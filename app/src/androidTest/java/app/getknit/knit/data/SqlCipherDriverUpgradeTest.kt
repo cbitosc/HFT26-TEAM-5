@@ -67,10 +67,10 @@ class SqlCipherDriverUpgradeTest {
             openRawConnection().use { connection ->
                 connection.materialiseSchema(CURRENT_VERSION)
                 connection.execSQL(
-                    // `openToChat` is NOT NULL with no table-level default (v9 added it with one only on the
-                    // ALTER), so a column-listed INSERT has to name it — as Room's own insert does.
-                    "INSERT INTO peers (nodeId, name, status, verified, updatedAt, openToChat) " +
-                        "VALUES ('${PEER.nodeId}', '${PEER.name}', '', 0, ${PEER.updatedAt}, 0)",
+                    // `openToChat` and `lastSeenAt` are NOT NULL with no table-level default (v9 and v19 added them
+                    // with one only on the ALTER), so a column-listed INSERT has to name them — as Room's own insert does.
+                    "INSERT INTO peers (nodeId, name, status, verified, updatedAt, openToChat, lastSeenAt) " +
+                        "VALUES ('${PEER.nodeId}', '${PEER.name}', '', 0, ${PEER.updatedAt}, 0, 0)",
                 )
             }
 

@@ -29,6 +29,11 @@ import java.util.Locale
  * A plain adoption of a contact's name, with no grinding, still shows two Alices with different aliases and
  * nothing says which is real. Trust stays with `verified` and the safety number.
  *
+ * **A clash fades** (ADR 2026-10.k8ge). The caller names the ids that have gone quiet — a stranger not heard
+ * from in a week, never a contact or this device — and those give way: they stay labelled apart from
+ * everyone, but no longer add a token to anyone else, so a stranger met once does not suffix a contact for
+ * good.
+ *
  * Pure Kotlin, no Android dependencies, unit-tested on the JVM (`PeerLabelsTest`, `NameKeyTest`).
  */
 object PeerLabels {
@@ -40,10 +45,19 @@ object PeerLabels {
      * Pass 1 groups the universe by [NameKey] and gives every member of a shared name one token. The
      * rounds that follow group the rendered texts and give every member of a shared text one more token,
      * until all texts are distinct.
+     *
+     * **[stale] ids give way** (ADR 2026-10.k8ge): a stranger not heard from in a week. The rest of the
+     * universe — the *live* ids, [self] always among them — is labelled by the passes above as if the stale ids
+     * were not there, so a contact whose only namesake has gone quiet reads plain again. A stale id still reads
+     * apart from everyone: it starts at the tokens it would hold against the whole universe (never fewer, so a
+     * look-alike that ground a contact's alias and then went quiet cannot settle on the label the contact wore
+     * while both were live) and grows past every text that still matches, live texts held fixed. Empty, it is
+     * exactly the index without it.
      */
     fun index(
         peers: Iterable<Pair<String, String>>,
         self: Pair<String, String>? = null,
+        stale: Set<String> = emptySet(),
     ): PeerLabelIndex {
         val stored = LinkedHashMap<String, String>()
         for ((id, name) in peers) stored[id] = name
@@ -57,30 +71,61 @@ object PeerLabels {
             names[id] = name
             idsByKey.getOrPut(NameKey.of(name)) { LinkedHashSet() }.add(id)
         }
-        val consumed = HashMap<String, Int>()
-        for (group in idsByKey.values) {
-            if (group.size > 1) for (id in group) consumed[id] = tokensInName(stored[id]) + 1
-        }
-        val texts = HashMap<String, String>()
-
-        fun render(id: String) {
-            val k = consumed[id] ?: tokensInName(stored[id])
-            texts[id] = PeerLabel.text(names.getValue(id), discriminatorOf(phrases.getValue(id), stored[id], k))
-        }
-        for (id in stored.keys) render(id)
-        growUntilDistinct(texts, consumed, stored, ::render)
+        val universe = Universe(stored, names, phrases)
+        val full = universe.consumedAmong(stored.keys)
+        val yielding = stored.keys.filterTo(HashSet()) { it in stale && it != self?.first }
+        val consumed = if (yielding.isEmpty()) full else universe.yielding(full, yielding)
         val idsByText = HashMap<String, MutableSet<String>>()
-        for ((id, text) in texts) idsByText.getOrPut(text) { LinkedHashSet() }.add(id)
+        for (id in stored.keys) idsByText.getOrPut(universe.text(id, consumed.getValue(id))) { LinkedHashSet() }.add(id)
         return PeerLabelIndex(stored, idsByKey, idsByText, consumed, phrases)
     }
+}
 
-    /** Each round, every id whose text another id shares consumes one more token; bounded by the digest. */
+/** The token counts of one universe's labels, every member's recorded — what [PeerLabelIndex.labelFor] reads. */
+private class Universe(
+    private val stored: Map<String, String>,
+    private val names: Map<String, String>,
+    private val phrases: Map<String, List<String>>,
+) {
+    fun text(
+        id: String,
+        consumed: Int,
+    ): String = PeerLabel.text(names.getValue(id), discriminatorOf(phrases.getValue(id), stored[id], consumed))
+
+    /** The rule over [ids] alone: a token for each member of a shared name, then rounds until no text repeats. */
+    fun consumedAmong(ids: Collection<String>): MutableMap<String, Int> {
+        val shared = ids.groupingBy { NameKey.of(names.getValue(it)) }.eachCount()
+        val consumed = HashMap<String, Int>()
+        for (id in ids) {
+            val namesake = shared.getValue(NameKey.of(names.getValue(id))) > 1
+            consumed[id] = tokensInName(stored[id]) + if (namesake) 1 else 0
+        }
+        growUntilDistinct(consumed, frozen = emptySet())
+        return consumed
+    }
+
+    /** The live ids labelled among themselves; each of [stale] from where [full] put it, grown past every text. */
+    fun yielding(
+        full: Map<String, Int>,
+        stale: Set<String>,
+    ): MutableMap<String, Int> {
+        val live = stored.keys - stale
+        val consumed = consumedAmong(live)
+        for (id in stale) consumed[id] = full.getValue(id)
+        growUntilDistinct(consumed, frozen = live)
+        return consumed
+    }
+
+    /**
+     * Each round, every id whose text another id shares consumes one more token — except a [frozen] one,
+     * whose text the round reads but never moves. Bounded by the digest.
+     */
     private fun growUntilDistinct(
-        texts: MutableMap<String, String>,
         consumed: MutableMap<String, Int>,
-        stored: Map<String, String>,
-        render: (String) -> Unit,
+        frozen: Set<String>,
     ) {
+        val texts = HashMap<String, String>()
+        for ((id, k) in consumed) texts[id] = text(id, k)
         for (round in 0 until Alias.MAX_TOKENS) {
             val colliding =
                 texts.entries
@@ -88,13 +133,14 @@ object PeerLabels {
                     .values
                     .filter { it.size > 1 }
                     .flatten()
+                    .filter { it !in frozen }
             if (colliding.isEmpty()) return
             var grew = false
             for (id in colliding) {
-                val k = consumed[id] ?: tokensInName(stored[id])
+                val k = consumed.getValue(id)
                 if (k < Alias.MAX_TOKENS) {
                     consumed[id] = k + 1
-                    render(id)
+                    texts[id] = text(id, k + 1)
                     grew = true
                 }
             }
@@ -132,6 +178,8 @@ data class PeerLabel(
  * A snapshot of the universe's name collisions (see [PeerLabels.index]). [labelFor] is O(1) for a member
  * and also answers for a node id *outside* the universe (a sender whose profile has not been pinned yet):
  * it grows exactly as far as it must to read apart from every member, and never changes a member.
+ * [consumed] holds every member's token count, live and stale alike: a member that fell through to [resolve]
+ * would be judged against the stale ids the index deliberately kept out of its live labels.
  */
 data class PeerLabelIndex(
     private val storedNames: Map<String, String>,

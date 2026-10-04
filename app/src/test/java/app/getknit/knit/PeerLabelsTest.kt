@@ -159,6 +159,86 @@ class PeerLabelsTest {
     }
 
     @Test
+    fun anEmptyStaleSetIsTheIndexWithoutIt() {
+        val rng = Random(11)
+        val pool = listOf("Alice", "alice", "Bob", "Sam", "SAM", "")
+        val peers = (0 until 500).map { NodeId.derive("peer-$it") to pool[rng.nextInt(pool.size)] }
+        val self = NodeId.derive("me") to "Alice"
+        val without = PeerLabels.index(peers, self)
+        // Ids outside the universe change nothing either.
+        val with = PeerLabels.index(peers, self, stale = setOf("not-a-member"))
+        for (id in peers.map { it.first } + self.first) assertEquals(without.labelFor(id), with.labelFor(id))
+    }
+
+    @Test
+    fun aContactWhoseOnlyNamesakeIsStaleReadsPlainAndTheStrangerStaysMarked() {
+        assertEquals(Alias.aliasFor("c"), index("c" to "Alice", "s" to "Alice").labelFor("c").discriminator)
+        val idx = PeerLabels.index(listOf("c" to "Alice", "s" to "Alice"), stale = setOf("s"))
+        assertNull(idx.labelFor("c").discriminator)
+        assertEquals("Alice", idx.labelFor("c").text)
+        assertEquals(Alias.aliasFor("c"), idx.labelFor("c").alias) // still shown on the precision surfaces
+        assertEquals(Alias.aliasFor("s"), idx.labelFor("s").discriminator)
+        // A sender outside the universe still reads apart from the stale namesake, and from the contact.
+        assertEquals(Alias.aliasFor("zz"), idx.labelFor("zz", "Alice").discriminator)
+    }
+
+    @Test
+    fun twoStaleNamesakesStayMarkedAndApart() {
+        val idx = PeerLabels.index(listOf("a" to "Alice", "b" to "Alice"), stale = setOf("a", "b"))
+        assertEquals(Alias.aliasFor("a"), idx.labelFor("a").discriminator)
+        assertEquals(Alias.aliasFor("b"), idx.labelFor("b").discriminator)
+        assertNotEquals(idx.labelFor("a").text, idx.labelFor("b").text)
+    }
+
+    @Test
+    fun aStaleGroundLookAlikeKeepsBothTokensSoItNeverWearsTheContactsOldLabel() {
+        val live = index(GROUND_X to "Alice", GROUND_Y to "Alice")
+        val contactsLabelWhileBothWereLive = live.labelFor(GROUND_X).text
+        val idx = PeerLabels.index(listOf(GROUND_X to "Alice", GROUND_Y to "Alice"), stale = setOf(GROUND_Y))
+        assertNull(idx.labelFor(GROUND_X).discriminator)
+        assertEquals(Alias.phrase(GROUND_Y, 2), idx.labelFor(GROUND_Y).discriminator)
+        // One token would read "Alice (<the shared first token>)" — the contact's quoted alias.
+        assertNotEquals("Alice (${Alias.aliasFor(GROUND_X)})", idx.labelFor(GROUND_Y).text)
+        assertNotEquals(contactsLabelWhileBothWereLive, idx.labelFor(GROUND_Y).text)
+    }
+
+    @Test
+    fun aLiveTextThatShrankOntoAStaleOneHoldsAndOnlyTheStaleOneGrows() {
+        // L shares its chosen name only with the stale S2, so it drops its token once S2 yields — landing on
+        // "Alice (<S's alias>)", the text S holds against the whole universe. S is the one that moves.
+        val chosen = "Alice (${Alias.aliasFor("s")})"
+        val idx =
+            PeerLabels.index(
+                listOf("m" to "Alice", "s" to "Alice", "l" to chosen, "s2" to chosen),
+                stale = setOf("s", "s2"),
+            )
+        assertNull(idx.labelFor("m").discriminator)
+        assertNull(idx.labelFor("l").discriminator)
+        assertEquals(chosen, idx.labelFor("l").text)
+        assertEquals(Alias.phrase("s", 2), idx.labelFor("s").discriminator)
+        val texts = listOf("m", "s", "l", "s2").map { idx.labelFor(it).text }
+        assertEquals(4, texts.toSet().size)
+    }
+
+    @Test
+    fun selfNeverYields() {
+        val idx = PeerLabels.index(listOf("a" to "Alice"), self = "me" to "Alice", stale = setOf("me", "a"))
+        assertNull(idx.labelFor("me").discriminator)
+        assertEquals(Alias.aliasFor("a"), idx.labelFor("a").discriminator)
+    }
+
+    @Test
+    fun everyLabelIsDistinctWhateverYields() {
+        val rng = Random(13)
+        val pool = listOf("Alice", "alice", "Bob", "Sam", "SAM", "Dani", "Jonas W.", "")
+        val peers = (0 until 2_000).map { NodeId.derive("peer-$it") to pool[rng.nextInt(pool.size)] }
+        val stale = peers.map { it.first }.filterTo(HashSet()) { rng.nextInt(3) == 0 }
+        val idx = PeerLabels.index(peers, NodeId.derive("me") to "Alice", stale)
+        val texts = (peers.map { it.first } + NodeId.derive("me")).map { idx.labelFor(it).text }
+        assertEquals(texts.size, texts.toSet().size)
+    }
+
+    @Test
     fun theEmptyIndexDiscriminatesNothing() {
         assertNull(PeerLabelIndex.EMPTY.labelFor("a", "Alice").discriminator)
         assertEquals("Alice", PeerLabelIndex.EMPTY.labelFor("a", "Alice").text)

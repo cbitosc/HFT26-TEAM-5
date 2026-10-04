@@ -53,7 +53,8 @@ without the key) but the channel it arrived over is not: an SMS can be spoofed a
 whoever sent the card. So an import **pins + accepts but never verifies**; the safety number is shown
 at import and on the profile for the pair to compare over a call, and the preview also shows the alias
 derived from the key (ADR 058) — and the `Name (Alias)` form if the card's name is one this device already
-knows another identity by. A differing key for a node id already
+knows another identity by, a stranger gone quiet for a week included (ADR 2026-10.k8ge), so the preview can carry
+an alias that the imported contact, now never stale, then drops. A differing key for a node id already
 pinned is refused, never swapped in. Relay hints are displayed, never applied *silently* — adding a relay
 hands it every scope id and IP this device has, so a hint's inline **Add** goes through the relay invite
 sheet (`docs/RELAY_INVITE.md`, ADR 2026-09.tmbq): the host named, the cost stated, the disclosure folded in

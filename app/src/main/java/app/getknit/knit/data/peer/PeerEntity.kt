@@ -66,4 +66,13 @@ data class PeerEntity(
      * signature is checked against at ingest, which is what makes a match verified rather than claimed.
      */
     val loraKey: String? = null,
+    /**
+     * When this phone last heard from the peer: the newest `sentAt` among the signed frames of theirs it has
+     * accepted, never past our own clock at acceptance, kept to within six hours
+     * (`app.getknit.knit.data.LabelFade.SEEN_GATE_MS`). The one reader is the name-clash fade (ADR
+     * 2026-10.k8ge): a stranger not heard from for a week stops adding an alias to anyone else's label.
+     * **Presentation only** — the stamp is sender-asserted and rides custody replays, so it must never feed a
+     * presence tier (`ui/Reach.kt`), routing, custody or eviction. Writes merge with `MAX`, so it never moves back.
+     */
+    val lastSeenAt: Long = 0L,
 )

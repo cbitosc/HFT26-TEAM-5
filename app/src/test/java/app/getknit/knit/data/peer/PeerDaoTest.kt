@@ -86,8 +86,8 @@ class PeerDaoTest : RoomDbTest() {
     /**
      * [PeerDao.upsert] is a hand-written `INSERT … ON CONFLICT DO UPDATE`, not Room's `@Upsert` (the same fix
      * as `DraftDao.upsert`, work item 60): this pins that a second profile for the same nodeId
-     * lands as an update of the row it found — same rowid, every column overwritten — never a delete-and-reinsert
-     * or a second row.
+     * lands as an update of the row it found — same rowid, every column overwritten but `lastSeenAt`, which keeps
+     * the larger stamp — never a delete-and-reinsert or a second row.
      */
     @Test
     fun `a second profile for the same nodeId updates that row in place`() =
@@ -99,6 +99,37 @@ class PeerDaoTest : RoomDbTest() {
 
             assertEquals(PeerEntity(nodeId = "a", name = "Ada Renamed", status = "online", updatedAt = 2L), dao.findByNodeId("a"))
             assertEquals("updated where it sat, not deleted and re-inserted", rowid, rowidOf("a"))
+        }
+
+    @Test
+    fun `an upsert never moves lastSeenAt back, so a row read before a stamp landed cannot undo it`() =
+        runTest {
+            val read = PeerEntity(nodeId = "a", name = "Ada", lastSeenAt = 10L)
+            dao.upsert(read)
+            dao.markSeen("a", at = 50L, olderThan = 50L)
+            dao.upsert(read.copy(name = "Ada Renamed")) // a read-copy-write carrying the stamp it read
+            assertEquals(50L, dao.findByNodeId("a")!!.lastSeenAt)
+            assertEquals("Ada Renamed", dao.findByNodeId("a")!!.name)
+            dao.upsert(read.copy(lastSeenAt = 70L))
+            assertEquals(70L, dao.findByNodeId("a")!!.lastSeenAt)
+        }
+
+    @Test
+    fun `markSeen writes only past the gate and says how many rows it moved`() =
+        runTest {
+            dao.upsert(PeerEntity(nodeId = "a", lastSeenAt = 100L))
+            assertEquals("inside the gate: no row", 0, dao.markSeen("a", at = 150L, olderThan = 90L))
+            assertEquals(100L, dao.findByNodeId("a")!!.lastSeenAt)
+            assertEquals(1, dao.markSeen("a", at = 300L, olderThan = 200L))
+            assertEquals(300L, dao.findByNodeId("a")!!.lastSeenAt)
+            assertEquals("no row to move", 0, dao.markSeen("ghost", at = 300L, olderThan = 200L))
+        }
+
+    @Test
+    fun `namesAll carries the facts the fade judges a row by`() =
+        runTest {
+            dao.upsert(PeerEntity(nodeId = "a", name = "Ada", verified = true, lastSeenAt = 42L))
+            assertEquals(listOf(PeerName("a", "Ada", verified = true, lastSeenAt = 42L)), dao.namesAll())
         }
 
     private suspend fun rowidOf(nodeId: String): Long =

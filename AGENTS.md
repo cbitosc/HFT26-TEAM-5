@@ -374,6 +374,13 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   reads at 45 min and the mesh at `SPOOL_COVER_MS` = 15 min), `Known` is a bare profile row — and both labelled
   surfaces derive from `reachOf` so they cannot disagree. READ ADR 2026-09.2ajk before loosening any tier;
   the Contacts list still draws a binary dot from `neighbors` alone.
+- **When touching `identity/PeerLabels`' `stale` rule, `data/LabelAnchors`, `data/LabelFade`, `peers.lastSeenAt`,
+  `PeerRepository.noteSeen` / `flushSeen`, or `mesh/HeardFrom`:** READ ADR 2026-10.k8ge (and ADR 058 /
+  2026-09.wuqj for the labels themselves). A stranger not heard from for a week *gives way* — still labelled apart,
+  starting from its whole-universe token count, but no longer suffixing anyone; anchors (accepted, written-to,
+  group co-members, verified, self) never go stale, and a new contact signal goes into `labelAnchors` too
+  (`LabelAnchorsTest`). The stamp is buffered from `noteVerified` and banked on the metrics tick, never written on
+  the inbound path, and `lastSeenAt` is presentation only — never a presence tier, a route, custody or eviction.
 - **When touching `MeshManager.watchReachable`, its `flooded` memo / `refloodKey`, or `PROFILE_REFLOOD_MIN_MS`:**
   READ ADR 2026-09.uc8p. The first-sighting profile flood is the NAN-only key bootstrap; it goes to a peer once
   per (frame id, peer) per `SeenSet.DEFAULT_TTL_MS` — the receivers' own window, so every copy it withholds is

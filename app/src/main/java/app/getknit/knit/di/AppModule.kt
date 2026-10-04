@@ -5,6 +5,7 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.preferencesDataStoreFile
+import androidx.room3.withWriteTransaction
 import app.getknit.knit.BuildConfig
 import app.getknit.knit.contacts.ContactCards
 import app.getknit.knit.contacts.ContactImporter
@@ -18,6 +19,8 @@ import app.getknit.knit.data.BlobRepository
 import app.getknit.knit.data.GallerySaver
 import app.getknit.knit.data.GroupRepository
 import app.getknit.knit.data.KnitDatabase
+import app.getknit.knit.data.LabelAnchors
+import app.getknit.knit.data.LabelFade
 import app.getknit.knit.data.LinkCardStore
 import app.getknit.knit.data.MessageReceiptRepository
 import app.getknit.knit.data.MessageRepository
@@ -231,7 +234,20 @@ val appModule =
         single { get<KnitDatabase>().metPeerDao() }
         single { get<KnitDatabase>().savedFileDao() }
         single { MessageRepository(get()) }
-        single { PeerRepository(get(), get<SettingsStore>(), get<Identity>()) }
+        // The name-clash fade (ADR 2026-10.k8ge): the never-stale anchors, shared on the app scope so every screen's
+        // directory reads one authored-in query; the stamps bank in one write transaction on the metrics tick.
+        single { LabelAnchors.from(get(), get(), get<SettingsStore>(), get<Identity>(), get<CoroutineScope>()) }
+        single {
+            val db = get<KnitDatabase>()
+            val fade =
+                LabelFade(
+                    anchors = get(),
+                    clock = System::currentTimeMillis,
+                    ticks = LabelFade.hourly(),
+                    transact = { block -> db.withWriteTransaction { block() } },
+                )
+            PeerRepository(get(), get<SettingsStore>(), get<Identity>(), fade = fade)
+        }
         // Crash reports. The capture-side CrashStore is built by hand in KnitApplication.onCreate BEFORE
         // startKoin, so a crash inside startup itself is still captured; this is the reader side over the
         // same fixed directory (crashStore() is the single definition of the path, so the two can't drift).

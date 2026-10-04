@@ -18,6 +18,8 @@ import app.getknit.knit.data.AttachmentStore
 import app.getknit.knit.data.BlobRepository
 import app.getknit.knit.data.GroupRepository
 import app.getknit.knit.data.KnitDatabase
+import app.getknit.knit.data.LabelAnchors
+import app.getknit.knit.data.LabelFade
 import app.getknit.knit.data.MeshBlobStore
 import app.getknit.knit.data.MessageReceiptRepository
 import app.getknit.knit.data.MessageRepository
@@ -913,7 +915,6 @@ class LabNode internal constructor(
                 nearbyMaxMessages = limits.roomMaxMessages,
                 roomMaxPerStranger = limits.roomMaxPerStranger,
             )
-        peers = PeerRepository(db.peerDao(), settings, identity)
         commons = if (withCommons) CommonsRepository(db.commonsDao(), messages, db) else null
         val reactions = ReactionRepository(db.reactionDao(), db).also { reactionStore = it }
         receipts = MessageReceiptRepository(db.messageReceiptDao(), messages, db)
@@ -932,6 +933,16 @@ class LabNode internal constructor(
         val groupRatchetStore = GroupRatchetRepository(db.groupRatchetDao())
         val groupRoots = GroupRootRepository(db.groupRootDao())
         groups = GroupRepository(db.groupDao(), messages, db, groupRatchetStore, groupRoots)
+        // The name-clash fade, as the DI module wires it (ADR 2026-10.k8ge), on this node's clock. One tick, not the
+        // hourly one: a scenario reads a directory afresh after moving the clock, and each read judges the window then.
+        val fade =
+            LabelFade(
+                anchors = LabelAnchors.from(messages, groups, settings, identity, scope),
+                clock = now,
+                ticks = flowOf(Unit),
+                transact = { block -> db.withWriteTransaction { block() } },
+            )
+        peers = PeerRepository(db.peerDao(), settings, identity, fade = fade)
         forwardStore =
             ForwardRepository(
                 db.forwardDao(),
@@ -1101,16 +1112,20 @@ class LabNode internal constructor(
 
     /** Tears the live stack down and returns the transports it was linked to. */
     private fun shutdownLive(): List<LabTransport> {
-        val peers = transport.disconnectAll()
+        val linked = transport.disconnectAll()
         transport.detach()
         loraLog.clear()
-        // stop() banks the ledger on the app scope, which the next line cancels; in the lab the "app" scope is
-        // this session's, so bank it here first — the process-death the restart models is the orderly kind.
-        runBlocking { ledger.flush() }
+        // stop() banks the ledger and the name-clash fade's lastSeenAt stamps on the app scope, which the next line
+        // cancels; in the lab the "app" scope is this session's, so bank them here first — the process-death the
+        // restart models is the orderly kind.
+        runBlocking {
+            ledger.flush()
+            peers.flushSeen()
+        }
         manager.stop()
         scope?.cancel()
         scope = null
-        return peers
+        return linked
     }
 
     // --- what a user does ---

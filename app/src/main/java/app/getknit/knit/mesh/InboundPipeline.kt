@@ -3010,7 +3010,7 @@ class InboundPipeline(
         // one read — reverting this profile, or the pushed avatar that landed while we checked for its blob.
         val stored =
             db.withWriteTransaction {
-                storeProfileRow(env.senderId, content, pubKey, version, prekey)
+                storeProfileRow(env.senderId, content, pubKey, version, prekey, seenAt = heardAt(env, clock()))
             }
         val applied =
             when (stored) {
@@ -3100,6 +3100,7 @@ class InboundPipeline(
         pubKey: String,
         version: Long,
         prekey: app.getknit.knit.mesh.protocol.PrekeyInfo?,
+        seenAt: Long,
     ): StoredProfile {
         val existing = peers.find(senderId)
         // Last-writer-wins, split across two watermarks. The key is immutable per nodeId (a different key
@@ -3165,6 +3166,9 @@ class InboundPipeline(
                 // The same, for the bound LoRa board: absent means unbound (or handed on), and clears.
                 loraNode = if (stalePresentation) base.loraNode else content.loraNode,
                 loraKey = if (stalePresentation) base.loraKey else content.loraKey,
+                // Heard from now, stale presentation or not: a row this profile pins is never born quiet, which
+                // would let the name-clash fade judge it before the metrics tick banks its stamp (ADR 2026-10.k8ge).
+                lastSeenAt = maxOf(base.lastSeenAt, seenAt),
             ),
         )
         return StoredProfile.Applied(existing, haveAvatar, stalePresentation)

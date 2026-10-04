@@ -91,6 +91,9 @@ class DemoWriter(
                     // have something to name.
                     loraNode = p.loraNode,
                     loraKey = p.loraKey,
+                    // Heard from just now: a seeded namesake (the second "Jonas W.") stays a live clash, so the
+                    // name-clash fade never quietly un-suffixes a captured screen (ADR 2026-10.k8ge).
+                    lastSeenAt = now,
                 ),
             )
         }

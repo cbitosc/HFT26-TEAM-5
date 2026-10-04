@@ -29,6 +29,12 @@ document:
   that fills as the rest comes in. On a slow Bluetooth connection, you can tell a transfer that's still moving
   from one that's stuck.
 
+### Changed
+
+- If a stranger had the same name as one of your contacts, your contact's name kept an alias after it for
+  good, even once the stranger was gone. The alias now goes away a week after your phone last heard from that
+  person.
+
 ### Fixed
 
 - Two phones a few metres apart could take over a minute to reconnect over Bluetooth, and sometimes didn't

@@ -23,9 +23,21 @@ interface PeerDao {
     @Query("SELECT * FROM peers WHERE loraNode = :node ORDER BY updatedAt DESC LIMIT 1")
     suspend fun findByLoraNode(node: Long): PeerEntity?
 
-    /** Every peer's `(nodeId, name)` — the light projection the name-collision index is built from. */
-    @Query("SELECT nodeId, name FROM peers")
+    /** Every peer's [PeerName] — the light projection the name-collision index is built from. */
+    @Query("SELECT nodeId, name, verified, lastSeenAt FROM peers")
     suspend fun namesAll(): List<PeerName>
+
+    /**
+     * Moves [nodeId]'s `lastSeenAt` up to [at] when the stored stamp is older than [olderThan]; returns the rows
+     * written. A stamp already inside that gate matches no row, and a row-level trigger fires for none, so the
+     * peers flows stay quiet (ADR 2026-10.k8ge).
+     */
+    @Query("UPDATE peers SET lastSeenAt = :at WHERE nodeId = :nodeId AND lastSeenAt < :olderThan")
+    suspend fun markSeen(
+        nodeId: String,
+        at: Long,
+        olderThan: Long,
+    ): Int
 
     /** The faces of [ids] alone — primary-key seeks, however many peers the table holds. */
     @Query("SELECT nodeId, name, avatarHash FROM peers WHERE nodeId IN (:ids)")
@@ -95,7 +107,9 @@ interface PeerDao {
      * SQLCipher logs every failed statement at `E` before Room's catch runs — and every inbound profile frame
      * upserts a peer, so this one logged far more often than the draft save that fix was written for.
      * `ON CONFLICT DO UPDATE` never issues a failing statement. The parameters are flattened because Room's
-     * `:entity.column` bind syntax is refused by this processor at build time.
+     * `:entity.column` bind syntax is refused by this processor at build time. `lastSeenAt` is the one column
+     * merged rather than replaced: it takes the larger stamp, so a caller that read the row before a stamp landed
+     * never writes it back older (ADR 2026-10.k8ge).
      */
     suspend fun upsert(peer: PeerEntity) =
         upsertRow(
@@ -116,23 +130,26 @@ interface PeerDao {
             openToChat = peer.openToChat,
             loraNode = peer.loraNode,
             loraKey = peer.loraKey,
+            lastSeenAt = peer.lastSeenAt,
         )
 
     /** The statement [upsert] actually runs, flattened — see its doc comment for why. */
     @Suppress("LongParameterList") // one column per field of PeerEntity; see the doc comment above
     @Query(
         "INSERT INTO peers (nodeId, name, status, avatarHash, pubKey, verified, deviceTag, protoVersion, " +
-            "capabilities, updatedAt, prekeyId, prekeyPub, prekeySig, prekeyProfileAt, openToChat, loraNode, loraKey) " +
+            "capabilities, updatedAt, prekeyId, prekeyPub, prekeySig, prekeyProfileAt, openToChat, loraNode, loraKey, " +
+            "lastSeenAt) " +
             "VALUES (:nodeId, :name, :status, :avatarHash, :pubKey, :verified, :deviceTag, :protoVersion, " +
             ":capabilities, :updatedAt, :prekeyId, :prekeyPub, :prekeySig, :prekeyProfileAt, :openToChat, " +
-            ":loraNode, :loraKey) " +
+            ":loraNode, :loraKey, :lastSeenAt) " +
             "ON CONFLICT(nodeId) DO UPDATE SET " +
             "name = excluded.name, status = excluded.status, avatarHash = excluded.avatarHash, " +
             "pubKey = excluded.pubKey, verified = excluded.verified, deviceTag = excluded.deviceTag, " +
             "protoVersion = excluded.protoVersion, capabilities = excluded.capabilities, " +
             "updatedAt = excluded.updatedAt, prekeyId = excluded.prekeyId, prekeyPub = excluded.prekeyPub, " +
             "prekeySig = excluded.prekeySig, prekeyProfileAt = excluded.prekeyProfileAt, " +
-            "openToChat = excluded.openToChat, loraNode = excluded.loraNode, loraKey = excluded.loraKey",
+            "openToChat = excluded.openToChat, loraNode = excluded.loraNode, loraKey = excluded.loraKey, " +
+            "lastSeenAt = MAX(peers.lastSeenAt, excluded.lastSeenAt)",
     )
     suspend fun upsertRow(
         nodeId: String,
@@ -152,5 +169,6 @@ interface PeerDao {
         openToChat: Boolean,
         loraNode: Long?,
         loraKey: String?,
+        lastSeenAt: Long,
     )
 }

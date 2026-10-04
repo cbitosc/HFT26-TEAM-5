@@ -635,7 +635,9 @@ that budget is a purely local knob that can differ per node without breaking cue
   `PeerRepository.observeDirectory()` emits the table with its index; `labelIndex()` is the suspend snapshot
   (notifications, card preview). Collision-evident, not anti-impersonation — a 24-bit token is minutes of
   grinding, but a match can only make both labels longer, never equal; `verified` and the safety number
-  remain the trust mechanism.
+  remain the trust mechanism. A stranger not heard from for a week (`peers.lastSeenAt`, stamped from accepted signed frames on the
+  metrics tick) **gives way** (ADR 2026-10.k8ge): still labelled apart, but no longer adding a token to anyone
+  else, so a contact reads plain again; contacts, verified peers and self (`data/LabelAnchors`) never go stale.
 - **Profile broadcasting** (`MeshManager`):
   - On a **new neighbor**, push the current profile frame and (only if needed — §8) the avatar file.
   - On a **profile change** (name/status/avatar, observed via a combined settings flow, `.drop(1)` to

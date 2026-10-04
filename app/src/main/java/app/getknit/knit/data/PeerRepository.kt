@@ -14,18 +14,33 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Single source of truth for cached peer profiles. [profile] and [identity] contribute this device's own
  * name and id to the name-collision universe ([observeDirectory] / [labelIndex]) — a peer who adopts our
- * name is discriminated too.
+ * name is discriminated too. With a [fade] (production), a stranger quiet for a week stops adding an alias to
+ * anyone else's label (ADR 2026-10.k8ge); without one every known identity counts forever, as before.
  */
 class PeerRepository(
     private val dao: PeerDao,
     private val profile: InboundSettings,
     private val identity: IdentitySource,
     private val maxPeers: Int = DEFAULT_MAX_PEERS,
+    private val fade: LabelFade? = null,
 ) {
+    // The `lastSeenAt` stamps [noteSeen] collected since the last [flushSeen], the newest per sender.
+    private val heard = ConcurrentHashMap<String, Long>()
+
+    // The stamp the table holds per node id, as far as this process knows: read from it on the first flush, then
+    // kept by every flush, so a stamp inside the gate is skipped before any query.
+    private val written = ConcurrentHashMap<String, Long>()
+    private var primed = false
+    private val flushLock = Mutex()
+
     fun observePeers(): Flow<List<PeerEntity>> = dao.observeAll()
 
     /**
@@ -33,15 +48,25 @@ class PeerRepository(
      * change of our own display name. The name arm is de-duplicated on purpose: `SettingsStore.displayName`
      * re-emits on every DataStore write (read watermarks, intro state), and each of those would otherwise
      * rebuild every list screen.
+     *
+     * With a [fade], the strangers whose clash has faded are judged on every input and on the fade's tick, and the
+     * index is rebuilt only when the rows, our name or that set actually changed — an anchor edit or a tick that
+     * moves nobody across the line costs a comparison, not an index.
      */
-    fun observeDirectory(): Flow<PeerDirectory> =
-        combine(
-            dao.observeAll(),
-            profile.displayName.distinctUntilChanged(),
-            flow { emit(identity.nodeId()) },
-        ) { peers, myName, me ->
-            PeerDirectory(peers, PeerLabels.index(peers.map { it.nodeId to it.name }, me to myName))
-        }
+    fun observeDirectory(): Flow<PeerDirectory> {
+        val myName = profile.displayName.distinctUntilChanged()
+        val me = flow { emit(identity.nodeId()) }
+        val fade =
+            fade ?: return combine(dao.observeAll(), myName, me) { peers, name, id ->
+                PeerDirectory(peers, PeerLabels.index(peers.map { it.nodeId to it.name }, id to name))
+            }
+        return combine(dao.observeAll(), myName, me, fade.anchors.observe(), fade.ticks) { peers, name, id, anchors, _ ->
+            val now = fade.clock()
+            val stale = peers.filter { fade.fades(it.nodeId, it.verified, it.lastSeenAt, anchors, now) }.mapTo(HashSet()) { it.nodeId }
+            DirectoryInputs(peers, id to name, stale)
+        }.distinctUntilChanged()
+            .map { PeerDirectory(it.peers, PeerLabels.index(it.peers.map { p -> p.nodeId to p.name }, it.self, it.stale)) }
+    }
 
     /**
      * The name and avatar of [ids] alone, as they change — the conversation-shortcut watch's read (ADR 2026-10.jbsa),
@@ -50,12 +75,63 @@ class PeerRepository(
      */
     fun observeFaces(ids: Set<String>): Flow<List<PeerFace>> = if (ids.isEmpty()) flowOf(emptyList()) else dao.observeFaces(ids)
 
-    /** A one-shot [PeerLabelIndex] for a suspend path (a notification, a contact-card preview). */
-    suspend fun labelIndex(): PeerLabelIndex =
-        PeerLabels.index(
-            dao.namesAll().map { it.nodeId to it.name },
+    /**
+     * A one-shot [PeerLabelIndex] for a suspend path (a notification, a contact-card preview), by the same rule as
+     * [observeDirectory] — the fade included, so a notification title never disagrees with the list it opens.
+     */
+    suspend fun labelIndex(): PeerLabelIndex {
+        val rows = dao.namesAll()
+        val stale =
+            fade?.let { f ->
+                val anchors = f.anchors.current()
+                val now = f.clock()
+                rows.filter { f.fades(it.nodeId, it.verified, it.lastSeenAt, anchors, now) }.mapTo(HashSet()) { it.nodeId }
+            }
+        return PeerLabels.index(
+            rows.map { it.nodeId to it.name },
             identity.nodeId() to profile.displayName.first(),
+            stale.orEmpty(),
         )
+    }
+
+    /**
+     * Notes that a signed frame of [nodeId]'s stamped [at] was accepted (ADR 2026-10.k8ge); the caller has decided
+     * the frame is evidence and capped [at] at its clock. Memory only — no query and nothing that throws — because
+     * it runs on the inbound path ahead of the relay. [flushSeen] banks it.
+     */
+    fun noteSeen(
+        nodeId: String,
+        at: Long,
+    ) {
+        if (fade == null) return
+        if (heard.size >= SEEN_BUFFER_CAP && !heard.containsKey(nodeId)) return
+        heard.merge(nodeId, at, ::maxOf)
+    }
+
+    /**
+     * Banks what [noteSeen] collected, in one transaction: the mesh runs it on its metrics tick and at stop. A stamp
+     * within [LabelFade.SEEN_GATE_MS] of the table's is skipped before any query, so a live peer costs a write or
+     * two a day, not one a frame. A stamp is remembered whether or not a row took it: a sender with no row yet gets
+     * its first stamp from the profile that pins it (`InboundPipeline.storeProfileRow`), not from here.
+     */
+    suspend fun flushSeen() {
+        val fade = fade ?: return
+        flushLock.withLock {
+            if (heard.isEmpty()) return
+            val pending = HashMap<String, Long>()
+            for (id in heard.keys.toList()) heard.remove(id)?.let { pending[id] = it }
+            if (!primed) {
+                for (row in dao.namesAll()) written.merge(row.nodeId, row.lastSeenAt, ::maxOf)
+                primed = true
+            }
+            val due = pending.filter { (id, at) -> written[id].let { held -> held == null || at - held >= LabelFade.SEEN_GATE_MS } }
+            if (due.isEmpty()) return
+            fade.transact {
+                for ((id, at) in due) dao.markSeen(id, at, olderThan = at - LabelFade.SEEN_GATE_MS)
+            }
+            for ((id, at) in due) written.merge(id, at, ::maxOf)
+        }
+    }
 
     fun observe(nodeId: String): Flow<PeerEntity?> = dao.observeByNodeId(nodeId)
 
@@ -120,8 +196,18 @@ class PeerRepository(
         dao.deleteOrphanProfiles() // the proof of key goes with the pin it proves
     }
 
+    /** One judgement of [observeDirectory]'s inputs; equal judgements build one index. */
+    private data class DirectoryInputs(
+        val peers: List<PeerEntity>,
+        val self: Pair<String, String>,
+        val stale: Set<String>,
+    )
+
     private companion object {
         /** High, conservative ceiling on cached peer rows — a Sybil profile-flood backstop, not a routine bound. */
         const val DEFAULT_MAX_PEERS = 2_000
+
+        /** Senders [noteSeen] holds between flushes; a minute's flood of fresh identities past it waits a tick. */
+        const val SEEN_BUFFER_CAP = 1_024
     }
 }

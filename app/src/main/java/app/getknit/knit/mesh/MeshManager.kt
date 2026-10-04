@@ -387,6 +387,21 @@ class MeshManager(
     // its signature gate, swept on the metrics tick, read only by the reach tiers. Not a routing input.
     private val relayedPresence = RelayedPresence(selfId = { identity.nodeId() }, clock = clock)
 
+    /**
+     * Every accepted frame, once, after `InboundPipeline.verifyInbound`: the indirect-reach tracker reads it, and so
+     * does the name-clash fade's `lastSeenAt` (ADR 2026-10.k8ge), which only buffers here — the metrics tick writes
+     * it. Runs ahead of the relay, so nothing in it may throw or wait on the database.
+     */
+    private suspend fun noteVerified(
+        wire: WireEnvelope,
+        env: RelayEnvelope,
+        fromNodeId: String,
+        kind: TransportKind,
+    ) {
+        relayedPresence.note(wire, env, fromNodeId, kind)
+        if (isHeardEvidence(wire, env) && env.senderId != identity.nodeId()) peers.noteSeen(env.senderId, heardAt(env, clock()))
+    }
+
     // The inbound half of the mesh: verify → custody → dispatch → deliver/ack, plus the store-and-forward
     // carry gate and the avatar/group-photo/attachment screening. MeshManager still OWNS the DTN services
     // above and the outbound origination choke; the pipeline receives the services by reference and reaches
@@ -443,7 +458,7 @@ class MeshManager(
             onPeerFrameOpened = { senderId, initEph, flagged -> introSync.onPeerFrameOpened(senderId, initEph, flagged) },
             onTransferCtl = onTransferSignal,
             commonsTitle = { commons?.find(it)?.name },
-            noteVerified = relayedPresence::note,
+            noteVerified = ::noteVerified,
         )
 
     // Reconstructed per session so its inbound collector + relay jobs live on the session scope and are
@@ -703,6 +718,7 @@ class MeshManager(
         scope.launch { sessionRouter.stop() }
         // The session's last metrics tick may be a minute away; bank what it credited before it dies.
         scope.launch { ledger.flush() }
+        scope.launch { flushSeenStamps() }
         session?.cancel()
         sessionScope = null
         // A stopped (or paused) mesh hears nothing, so it stops claiming anyone is reachable through it — and,
@@ -3215,6 +3231,10 @@ class MeshManager(
         return true
     }
 
+    private suspend fun flushSeenStamps() {
+        runCatching { peers.flushSeen() }.onFailure { Log.w(TAG, "lastSeenAt flush failed: ${it.message}") }
+    }
+
     /** Periodically logs a transmission snapshot so flood-suppression and byte savings are visible. */
     private fun logMetricsPeriodically(session: CoroutineScope) {
         session.launch {
@@ -3238,6 +3258,9 @@ class MeshManager(
                 )
                 // The contribution ledger banks its deltas on the same tick: one DataStore write a minute at most.
                 ledger.flush()
+                // So do the name-clash fade's `lastSeenAt` stamps: one peers write a minute at most (ADR 2026-10.k8ge).
+                // A presentation stamp; a failed write waits for the next tick rather than ending this loop.
+                flushSeenStamps()
                 // Bounds the indirect-reach table; the linger itself is applied at read (indirectPeers).
                 relayedPresence.sweep()
             }

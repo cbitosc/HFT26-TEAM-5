@@ -46,7 +46,7 @@ class KnitDatabaseMigrationTest {
         )
 
     @Test
-    fun `the current schema (v18) creates and opens from the exported JSON`() =
+    fun `the current schema (v19) creates and opens from the exported JSON`() =
         runTest {
             helper.createDatabase(CURRENT_VERSION).close()
         }
@@ -651,6 +651,27 @@ class KnitDatabaseMigrationTest {
         }
 
     @Test
+    fun `migrate 18 to 19 seeds lastSeenAt from the later of the profile version and the kept proof's stamp`() =
+        runTest {
+            // The kept proof of key is republished every 12 h while its peer is live, so it outdates the version
+            // (the last edit) for anyone still around; a row with no proof falls back to the version (ADR 2026-10.k8ge).
+            helper.createDatabase(18).use { c ->
+                c.execSQL("INSERT INTO peers (nodeId, name, status, verified, updatedAt, openToChat) VALUES ('live','Ann','',0,10,0)")
+                c.execSQL("INSERT INTO peers (nodeId, name, status, verified, updatedAt, openToChat) VALUES ('edited','Bo','',0,50,0)")
+                c.execSQL("INSERT INTO peers (nodeId, name, status, verified, updatedAt, openToChat) VALUES ('bare','Cy','',0,7,0)")
+                c.execSQL("INSERT INTO peer_profiles (nodeId, signed, sig, sentAt) VALUES ('live',X'01',X'02',40)")
+                c.execSQL("INSERT INTO peer_profiles (nodeId, signed, sig, sentAt) VALUES ('edited',X'01',X'02',20)")
+            }
+            helper.runMigrationsAndValidate(19, listOf(KnitMigrations.MIGRATION_18_19)).use { c ->
+                val seen = mutableMapOf<String, Long>()
+                c.prepare("SELECT nodeId, lastSeenAt FROM peers").use { s ->
+                    while (s.step()) seen[s.getText(0)] = s.getLong(1)
+                }
+                assertEquals(mapOf("live" to 40L, "edited" to 50L, "bare" to 7L), seen)
+            }
+        }
+
+    @Test
     fun `migrate 11 to 12 indexes every existing message and keeps the index in step from then on`() =
         runTest {
             // A device upgrading holds history; 'rebuild' must index all of it, and the sync triggers must
@@ -705,7 +726,7 @@ class KnitDatabaseMigrationTest {
          * KnitDatabase `@Database(version = …)` — bump alongside the DB (its retention is CLASS, so the version
          * can't be read reflectively). A missing schemas/<db>/<version>.json fails the smoke test.
          */
-        const val CURRENT_VERSION = 18
+        const val CURRENT_VERSION = 19
 
         /** The v16 column list with an attachment — MIGRATION_16_17's test seeds rows through it. */
         const val INSERT_V16 =

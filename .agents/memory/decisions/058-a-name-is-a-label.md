@@ -43,7 +43,8 @@ moment a name was typed, so nobody could learn their own.
 rule and one O(n) index per emission (n ≤ 2,000, the `sweepCap`), and a contact's label *changing* is itself
 the signal that a second Alice has appeared. The accepted cost: a stranger seen once can suffix a contact
 indefinitely, since there is no last-seen column to age them out of the universe. If that proves noisy, a
-`lastSeen`-bounded universe is the fix — not per-surface sets.
+`lastSeen`-bounded universe is the fix — not per-surface sets. *Amended by ADR 2026-10.k8ge (2026-10-04): it is — a stranger
+not heard from for a week gives way (still labelled apart, no longer suffixing anyone), and contacts never go stale.*
 
 **What this is not.** Anti-impersonation. The alias carries ~15 bits (178 × 182 word pairs) and a matching
 keypair can be ground in seconds, so this is *disambiguation*: it separates the accidental collision and makes
@@ -61,5 +62,5 @@ exists for it alone.
 
 **Deferred, by design.** An impersonation *warning* when a non-contact adopts a contact's or your own name;
 a node-id-derived avatar hue in-app (the notification hue now keys on the identity, not the name, so two
-Alices at least differ in the shade); last-seen pruning of the universe; and resolving `ReplyRef.authorId`
+Alices at least differ in the shade); last-seen pruning of the universe (since done, ADR 2026-10.k8ge); and resolving `ReplyRef.authorId`
 through the directory instead of rendering the sender's snapshot.

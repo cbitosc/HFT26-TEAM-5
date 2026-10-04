@@ -1,5 +1,7 @@
 package app.getknit.knit.data
 
+import androidx.room3.withWriteTransaction
+import app.getknit.knit.data.group.GroupEntity
 import app.getknit.knit.data.peer.PeerEntity
 import app.getknit.knit.data.settings.InboundSettings
 import app.getknit.knit.identity.Alias
@@ -8,8 +10,13 @@ import app.getknit.knit.mesh.protocol.WireEnvelope
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -34,6 +41,32 @@ class PeerRepositoryTest : RoomDbTest() {
         val identity = mockk<IdentitySource>(relaxed = true)
         coEvery { identity.nodeId() } returns "me"
         return PeerRepository(db.peerDao(), profile, identity, maxPeers)
+    }
+
+    /** The inputs a [LabelFade] reads, held by the test: anchors, the clock and the tick. */
+    private inner class Fade(
+        scope: CoroutineScope,
+    ) {
+        val accepted = MutableStateFlow(emptySet<String>())
+        val authored = MutableStateFlow(emptySet<String>())
+        val groups = MutableStateFlow(emptyList<GroupEntity>())
+        var now = NOW
+        val ticks = MutableSharedFlow<Unit>(replay = 1).apply { tryEmit(Unit) }
+        val fade =
+            LabelFade(
+                anchors = LabelAnchors(accepted, authored, groups, scope),
+                clock = { now },
+                ticks = ticks,
+                transact = { block -> db.withWriteTransaction { block() } },
+            )
+
+        fun repo(myName: String = ""): PeerRepository {
+            val profile = mockk<InboundSettings>(relaxed = true)
+            every { profile.displayName } returns flowOf(myName)
+            val identity = mockk<IdentitySource>(relaxed = true)
+            coEvery { identity.nodeId() } returns "me"
+            return PeerRepository(db.peerDao(), profile, identity, fade = fade)
+        }
     }
 
     @Test
@@ -138,6 +171,121 @@ class PeerRepositoryTest : RoomDbTest() {
             assertEquals(Alias.aliasFor("zz"), labels.labelFor("zz").text) // never pinned → alias, undiscriminated
         }
 
+    @Test
+    fun `a stranger's clash fades a week after it was last heard and the contact reads plain`() =
+        runTest {
+            val fade = Fade(backgroundScope)
+            val dao = db.peerDao()
+            dao.upsert(PeerEntity(nodeId = "c", name = "Alice", lastSeenAt = NOW - DAY)) // a contact, by our own accept
+            dao.upsert(PeerEntity(nodeId = "s", name = "Alice", lastSeenAt = NOW - DAY)) // a stranger met once
+            fade.accepted.value = setOf("c")
+            val repo = fade.repo()
+            val directories = Channel<PeerDirectory>(Channel.UNLIMITED)
+            backgroundScope.launch { repo.observeDirectory().collect { directories.send(it) } }
+
+            val live = directories.receive()
+            assertEquals(Alias.aliasFor("c"), live.label("c").discriminator)
+            assertEquals(Alias.aliasFor("s"), live.label("s").discriminator)
+            assertEquals(Alias.aliasFor("c"), repo.labelIndex().labelFor("c").discriminator)
+
+            // Six days on, still inside the week: the tick judges again and nothing moves.
+            fade.now = NOW + 5 * DAY
+            assertEquals(Alias.aliasFor("c"), repo.labelIndex().labelFor("c").discriminator)
+
+            // Past the week, with no write to the table: the tick alone carries the change.
+            fade.now = NOW + 6 * DAY + HOUR
+            fade.ticks.emit(Unit)
+            val faded = directories.receive()
+            assertNull(faded.label("c").discriminator)
+            assertEquals("Alice", faded.label("c").text)
+            assertEquals(Alias.aliasFor("s"), faded.label("s").discriminator) // the stranger stays marked
+            assertNull(repo.labelIndex().labelFor("c").discriminator) // a notification title agrees
+        }
+
+    @Test
+    fun `an anchored or verified peer never goes stale, whichever signal anchors it`() =
+        runTest {
+            val fade = Fade(backgroundScope)
+            val dao = db.peerDao()
+            val quiet = NOW - 30 * DAY
+            dao.upsert(PeerEntity(nodeId = "fresh", name = "Sam", lastSeenAt = NOW)) // a stranger heard just now
+            dao.upsert(PeerEntity(nodeId = "acc", name = "Sam", lastSeenAt = quiet))
+            dao.upsert(PeerEntity(nodeId = "dm", name = "Sam", lastSeenAt = quiet))
+            dao.upsert(PeerEntity(nodeId = "mem", name = "Sam", lastSeenAt = quiet))
+            dao.upsert(PeerEntity(nodeId = "ver", name = "Sam", verified = true, lastSeenAt = quiet))
+            dao.upsert(PeerEntity(nodeId = "gone", name = "Sam", lastSeenAt = quiet))
+            fade.accepted.value = setOf("acc")
+            fade.authored.value = setOf("dm", "g-x")
+            fade.groups.value =
+                listOf(GroupEntity(groupId = "g-x", name = "", members = "[\"me\",\"mem\"]", createdBy = "me", createdAt = 1L))
+
+            val labels = fade.repo().labelIndex()
+
+            // The quiet contacts and the fresh stranger stay a live clash; only the quiet stranger yields.
+            for (id in listOf("fresh", "acc", "dm", "mem", "ver")) assertEquals(id, Alias.aliasFor(id), labels.labelFor(id).discriminator)
+            assertEquals(Alias.aliasFor("gone"), labels.labelFor("gone").discriminator)
+        }
+
+    @Test
+    fun `accepting a quiet stranger brings the clash back`() =
+        runTest {
+            val fade = Fade(backgroundScope)
+            val dao = db.peerDao()
+            dao.upsert(PeerEntity(nodeId = "c", name = "Alice", lastSeenAt = NOW))
+            dao.upsert(PeerEntity(nodeId = "s", name = "Alice", lastSeenAt = NOW - 30 * DAY))
+            fade.accepted.value = setOf("c")
+            val repo = fade.repo()
+            assertNull(repo.labelIndex().labelFor("c").discriminator)
+            fade.accepted.value = setOf("c", "s")
+            assertEquals(Alias.aliasFor("c"), repo.labelIndex().labelFor("c").discriminator)
+        }
+
+    @Test
+    fun `heard stamps bank on the flush, the newest per sender, and a stamp inside the gate costs no write`() =
+        runTest {
+            val fade = Fade(backgroundScope)
+            val dao = db.peerDao()
+            dao.upsert(PeerEntity(nodeId = "a", name = "Ada", lastSeenAt = NOW - DAY))
+            val repo = fade.repo()
+
+            repo.noteSeen("a", NOW - HOUR)
+            repo.noteSeen("a", NOW) // the newest wins
+            repo.noteSeen("ghost", NOW) // no row: remembered, nothing written
+            assertEquals("memory only until the flush", NOW - DAY, dao.findByNodeId("a")!!.lastSeenAt)
+            repo.flushSeen()
+            assertEquals(NOW, dao.findByNodeId("a")!!.lastSeenAt)
+            assertNull(dao.findByNodeId("ghost"))
+
+            // Inside the six-hour gate: skipped before any query, so the row (moved behind its back) stays put.
+            dao.markSeen("a", at = NOW + MINUTE, olderThan = Long.MAX_VALUE)
+            repo.noteSeen("a", NOW + 2 * HOUR)
+            repo.flushSeen()
+            assertEquals(NOW + MINUTE, dao.findByNodeId("a")!!.lastSeenAt)
+
+            // Past it: written.
+            repo.noteSeen("a", NOW + 7 * HOUR)
+            repo.flushSeen()
+            assertEquals(NOW + 7 * HOUR, dao.findByNodeId("a")!!.lastSeenAt)
+        }
+
+    @Test
+    fun `without a fade nothing is stamped and every known identity counts`() =
+        runTest {
+            val dao = db.peerDao()
+            dao.upsert(PeerEntity(nodeId = "a", name = "Ada", lastSeenAt = 0L))
+            val repo = repo()
+            repo.noteSeen("a", NOW)
+            repo.flushSeen()
+            assertEquals(0L, dao.findByNodeId("a")!!.lastSeenAt)
+        }
+
     /** A stand-in signed profile frame: the bytes are what the store must keep, not a real envelope. */
     private fun frame(tag: Int) = WireEnvelope(sig = byteArrayOf((tag * 10).toByte()), signed = byteArrayOf(tag.toByte()))
+
+    private companion object {
+        const val MINUTE = 60_000L
+        const val HOUR = 60 * MINUTE
+        const val DAY = 24 * HOUR
+        const val NOW = 1_800_000_000_000L
+    }
 }

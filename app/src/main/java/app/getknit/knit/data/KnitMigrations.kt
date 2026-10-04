@@ -449,6 +449,26 @@ object KnitMigrations {
             }
         }
 
+    /**
+     * v18 → v19: one `peers.lastSeenAt` column — when this phone last heard from the peer, so a stranger quiet for
+     * a week stops adding an alias to a contact's label (ADR 2026-10.k8ge). Seeded from the newest stamp the row
+     * already implies: its profile version, or the publish stamp of the signed profile kept as its proof of key
+     * (`peer_profiles.sentAt`, refreshed every 12 h while the peer is live), whichever is later. A seed that runs
+     * early only makes a stranger yield sooner, and a stranger that yields is still labelled apart; a contact
+     * never reads this column. Additive only; the SQL must stay byte-equivalent to what Room generates for
+     * `app/schemas/**/19.json`.
+     */
+    val MIGRATION_18_19 =
+        object : Migration(18, 19) {
+            override suspend fun migrate(connection: SQLiteConnection) {
+                connection.execSQL("ALTER TABLE `peers` ADD COLUMN `lastSeenAt` INTEGER NOT NULL DEFAULT 0")
+                connection.execSQL(
+                    "UPDATE `peers` SET `lastSeenAt` = MAX(`updatedAt`, " +
+                        "COALESCE((SELECT `sentAt` FROM `peer_profiles` WHERE `peer_profiles`.`nodeId` = `peers`.`nodeId`), 0))",
+                )
+            }
+        }
+
     /** All migrations, applied by Room in order. */
     val ALL: Array<Migration> =
         arrayOf(
@@ -469,5 +489,6 @@ object KnitMigrations {
             MIGRATION_15_16,
             MIGRATION_16_17,
             MIGRATION_17_18,
+            MIGRATION_18_19,
         )
 }
