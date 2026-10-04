@@ -3,7 +3,9 @@ package app.getknit.knit
 import app.getknit.knit.mesh.power.ElapsedWait
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
@@ -116,5 +118,45 @@ class ElapsedWaitTest {
             ch.trySend(Unit)
             assertEquals(Unit, wait.receiveWithin(ch, 0))
             assertEquals(0, currentTime)
+        }
+
+    @Test
+    fun runWithinReturnsWhatTheBlockReturnsBeforeTheDeadline() =
+        runTest {
+            val wait = ElapsedWait(Clock(this)::now, checkMs = 2_000)
+            val got =
+                wait.runWithin(12_000) {
+                    delay(5_000)
+                    "read"
+                }
+            assertEquals("read", got)
+            assertEquals(5_000, currentTime)
+        }
+
+    @Test
+    fun runWithinCancelsABlockStillRunningAtTheElapsedDeadline() =
+        runTest {
+            val clock = Clock(this)
+            val wait = ElapsedWait(clock::now, checkMs = 2_000)
+            var cancelled = false
+            var result: String? = "unset"
+            var endedAt = -1L
+            launch {
+                result =
+                    wait.runWithin<String>(12_000) {
+                        try {
+                            awaitCancellation()
+                        } finally {
+                            cancelled = true
+                        }
+                    }
+                endedAt = currentTime
+            }
+            advanceTimeBy(1_000)
+            clock.slept = 20_000
+            advanceTimeBy(5_000)
+            assertNull(result)
+            assertTrue(cancelled)
+            assertEquals(2_000, endedAt)
         }
 }

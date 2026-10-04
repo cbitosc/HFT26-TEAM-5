@@ -1,8 +1,11 @@
 package app.getknit.knit.mesh.power
 
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ReceiveChannel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.onTimeout
 import kotlinx.coroutines.selects.select
 
@@ -52,6 +55,24 @@ class ElapsedWait(
             if (got != null) return got
         }
     }
+
+    /**
+     * What [block] returns, or null once [ms] have passed on the elapsed clock: `withTimeoutOrNull` on the clock that
+     * keeps counting in suspend. On a miss [block] is cancelled, and this returns once it has stopped.
+     */
+    suspend fun <T : Any> runWithin(
+        ms: Long,
+        block: suspend () -> T,
+    ): T? =
+        coroutineScope {
+            val result = Channel<T>(1)
+            val run = launch { result.send(block()) }
+            try {
+                receiveWithin(result, ms)
+            } finally {
+                run.cancel()
+            }
+        }
 
     companion object {
         /**

@@ -217,10 +217,16 @@ class BluetoothMeshTransport(
     private var lastScanCoded = false
     private var codedWindows = false
 
+    // The waits a relink waits on — the scan's window, its pause behind a dial and its hunting gap, the connect loop,
+    // the dial and HELLO watchdogs, the GATT payload read — run on the elapsed clock, so a phone that suspends between
+    // events keeps them in wall time instead of stretching them by however long it slept (ADR 2026-10.pj9w). The
+    // scan's other gaps are power budgets and keep plain timeouts, as do the waits elsewhere in this file.
+    private val elapsedWait = ElapsedWait(::elapsed)
+
     // Whose GATT payload to read and what each read found (companion change A3), and the reader; [gattReads] counts
     // the reads begun, for the debug state line. [gattJob] is the read in progress, cancelled with the radio.
     private val gattPayloads = GattPayloads()
-    private val gattReader = BleGattPayloadReader(appContext, arbiter)
+    private val gattReader = BleGattPayloadReader(appContext, arbiter, elapsedWait)
     private val gattReads = AtomicInteger()
 
     @Volatile private var gattJob: Job? = null
@@ -311,12 +317,6 @@ class BluetoothMeshTransport(
     // the scan's boost/floor decision — otherwise a settled clique's per-sighting heals keep it scanning forever).
     private val healSignal = Channel<Unit>(Channel.CONFLATED)
     private val scanWake = Channel<Unit>(Channel.CONFLATED)
-
-    // The waits a relink waits on — the scan's window, its pause behind a dial and its hunting gap, the connect loop,
-    // the dial and HELLO watchdogs — run on the elapsed clock, so a phone that suspends between events keeps them in
-    // wall time instead of stretching them by however long it slept (ADR 2026-10.pj9w). The scan's other gaps are
-    // power budgets and keep plain timeouts, as do the waits elsewhere in this file.
-    private val elapsedWait = ElapsedWait(::elapsed)
 
     // Cross-plane early-warning: nodeIds another plane (Wi-Fi Aware) can see that we'd initiate to but haven't
     // linked or BLE-sighted yet — pushed by [CompositeMeshTransport.onForeignReachable] — plus their per-peer

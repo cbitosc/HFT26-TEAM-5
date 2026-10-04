@@ -54,7 +54,7 @@ internal class GattPayloads(
         data object Stranger : Outcome
     }
 
-    /** The read in progress: whose payload it reads, and when it must have ended on the monotonic clock. */
+    /** The read in progress: whose payload it reads, and when it must have ended on the elapsed clock. */
     data class Read(
         val address: String,
         val deadline: Long,

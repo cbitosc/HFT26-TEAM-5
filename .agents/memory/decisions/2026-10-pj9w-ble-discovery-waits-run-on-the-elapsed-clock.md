@@ -96,3 +96,7 @@ that is not fine — the GATT payload reader's 12 s give-up holds `BleConnectArb
 on it (kwq2), and it is marked as owing `elapsedWait` — and two whose reasons stay open: the re-assert loop's no-link
 retry (the net is this ADR's call; the 2.5 s settle and the refusal retry share its wait) and the Coded step-up hold,
 which spans a sleep on two reads.
+
+The owed wait was paid the same day (#127): the read races `client.read()` against `ElapsedWait.runWithin`, which
+cancels it on a miss, so a read a sleeping phone left hanging frees the arbiter within `ElapsedWait.CHECK_MS` of the
+CPU next running (`BleGattPayloadReaderTest`). Its marker is gone with the `withTimeoutOrNull` it explained.

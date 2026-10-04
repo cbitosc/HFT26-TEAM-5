@@ -408,9 +408,11 @@ Bluetooth toggle, and once not at all. Three causes, three rules:
   windows, when the dwell comes due. A new rule that gates a dial on the clock needs the same wake.
 - **The waits a relink waits on run on `elapsedRealtime`** (`mesh/power/ElapsedWait`). A coroutine `delay` stops
   while the CPU is suspended: the Pixel 3's 60 s `bt state` line ran at a median 110 s, its 12 s dial watchdog at up
-  to 26 s. The connect loop, the dial and HELLO watchdogs, the scan's pause behind a dial, the scan window and the
-  **hunting** gap (`PowerPolicy.hunting`: no link, not yet relaxed) go through `elapsedWait`, which looks at the clock
-  every 2 s of awake time; they never wake a sleeping phone, they stop losing the time it slept. The settled, linked
+  to 26 s. The connect loop, the dial and HELLO watchdogs, the scan's pause behind a dial, the GATT payload read's
+  12 s give-up (`ElapsedWait.runWithin`: the read holds the arbiter, so the scan and every dial wait on it, #127), the
+  scan window and the **hunting** gap (`PowerPolicy.hunting`: no link, not yet relaxed) go through `elapsedWait`,
+  which looks at the clock every 2 s of awake time; they never wake a sleeping phone, they stop losing the time it
+  slept. The settled, linked
   and relaxed gaps keep stretching on purpose: they are power budgets measured on phones that stretched them. A new
   wait a relink waits on that uses `delay` or `withTimeoutOrNull` brings the stretch back, and only a suspending phone
   shows it. The `bt state` line itself keeps `delay` on purpose: its spacing is how far a phone sleeps.
@@ -481,8 +483,9 @@ characteristic `848eedcd-a2e3-4fb2-86f9-e2c80821a497` (`DoorbellPolicy.PAYLOAD_U
 - **A payload lives until one of three rules forgets its address** (the contract's payload lifetime): a dial to it
   fails before its channel opens (never on HANDSHAKE); a HELLO on a link to it, accepted or the reply to ours, names
   another node; or it goes 60 s of scanning unheard with no link up (`GattPayloads.scanned`, fed each scan window).
-- **`BleGattPayloadReader` is a dial**: `connectGatt(TRANSPORT_LE)` → discover → read → parse, 12 s in all, under
-  `BleConnectArbiter("gatt-read")`, client always closed, no `requestMtu` (the Read Blob fetches 24 B at MTU 23).
+- **`BleGattPayloadReader` is a dial**: `connectGatt(TRANSPORT_LE)` → discover → read → parse, 12 s in all on the
+  elapsed clock (pj9w, #127), under `BleConnectArbiter("gatt-read")`, client always closed, no `requestMtu` (the
+  Read Blob fetches 24 B at MTU 23).
   Never an address a link holds, never while an L2CAP dial is in flight or the arbiter is held; a promotion waits
   while a read runs.
 - **The dial rule is unchanged.** A read iPhone is sighted, so the larger id dials and a sighted lower dialer is

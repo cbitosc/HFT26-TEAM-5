@@ -8,8 +8,8 @@ import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothProfile
 import android.content.Context
 import android.os.Build
+import app.getknit.knit.mesh.power.ElapsedWait
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Reads the [BleAdvertPayload] a peer serves over GATT (companion change A3): the value of [DoorbellPolicy.PAYLOAD_UUID]
@@ -23,7 +23,9 @@ import kotlinx.coroutines.withTimeoutOrNull
  * for an MTU races the SMP handshake on a Pixel — `MeshtasticGatt`'s settle). The client is closed after every read,
  * whatever it found: the L2CAP dial that follows makes its own ACL.
  *
- * [BleConnectArbiter] is held for the read, so both scans pause for it as they do for a board dial. Callbacks arrive
+ * [BleConnectArbiter] is held for the read, so both scans pause for it as they do for a board dial, and the transport
+ * holds every dial back until it ends. So [timeoutMs] is counted on the elapsed clock: a read left hanging while the
+ * phone slept frees the radio in wall time, not after 12 s of awake time (ADR 2026-10.pj9w, #127). Callbacks arrive
  * on a binder thread; each read has its own [Client], whose deferreds are made before the calls that complete them.
  *
  * Device-verified only — there is no host GATT stack — like [BleDoorbell] and `MeshtasticGatt`; the rules it serves
@@ -33,6 +35,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 internal class BleGattPayloadReader(
     private val context: Context,
     private val arbiter: BleConnectArbiter,
+    private val elapsedWait: ElapsedWait,
     private val timeoutMs: Long = GattPayloads.READ_TIMEOUT_MS,
 ) {
     /** How a read ended, and at which phase when it did not find a payload (for the log line). */
@@ -45,8 +48,7 @@ internal class BleGattPayloadReader(
         arbiter.begin(ARBITER_TAG)
         val client = Client(device)
         return try {
-            // stretches: NOT fine: the read holds the arbiter, so the scan and every dial wait on it (kwq2). Owed: elapsedWait.
-            withTimeoutOrNull(timeoutMs) { client.read() } ?: Result(GattPayloads.Outcome.Failed, "timeout@${client.phase}")
+            elapsedWait.runWithin(timeoutMs) { client.read() } ?: Result(GattPayloads.Outcome.Failed, "timeout@${client.phase}")
         } finally {
             client.close()
             arbiter.end(ARBITER_TAG)
