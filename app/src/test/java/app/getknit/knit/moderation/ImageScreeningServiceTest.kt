@@ -66,6 +66,21 @@ class ImageScreeningServiceTest : RoomDbTest() {
     ) = LinkPreviewBlob(LinkPreviewBlob.VERSION, "https://example.com/x", title, description, image, image?.let { "image/jpeg" }).encode()
 
     @Test
+    fun `screenImage on bytes the decoder throws on caches nothing and does not throw`() =
+        runTest {
+            // A sealed photo's ciphertext whose random IV starts "BM": Robolectric's ImageIO picks its BMP reader and
+            // throws on the header behind it, where a phone's decoder answers null. The throw left the received blob
+            // unstored (#139).
+            val bmpLooking = byteArrayOf(0x42, 0x4D) + ByteArray(12) + byteArrayOf(0x7F, 0x7F, 0x7F, 0x7F) + ByteArray(64) { it.toByte() }
+            val moderator = FakeImageModerator(ImageVerdict(allowed = false, score = 0.8f))
+
+            service(moderator).screenImage("h", bmpLooking)
+
+            assertEquals("nothing decoded, nothing classified", 0, moderator.calls)
+            assertEquals(null, db.blobVerdictDao().find("h"))
+        }
+
+    @Test
     fun `screenImage classifies a miss once and caches the verdict`() =
         runTest {
             val moderator = FakeImageModerator(ImageVerdict(allowed = false, score = 0.8f))

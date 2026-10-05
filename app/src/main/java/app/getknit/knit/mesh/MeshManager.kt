@@ -2624,9 +2624,8 @@ class MeshManager(
 
     private fun watchIncomingFiles(session: CoroutineScope) {
         session.launch {
-            transport.incomingFiles.collect { file ->
-                // The link counts a file as arriving until it is taken here (#138): stored, refused, or thrown on.
-                try {
+            transport.incomingFiles.handleEach(
+                handle = { file ->
                     when (file.kind) {
                         FileKind.AVATAR -> {
                             pipeline.onAvatarReceived(file.fromNodeId, file.key, file.mime, file.path)
@@ -2641,10 +2640,14 @@ class MeshManager(
                             blobExchange.onReceived(file.key, file.mime, file.path, file.resumedFrom, from = file.fromNodeId)
                         }
                     }
-                } finally {
-                    transport.fileTaken(file.fromNodeId, file.key)
-                }
-            }
+                },
+                // The link counts a file as arriving until it is taken here (#138): stored, refused, or thrown on.
+                taken = { transport.fileTaken(it.fromNodeId, it.key) },
+                // One file's failure, not the collector's (#139): the next file is handled, and this one is re-asked.
+                onFailure = { file, t ->
+                    Log.w(TAG, "incoming ${file.kind} ${file.key.take(LOG_KEY_CHARS)}… from ${file.fromNodeId} failed", t)
+                },
+            )
         }
     }
 
@@ -3328,6 +3331,9 @@ class MeshManager(
     private companion object {
         /** Debug-bridge root fingerprint length — enough to compare eras across devices, nothing more. */
         const val ROOT_HASH_HEX_CHARS = 8
+
+        /** How much of a file's key a log line names. */
+        const val LOG_KEY_CHARS = 8
 
         const val TAG = "MeshManager"
         const val TEXT_MODERATION_TAG = "TextModeration"

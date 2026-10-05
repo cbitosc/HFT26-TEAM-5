@@ -103,21 +103,24 @@ private fun sampleSizeFor(
 /**
  * Decodes a bitmap from in-memory [bytes], sub-sampled and downscaled so neither side exceeds [maxDim]
  * (so screening a peer-supplied image can't OOM). For an animated GIF this yields its first frame, which
- * is enough for content classification. Returns null if the bytes can't be decoded.
+ * is enough for content classification. Returns null if the bytes can't be decoded — also when the decoder
+ * throws on them instead of answering null, as Robolectric's ImageIO does on a sealed photo whose ciphertext
+ * happens to start "BM" (#139): the receive-side screen stores a blob whatever it decides, and a throw from here
+ * dropped it.
  */
 internal fun decodeBoundedFromBytes(
     bytes: ByteArray,
     maxDim: Int,
-): Bitmap? {
-    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-    val options =
-        BitmapFactory.Options().apply {
-            inSampleSize = sampleSizeFor(bounds.outWidth, bounds.outHeight, maxDim)
-        }
-    val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options) ?: return null
-    return downscale(bitmap, maxDim)
-}
+): Bitmap? =
+    runCatching {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        val options =
+            BitmapFactory.Options().apply {
+                inSampleSize = sampleSizeFor(bounds.outWidth, bounds.outHeight, maxDim)
+            }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)?.let { downscale(it, maxDim) }
+    }.getOrNull()
 
 /** Scales [src] down so neither side exceeds [max], preserving aspect ratio; returns [src] if already within bounds. */
 internal fun downscale(
