@@ -433,7 +433,8 @@ hop (fixed in `MeshRouter.countOverheard`, pinned by `MeshRouterTest`).
   a stack **sends before it custodies** (`originateWire`), so a frame sent into a link that is going down is
   re-offered only by the 60 s timer once the relaunch's digest exchange has run without it — `restart()` and
   `restoreFromBackup()` therefore wait for every peer's inbound to drain (`LabTransport.awaitInboundDrained`:
-  each frame handed to the router has finished `handleInbound`), not just for the departure. `hold`/`release`
+  each frame handed to the router has finished `handleInbound`), not just for the departure, and so does
+  `unlink` for both ends since #137 (a receipt sealed after the cut missed the re-link's digest exchange). `hold`/`release`
   flip `holding` under the batch's lock, so a frame sent during a release is never parked into a batch
   already taken. A stranger on the pages is a stranger only while the first-sighting profile floods cannot
   reach it — they page out unawaited by `awaitAcquainted` — so make `pages.lossy` eat them. A spool scope's

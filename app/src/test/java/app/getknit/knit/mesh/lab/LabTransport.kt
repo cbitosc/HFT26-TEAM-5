@@ -172,7 +172,8 @@ class LabTransport(
      * `collect { handleInbound(…) }`) returns from `emit` only once `handleInbound` has, so [awaitInboundDrained]
      * means "every frame this node was handed has been handled" — its custody writes and the sends it
      * provoked included. Behind a composite's `merge` (a node with a board) `emit` returns at the channel, so
-     * there the signal is early; [LabNode.restart] keeps its settle for that case.
+     * there the signal is early; [LabNode.restart] and [MeshLab.unlink] keep their settle for that case, which
+     * a chaos stall can outlast: a board scenario that re-links right after a delivery awaits the event first.
      */
     override val inbound: Flow<InboundFrame> =
         flow {
@@ -435,9 +436,9 @@ class LabTransport(
      * Suspends until this node's router has finished handling every frame it was handed ([inbound]):
      * `handleInbound` has returned, so `onDeliver`'s inline work is done — its custody row, and a DM's receipt
      * sealed on a link plane. Not what it launches: a relay fires 0–150 ms later, an escalated group or room
-     * tick after `AckSync`'s debounce. [LabNode.restart] waits on it for every peer of the node going down, so
-     * a frame the peer is still handling when the link dies is custodied before the relaunched node's digest
-     * exchange reads the peer's store. Fails, rather than waits forever, on a collector that never finishes.
+     * tick after `AckSync`'s debounce. [LabNode.restart] waits on it for every peer of the node going down, and
+     * [MeshLab.unlink] for both ends, so a frame a node is still handling when the link dies is custodied before
+     * the next link's digest exchange reads its store. Fails, rather than waits forever, on a collector that never finishes.
      */
     suspend fun awaitInboundDrained() {
         val drained =

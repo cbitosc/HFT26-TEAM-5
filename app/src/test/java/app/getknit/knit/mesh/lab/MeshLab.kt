@@ -226,9 +226,13 @@ class MeshLab {
      * long. A node with a board also waits for its LoRa child to hold the new link set
      * ([LabNode.awaitBoardSawLinks]) and for the composite's own merged `neighbors`: each is handed over from a
      * coroutine of its own, and a send that outruns it meets a stale election or a peer still counted as
-     * linked. Last, each manager must have acted on the departure ([LabNode.awaitLinksActedOn]) — on a board
+     * linked. Both ends then finish every frame they were handed before the cut ([LabTransport.awaitInboundDrained]),
+     * as [LabNode.restart]'s peers do: a stack sends before it custodies, so a receipt sealed after the cut goes to
+     * no one, and a re-link whose digest exchange ran before its custody row landed leaves it to the 60 s re-offer
+     * (#137). Last, each manager must have acted on the departure ([LabNode.awaitLinksActedOn]) — on a board
      * node it collects the composite's `StateFlow`, a second conflation the radio's hand-off record cannot see.
-     * The [SETTLE_MS] pause stays for the composite's other `StateFlow`s (`reachable`, the status).
+     * The [SETTLE_MS] pause stays for the composite's other `StateFlow`s (`reachable`, the status), and for a
+     * board node's `merge`, which makes the drained signal early.
      */
     suspend fun unlink(
         a: LabNode,
@@ -237,6 +241,10 @@ class MeshLab {
         a.transport.disconnect(b.transport)
         a.transport.awaitNeighborsObserved()
         b.transport.awaitNeighborsObserved()
+        withContext(Dispatchers.Default) {
+            a.transport.awaitInboundDrained()
+            b.transport.awaitInboundDrained()
+        }
         a.awaitBoardSawLinks()
         b.awaitBoardSawLinks()
         a.awaitLinksActedOn()

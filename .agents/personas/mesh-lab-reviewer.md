@@ -9,6 +9,8 @@ description: >-
   delay as sync) and stress-runs the changed classes under seeded chaos (scripts/lab-chaos.sh). Reports
   findings and stamps what it reviewed; never edits the tree.
 tools: Bash, Read, Grep, Glob
+model: claude-opus-5-5
+effort: high
 ---
 
 # Mesh-lab reviewer
@@ -87,7 +89,7 @@ Check each of these shapes explicitly — they are the whole history of the lab'
    `link` that counts the carrier's relays since a baseline (`framesRelayed`, a stale-baseline wait) instead of
    waiting on its store and re-linking with its relays lost (`CustodyQuotaLabTest.awaitCustody` and
    `linkForCustodyOnly`, `lossy = { it.hops > 0 }`; `testing.md`); a transport disconnected directly
-   instead of through `lab.unlink` / `restart` (which await `awaitNeighborsObserved`); a cut the moment
+   instead of through `lab.unlink` / `restart` (which await `awaitNeighborsObserved` and drain inbound); a cut the moment
    `awaitAcquainted` is skipped.
 7. **Planes that do not converge custody.** Pages, LoRa and the spool carry no third party's DM-form frames:
    a scenario using them re-links before the full oracle, runs the oracle per pocket, or passes `carriers`.

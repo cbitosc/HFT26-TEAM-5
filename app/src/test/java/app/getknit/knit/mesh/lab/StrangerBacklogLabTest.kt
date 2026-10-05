@@ -201,10 +201,9 @@ class StrangerBacklogLabTest {
         repeat(POSTS) { assertTrue(alice.sendRoom("post $it")) }
         lab.await(POSTS) { bob.roomPosts()[alice.nodeId]?.size ?: 0 }
         lab.awaitCustodyParity(alice, bob)
+        // Parity can read true just before Alice answers Bob's first tick (`IntroSync`); the unlink drains Bob's
+        // inbound, so whatever she sent before the pipe went is in his custody before Carol's digest reaches him.
         lab.unlink(alice, bob)
-        // Parity can read true just before Alice answers Bob's first tick (`IntroSync`); whatever she sent before
-        // the pipe went is in Bob's custody before Carol's digest reaches him, and nothing after ever reaches him.
-        bob.transport.awaitInboundDrained()
         return Triple(alice, bob, carol)
     }
 
