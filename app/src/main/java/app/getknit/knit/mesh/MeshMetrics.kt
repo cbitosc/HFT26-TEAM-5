@@ -222,6 +222,9 @@ class MeshMetrics {
     private val filesResumedOut = AtomicLong()
     private val filesResumedIn = AtomicLong()
     private val splicesRefused = AtomicLong()
+
+    // The holder query (ADR 2026-10.6e5t): one counter per [BlobExchange.BlobEvent].
+    private val blobEvents = BlobExchange.BlobEvent.entries.associateWith { AtomicLong() }
     private val receiptsResent = AtomicLong()
     private val dmSealedV2 = AtomicLong()
     private val dmSealedV3 = AtomicLong()
@@ -465,6 +468,16 @@ class MeshMetrics {
      */
     fun onSpliceRefused() {
         splicesRefused.incrementAndGet()
+    }
+
+    /**
+     * What the blob fetch did (ADR 2026-10.6e5t): a holder query sent, answered, or refused over budget; an answer
+     * taken (what the mesh-in-a-box lab waits on before it moves the clock) or ignored; an ask of a holder that said it
+     * holds the blob, a confirm query, a fallback to the next holder, a blind ask of a neighbour that cannot be queried,
+     * and a pull-through ask.
+     */
+    fun onBlobEvent(event: BlobExchange.BlobEvent) {
+        blobEvents.getValue(event).incrementAndGet()
     }
 
     /** A broadcast/group delivery receipt we re-sent to its author because the first best-effort tick may not
@@ -1228,7 +1241,19 @@ class MeshMetrics {
             filesResumedOut = filesResumedOut.get(),
             filesResumedIn = filesResumedIn.get(),
             splicesRefused = splicesRefused.get(),
+            blobQueriesSent = blob(BlobExchange.BlobEvent.QuerySent),
+            blobQueriesAnswered = blob(BlobExchange.BlobEvent.QueryAnswered),
+            blobQueriesRefused = blob(BlobExchange.BlobEvent.QueryRefused),
+            blobAnswersTaken = blob(BlobExchange.BlobEvent.AnswerTaken),
+            blobAnswersIgnored = blob(BlobExchange.BlobEvent.AnswerIgnored),
+            blobFetches = blob(BlobExchange.BlobEvent.Fetch),
+            blobConfirms = blob(BlobExchange.BlobEvent.Confirm),
+            blobFallbacks = blob(BlobExchange.BlobEvent.Fallback),
+            blobBlindAsks = blob(BlobExchange.BlobEvent.BlindAsk),
+            blobPullThroughs = blob(BlobExchange.BlobEvent.PullThrough),
         )
+
+    private fun blob(event: BlobExchange.BlobEvent): Long = blobEvents.getValue(event).get()
 
     /** The [Snapshot.Bluetooth] counters alone, read now. */
     fun bluetooth(): Snapshot.Bluetooth {
@@ -1447,6 +1472,16 @@ class MeshMetrics {
             val filesResumedOut: Long = 0,
             val filesResumedIn: Long = 0,
             val splicesRefused: Long = 0,
+            val blobQueriesSent: Long = 0,
+            val blobQueriesAnswered: Long = 0,
+            val blobQueriesRefused: Long = 0,
+            val blobAnswersTaken: Long = 0,
+            val blobAnswersIgnored: Long = 0,
+            val blobFetches: Long = 0,
+            val blobConfirms: Long = 0,
+            val blobFallbacks: Long = 0,
+            val blobBlindAsks: Long = 0,
+            val blobPullThroughs: Long = 0,
         )
 
         /**

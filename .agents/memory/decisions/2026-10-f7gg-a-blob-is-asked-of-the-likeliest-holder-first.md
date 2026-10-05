@@ -9,7 +9,11 @@ topics: [mesh, attachments, blob-exchange, wifi-aware]
 # ADR 2026-10.f7gg — A blob is asked of the likeliest holder first, then of every neighbour
 
 Status: Accepted (2026-10-04). Work item knit/knit-next#136. Amends ADR 2026-09.4tx5, whose reads of the link and
-serve rules are unchanged; it changes who the asker asks, and when. No wire change, no DB change.
+serve rules are unchanged; it changes who the asker asks, and when. No wire change, no DB change. Amended by ADR
+2026-10.6e5t (2026-10-05): a neighbour whose link advertises `CAP_BLOB_HAVE` is queried first and the best holder
+asked; this round is now the tier for the neighbours that cannot be queried (and for every neighbour while
+`BuildConfig.BLOB_QUERY` is off), unchanged but for one fix — a grace counts from the first look that finds the holder
+no longer streaming to us, not from the last look that saw it streaming (the #136 trial's S4).
 
 **What was observed.** In scenario 3 of the ADR 2026-10.mptm device trial (2026-10-04, every lab phone on
 `eb1bdf9b`), the Pixel 3 posted a 101,691 B picture to the Nearby room. The Pixel 7 copied it from its own sealed

@@ -67,11 +67,12 @@ internal object DoorbellPolicy {
      * Whether writing a frame of [type] rings. Everything does except the link's upkeep, which waits for the next
      * wake as the digest does: the typing cue (worthless to a locked phone) and the point-to-point requests the
      * 60 s tick re-sends for as long as a blob or a key is missing (`BlobExchange`, `KeyExchange`), which would
-     * otherwise wake the iPhone every minute. A frame whose type could not be read rings.
+     * otherwise wake the iPhone every minute — the blob holder query and its answer among them (ADR 2026-10.6e5t). A
+     * frame whose type could not be read rings.
      */
     fun rings(type: String?): Boolean = type == null || type !in UPKEEP
 
-    private val UPKEEP = setOf(FrameType.TYPING, FrameType.BLOB_REQ, FrameType.KEY_REQ)
+    private val UPKEEP = setOf(FrameType.TYPING, FrameType.BLOB_REQ, FrameType.BLOB_HAVE, FrameType.BLOB_HAS, FrameType.KEY_REQ)
 
     /** One link's ring times. Not thread-safe: a [BleDoorbell]'s loop is its only caller. */
     class Schedule(

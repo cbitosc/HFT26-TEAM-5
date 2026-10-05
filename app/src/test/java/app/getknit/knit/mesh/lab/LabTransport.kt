@@ -1,6 +1,7 @@
 package app.getknit.knit.mesh.lab
 
 import app.getknit.knit.mesh.ArrivingFile
+import app.getknit.knit.mesh.BulkRoute
 import app.getknit.knit.mesh.FileMeta
 import app.getknit.knit.mesh.InboundFrame
 import app.getknit.knit.mesh.MeshTransport
@@ -16,6 +17,8 @@ import app.getknit.knit.mesh.link.FileIntake
 import app.getknit.knit.mesh.link.FrameKey
 import app.getknit.knit.mesh.link.LinkCrossings
 import app.getknit.knit.mesh.link.LinkFraming
+import app.getknit.knit.mesh.protocol.BlobHasContent
+import app.getknit.knit.mesh.protocol.BlobHaveContent
 import app.getknit.knit.mesh.protocol.BlobReqContent
 import app.getknit.knit.mesh.protocol.FrameType
 import app.getknit.knit.mesh.protocol.RelayEnvelope
@@ -362,6 +365,42 @@ class LabTransport(
     /** Every `blobreq` this node sent that reached its peer, in arrival order — what an ask said, offset included. */
     val blobAsks = CopyOnWriteArrayList<BlobAsk>()
 
+    /** A `blobhave` that crossed one of this node's pipes: to whom, and the hashes it named (ADR 2026-10.6e5t). */
+    data class BlobQuery(
+        val to: String,
+        val hashes: List<String>,
+    )
+
+    /** Every `blobhave` this node sent that reached its peer, in arrival order. */
+    val blobQueries = CopyOnWriteArrayList<BlobQuery>()
+
+    /** A `blobhas` that crossed one of this node's pipes: to whom, and each hash's state. */
+    data class BlobAnswer(
+        val to: String,
+        val states: Map<String, Int>,
+    )
+
+    /** Every `blobhas` this node sent that reached its peer, in arrival order. */
+    val blobAnswers = CopyOnWriteArrayList<BlobAnswer>()
+
+    /**
+     * The capabilities this node's link advertises to whoever it links with — its HELLO. Every build answers a holder
+     * query, so it carries `CAP_BLOB_HAVE` unless the node plays one that predates it (`LabLimits.answersHolderQueries`).
+     * Read when a link comes up, so set it before linking.
+     */
+    @Volatile
+    var advertises: Long = 0L
+
+    /** The plane a scenario declares a file from each peer would ride ([bulkRouteTo]); the lab has no Wi-Fi Aware. */
+    val bulkRoutes = ConcurrentHashMap<String, BulkRoute>()
+
+    /** Peers a scenario declares as linked on a slow (Coded) link ([slowLinkTo]). */
+    val slowLinks: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    /** How many files a scenario declares this node is feeding ([feedingLoad]) — a `blobhas` answer's load. */
+    @Volatile
+    var feeding: Int = 0
+
     /**
      * A holder on a build that predates the resume (#116): whatever offset the ask named, it streams the whole file
      * with no offset in the header — what an older Android build or the iOS port before its companion change does.
@@ -591,6 +630,12 @@ class LabTransport(
     ) {
         landing.remove("$fromNodeId|$key")
     }
+
+    override fun bulkRouteTo(nodeId: String): BulkRoute = bulkRoutes[nodeId] ?: BulkRoute.None
+
+    override fun slowLinkTo(nodeId: String): Boolean = nodeId in slowLinks
+
+    override fun feedingLoad(nodeId: String): Int = feeding
 
     /** A linked sender's file streaming in to this node: one parked toward us with its header across. */
     override fun fileArrivingFrom(nodeId: String): Boolean {
@@ -900,9 +945,23 @@ class LabTransport(
     ): InboundFrame? {
         val envelope = WireCodec.decodeEnvelope(wire.signed) ?: return null
         crossings.firstCrossing(fromNodeId, FrameKey.of(wire, envelope)) // in counts: it never goes back this way
-        if (envelope.type == FrameType.BLOB_REQ) {
-            WireCodec.decodePayload<BlobReqContent>(envelope.payload)?.let { ask ->
-                pipes[fromNodeId]?.target?.blobAsks?.add(BlobAsk(nodeId, ask.hash, ask.offset))
+        when (envelope.type) {
+            FrameType.BLOB_REQ -> {
+                WireCodec.decodePayload<BlobReqContent>(envelope.payload)?.let { ask ->
+                    pipes[fromNodeId]?.target?.blobAsks?.add(BlobAsk(nodeId, ask.hash, ask.offset))
+                }
+            }
+
+            FrameType.BLOB_HAVE -> {
+                WireCodec.decodePayload<BlobHaveContent>(envelope.payload)?.let { q ->
+                    pipes[fromNodeId]?.target?.blobQueries?.add(BlobQuery(nodeId, q.hashes))
+                }
+            }
+
+            FrameType.BLOB_HAS -> {
+                WireCodec.decodePayload<BlobHasContent>(envelope.payload)?.let { a ->
+                    pipes[fromNodeId]?.target?.blobAnswers?.add(BlobAnswer(nodeId, a.items.associate { it.hash to it.state }))
+                }
             }
         }
         pipes[fromNodeId]?.target?.sent?.add(
@@ -923,7 +982,7 @@ class LabTransport(
 
     /** Makes `neighbors.value` answer with the pipes as they are now, without waking a collector. */
     private fun presentNeighbors() {
-        current = pipes.keys.map { Peer(it) }.toSet()
+        current = pipes.map { (id, pipe) -> Peer(id, capabilities = pipe.target.advertises) }.toSet()
     }
 
     private fun refreshNeighbors() {

@@ -210,6 +210,18 @@ free). Two invariants that are easy to break:
   full while it goes on feeding that peer — never a TTL after the feed ends. The progress ring the chat draws is the
   same read (`arrivingFiles()` maps each key to the bytes in and the header's declared `size`, ADR
   2026-10.y9qh): that size is the sender's label, never a bound or a stall timer.
+- **A holder is asked only once it said so; a query is not an ask** (`BlobExchange`, ADR 2026-10.6e5t). A neighbour
+  whose link carries `CAP_BLOB_HAVE` is queried (`blobhave`) and the best that answers HAVE is asked alone; one that
+  brings nothing is queried once more, then the next is asked. `onHaveQuery` never serves, wants or stamps the
+  memo; its HAVE is the serve predicate read through `BlobStore.servable` (never `fileFor`, which writes plaintext),
+  its SENDING is `fileInFlightTo` or a *peek* at the memo, and its reads run link → `storing` → store. Neighbours
+  that cannot answer keep ADR 2026-10.f7gg's round, never made one-by-one; a grace counts from the first look that
+  finds the holder no longer streaming to us. Only a *dead* cycle backs off (every neighbour asked said NONE, nobody
+  asked blind): one that asked anyone blind keeps f7gg's pace, so the release build (asking off) never backs off. The
+  puller's ask opens a due cycle before it marks the puller. A state the reader does not know is never HAVE —
+  `PARTIAL` is reserved, and its serve will need a request-side gate (`BlobReqContent.end`), never the bit alone.
+  Both types are unsigned and point-to-point: `FrameType.isUnsignedPointToPoint` keeps them out of presence
+  evidence, the key path and custody; `DoorbellPolicy.UPKEEP` keeps them from ringing an iPhone.
 - **A cut attachment resumes from the bytes the receiver kept** (`PartialBlobs`, `FileIntake`, ADR
   2026-10.wtyc). A link closed mid-stream keeps an attachment's prefix; the ask names its length
   (`BlobReqContent.offset`), the holder streams the tail and echoes it (`FileHeaderWire.offset`), and the

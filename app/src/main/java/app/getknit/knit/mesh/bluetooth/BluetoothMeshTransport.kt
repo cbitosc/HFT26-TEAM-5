@@ -651,6 +651,11 @@ class BluetoothMeshTransport(
         key: String,
     ): Boolean = links[nodeId]?.hasPendingFile(key) ?: false
 
+    // [paceFor]'s divisor: the links splitting the 1M/2M budget right now. A Coded feed keeps its own pace outside it.
+    override fun feedingLoad(nodeId: String): Int = links.values.count { it.txInProgress && linkPhy[it] != LinkPhy.CODED }
+
+    override fun slowLinkTo(nodeId: String): Boolean = links[nodeId]?.let { linkPhy[it] == LinkPhy.CODED } ?: false
+
     override suspend fun sendDigest(
         to: Peer,
         ids: List<String>,

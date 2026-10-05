@@ -204,6 +204,10 @@ class MeshManager(
     // How long a blob round's first ask has before every other neighbour is asked ([BlobExchange.FIRST_ASK_GRACE_MS],
     // ADR 2026-10.f7gg). Injectable for `mesh/lab`, whose scenarios must not hang an assertion on a wall-clock race.
     private val firstAskGraceMs: Long = BlobExchange.FIRST_ASK_GRACE_MS,
+    // Whether this build queries neighbours for a blob's holders before it asks (ADR 2026-10.6e5t;
+    // `BuildConfig.BLOB_QUERY`, dark in release until its device trial), and how long it waits for their answers.
+    // Off, every neighbour gets ADR 2026-10.f7gg's blind round; answering a query is never gated.
+    private val blobHolderQuery: BlobExchange.HolderQuery = BlobExchange.HolderQuery(),
     // What the session's collectors and everything they launch run on. Production takes the default; the
     // `mesh/lab` harness hands in its seeded chaos dispatcher (`LabChaos`), a busy pool on demand.
     private val sessionDispatcher: CoroutineDispatcher = Dispatchers.Default,
@@ -250,6 +254,8 @@ class MeshManager(
             onSpliceRefused = metrics::onSpliceRefused,
             // A first ask's grace runs on the session (ADR 2026-10.f7gg); stopped, the tick and link-ups step it.
             firstAskGraceMs = firstAskGraceMs,
+            holderQuery = blobHolderQuery,
+            onEvent = metrics::onBlobEvent,
             timers = { sessionScope },
             log = { Log.d(TAG, it) },
         )
@@ -2286,28 +2292,30 @@ class MeshManager(
      * database is the durable truth; `BlobExchange`'s in-memory fetching set is a bounded, TTL-swept memo of
      * it, and the two drift apart in exactly the shape the LoRa field trial hit (ADR 2026-09.ptv8): a frame
      * heard over the board while the phone had no neighbor parks a want that nobody was asked for, the 30-min
-     * sweep reclaims it, and the link-up re-ask ([BlobExchange.onNeighborAdded]) then finds nothing to ask
+     * sweep reclaims it, and the link-up re-ask ([BlobExchange.reask]) then finds nothing to ask
      * for — the row spins forever, until a restart ran this. So it runs at every point a holder may have just
-     * appeared: startup, a neighbor joining, and the 60 s re-offer tick. [BlobExchange.want] is idempotent for
+     * appeared: startup, a neighbor joining, and the 60 s re-offer tick. [BlobExchange.wantAll] is idempotent for
      * a hash already in flight and returns at once for one the store has, so the repeat costs one bounded query.
      */
     private suspend fun rewantMissingBlobs() {
         // Own/received message attachments: always re-pull (uncapped, kept alive by their message row). Each is
         // wanted with its row's sender, so a want re-armed after a restart or the sweep asks the author first.
+        // All of it goes to the exchange in one batch, so a link-up's holder queries share one frame per neighbour.
         val ownHashes = messages.attachmentsNeedingFetch()
-        ownHashes.forEach { (hash, author) -> blobExchange.want(hash, author = author) }
+        val wanted = ownHashes.entries.mapTo(mutableListOf<Pair<String, String?>>()) { (hash, author) -> hash to author }
         // Carrier-only custody blobs backfill only while under the byte budget (the same pull-time soft cap
         // onCarriedFrame applies), so a restart re-attempts pulls that a live-session over-budget skip left
         // missing; skip ones already re-requested above as our own/received attachments.
         if (blobs.carrierOnlyBlobBytes() < CARRIER_BLOB_BUDGET_BYTES) {
             forwardStore.attachmentsNeedingFetch().forEach { (hash, author) ->
-                if (hash !in ownHashes) blobExchange.want(hash, author = author)
+                if (hash !in ownHashes) wanted += hash to author
             }
         }
         // A group's decided photo not shown yet (ADR 2026-09.nxcq): the row is the durable want, so a pull lost
         // to a restart or the fetch TTL comes back here and not only on the group's next frame. A photo
         // screening refused keeps its verdict and is never asked for again while filtering is on.
-        groups.photoHashesNeedingFetch().forEach { if (!refusedImage(it)) blobExchange.want(it) }
+        groups.photoHashesNeedingFetch().forEach { if (!refusedImage(it)) wanted += it to null }
+        blobExchange.wantAll(wanted)
     }
 
     /** Periodically reclaims expired carried DMs, bounding the forward store between heartbeat sweeps. */

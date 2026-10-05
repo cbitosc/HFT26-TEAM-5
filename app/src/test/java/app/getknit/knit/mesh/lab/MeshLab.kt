@@ -51,6 +51,7 @@ import app.getknit.knit.data.settings.SettingsKeys
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.identity.Identity
 import app.getknit.knit.identity.NodeId
+import app.getknit.knit.mesh.BlobExchange
 import app.getknit.knit.mesh.CompositeMeshTransport
 import app.getknit.knit.mesh.ContributionLedger
 import app.getknit.knit.mesh.DmAckCoalescer
@@ -755,6 +756,22 @@ class MeshLab {
         const val FIRST_ASK_GRACE_MS = 20_000L
 
         /**
+         * How long a fetch waits for its holder queries' answers, lengthened the same way
+         * ([app.getknit.knit.mesh.BlobExchange.QUERY_WAIT_MS] is 5 s; ADR 2026-10.6e5t): a scenario that counts asks
+         * must not race a slow runner's answer. With [FIRST_ASK_GRACE_MS] it stays under
+         * [app.getknit.knit.mesh.BlobExchange.CYCLE_MS], so a wait and a grace never also open the next cycle.
+         */
+        const val QUERY_WAIT_MS = 15_000L
+
+        /**
+         * When a fetch queries again a neighbour that said it is fetching the blob, or that it asked to pull it through,
+         * lengthened the same way ([app.getknit.knit.mesh.BlobExchange.FETCHING_RECHECK_MS] is 10 s): only a scenario's
+         * clock jump and tick move it, never a slow run's wall clock. Below [app.getknit.knit.mesh.BlobExchange.CYCLE_MS]; on a run slow
+         * enough that the jump also opens the next cycle, that cycle queries the same neighbour again, to the same end.
+         */
+        const val FETCHING_RECHECK_MS = 30_000L
+
+        /**
          * Long enough for the scope reconcile (15 s) and a worker that missed an event and waits for its own
          * 60 s tick — the slow path a real relay client takes too; the fast path is a second or two.
          */
@@ -800,6 +817,21 @@ data class LabLimits(
     val rideHoldMs: Long = MeshLab.RIDE_HOLD_MS,
     /** How long a blob round's first ask has before every other neighbour is asked ([MeshLab.FIRST_ASK_GRACE_MS]). */
     val firstAskGraceMs: Long = MeshLab.FIRST_ASK_GRACE_MS,
+    /**
+     * Whether the node queries its neighbours for a blob's holders before it asks (ADR 2026-10.6e5t;
+     * `BuildConfig.BLOB_QUERY`, on in debug and off in release). Off by default, so every other scenario asks blind,
+     * exactly as before the query existed.
+     */
+    val blobQuery: Boolean = false,
+    /** How long its fetch waits for the answers ([MeshLab.QUERY_WAIT_MS]). */
+    val queryWaitMs: Long = MeshLab.QUERY_WAIT_MS,
+    /** When it queries a neighbour fetching the blob again ([MeshLab.FETCHING_RECHECK_MS]). */
+    val fetchingRecheckMs: Long = MeshLab.FETCHING_RECHECK_MS,
+    /**
+     * Whether the node's link advertises that it answers a holder query (`CAP_BLOB_HAVE`) — every build does. False
+     * plays a neighbour that predates it, the iOS port today: never queried, asked blind.
+     */
+    val answersHolderQueries: Boolean = true,
     /**
      * The custody store's bounds ([ForwardRepository]'s constructor). Give every node in a scenario the
      * same numbers: the content digest is folded over what these keep, and the bound must be identical
@@ -955,7 +987,10 @@ class LabNode internal constructor(
         val session = dispatcher(Dispatchers.Default)
         val scope = CoroutineScope(SupervisorJob() + session).also { this.scope = it }
         partials = PartialBlobs(File(dir, "blob-partials"), now = now)
-        transport = LabTransport(nodeId, File(dir, "rx"), partials, pages, chaos)
+        transport =
+            LabTransport(nodeId, File(dir, "rx"), partials, pages, chaos).apply {
+                advertises = if (limits.answersHolderQueries) Protocol.CAP_BLOB_HAVE else 0L
+            }
         metrics = MeshMetrics()
         // The Internet plane is opted into through the same two settings the relay editor writes; the
         // settings file persists, so a restart() dials the same spool again.
@@ -1105,6 +1140,12 @@ class LabNode internal constructor(
                 spoolTickMs = limits.spoolTickMs,
                 spoolAttachmentRetryMs = limits.spoolAttachmentRetryMs,
                 firstAskGraceMs = limits.firstAskGraceMs,
+                blobHolderQuery =
+                    BlobExchange.HolderQuery(
+                        enabled = limits.blobQuery,
+                        waitMs = limits.queryWaitMs,
+                        fetchingRecheckMs = limits.fetchingRecheckMs,
+                    ),
                 sessionDispatcher = session,
                 ingressBudget = IngressBudget(burst = limits.ingressBurst, perMinute = limits.ingressPerMinute, clock = now),
                 spoolDialer = spool,

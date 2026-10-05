@@ -19,7 +19,10 @@ re-ask a peer whose file is streaming in (`MeshTransport.fileArrivingFrom`), and
 the link fed in full while it goes on feeding that peer. Amended by ADR 2026-10.f7gg (2026-10-04, #136): the first
 ask goes to the likeliest holder alone and widens to every neighbour after its grace, so "one copy per asker per
 holder" is paid only when the first choice misses; `onNeighborAdded` is now `reask`. Point 1 amended 2026-10-05
-(#138, below): a file stays arriving past its `FILE_END` until the consumer of `incomingFiles` has taken it.
+(#138, below): a file stays arriving past its `FILE_END` until the consumer of `incomingFiles` has taken it. Amended
+by ADR 2026-10.6e5t (2026-10-05): a neighbour may be *queried* first (`blobhave`) — a query is not an ask, so it serves,
+pulls and stamps nothing; its HAVE is this ADR's serve predicate read without materialising a file, its SENDING is
+`fileInFlightTo` or a peek at the memo, its FETCHING the two link reads and `storing`, in that order.
 
 **What was observed.** 2026-09-19 20:43, three phones linked over BLE (P3, Moto G, P9), a 699 KB DM
 attachment P3 → Moto. It crossed the mesh three times to the Moto and twice to P9: P3 served the Moto at

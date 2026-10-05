@@ -11,7 +11,7 @@ product:
 document:
   updated: 2026-10-03T03:55:42Z
   coverage: partial
-  canonical: https://github.com/getknit/knit/blob/main/CHANGELOG.md
+  canonical: https://whatsnew.fyi/product/knit
   locale: en
   older: https://github.com/getknit/knit/releases/tag/v2.1.0
 ---

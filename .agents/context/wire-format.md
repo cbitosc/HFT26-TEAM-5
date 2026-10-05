@@ -17,15 +17,18 @@ can evolve *additively* without another break. The three layers:
   `type` (a plain **string** discriminator, so an unknown future type decodes instead of throwing),
   `id`, `senderId`, `sentAt`, `recipientId`, `group` — plus the opaque per-type `payload`.
 - Per-type content (`ChatContent`, `ProfileContent`, `GroupLeaveContent`, `ReceiptContent`,
-  `ReactionContent`, `BlobReqContent`, `KeyReqContent`, `TypingContent`) lives inside `payload`; only
-  endpoints parse it. Current `type`s: `chat`, `groupupdate`, `profile`, `receipt`, `reaction`,
-  `groupleave`, `blobreq`, `keyreq`, `typing` (a best-effort, single-hop, never-custodied "now typing"
-  cue — see the typing-indicator flow). A `blobreq` may carry an `offset`: the bytes the asker kept from a
-  transfer a link drop cut off, answered by a link `FILE_HEADER` that echoes it (ADR 2026-10.wtyc).
+  `ReactionContent`, `BlobReqContent`, `BlobHaveContent`, `BlobHasContent`, `KeyReqContent`, `TypingContent`) lives
+  inside `payload`; only endpoints parse it. Current `type`s: `chat`, `groupupdate`, `profile`, `receipt`, `reaction`,
+  `groupleave`, `blobreq`, `blobhave`, `blobhas`, `keyreq`, `typing` (a best-effort, single-hop, never-custodied "now
+  typing" cue — see the typing-indicator flow), `commons`. A `blobreq` may carry an `offset`: the bytes the asker kept
+  from a transfer a link drop cut off, answered by a link `FILE_HEADER` that echoes it (ADR 2026-10.wtyc). A
+  `blobhave` asks a neighbour whose link carries `CAP_BLOB_HAVE` which of up to 32 blobs it holds; its `blobhas`
+  answers each with a state (NONE, HAVE, SENDING, FETCHING; PARTIAL reserved), a size, the responder's load and the
+  query's id (ADR 2026-10.6e5t).
 
 **One signature authenticates every type**: `WireEnvelope.sig` is raw Ed25519 over `signed` (which
-binds `type`/`id`/`senderId`), verified byte-exact in `MeshManager.verifyInbound`; `blobreq` (with
-`relay = false`) and the v3 live-link delivery tick (ADR 059 — a `relay = false` DM-form chat addressed to
+binds `type`/`id`/`senderId`), verified byte-exact in `MeshManager.verifyInbound`; the blob traffic — `blobreq`,
+`blobhave`, `blobhas`, each with `relay = false` (`FrameType.isUnsignedPointToPoint`) — and the v3 live-link delivery tick (ADR 059 — a `relay = false` DM-form chat addressed to
 us, authenticated by its ratchet AEAD) are the only unsigned frames. `MeshManager` signs on origination; `verifyInbound` drops
 any flooded frame whose signature is missing/invalid or whose key doesn't derive to `senderId`, but
 the router still relays unknown/unverifiable frames verbatim so an old build is never a black hole.

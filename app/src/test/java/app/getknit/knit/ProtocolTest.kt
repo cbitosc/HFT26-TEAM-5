@@ -72,6 +72,17 @@ class ProtocolTest {
     }
 
     @Test
+    fun everyBuildAnswersAHolderQuery() {
+        // ADR 2026-10.6e5t: the next bit after the doorbell, above the advert's 8 bits, and in every build — only the
+        // asking is gated (BuildConfig.BLOB_QUERY), so a mixed fleet answers whoever asks.
+        assertEquals(0x2000L, Protocol.CAP_BLOB_HAVE)
+        assertEquals(Protocol.CAP_DOORBELL shl 1, Protocol.CAP_BLOB_HAVE)
+        assertEquals(Protocol.CAP_BLOB_HAVE, Protocol.LOCAL_CAPABILITIES and Protocol.CAP_BLOB_HAVE)
+        val advertised = Protocol.parse(Protocol.advertise("ffbbh6thbepahqxsv2gqog45m4")).capabilities
+        assertEquals(Protocol.CAP_BLOB_HAVE, advertised and Protocol.CAP_BLOB_HAVE)
+    }
+
+    @Test
     fun nodeIdIsAlwaysTheFirstSegment() {
         // Robust to any future suffix appended after the capabilities field.
         assertEquals("abcd1234", Protocol.parse("abcd1234|1|f|future|stuff").nodeId)

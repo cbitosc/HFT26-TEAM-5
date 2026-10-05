@@ -39,6 +39,9 @@ class MeshBlobStore(
 
     override suspend fun mimeFor(hash: String): String? = blobs.mimeFor(hash)
 
+    // [fileFor]'s gate, then the row's length straight from the table — no bytes read, no temp file written.
+    override suspend fun servable(hashes: List<String>): Map<String, Long> = blobs.sizes(hashes.filter(::isValidBlobHash))
+
     /** Materializes a temp file from the stored bytes so the transport can send it; null if not held. */
     override suspend fun fileFor(hash: String): File? =
         withContext(Dispatchers.IO) {

@@ -56,6 +56,11 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   `indirect` lists the authors another phone handed us a fresh frame from within the linger
   (`{nodeId, name, via, agoMs}`), which is what Diagnostics shows as "Reachable indirectly" (ADR 2026-10.fw8g); the
   top-level `reachable` array is the *nearby* set (`neighbors`), not `MeshController.reachable`.
+  The metrics carry the holder query's counters (ADR 2026-10.6e5t): `blobQueriesSent` / `blobQueriesAnswered` /
+  `blobQueriesRefused` / `blobAnswersTaken` / `blobAnswersIgnored`, then what the fetch did — `blobFetches` (a holder that said so, asked),
+  `blobConfirms`, `blobFallbacks`, `blobBlindAsks` (f7gg's round, for neighbours that cannot answer) and
+  `blobPullThroughs`. The per-blob story is in logcat, tag `MeshManager`: `blob query`, `blob answer … in <ms> ms`,
+  `blob fetch`, `blob confirm`, `blob fallback`, `blob pull`, and the holder's `blob has`.
 - `…debug.STORE` — dumps the store-and-forward carry set (the **live** rows are the id set the cue-plane
   content digest is folded over; expired-unswept rows are digest/quota/serve-invisible residue awaiting the
   sweep), for diagnosing why two nodes never converge their digests (the churn from a carried-set delta):

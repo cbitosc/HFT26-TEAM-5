@@ -47,6 +47,8 @@ import app.getknit.knit.mesh.crypto.ratchet.RatchetSessions
 import app.getknit.knit.mesh.crypto.readsCryptoV3
 import app.getknit.knit.mesh.crypto.sealBytes
 import app.getknit.knit.mesh.lora.MeshtasticProto
+import app.getknit.knit.mesh.protocol.BlobHasContent
+import app.getknit.knit.mesh.protocol.BlobHaveContent
 import app.getknit.knit.mesh.protocol.BlobReqContent
 import app.getknit.knit.mesh.protocol.ChatContent
 import app.getknit.knit.mesh.protocol.EncEnvelope
@@ -297,6 +299,33 @@ class InboundPipeline(
     }
 
     /**
+     * The unsigned blob traffic, all point-to-point on the link it came in on: a neighbour's ask, and the holder query
+     * and its answer (ADR 2026-10.6e5t). For the query and the answer the link's peer is the party, so one naming somebody
+     * else as its sender is a stray, and nobody acts on it.
+     */
+    private suspend fun handleBlobFrame(
+        env: RelayEnvelope,
+        fromNodeId: String,
+    ) {
+        when {
+            env.type == FrameType.BLOB_REQ -> {
+                WireCodec.decodePayload<BlobReqContent>(env.payload)?.let { blobExchange.onRequest(it.hash, fromNodeId, it.offset) }
+                metrics.onBlobAskHandled()
+            }
+
+            env.senderId != fromNodeId -> {}
+
+            env.type == FrameType.BLOB_HAVE -> {
+                WireCodec.decodePayload<BlobHaveContent>(env.payload)?.let { blobExchange.onHaveQuery(it.hashes, fromNodeId, env.id) }
+            }
+
+            else -> {
+                WireCodec.decodePayload<BlobHasContent>(env.payload)?.let { blobExchange.onHaveAnswer(it, fromNodeId) }
+            }
+        }
+    }
+
+    /**
      * Routes a verified inbound frame to its type handler. A plain `when` over the type string: an unknown
      * future type that decoded (the discriminator is a string, so it doesn't throw) hits `else` — not
      * delivered locally, but the router still relays it verbatim, so an old build is never a black hole for
@@ -337,9 +366,8 @@ class InboundPipeline(
                 handleReaction(env)
             }
 
-            FrameType.BLOB_REQ -> {
-                WireCodec.decodePayload<BlobReqContent>(env.payload)?.let { blobExchange.onRequest(it.hash, fromNodeId, it.offset) }
-                metrics.onBlobAskHandled()
+            FrameType.BLOB_REQ, FrameType.BLOB_HAVE, FrameType.BLOB_HAS -> {
+                handleBlobFrame(env, fromNodeId)
             }
 
             FrameType.KEY_REQ -> {
@@ -554,6 +582,9 @@ class InboundPipeline(
     ): Boolean =
         runCatching {
             if (env.type == FrameType.BLOB_REQ) return true
+            // The holder query and its answer are unsigned like the ask (ADR 2026-10.6e5t), and point-to-point only: a
+            // flooded copy is nobody's query. Ahead of the key path, so neither ever spends a key request.
+            if (env.type == FrameType.BLOB_HAVE || env.type == FrameType.BLOB_HAS) return !wire.relay
             // A self frame — one of OUR own frames looping back, after a neighbor carried it and (once our SeenSet
             // window lapsed) re-served it — is authenticated like any other via [verifierBundle], which resolves
             // our identity's own bundle for it. It USED to be dropped here as a silent no-op ("we already have
@@ -3493,7 +3524,8 @@ class InboundPipeline(
 
     private companion object {
         /** Types a missing sender key never spends a key request on — see the comment in `verifyInbound`. */
-        val NO_KEY_REQUEST_TYPES = setOf(FrameType.KEY_REQ, FrameType.PROFILE, FrameType.TYPING, FrameType.COMMONS)
+        val NO_KEY_REQUEST_TYPES =
+            setOf(FrameType.KEY_REQ, FrameType.PROFILE, FrameType.TYPING, FrameType.COMMONS, FrameType.BLOB_HAVE, FrameType.BLOB_HAS)
 
         // Same tag as MeshManager on purpose: these inbound verify/drop log lines are grepped in field
         // diagnostics, so the extraction must not change them.

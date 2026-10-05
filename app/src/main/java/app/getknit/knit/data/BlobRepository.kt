@@ -77,6 +77,10 @@ class BlobRepository(
             blobs.observeSizes(hashes.toList()).map { rows -> rows.associate { it.hash to it.size } }
         }
 
+    /** Hash → byte length for the stored blobs among [hashes], read once; a hash not held is absent. */
+    suspend fun sizes(hashes: Collection<String>): Map<String, Long> =
+        if (hashes.isEmpty()) emptyMap() else blobs.sizes(hashes.toList()).associate { it.hash to it.size.toLong() }
+
     /**
      * Deletes the blob for [hash] only if nothing references it any more — no message attachment, no
      * peer avatar, no group photo, no carried store-and-forward frame, and not the device's own avatar.

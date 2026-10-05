@@ -170,6 +170,30 @@ class MeshMetricsTest {
     }
 
     @Test
+    fun `every blob fetch event surfaces in the files group`() {
+        val metrics = MeshMetrics()
+        BlobExchange.BlobEvent.entries.forEachIndexed { i, e -> repeat(i + 1) { metrics.onBlobEvent(e) } }
+
+        val files = metrics.files()
+        assertEquals(
+            listOf(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L),
+            listOf(
+                files.blobQueriesSent,
+                files.blobQueriesAnswered,
+                files.blobQueriesRefused,
+                files.blobAnswersTaken,
+                files.blobAnswersIgnored,
+                files.blobFetches,
+                files.blobConfirms,
+                files.blobFallbacks,
+                files.blobBlindAsks,
+                files.blobPullThroughs,
+            ),
+        )
+        assertEquals(files, metrics.snapshot().files)
+    }
+
+    @Test
     fun `every snapshot group stays far below the JVM's parameter-slot limit`() {
         // A method may take at most 255 slots, a Long or Double two, and a data class's copy$default and synthetic
         // default constructor take every field. Past the limit the class fails to load and every test touching it

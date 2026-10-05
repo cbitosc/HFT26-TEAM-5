@@ -43,6 +43,17 @@ object FrameType {
     const val TYPING = "typing"
 
     /**
+     * "Do you hold these blobs?" — a [BlobHaveContent] asked of one linked neighbour, answered with a [BLOB_HAS]
+     * (ADR 2026-10.6e5t). Unsigned and point-to-point like [BLOB_REQ], and asked only of a neighbour whose link
+     * advertises `Protocol.CAP_BLOB_HAVE`: a build without it would refuse the unsigned frame and the asker would
+     * wait for nothing. A query is not an ask — it serves nothing, pulls nothing, and stamps no serve memo.
+     */
+    const val BLOB_HAVE = "blobhave"
+
+    /** The answer to a [BLOB_HAVE]: a [BlobHasContent], sent back on the link the query came in on. */
+    const val BLOB_HAS = "blobhas"
+
+    /**
      * A post in a **commons** — a spool's shared room (docs/SPOOL_PROTOCOL.md §7.4). Payload is a
      * [CommonsPost]. Deliberately **not** replayable and **not** custodial: a commons post lives on the
      * spool that runs the room and enters the app through the Internet plane's own door, never the
@@ -83,6 +94,14 @@ object FrameType {
      * reason. Do not widen this list without re-reading `docs/WIRE_COMPAT.md`.
      */
     fun isCustodial(type: String): Boolean = isReplayable(type) || type == PROFILE
+
+    /**
+     * The unsigned point-to-point blob traffic: [BLOB_REQ] and the [BLOB_HAVE]/[BLOB_HAS] query and answer. Taken
+     * without a signature (`InboundPipeline.verifyInbound`), so its [RelayEnvelope.senderId] is a claim nobody checked:
+     * none of it is ever evidence that a node was heard (`HeardFrom`, `RelayedPresence`), and none of it is carried,
+     * parked or flooded.
+     */
+    fun isUnsignedPointToPoint(type: String): Boolean = type == BLOB_REQ || type == BLOB_HAVE || type == BLOB_HAS
 }
 
 /**
@@ -282,6 +301,59 @@ data class ReactionContent(
 data class BlobReqContent(
     val hash: String,
     val offset: Long? = null,
+)
+
+/**
+ * Content of a [FrameType.BLOB_HAVE] frame: the content hashes the asker wants to know the holders of, at most
+ * `BlobExchange.MAX_QUERY_HASHES` (a responder answers the first that many and ignores the rest). ADR 2026-10.6e5t.
+ */
+@Serializable
+data class BlobHaveContent(
+    val hashes: List<String>,
+)
+
+/**
+ * One hash's answer inside a [BlobHasContent]. [state] is always on the wire (no default), one of the constants
+ * below; a state this build does not know is never taken for [HAVE] (a later build may answer [PARTIAL]).
+ *
+ * [size] is the whole blob's length, given with [HAVE] and [SENDING], so the asker can tell whether the Wi-Fi Aware
+ * link is worth raising for it. [held] is reserved for [PARTIAL] — the bytes held from 0 — and no build emits it yet.
+ */
+@Serializable
+data class BlobHasItem(
+    val hash: String,
+    val state: Int,
+    val size: Long? = null,
+    val held: Long? = null,
+) {
+    companion object {
+        /** Not held, and not on its way here. */
+        const val NONE = 0
+
+        /** Held whole: a `blobreq` from the asker now is served. */
+        const val HAVE = 1
+
+        /** Held, and a copy is already queued or streaming to the asker (or was just enqueued): wait for it. */
+        const val SENDING = 2
+
+        /** Not held yet, but on its way here — streaming in, landing, or being stored: ask again shortly. */
+        const val FETCHING = 3
+
+        /** Reserved: a prefix of [held] bytes, kept from a cut transfer. Not emitted until a range ask exists. */
+        const val PARTIAL = 4
+    }
+}
+
+/**
+ * Content of a [FrameType.BLOB_HAS] frame: the answer to one [BlobHaveContent], one [items] entry per hash asked.
+ * [load] is how many files the responder is feeding right now (a Bluetooth holder's pace is split across them), and
+ * [re] the query's envelope id, so an answer is matched to the query it answers. ADR 2026-10.6e5t.
+ */
+@Serializable
+data class BlobHasContent(
+    val items: List<BlobHasItem>,
+    val load: Int? = null,
+    val re: String? = null,
 )
 
 /**

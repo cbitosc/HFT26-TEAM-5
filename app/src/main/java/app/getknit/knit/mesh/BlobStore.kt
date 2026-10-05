@@ -33,4 +33,12 @@ interface BlobStore {
      * classification. The default is never.
      */
     fun storing(hash: String): Boolean = false
+
+    /**
+     * Which of [hashes] a `blobreq` would be served now, and each one's whole length: [fileFor]'s answer without
+     * materializing anything (ADR 2026-10.6e5t). A neighbour's `blobhave` asks this for up to 32 hashes, unsigned, so
+     * it must not read a blob's bytes or leave a plaintext copy behind; the default (for fakes) does exactly that.
+     */
+    suspend fun servable(hashes: List<String>): Map<String, Long> =
+        hashes.mapNotNull { hash -> fileFor(hash)?.let { hash to it.length() } }.toMap()
 }

@@ -114,7 +114,8 @@ class RelayedPresence(
  *    hop: a BLE side-channel page and a NAN fast-frame whose hop is unknown both report the author as the
  *    source, as do the `MeshManager` custody replays and a `typing` cue (single-hop by design).
  *  - **signed** — only a frame `verifyInbound` checked against the key its sender id binds to. The unsigned
- *    door (a v3 sealed tick, opened later) and an unchecked `blobreq` name a sender nobody has verified yet.
+ *    door (a v3 sealed tick, opened later) and the unchecked blob traffic (`blobreq`, `blobhave`, `blobhas`) name a
+ *    sender nobody has verified yet.
  *  - **fresh** — [PRESENCE_FRESH_MS] for every type, profiles included. Deliberately stricter than
  *    [isPresenceEvidence]'s 13 h profile window: on this plane other people's profiles are handed over all the
  *    time (`KeyExchange.serveKey`, custody re-serves on every new link), so only a fresh publish says its
@@ -134,7 +135,7 @@ internal fun isRelayedRadioEvidence(
         !ScopeSync.isSpoolSource(fromNodeId) &&
         env.senderId != fromNodeId &&
         wire.sig.isNotEmpty() &&
-        env.type != FrameType.BLOB_REQ &&
+        !FrameType.isUnsignedPointToPoint(env.type) &&
         now - env.sentAt <= PRESENCE_FRESH_MS
 
 /**

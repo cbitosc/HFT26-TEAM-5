@@ -48,6 +48,9 @@ import app.getknit.knit.mesh.crypto.ratchet.RatchetCrypto
 import app.getknit.knit.mesh.crypto.ratchet.RatchetEngine
 import app.getknit.knit.mesh.crypto.ratchet.RatchetSessions
 import app.getknit.knit.mesh.crypto.sealBytes
+import app.getknit.knit.mesh.protocol.BlobHasContent
+import app.getknit.knit.mesh.protocol.BlobHasItem
+import app.getknit.knit.mesh.protocol.BlobHaveContent
 import app.getknit.knit.mesh.protocol.BlobReqContent
 import app.getknit.knit.mesh.protocol.ChatContent
 import app.getknit.knit.mesh.protocol.CommonsPost
@@ -735,6 +738,17 @@ class InboundPipelineTest {
                     payload = WireCodec.encodePayload(BlobReqContent(hash = hash)),
                 )
             return WireEnvelope(relay = false, sig = ByteArray(0), signed = WireCodec.encodeEnvelope(env)) to env
+        }
+
+        /** The blob holder query and its answer (ADR 2026-10.6e5t): unsigned and point-to-point, like a blob request. */
+        fun blobHolderWire(
+            fromNodeId: String,
+            type: String,
+            payload: ByteArray,
+            relay: Boolean = false,
+        ): Pair<WireEnvelope, RelayEnvelope> {
+            val env = RelayEnvelope(type = type, id = "$type-$fromNodeId", senderId = fromNodeId, payload = payload)
+            return WireEnvelope(relay = relay, sig = ByteArray(0), signed = WireCodec.encodeEnvelope(env)) to env
         }
 
         /** Builds a self-describing roster; [id] defaults to the real derivation over the founding set
@@ -1721,6 +1735,41 @@ class InboundPipelineTest {
 
             // onRequest consults the store to decide whether to serve — proves the arm ran (blobreq is unsigned).
             coVerify { rig.blobStore.fileFor("bhash") }
+        }
+
+    @Test
+    fun aHolderQueryFromAnUnpinnedNeighbourIsAnsweredWithoutAKeyRequest() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val requester = party() // never pinned: the query is unsigned, and spends no key request
+            rig.transport.connect(FakeLoopTransport("neighbor-node"))
+            val (wire, env) =
+                rig.blobHolderWire(requester.nodeId, FrameType.BLOB_HAVE, WireCodec.encodePayload(BlobHaveContent(listOf("bhash"))))
+
+            rig.pipeline.onDeliver(wire, env, requester.nodeId)
+
+            coVerify { rig.blobExchange.onHaveQuery(listOf("bhash"), requester.nodeId, env.id) }
+            assertEquals(0L, rig.metrics.keys().keyRequestsSent)
+        }
+
+    @Test
+    fun aHolderQueryOrAnswerIsTakenOnlyPointToPointAndFromItsOwnSender() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val requester = party()
+            val query = WireCodec.encodePayload(BlobHaveContent(listOf("bhash")))
+            val answer = WireCodec.encodePayload(BlobHasContent(listOf(BlobHasItem("bhash", BlobHasItem.HAVE, 10))))
+
+            val (flooded, floodedEnv) = rig.blobHolderWire(requester.nodeId, FrameType.BLOB_HAVE, query, relay = true)
+            rig.pipeline.onDeliver(flooded, floodedEnv, requester.nodeId)
+            val (stray, strayEnv) = rig.blobHolderWire(requester.nodeId, FrameType.BLOB_HAS, answer)
+            rig.pipeline.onDeliver(stray, strayEnv, "someone-else") // the link's peer is not the frame's sender
+
+            coVerify(exactly = 0) { rig.blobExchange.onHaveQuery(any(), any(), any()) }
+            coVerify(exactly = 0) { rig.blobExchange.onHaveAnswer(any(), any()) }
+            val (ok, okEnv) = rig.blobHolderWire(requester.nodeId, FrameType.BLOB_HAS, answer)
+            rig.pipeline.onDeliver(ok, okEnv, requester.nodeId)
+            coVerify { rig.blobExchange.onHaveAnswer(any(), requester.nodeId) }
         }
 
     @Test

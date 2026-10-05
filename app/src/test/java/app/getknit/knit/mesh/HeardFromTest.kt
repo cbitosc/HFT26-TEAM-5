@@ -24,6 +24,9 @@ class HeardFromTest {
         assertTrue(isHeardEvidence(signed, env(FrameType.PROFILE)))
         // verifyInbound lets these two through without authenticating the sender.
         assertFalse(isHeardEvidence(signed, env(FrameType.BLOB_REQ)))
+        // …and so does the holder query and its answer (ADR 2026-10.6e5t), whatever their signature bytes say.
+        assertFalse(isHeardEvidence(signed, env(FrameType.BLOB_HAVE)))
+        assertFalse(isHeardEvidence(signed, env(FrameType.BLOB_HAS)))
         assertFalse(isHeardEvidence(unsigned, env(FrameType.RECEIPT)))
     }
 

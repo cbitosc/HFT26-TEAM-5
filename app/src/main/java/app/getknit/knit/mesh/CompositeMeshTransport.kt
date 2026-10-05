@@ -305,6 +305,19 @@ class CompositeMeshTransport(
     ): Boolean = children.any { it.fileInFlightTo(nodeId, key) }
 
     /**
+     * The load of the plane an attachment to [nodeId] would ride: the high-throughput child when it holds a link to
+     * [nodeId] (an attachment takes it, [sendFile]), else the preference-order link holder.
+     */
+    override fun feedingLoad(nodeId: String): Int = fileChildFor(nodeId)?.feedingLoad(nodeId) ?: 0
+
+    /** The link holder's answer: a frame, and a file off the high-throughput plane, ride its link. */
+    override fun slowLinkTo(nodeId: String): Boolean = childHoldingLinkTo(nodeId)?.slowLinkTo(nodeId) ?: false
+
+    /** The child an attachment to [nodeId] would go out on now: a live high-throughput link, else the link holder. */
+    private fun fileChildFor(nodeId: String): MeshTransport? =
+        children.firstOrNull { c -> c.highThroughput && c.neighbors.value.any { it.nodeId == nodeId } } ?: childHoldingLinkTo(nodeId)
+
+    /**
      * Files route like frames — preference-order link holder — EXCEPT attachment blobs, which prefer the
      * [highThroughput] plane: ANY attachment rides its live link when one exists (a link that's already up
      * costs nothing extra, and an NDP moves it orders of magnitude faster than L2CAP), and a **large** one

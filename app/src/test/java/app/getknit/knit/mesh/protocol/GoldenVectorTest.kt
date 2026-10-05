@@ -112,6 +112,25 @@ class GoldenVectorTest {
             "blobReqContent" to WireCodec.encodePayload(BlobReqContent(hash = "h1")),
             // An ask that resumes a transfer a link drop cut off, 400 000 bytes in (#116, ADR 2026-10.wtyc).
             "blobReqContentResumed" to WireCodec.encodePayload(BlobReqContent(hash = "h1", offset = 400_000)),
+            // The holder query and its answer (ADR 2026-10.6e5t): every state a build emits, the load and the query echo.
+            "blobHaveContent" to WireCodec.encodePayload(BlobHaveContent(hashes = listOf("h1", "h2"))),
+            "blobHasContent" to
+                WireCodec.encodePayload(
+                    BlobHasContent(
+                        items =
+                            listOf(
+                                BlobHasItem("h1", BlobHasItem.HAVE, size = 140_948),
+                                BlobHasItem("h2", BlobHasItem.SENDING, size = 4_096),
+                                BlobHasItem("h3", BlobHasItem.FETCHING),
+                                BlobHasItem("h4", BlobHasItem.NONE),
+                            ),
+                        load = 2,
+                        re = "q1",
+                    ),
+                ),
+            // A state reserved for a later build (PARTIAL, with the bytes it holds): decodes, and is never taken for HAVE.
+            "blobHasContentReserved" to
+                WireCodec.encodePayload(BlobHasContent(items = listOf(BlobHasItem("h1", BlobHasItem.PARTIAL, size = 1_000, held = 400)))),
             "typingContent" to WireCodec.encodePayload(TypingContent(groupId = "g-1")),
             "mention" to WireCodec.encodePayload(Mention("node1", "Ann")),
             "replyRef" to WireCodec.encodePayload(ReplyRef("m0", "a", "Ann", "see you", hasAttachment = true)),

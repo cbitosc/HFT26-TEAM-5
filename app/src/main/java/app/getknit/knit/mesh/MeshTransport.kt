@@ -423,6 +423,21 @@ interface MeshTransport {
         key: String,
     ): Boolean = false
 
+    /**
+     * How many files the plane a file to [nodeId] would ride is feeding right now, this node's own sends: what a
+     * `blobhas` answer names as its `load` (ADR 2026-10.6e5t). A Bluetooth holder splits one pace budget across every
+     * link it is feeding (ADR 2026-10.8jwn), so an asker choosing between two holders takes the less loaded one.
+     * Default 0: a plane with no data path feeds nothing.
+     */
+    fun feedingLoad(nodeId: String): Int = 0
+
+    /**
+     * True while the live link to [nodeId] runs far below its plane's pace — Bluetooth on the Coded PHY, which the
+     * experiment paces apart (ADR 2026-10.yvn6). An asker ranks a holder on such a link after one on a full-speed
+     * link (ADR 2026-10.6e5t). Default false.
+     */
+    fun slowLinkTo(nodeId: String): Boolean = false
+
     /** Sends [wire] to one neighbor, or to all neighbors when [to] is null. */
     suspend fun send(
         wire: WireEnvelope,

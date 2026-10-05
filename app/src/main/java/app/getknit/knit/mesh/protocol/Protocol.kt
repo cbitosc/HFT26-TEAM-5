@@ -147,11 +147,21 @@ object Protocol {
      */
     const val CAP_DOORBELL = 0x1000L
 
+    /**
+     * Blob holders: this node answers a `blobhave` query with a `blobhas` — which of the asked blobs it holds, is
+     * already sending us, or is fetching itself (ADR 2026-10.6e5t). The asker queries only a neighbour whose link
+     * carries this bit: a build without it refuses the unsigned frame, and the asker would wait out its answer for
+     * nothing. Read from the link's own copy (the HELLO, or the Wi-Fi Aware SSI) — queries ride live links, never a
+     * pinned profile — and above the 8 bits a BLE advert carries. Every build answers; only the asking is gated
+     * (`BuildConfig.BLOB_QUERY`). A routing hint like the rest: a liar costs the asker one grace, never a blob.
+     */
+    const val CAP_BLOB_HAVE = 0x2000L
+
     /** This build's advertised capability bitfield. */
     const val LOCAL_CAPABILITIES: Long =
         CAP_E2E or CAP_GROUPS or CAP_REACTIONS or CAP_STORE_FORWARD or CAP_RATCHET or CAP_FAST_COMPACT or
             CAP_INLINE_ACK or CAP_FRAME_TRANSCODE or CAP_CRYPTO_V3 or CAP_FILES or CAP_LINK_PREVIEW or
-            CAP_DIRECT_TRANSFER
+            CAP_DIRECT_TRANSFER or CAP_BLOB_HAVE
 
     private const val SEP = '|'
 

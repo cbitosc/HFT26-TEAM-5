@@ -1164,6 +1164,9 @@ class WifiAwareTransport(
         key: String,
     ): Boolean = peers[nodeId]?.link?.hasPendingFile(key) ?: false
 
+    // No pace budget here (an NDP is fed as fast as it drains), so this only tells two loaded holders apart.
+    override fun feedingLoad(nodeId: String): Int = peers.values.count { it.link.txInProgress }
+
     override suspend fun sendDigest(
         to: Peer,
         ids: List<String>,

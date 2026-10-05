@@ -477,13 +477,23 @@ opaque SHA-256-addressed bytes with a MIME string beside them, which is why voic
   - `want(hash)` — returns early if held, already in flight (`fetching` set), or already **arriving**
     on a link (`MeshTransport.arrivingFiles()`: a `FILE_HEADER` in, no `FILE_END` yet — read off
     `FramedLink.rxFile`, never a memo; the same read gives the chat its progress ring, ADR 2026-10.y9qh);
-    otherwise opens a **round of asks** (ADR 2026-10.f7gg): a `blobreq` frame (`relay = false`) to the
-    likeliest holder alone — the frame's author, then a neighbour on the Wi-Fi Aware plane
+    otherwise first **queries the holders** (ADR 2026-10.6e5t): every linked neighbour whose link advertises
+    `CAP_BLOB_HAVE` gets a `blobhave` and answers with a `blobhas` — NONE, HAVE (with the size), SENDING (our copy is
+    already on its link) or FETCHING — plus its load. Once every answer is in or 5 s pass, the best holder by plane
+    (a live Wi-Fi Aware link; a reachable one for a blob worth raising it; a full-speed Bluetooth link with nothing
+    streaming to us; a Coded or busy one) and load is asked alone with a `blobreq` (`relay = false`); one that
+    brings nothing in its grace is queried once more, then the next is asked. Neighbours that cannot answer (the
+    iOS port, older builds, everyone while `BuildConfig.BLOB_QUERY` is off) get the **round of asks** of ADR
+    2026-10.f7gg: the likeliest alone — the frame's author, then a neighbour on the Wi-Fi Aware plane
     (`MeshTransport.bulkRouteTo`: linked, then reachable), then the hop the frame came from, then the rest — and,
-    once that ask's grace (5 s, 15 s for a reachable Wi-Fi Aware peer) passes with nothing arriving, to every other
-    direct neighbor at once. There is no negative answer on the wire, so a first choice that cannot serve costs
-    one grace. A neighbour pulling the blob through us (`onRequest`) is not asked back that round, and a neighbour
-    that links again is open to every round again (`linked`): an ask can die with a link.
+    once that ask's grace (5 s, 15 s for a reachable Wi-Fi Aware peer) passes with nothing arriving, every other at
+    once. When nobody in reach holds it, the hop that said NONE is asked to pull it through, and every NONE
+    neighbour from the next empty cycle on; a neighbour asked to pull it is queried again 10 s later, up to four
+    times, in the first two cycles of a dead streak. A cycle in which every neighbour said it lacks the blob doubles
+    the wait for the next, up to 6 min, until a lead turns up, and a cycle that pulled stands one cycle from the pull. A grace counts from the first look that finds the holder no longer
+    streaming to us. A neighbour pulling the blob through us (`onRequest`) is neither queried nor asked back that
+    cycle, and a neighbour that links again is queried again (`linked`): an ask can die with a link. A query is not
+    an ask: `onHaveQuery` serves, pulls and stamps nothing.
   - `onRequest(hash, fromNodeId, offset)` — if we hold the blob, send it straight back over the file channel
     (`FileKind.ATTACHMENT`) — from the asker's `offset` when it kept the start of a cut transfer (ADR
     2026-10.wtyc) — unless a copy is already queued or streaming to that peer

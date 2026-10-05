@@ -128,8 +128,8 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
 - **When touching `mesh/bluetooth/BleDoorbell`, `DoorbellPolicy`, `Protocol.CAP_DOORBELL`, or what
   `BluetoothMeshTransport.writeOnce` rings:** READ ADR 2026-09.dqvb (companion change A4 for the iOS port). A link
   rings only when the peer's HELLO carries `CAP_DOORBELL`, which Android never claims, so Android↔Android links never
-  touch GATT. The doorbell UUIDs are cross-platform law, and the schedule is the port's. `typing`, `blobreq` and
-  `keyreq` don't ring. The GATT client attaches to the link's own ACL, closes on a 2 s attach timeout, and lives
+  touch GATT. The doorbell UUIDs are cross-platform law, and the schedule is the port's. `typing`, `blobreq`,
+  `blobhave`, `blobhas` and `keyreq` don't ring. The GATT client attaches to the link's own ACL, closes on a 2 s attach timeout, and lives
   and dies with the link. A ring is a write without response, poked at the enqueue, never after the socket write.
   The lookup runs at link-up and each one that finds the doorbell asks for `CONNECTION_PRIORITY_BALANCED`: an
   iPhone central runs the link at a 720 ms supervision timeout, BALANCED carries 5 s (#102, the ADR's amendment).
@@ -366,7 +366,15 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   Aware linked, then reachable, then the source hop) and widens to everyone only after its grace, because every
   holder serves a fresh ask; there is no negative answer on the wire, so never make it one-at-a-time without one.
   A link-up clears its newcomer's asks (`BlobExchange.linked`), since an ask can die with a link.
-  Lab: `BlobFirstAskLabTest`. **Before touching `FramedLink.rxFile`, `ArrivingFile`,
+  Lab: `BlobFirstAskLabTest`. **Before touching the holder query — `BlobExchange.onHaveQuery` / `onHaveAnswer` /
+  `decide` / `wantAll`, `FrameType.BLOB_HAVE` / `BLOB_HAS` / `isUnsignedPointToPoint`, `BlobHaveContent` /
+  `BlobHasContent`, `Protocol.CAP_BLOB_HAVE`, `BlobStore.servable`, `MeshTransport.feedingLoad` / `slowLinkTo`, or
+  `BuildConfig.BLOB_QUERY`:** READ ADR 2026-10.6e5t — a neighbour whose link carries the bit is queried first, the
+  best holder by plane and load asked alone, a silent one confirmed then passed over; the rest keep f7gg's round. A
+  query is not an ask (it serves, pulls and stamps nothing), HAVE is the serve predicate read without materialising,
+  SENDING peeks the memo, an unknown state is never HAVE (PARTIAL is reserved for a range ask), every build answers
+  and only the asking is dark in release. Wire change: the iOS port owes the responder as a companion change.
+  Lab: `BlobHaveLabTest`; unit: `BlobHolderQueryTest`. **Before touching `FramedLink.rxFile`, `ArrivingFile`,
   `FileHeaderWire.size`, `MeshController.arrivals` / `arrivalTicker`, `ChatViewModel.arrivals` or
   `ui/chat/ArrivalIndicator`:** READ ADR 2026-10.y9qh — the chat's progress ring is the same read of the link
   (bytes in, and the size the header declared: a label, never a bound), polled only while an attachment the

@@ -52,6 +52,15 @@ class FakeLoopTransport(
     /** Peers a test saw this node arm a bulk transfer toward ([expectBulkTransfer]), in order. */
     val bulkArmed = java.util.concurrent.CopyOnWriteArrayList<String>()
 
+    /** The capabilities this node's link advertises to its neighbours (its HELLO); set before [connect]. */
+    var advertises: Long = 0L
+
+    /** Peers a test declares as linked on a slow (Coded) link ([slowLinkTo]). */
+    val slowLinks = mutableSetOf<String>()
+
+    /** How many files a test declares this node is feeding right now ([feedingLoad]). */
+    var feeding: Int = 0
+
     /** What every [sendFile] that reached a peer asked of the link, offset included (#116), in order. */
     val filesSent = java.util.concurrent.CopyOnWriteArrayList<FileMeta>()
 
@@ -124,6 +133,10 @@ class FakeLoopTransport(
         key: String,
     ): Boolean = (nodeId to key) in inFlight
 
+    override fun feedingLoad(nodeId: String): Int = feeding
+
+    override fun slowLinkTo(nodeId: String): Boolean = nodeId in slowLinks
+
     override suspend fun sendDigest(
         to: Peer,
         ids: List<String>,
@@ -142,6 +155,6 @@ class FakeLoopTransport(
     }
 
     private fun refreshNeighbors() {
-        _neighbors.value = links.keys.map { Peer(it) }.toSet()
+        _neighbors.value = links.map { (id, link) -> Peer(id, capabilities = link.advertises) }.toSet()
     }
 }

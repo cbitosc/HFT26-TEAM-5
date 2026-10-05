@@ -43,6 +43,13 @@ interface BlobDao {
     fun observeSizes(hashes: List<String>): Flow<List<BlobSize>>
 
     /**
+     * [observeSizes] once: the stored blobs among [hashes] and their lengths, for a neighbour asking which of them we
+     * hold (`BlobExchange.onHaveQuery`, ADR 2026-10.6e5t). One seek per hash, no BLOB read.
+     */
+    @Query("SELECT hash, length(bytes) AS size FROM blobs WHERE hash IN (:hashes)")
+    suspend fun sizes(hashes: List<String>): List<BlobSize>
+
+    /**
      * Blob hashes referenced by no message attachment, no peer avatar, no group photo, and no carried
      * store-and-forward frame. The caller must still exclude the device's own-avatar hash (it lives in
      * DataStore, not a table) before deleting. The forward_store clause is what makes a carrier's custodied

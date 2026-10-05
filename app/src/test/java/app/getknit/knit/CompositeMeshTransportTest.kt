@@ -48,6 +48,14 @@ class CompositeMeshTransportTest {
         /** What [sendFile] reports — false simulates the link dying in the check→enqueue window. */
         var acceptFiles = true
 
+        /** What [feedingLoad] and [slowLinkTo] report. */
+        var feeding = 0
+        val slow = mutableSetOf<String>()
+
+        override fun feedingLoad(nodeId: String): Int = feeding
+
+        override fun slowLinkTo(nodeId: String): Boolean = nodeId in slow
+
         val expectBulkCalls = mutableListOf<String>()
         private val _neighbors = MutableStateFlow<Set<Peer>>(emptySet())
         override val neighbors = _neighbors.asStateFlow()
@@ -477,6 +485,25 @@ class CompositeMeshTransportTest {
             assertEquals(BulkRoute.None, composite.bulkRouteTo("bt"))
             val btOnly = CompositeMeshTransport(listOf(bt), backgroundScope)
             assertEquals("Bluetooth alone answers None", BulkRoute.None, btOnly.bulkRouteTo("linked"))
+        }
+
+    @Test
+    fun aHoldersLoadIsThePlaneTheFileWouldRideAndASlowLinkIsTheLinkHolders() =
+        runTest(UnconfinedTestDispatcher()) {
+            // A `blobhas` answer names the load of the plane its attachment would go out on (ADR 2026-10.6e5t): a live
+            // Wi-Fi Aware link takes it, else the Bluetooth link holder; "slow" is the link a frame rides.
+            val bt = FakeChild().apply { feeding = 3 }
+            val nan = FakeChild(highThroughput = true).apply { feeding = 1 }
+            val composite = CompositeMeshTransport(listOf(bt, nan), backgroundScope)
+            bt.setNeighbors(Peer("both"), Peer("bt"))
+            nan.setNeighbors(Peer("both"))
+            bt.slow += "bt"
+            advanceUntilIdle()
+            assertEquals(1, composite.feedingLoad("both"))
+            assertEquals(3, composite.feedingLoad("bt"))
+            assertEquals(0, composite.feedingLoad("nobody"))
+            assertTrue(composite.slowLinkTo("bt"))
+            assertTrue(!composite.slowLinkTo("both"))
         }
 
     @Test

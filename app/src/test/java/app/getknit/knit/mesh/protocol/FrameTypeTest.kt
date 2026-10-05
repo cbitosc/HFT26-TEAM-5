@@ -19,17 +19,32 @@ class FrameTypeTest {
     @Test
     fun `isReplayable is exactly the locally-delivered family`() {
         replayable.forEach { assertTrue(it, FrameType.isReplayable(it)) }
-        listOf(FrameType.PROFILE, FrameType.BLOB_REQ, FrameType.KEY_REQ, FrameType.TYPING, FrameType.COMMONS)
-            .forEach { assertFalse(it, FrameType.isReplayable(it)) }
+        listOf(
+            FrameType.PROFILE,
+            FrameType.BLOB_REQ,
+            FrameType.BLOB_HAVE,
+            FrameType.BLOB_HAS,
+            FrameType.KEY_REQ,
+            FrameType.TYPING,
+            FrameType.COMMONS,
+        ).forEach { assertFalse(it, FrameType.isReplayable(it)) }
     }
 
     @Test
     fun `isCustodial is the replayable family plus profile`() {
         (replayable + FrameType.PROFILE).forEach { assertTrue(it, FrameType.isCustodial(it)) }
-        // COMMONS is the one type added since the v1 baseline, and it is added as non-custodial on purpose:
-        // a commons post lives on its spool, so custody never folds it and the fixed list stays fixed.
-        listOf(FrameType.BLOB_REQ, FrameType.KEY_REQ, FrameType.TYPING, FrameType.COMMONS)
+        // Every type added since the v1 baseline is added as non-custodial on purpose: a commons post lives on its
+        // spool, and the blob holder query and its answer (ADR 2026-10.6e5t) are point-to-point and transient — so
+        // custody never folds them and the fixed list stays fixed.
+        listOf(FrameType.BLOB_REQ, FrameType.BLOB_HAVE, FrameType.BLOB_HAS, FrameType.KEY_REQ, FrameType.TYPING, FrameType.COMMONS)
             .forEach { assertFalse(it, FrameType.isCustodial(it)) }
+    }
+
+    @Test
+    fun `the unsigned point-to-point types are the blob ask, query and answer`() {
+        listOf(FrameType.BLOB_REQ, FrameType.BLOB_HAVE, FrameType.BLOB_HAS).forEach { assertTrue(it, FrameType.isUnsignedPointToPoint(it)) }
+        (replayable + FrameType.PROFILE + FrameType.KEY_REQ + FrameType.TYPING + FrameType.COMMONS + "something-new")
+            .forEach { assertFalse(it, FrameType.isUnsignedPointToPoint(it)) }
     }
 
     @Test
@@ -44,6 +59,8 @@ class FrameTypeTest {
         assertTrue(envelope(FrameType.PROFILE).isStorable())
         assertFalse(envelope(FrameType.TYPING).isStorable())
         assertFalse(envelope(FrameType.COMMONS).isStorable())
+        assertFalse(envelope(FrameType.BLOB_HAVE).isStorable())
+        assertFalse(envelope(FrameType.BLOB_HAS).isStorable())
         assertFalse(envelope("something-new").isStorable())
     }
 

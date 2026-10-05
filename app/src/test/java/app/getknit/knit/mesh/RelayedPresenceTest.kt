@@ -102,6 +102,9 @@ class RelayedPresenceTest {
             t.hear(wire = WireEnvelope(sig = ByteArray(0), signed = byteArrayOf(2)))
             // A blob request passes verifyInbound unchecked.
             t.hear(env = env(type = FrameType.BLOB_REQ))
+            // So do the holder query and its answer (ADR 2026-10.6e5t), even with signature bytes on them.
+            t.hear(env = env(type = FrameType.BLOB_HAVE))
+            t.hear(env = env(type = FrameType.BLOB_HAS))
             assertTrue(t.heard.value.isEmpty())
         }
 

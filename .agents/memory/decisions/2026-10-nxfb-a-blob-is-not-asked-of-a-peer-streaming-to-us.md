@@ -12,7 +12,9 @@ Status: Accepted (2026-10-03). Work item knit/knit-next#121. Amends ADR 2026-09.
 stay, and each gains the case the Bluetooth stack's buffer opened between them. No wire change, no DB change.
 Point 1 amended by ADR 2026-10.f7gg (2026-10-04): the asker's rule is per blob and per round — a neighbour already
 asked for a blob is not asked for it again while its file streams in, and a first-asked one's grace restarts until
-that stream ends.
+that stream ends. Amended by ADR 2026-10.6e5t (2026-10-05): that grace counts from the first look that finds the
+stream ended (looked for every 2 s), and a queried holder says SENDING while our copy is on its link or in its memo, so
+the asker waits on it rather than asking past it.
 
 **What was observed.** During the #117 trial on 2026-10-03 the Pixel 9 served the same photo to the same peer twice,
 over and over: four P9 → P8 DM photos twice each, four photos to the P3, two to the P7. The issue first read it as

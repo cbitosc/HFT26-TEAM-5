@@ -38,7 +38,8 @@ class DoorbellPolicyTest {
             FrameType.GROUP_LEAVE,
             "somefuturetype",
         ).forEach { assertTrue(it, DoorbellPolicy.rings(it)) }
-        listOf(FrameType.TYPING, FrameType.BLOB_REQ, FrameType.KEY_REQ).forEach { assertFalse(it, DoorbellPolicy.rings(it)) }
+        listOf(FrameType.TYPING, FrameType.BLOB_REQ, FrameType.BLOB_HAVE, FrameType.BLOB_HAS, FrameType.KEY_REQ)
+            .forEach { assertFalse(it, DoorbellPolicy.rings(it)) }
         assertTrue("a frame whose type could not be read rings", DoorbellPolicy.rings(null))
     }
 

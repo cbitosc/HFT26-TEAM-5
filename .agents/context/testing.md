@@ -248,6 +248,12 @@ hop (fixed in `MeshRouter.countOverheard`, pinned by `MeshRouterTest`).
   is scheduled), and release it once the assertion is in. (Since #136, ADR 2026-10.f7gg, Bob's first ask goes to
   Alice alone, and that scenario counts asks instead; a blob round's grace is wall time, so the lab lengthens it
   — `LabLimits.firstAskGraceMs` — and widens a round with a clock jump and a tick, never by waiting it out.)
+  The holder query (ADR 2026-10.6e5t) is off in the lab unless a node boots with `LabLimits(blobQuery = true)`;
+  every lab node advertises `CAP_BLOB_HAVE` and answers, except one booted with `answersHolderQueries = false` (the
+  iOS port). A querying node's choice waits for every queried neighbour's answer (`LabLimits.queryWaitMs`, 15 s), so
+  a query parked on a `hold`-ed pipe stalls the asker's choice for that long: link the asker once the state it
+  should find is in place (`BlobHaveLabTest`), and move a FETCHING recheck or a cycle with a clock jump and a tick.
+  `LabTransport.blobQueries` / `blobAnswers` record both frames on the sender, as `blobAsks` does.
 - **A held frame that is filtered out at `release` is lost, like a dropped packet** — and the digest exchange
   repairs it only on the next link-up or the 60 s re-offer. A scenario that drops held frames re-links before
   the oracle (`KeyExchangeLabTest`, `SessionLabTest`'s key request), as `RoomTickPlanesLabTest` already did.

@@ -608,6 +608,17 @@ doc). **Don't start a deferred item without explicit direction.**
   shipped artifact (`BuildConfig.BLE_CODED_PHY`, debug on / release off) until: a walk-apart field trial (link-drop
   distance under off, auto and coded), the OFF-vs-AUTO 1M-sighting rate, chat latency behind a blob on a CODED link,
   and a battery night against OFF. iOS has no Coded PHY; 2M up-shift and PHY-aware blob scheduling are deferred.
+- **Blob holder query: the release flag, the iOS responder, partial fetch** — BUILT 2026-10-05 on `feat/blob-have`
+  (ADR 2026-10.6e5t): a `blobhave` query to every neighbour whose link carries `CAP_BLOB_HAVE`, the best holder by
+  plane and load asked alone, confirm then fall back, f7gg's round for the rest. Every build answers; asking is
+  dark in a shipped artifact (`BuildConfig.BLOB_QUERY`, debug on / release off) until a device trial: the #136
+  trial's S1–S4 again (S3 should take the holding hop at once), two holders on different links, the iPhone and Moto
+  asked blind, and a holder walking away mid-fetch. The 2026-10-05 trial (P3/P8/P9) passed those it could stage
+  and set `QUERY_WAIT_MS` to 5 s; its pull-through recheck and dead-cycle backoff are in, and still owed are the
+  two-holder choice on radios, the iPhone and Moto asked blind, the 50-blob batch, a battery night, and the
+  link-down step (a want whose fetch peer left waits for the tick or a link-up). The iOS port owes the responder (and then its own asker) as a companion change. Partial fetch is designed
+  for, not built: `PARTIAL` + `held` reserved in the answer, and it needs `BlobReqContent.end`, a `.part` serve and a
+  `FileHeaderWire` partial marker. Querying unlinked Wi-Fi Aware peers over the message plane is deferred too.
 - **Frame compaction: what round 2 (ADR 060, the `0x05` transcoder) left** — round 1 (ADR 059, crypto v3)
   and round 2 (ADR 060: a schema-aware re-encoding of `signed` the receiver rebuilds byte-exact before
   verifying) both landed 2026-08-29; measured after: signed v3 ✓✓ tick **221 B, one packet at 228/231/255**,

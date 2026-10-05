@@ -108,6 +108,13 @@ val bleSidePlane = (project.findProperty("bleSidePlane") as? String)?.toBoolean(
 // F-Droid's -P-free rebuild stays identical. Flip the release default after the device trial.
 val bleGattPeers = (project.findProperty("bleGattPeers") as? String)?.toBoolean()
 
+// Asking neighbours which of them holds a blob before asking one for it (`blobhave`/`blobhas`, ADR 2026-10.6e5t):
+// ON in debug, OFF in a shipped artifact, overridable with `-PblobQuery=true|false`. It gates the asking only — every
+// build advertises CAP_BLOB_HAVE and answers a query, so a mixed fleet works and the release flip changes one side.
+// Off, every neighbour gets ADR 2026-10.f7gg's blind round. Not a code strip, and the defaults live in source so
+// F-Droid's -P-free rebuild stays identical. Flip the release default after the device trial.
+val blobQuery = (project.findProperty("blobQuery") as? String)?.toBoolean()
+
 // The BLE Coded PHY experiment (long range, getknit/knit#29, ADR 2026-10.yvn6): a second presence set on the Coded
 // PHY, an all-PHY presence scan, and per-link steps between 1M and Coded S=8 — ON in debug, OFF in a shipped
 // artifact, overridable with `-PbleCodedPhy=true|false`. It gates the one seam, the mode flow the DI hands
@@ -262,6 +269,8 @@ android {
         buildConfigField("boolean", "BLE_SIDE_PLANE", (bleSidePlane ?: true).toString())
         // The GATT payload reader is ON in debug so a lab build finds and dials iPhones; see `bleGattPeers` above.
         buildConfigField("boolean", "BLE_GATT_PEERS", (bleGattPeers ?: true).toString())
+        // Querying neighbours for a blob's holders is ON in debug so a lab build asks the best one; see `blobQuery` above.
+        buildConfigField("boolean", "BLOB_QUERY", (blobQuery ?: true).toString())
         // The Coded PHY experiment is ON in debug so a lab build can be walk-tested; see `bleCodedPhy` above.
         buildConfigField("boolean", "BLE_CODED_PHY", (bleCodedPhy ?: true).toString())
         // The Wear OS status service is ON in debug so a lab phone serves a paired watch; see `wearStatus` above.
@@ -364,6 +373,8 @@ android {
             buildConfigField("boolean", "BLE_SIDE_PLANE", (bleSidePlane ?: false).toString())
             // Finding iPhones through their GATT payload is not introduced yet: dark until its device trial.
             buildConfigField("boolean", "BLE_GATT_PEERS", (bleGattPeers ?: false).toString())
+            // Querying for a blob's holders is not introduced yet: a shipped artifact answers, and asks blind.
+            buildConfigField("boolean", "BLOB_QUERY", (blobQuery ?: false).toString())
             // The Coded PHY experiment is not introduced yet: dark in a shipped artifact until its field trial.
             buildConfigField("boolean", "BLE_CODED_PHY", (bleCodedPhy ?: false).toString())
             // The Wear OS status service is a prototype: dark in a shipped artifact.

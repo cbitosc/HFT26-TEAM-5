@@ -13,6 +13,7 @@ import app.getknit.knit.data.relay.RelayStatusRepository
 import app.getknit.knit.data.settings.LoraPlaneStateStore
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.identity.Identity
+import app.getknit.knit.mesh.BlobExchange
 import app.getknit.knit.mesh.BridgeFrameSource
 import app.getknit.knit.mesh.CompositeMeshTransport
 import app.getknit.knit.mesh.ContributionLedger
@@ -309,6 +310,8 @@ val meshModule =
                 publicChannel = { body -> get<PublicChannelSink>().postToPublicChannel(body) },
                 onTransferSignal = { sender, payload, sentAt -> get<TransferManager>().onSignal(sender, payload, sentAt) },
                 identities = get(),
+                // Ask the best holder of a blob rather than the likeliest (ADR 2026-10.6e5t); dark in release.
+                blobHolderQuery = BlobExchange.HolderQuery(enabled = BuildConfig.BLOB_QUERY),
             )
         }
         // UI ViewModels, MeshService, and the notification/debug entry points bind this narrow facade (not

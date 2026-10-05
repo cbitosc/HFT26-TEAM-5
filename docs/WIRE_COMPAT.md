@@ -37,7 +37,8 @@ Each evolves independently; bump the right one:
   advert/handshake hint (Wi-Fi Aware `serviceSpecificInfo` / the BLE service-data payload), known at
   connection time, **unauthenticated** — a routing/degradation hint only, never a trust input.
 - **`RelayEnvelope.type` registry**: `chat`, `groupupdate`, `groupleave`, `profile`, `receipt`,
-  `reaction`, `blobreq`, `keyreq`, `typing`, `commons` (non-custodial; the spool commons' post, spec §7.4).
+  `reaction`, `blobreq`, `keyreq`, `typing`, `commons` (non-custodial; the spool commons' post, spec §7.4),
+  `blobhave` and `blobhas` (the blob holder query and its answer: unsigned, point-to-point, ADR 2026-10.6e5t).
   (`meshpost` is **burned**: minted on an unpushed branch in September 2026 and withdrawn before it
   shipped — never reuse the string, since a lab build may still hold a frame of it.)
 - **`EncEnvelope.v`**: the E2E crypto scheme — `1` = static keys (AES-GCM + per-recipient HPKE wrap),
@@ -670,6 +671,23 @@ only a build that reads the header's offset asks with one, and an older holder a
 takes as before. No version bump, no discovery marker, no DB change; `vectors/wire-v1.json` gained
 `blobReqContentResumed` and `vectors/keyed-v1.json` `fileHeaderResumed`, and nothing moved. *Metadata cost:* the
 offset tells each asked neighbour how much of the blob the asker holds — progress, never content.
+
+**Precedent — a holder query and its answer (`blobhave` / `blobhas`, `CAP_BLOB_HAVE` 0x2000, ADR 2026-10.6e5t).**
+Two new `type` strings with content classes of their own, so rule 3 holds and nothing was repurposed. Both are
+unsigned and `relay = false`, the third and fourth unsigned shapes after `blobreq` and the v3 tick, and neither is
+custodial, replayable or flooded (`isCustodial` stays the fixed list; `FrameTypeTest`). An older build refuses either
+as an unsigned frame, and would spend a key request on one from an unpinned sender, so the asker queries **only** a
+neighbour whose link (HELLO or Wi-Fi Aware SSI) carries the new capability bit: the `CAP_FILES` argument, a receiver
+that consumes a frame silently strands the sender's wait. The bit sits above the BLE advert's 8 and is read only from
+the link's copy. Every build sets it and answers, and only the asking is gated (`BuildConfig.BLOB_QUERY`), so a mixed
+fleet answers whoever asks and the release flip moves one side. `BlobHasItem.state` is an always-encoded int. A
+state a reader does not know is never taken for HAVE, which makes the reserved `PARTIAL` (4, with `held`) additive
+later. Its serve still needs a request-side gate (`BlobReqContent.end`), never the bit alone. The fast codecs were
+not touched: `FastFrameCodec`'s dictionary and `FrameTranscoder`'s type codes are frozen, and these types ride
+links only. No version bump, no discovery marker, no DB change. `vectors/wire-v1.json` gained `blobHaveContent`,
+`blobHasContent` and `blobHasContentReserved`, and nothing moved. *Metadata cost:* an answer tells a linked
+neighbour which of the asked blobs this phone holds, exactly what serving its `blobreq` already told it. The `load`
+says how many files it is feeding, never to whom.
 
 **When you bump a version layer:** add a round-trip test plus an "unknown higher version drops locally
 but is counted" test. New crypto scheme ⇒ bump `EncEnvelope.MAX_SUPPORTED_VERSION` + every branch that
