@@ -237,6 +237,11 @@ class PeerRepositoryTest : RoomDbTest() {
             val repo = fade.repo()
             assertNull(repo.labelIndex().labelFor("c").discriminator)
             fade.accepted.value = setOf("c", "s")
+            // The anchors are a shared flow: the accept reaches `current()` once the share has re-judged it, which a
+            // query that returns fast can beat. Wait for it rather than for the scheduler's order.
+            fade.fade.anchors
+                .observe()
+                .first { "s" in it }
             assertEquals(Alias.aliasFor("c"), repo.labelIndex().labelFor("c").discriminator)
         }
 
