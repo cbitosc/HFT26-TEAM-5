@@ -16,7 +16,9 @@ has got, read off `FramedLink.rxFile`; `BlobExchange` still reads only its keys.
 fresh ask is still what makes a serve, and the memo and the two link reads are unchanged. Points 1 and 2 amended by
 ADR 2026-10.nxfb (2026-10-03, #121): the Bluetooth stack's buffer sits between the two reads, so the tick does not
 re-ask a peer whose file is streaming in (`MeshTransport.fileArrivingFrom`), and `fileInFlightTo` also covers a file
-the link fed in full while it goes on feeding that peer.
+the link fed in full while it goes on feeding that peer. Amended by ADR 2026-10.f7gg (2026-10-04, #136): the first
+ask goes to the likeliest holder alone and widens to every neighbour after its grace, so "one copy per asker per
+holder" is paid only when the first choice misses; `onNeighborAdded` is now `reask`.
 
 **What was observed.** 2026-09-19 20:43, three phones linked over BLE (P3, Moto G, P9), a 699 KB DM
 attachment P3 → Moto. It crossed the mesh three times to the Moto and twice to P9: P3 served the Moto at

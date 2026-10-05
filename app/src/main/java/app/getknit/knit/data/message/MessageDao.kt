@@ -260,12 +260,19 @@ interface MessageDao {
         plain: String,
     )
 
-    /** Attachment hashes referenced by stored messages whose bytes aren't in the `blobs` table yet. */
+    /**
+     * Attachment hashes referenced by stored messages whose bytes aren't in the `blobs` table yet, each with the sender
+     * of the earliest row naming it — the one holder a re-armed want can name, so its first ask goes there (ADR
+     * 2026-10.f7gg).
+     */
     @Query(
-        "SELECT DISTINCT attachmentHash FROM messages " +
-            "WHERE attachmentHash IS NOT NULL AND attachmentHash NOT IN (SELECT hash FROM blobs)",
+        "SELECT DISTINCT m.attachmentHash AS hash, " +
+            "(SELECT s.senderId FROM messages AS s WHERE s.attachmentHash = m.attachmentHash " +
+            "ORDER BY s.sentAt, s.id LIMIT 1) AS senderId " +
+            "FROM messages AS m " +
+            "WHERE m.attachmentHash IS NOT NULL AND m.attachmentHash NOT IN (SELECT hash FROM blobs)",
     )
-    suspend fun hashesNeedingFetch(): List<String>
+    suspend fun attachmentsNeedingFetch(): List<NeededAttachment>
 
     /**
      * Whether the message naming ciphertext [hash] crossed a **short-range radio** between [me] and
@@ -608,6 +615,12 @@ data class ConversationActivity(
 /** Room projection for [MessageDao.observeGroupSenders]: one row per distinct (group, author) pair. */
 data class ConversationSender(
     val conversationId: String,
+    val senderId: String,
+)
+
+/** A blob a stored row names but the store lacks, and who sent the row ([MessageDao.attachmentsNeedingFetch]). */
+data class NeededAttachment(
+    val hash: String,
     val senderId: String,
 )
 

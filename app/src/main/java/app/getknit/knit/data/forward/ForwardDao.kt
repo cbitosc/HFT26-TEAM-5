@@ -4,6 +4,7 @@ import androidx.room3.Dao
 import androidx.room3.Insert
 import androidx.room3.OnConflictStrategy
 import androidx.room3.Query
+import app.getknit.knit.data.message.NeededAttachment
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -110,15 +111,19 @@ interface ForwardDao {
     suspend fun countByAttachmentHash(hash: String): Int
 
     /**
-     * Content hashes referenced by a carried frame whose bytes aren't in the `blobs` table yet — the carrier's
-     * side of the "still-missing blobs" set (mirrors [app.getknit.knit.data.message.MessageDao.hashesNeedingFetch]).
+     * Content hashes referenced by a carried frame whose bytes aren't in the `blobs` table yet, each with the author of
+     * the earliest frame naming it — the carrier's side of the "still-missing blobs" set (mirrors
+     * [app.getknit.knit.data.message.MessageDao.attachmentsNeedingFetch]).
      * Re-requested on startup / neighbour-join so a carrier keeps trying to pull the image it's custodying.
      */
     @Query(
-        "SELECT DISTINCT attachmentHash FROM forward_store " +
-            "WHERE attachmentHash IS NOT NULL AND attachmentHash NOT IN (SELECT hash FROM blobs)",
+        "SELECT DISTINCT f.attachmentHash AS hash, " +
+            "(SELECT s.senderId FROM forward_store AS s WHERE s.attachmentHash = f.attachmentHash " +
+            "ORDER BY s.sentAt, s.id LIMIT 1) AS senderId " +
+            "FROM forward_store AS f " +
+            "WHERE f.attachmentHash IS NOT NULL AND f.attachmentHash NOT IN (SELECT hash FROM blobs)",
     )
-    suspend fun attachmentHashesNeedingFetch(): List<String>
+    suspend fun attachmentsNeedingFetch(): List<NeededAttachment>
 
     /**
      * Every carried frame including expired-but-unswept rows, newest first — the `debug.STORE` bridge dump.

@@ -278,6 +278,9 @@ class CompositeMeshTransport(
         return armed
     }
 
+    /** The high-throughput child's answer: the plane an attachment would ride, whichever child carries the ask. */
+    override fun bulkRouteTo(nodeId: String): BulkRoute = children.firstOrNull { it.highThroughput }?.bulkRouteTo(nodeId) ?: BulkRoute.None
+
     /**
      * The union over every plane: a blob arriving on any link is arriving, and when two planes stream the same
      * blob the copy furthest along is the one the chat shows (#115).

@@ -194,7 +194,7 @@ class ForwardRepository(
             WireCodec.decodeEnvelope(row.signed)?.let { CarriedFrame(it, row.sig, row.signed) }
         }
 
-    override suspend fun attachmentHashesNeedingFetch(): List<String> = dao.attachmentHashesNeedingFetch()
+    override suspend fun attachmentsNeedingFetch(): Map<String, String> = dao.attachmentsNeedingFetch().associate { it.hash to it.senderId }
 
     override suspend fun recipientOf(id: String): String? = dao.recipientOf(id)
 

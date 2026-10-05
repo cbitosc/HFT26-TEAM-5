@@ -263,7 +263,7 @@ class InboundPipeline(
         // SeenSet window — the three digests disagreed for up to eleven minutes after every key request, and
         // the cue plane raised a reconcile with nothing to transfer (ADR 2026-09.7bu7, issue #49).
         if (env.isStorable() && (wire.relay || env.type == FrameType.PROFILE)) {
-            forwardSync.onSeen(wire, env, ForwardStore.ORIGIN_RELAY)
+            forwardSync.onSeen(wire, env, ForwardStore.ORIGIN_RELAY, from = fromNodeId)
         }
         // Multi-hop coordination-plane fan-out: re-fan a small flood frame to our own neighbors so it spreads
         // across the mesh at message-plane speed (no data path), not just one hop from the originator. onDeliver
@@ -871,7 +871,7 @@ class InboundPipeline(
             return
         }
         if (enc == null) {
-            deliverChat(env, content, me, conversationId, plane)
+            deliverChat(env, content, me, conversationId, plane, via = source?.fromNodeId)
             return
         }
         // The already-have-it gate: custody re-serves the same ciphertext routinely (the 60s re-offer
@@ -890,7 +890,7 @@ class InboundPipeline(
             // group-addressed carries the sender-key header `g`, a DM the epoch-ratchet header `r`. The
             // group form is v2 only; v3 (ADR 059) is the DM form's compact sibling and takes the same arm.
             enc.v == EncEnvelope.VERSION_RATCHET && env.group != null -> {
-                runCatching { decryptAndDeliverGroup(env, content, enc, me, conversationId, plane) }.getOrElse {
+                runCatching { decryptAndDeliverGroup(env, content, enc, me, conversationId, plane, source?.fromNodeId) }.getOrElse {
                     Log.w(TAG, "drop group ratchet chat ${env.id}: ${it.message}")
                     metrics.onDropped(DropReason.DECRYPT_FAILED)
                 }
@@ -909,7 +909,7 @@ class InboundPipeline(
                         Log.w(TAG, "drop encrypted chat ${env.id}: ${it.message}")
                         null
                     } ?: return
-                deliverChat(env, plaintextContent(content, plain), me, conversationId, plane, plain)
+                deliverChat(env, plaintextContent(content, plain), me, conversationId, plane, plain, via = source?.fromNodeId)
             }
         }
     }
@@ -1007,6 +1007,7 @@ class InboundPipeline(
             conversationId,
             plane,
             plain,
+            via = source?.fromNodeId,
             persist = persistWithInlineAcks(env, plain, plane, commit),
         )
     }
@@ -1532,6 +1533,7 @@ class InboundPipeline(
         me: String,
         conversationId: String,
         plane: DeliveryPlane,
+        via: String? = null,
     ) {
         val wireHeader = enc.g
         val groupId = env.group?.id
@@ -1580,6 +1582,7 @@ class InboundPipeline(
             conversationId,
             plane,
             plain,
+            via = via,
             persist = { row -> commit { messages.save(row) } },
         )
     }
@@ -1972,13 +1975,17 @@ class InboundPipeline(
      * instead, exactly as [deliverChat] would (ADR 2026-10.mptm) — a carried room frame can be custodied before it
      * is delivered here.
      */
-    suspend fun onCarriedFrame(env: RelayEnvelope) {
+    suspend fun onCarriedFrame(
+        env: RelayEnvelope,
+        // The neighbour the frame came from: the first ask ranks it after the author and the fast plane (ADR 2026-10.f7gg).
+        via: String? = null,
+    ) {
         if (env.type != FrameType.CHAT) return
         val hash = WireCodec.decodePayload<ChatContent>(env.payload)?.attachmentHash ?: return
         if (blobStore.has(hash)) return
         if (copyFromOwnStore(hash, env.senderId)) return
         if (blobs.carrierOnlyBlobBytes() >= CARRIER_BLOB_BUDGET_BYTES) return
-        blobExchange.want(hash)
+        blobExchange.want(hash, author = env.senderId, via = via)
     }
 
     /**
@@ -2083,7 +2090,7 @@ class InboundPipeline(
         // A decided photo whose bytes we don't hold yet: pull it hop-by-hop (after the upsert stored it, so
         // settleArrivedGroupPhoto finds the row waiting on it). Outside the transaction — a network-bound blob
         // fetch, and the reclaims below are their own transactions.
-        settleGroupPhotoBlobs(photo)
+        settleGroupPhotoBlobs(photo, senderId)
         // The row exists now: any seed that arrived ahead of it can be adopted. Cheap when nothing is parked
         // (the usual case), and it must run before a chat frame's own decrypt so the first message of a new
         // group opens on its first pass rather than on the custody replay.
@@ -2428,8 +2435,12 @@ class InboundPipeline(
      * it; [settleArrivedGroupPhoto] shows it on arrival), drops a refused photo's bytes, and reclaims the
      * hashes the row stopped naming.
      */
-    private suspend fun settleGroupPhotoBlobs(photo: PhotoDecision) {
-        photo.pull?.let { blobExchange.want(it) }
+    private suspend fun settleGroupPhotoBlobs(
+        photo: PhotoDecision,
+        // The member whose frame named the photo: the likeliest holder, so the round asks it first (ADR 2026-10.f7gg).
+        senderId: String,
+    ) {
+        photo.pull?.let { blobExchange.want(it, author = senderId) }
         photo.refused?.let { blobs.dropRefusedGroupPhoto(it) }
         photo.replaced.forEach { blobs.deleteIfUnreferenced(it) }
     }
@@ -2565,6 +2576,9 @@ class InboundPipeline(
         // into a row of loose nullable parameters, and read only for those three: [content] stays the shape
         // the row is built from, so the plaintext and cleartext paths keep one body.
         sealed: MessageContent? = null,
+        // The neighbour this frame reached us from, when it came off a link: the attachment's first ask ranks it
+        // after the author and the fast plane (ADR 2026-10.f7gg). Null for a replay with no hop worth naming.
+        via: String? = null,
         // How the built row is persisted. The default inserts only if the row is absent: a re-served frame is
         // the same signed bytes, so it can never carry anything new, while a blind upsert would rewrite the
         // arrival plane, wipe the voice-note metadata setVoiceMeta added after the insert, and — for one of
@@ -2641,7 +2655,7 @@ class InboundPipeline(
                 deriveObtainedAnimation(hash)
                 identities.notePlain(hash)
             } else if (sealed?.attachmentKey != null || !copyFromOwnStore(hash, env.senderId)) {
-                blobExchange.want(hash)
+                blobExchange.want(hash, author = env.senderId, via = via)
                 // Arm the fast plane toward the author — the guaranteed holder — so the pull can ride a NAN
                 // NDP instead of crawling over BLE (the serve side arms its own half in the composite; only
                 // the larger nodeId of a pair ever initiates, so an inert mark here is harmless). Freshness/
@@ -3240,7 +3254,7 @@ class InboundPipeline(
             transport.neighbors.value.none { it.nodeId == senderId }
         ) {
             advertisedAvatars[senderId] = advertised
-            blobExchange.want(advertised)
+            blobExchange.want(advertised, author = senderId)
         }
     }
 

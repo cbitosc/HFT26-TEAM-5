@@ -477,8 +477,13 @@ opaque SHA-256-addressed bytes with a MIME string beside them, which is why voic
   - `want(hash)` — returns early if held, already in flight (`fetching` set), or already **arriving**
     on a link (`MeshTransport.arrivingFiles()`: a `FILE_HEADER` in, no `FILE_END` yet — read off
     `FramedLink.rxFile`, never a memo; the same read gives the chat its progress ring, ADR 2026-10.y9qh);
-    otherwise sends a `blobreq` frame (`relay = false`) to **every
-    direct neighbor**.
+    otherwise opens a **round of asks** (ADR 2026-10.f7gg): a `blobreq` frame (`relay = false`) to the
+    likeliest holder alone — the frame's author, then a neighbour on the Wi-Fi Aware plane
+    (`MeshTransport.bulkRouteTo`: linked, then reachable), then the hop the frame came from, then the rest — and,
+    once that ask's grace (5 s, 15 s for a reachable Wi-Fi Aware peer) passes with nothing arriving, to every other
+    direct neighbor at once. There is no negative answer on the wire, so a first choice that cannot serve costs
+    one grace. A neighbour pulling the blob through us (`onRequest`) is not asked back that round, and a neighbour
+    that links again is open to every round again (`linked`): an ask can die with a link.
   - `onRequest(hash, fromNodeId, offset)` — if we hold the blob, send it straight back over the file channel
     (`FileKind.ATTACHMENT`) — from the asker's `offset` when it kept the start of a cut transfer (ADR
     2026-10.wtyc) — unless a copy is already queued or streaming to that peer
@@ -495,9 +500,11 @@ opaque SHA-256-addressed bytes with a MIME string beside them, which is why voic
     (`MessageRepository.setAttachmentPath`, filling the local path on every message referencing the
     hash). Nothing is pushed to anyone: a blob walks hop-by-hop over direct-neighbor file transfers,
     one hop per re-ask.
-  - `onNeighborAdded(peer)` re-asks a neighbor for everything still missing and not arriving — on a new
-    link (catches late joiners) and on the 60 s re-offer tick for every linked neighbor, re-armed from the
-    database first (`MeshManager.rewantMissingBlobs`, ADR 2026-09.ptv8).
+  - `reask()` steps every round still missing and not arriving — on a new link (a neighbour that links in a
+    widened round is asked at once; catches late joiners) and on the 60 s re-offer tick, which opens the next
+    round with one ask again once 45 s have passed, re-armed from the database first
+    (`MeshManager.rewantMissingBlobs`, ADR 2026-09.ptv8). A neighbour asked before is not asked again while a
+    file from it is streaming in (ADR 2026-10.nxfb).
   - **Storm/loop control:** the `fetching` dedup set, the non-relaying request frame (`relay = false`,
     never flooded — each hop mints a fresh request id), and never bouncing a blob back to its giver.
 

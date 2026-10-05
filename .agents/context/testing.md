@@ -237,13 +237,15 @@ hop (fixed in `MeshRouter.countOverheard`, pinned by `MeshRouterTest`).
   be folded into the seed's republish with no version bump, so `published` would time out; no scenario edits
   there today.
 - **Two legitimate orderings are not a state to await.** `AttachmentLabTest`'s #79 scenario awaited Carol's
-  copy of the blob and then asserted she never served Bob — but Bob asks every neighbour at once, and whether
+  copy of the blob and then asserted she never served Bob — but Bob then asked every neighbour at once, and whether
   Carol holds the bytes when his ask reaches her is a race the mesh does not decide (her pull is two hops and
   a file write; his ask is one hop behind a DM decrypt). On one slow core her serve of that *fresh* ask —
   correct under ADR 2026-09.4tx5 — read as the wanter push (GitLab job 4939). Where a scenario's assertion
   presumes an order, pin it: `hold` the frame that would let the other order happen (Alice's frame to Carol,
   so Bob's ask is the first Carol hears of the hash — the ask is emitted inside `onDeliver`, before the relay
-  is scheduled), and release it once the assertion is in.
+  is scheduled), and release it once the assertion is in. (Since #136, ADR 2026-10.f7gg, Bob's first ask goes to
+  Alice alone, and that scenario counts asks instead; a blob round's grace is wall time, so the lab lengthens it
+  — `LabLimits.firstAskGraceMs` — and widens a round with a clock jump and a tick, never by waiting it out.)
 - **A held frame that is filtered out at `release` is lost, like a dropped packet** — and the digest exchange
   repairs it only on the next link-up or the 60 s re-offer. A scenario that drops held frames re-links before
   the oracle (`KeyExchangeLabTest`, `SessionLabTest`'s key request), as `RoomTickPlanesLabTest` already did.

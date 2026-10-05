@@ -449,11 +449,19 @@ class MeshLab {
         conversation: (LabNode) -> String,
     ) {
         val held = tryAwait(1, timeoutMs) { if (nodes.all { n -> ids.all { n.attachmentHeld(conversation(n), it) } }) 1 else 0 }
-        assertTrue(
-            "attachment bytes did not land on every node within ${timeoutMs}ms:\n" +
-                nodes.map { n -> "  ${n.name}: missing ${ids.filterNot { n.attachmentHeld(conversation(n), it) }}" }.joinToString("\n"),
-            held,
-        )
+        if (!held) {
+            // Who asked whom for the missing bytes and who served them: the two halves a lost pull can fail in.
+            val missing = nodes.associateWith { n -> ids.filterNot { n.attachmentHeld(conversation(n), it) } }
+            val hashes = missing.flatMap { (n, gone) -> gone.mapNotNull { n.attachmentHash(conversation(n), it) } }.toSet()
+            throw AssertionError(
+                "attachment bytes did not land on every node within ${timeoutMs}ms:\n" +
+                    missing.entries.joinToString("\n") { (n, gone) -> "  ${n.name}: missing $gone" } + "\n" +
+                    nodes.joinToString("\n") { n ->
+                        "  ${n.name} asked ${n.transport.blobAsks.filter { it.hash in hashes }}, " +
+                            "served ${n.transport.files.filter { f -> hashes.any { f.contains(it) } }}"
+                    } + "\n" + report(nodes),
+            )
+        }
         // A lab that allows every picture never flags one; a node told to mind them all flags by design (#109).
         nodes.filterNot { it.picturesExplicit }.forEach { n ->
             ids.forEach { id -> assertTrue("${n.name} flagged the attachment on $id", !n.attachmentFlagged(conversation(n), id)) }
@@ -731,6 +739,14 @@ class MeshLab {
         const val RIDE_HOLD_MS = 300L
 
         /**
+         * A blob round's first ask, lengthened ([app.getknit.knit.mesh.BlobExchange.FIRST_ASK_GRACE_MS] is 5 s): its
+         * timer runs on wall time, and a scenario that counts copies must not race a slow runner's stall. A scenario
+         * widens a round by advancing the clock this far and running a tick. Below
+         * [app.getknit.knit.mesh.BlobExchange.ROUND_MS], so that jump never also opens the next round.
+         */
+        const val FIRST_ASK_GRACE_MS = 20_000L
+
+        /**
          * Long enough for the scope reconcile (15 s) and a worker that missed an event and waits for its own
          * 60 s tick — the slow path a real relay client takes too; the fast path is a second or two.
          */
@@ -774,6 +790,8 @@ data class LabLimits(
      * ([app.getknit.knit.mesh.AckSync.RIDE_HOLD_MS], ADR 2026-09.y5f3).
      */
     val rideHoldMs: Long = MeshLab.RIDE_HOLD_MS,
+    /** How long a blob round's first ask has before every other neighbour is asked ([MeshLab.FIRST_ASK_GRACE_MS]). */
+    val firstAskGraceMs: Long = MeshLab.FIRST_ASK_GRACE_MS,
     /**
      * The custody store's bounds ([ForwardRepository]'s constructor). Give every node in a scenario the
      * same numbers: the content digest is folded over what these keep, and the bound must be identical
@@ -1078,6 +1096,7 @@ class LabNode internal constructor(
                 dmAckHoldMs = limits.dmAckHoldMs,
                 spoolTickMs = limits.spoolTickMs,
                 spoolAttachmentRetryMs = limits.spoolAttachmentRetryMs,
+                firstAskGraceMs = limits.firstAskGraceMs,
                 sessionDispatcher = session,
                 ingressBudget = IngressBudget(burst = limits.ingressBurst, perMinute = limits.ingressPerMinute, clock = now),
                 spoolDialer = spool,

@@ -2,6 +2,7 @@ package app.getknit.knit.data.forward
 
 import app.getknit.knit.data.RoomDbTest
 import app.getknit.knit.data.blob.BlobEntity
+import app.getknit.knit.data.message.NeededAttachment
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
@@ -15,7 +16,7 @@ import org.junit.Test
  * eviction/quota/TTL/anti-join queries were verified only against `ForwardRepositoryTest`'s hand-mirrored
  * `FakeForwardDao` — a `HashMap` that re-implements the ordering in Kotlin, so a divergence between the fake
  * and the SQLite would pass. These tests run the actual queries, and in particular exercise
- * [ForwardDao.attachmentHashesNeedingFetch] (the `blobs` anti-join the fake explicitly punts on) and the
+ * [ForwardDao.attachmentsNeedingFetch] (the `blobs` anti-join the fake explicitly punts on) and the
  * `DELETE ... WHERE id IN (SELECT ... ORDER BY sentAt ASC, id ASC LIMIT :n)` evictions whose frame-global
  * `(sentAt, id)` ordering is what keeps every node's carried set convergent.
  */
@@ -113,15 +114,15 @@ class ForwardDaoTest : RoomDbTest() {
         }
 
     @Test
-    fun `attachmentHashesNeedingFetch excludes held blobs and nulls and dedupes (the anti-join)`() =
+    fun `attachmentsNeedingFetch excludes held blobs and nulls and dedupes (the anti-join)`() =
         runTest {
-            dao.insert(fwd("f1", attachmentHash = "H1"))
+            dao.insert(fwd("f1", attachmentHash = "H1", senderId = "relayed", sentAt = 9L))
             dao.insert(fwd("f2", attachmentHash = "H2")) // H2 is already held below → excluded
-            dao.insert(fwd("f3", attachmentHash = "H1")) // duplicate reference → H1 must appear once
+            dao.insert(fwd("f3", attachmentHash = "H1", sentAt = 1L)) // duplicate → H1 once, under the earliest sender
             dao.insert(fwd("f4", attachmentHash = null)) // null → excluded
             db.blobDao().insert(BlobEntity(hash = "H2", mime = "image/jpeg", bytes = ByteArray(0)))
 
-            assertEquals(listOf("H1"), dao.attachmentHashesNeedingFetch())
+            assertEquals(listOf(NeededAttachment("H1", "peer")), dao.attachmentsNeedingFetch())
             assertEquals(2, dao.countByAttachmentHash("H1"))
         }
 

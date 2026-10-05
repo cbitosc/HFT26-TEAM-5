@@ -2,20 +2,24 @@ package app.getknit.knit
 
 import app.getknit.knit.mesh.BlobExchange
 import app.getknit.knit.mesh.BlobStore
+import app.getknit.knit.mesh.BulkRoute
+import app.getknit.knit.mesh.CompositeMeshTransport
 import app.getknit.knit.mesh.FakeLoopTransport
 import app.getknit.knit.mesh.FileKind
 import app.getknit.knit.mesh.FileMeta
 import app.getknit.knit.mesh.MeshRouter
 import app.getknit.knit.mesh.PartialBlobs
-import app.getknit.knit.mesh.Peer
 import app.getknit.knit.mesh.protocol.BlobReqContent
 import app.getknit.knit.mesh.protocol.FrameType
 import app.getknit.knit.mesh.protocol.WireCodec
 import app.getknit.knit.mesh.sha256Hex
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -26,6 +30,7 @@ import java.nio.file.Files
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 
+@Suppress("LargeClass") // one exchange's whole contract: the serve, the walk, the round of asks and the resume
 @OptIn(ExperimentalCoroutinesApi::class)
 class BlobExchangeTest {
     /** A store for the prefixes of cut transfers, kept from a single byte so a test needs no 16 KiB file. */
@@ -96,12 +101,14 @@ class BlobExchangeTest {
         val transport = FakeLoopTransport(id)
         val store = FakeBlobStore(Files.createTempDirectory("blob-$id").toFile())
         val partials = PartialBlobs(Files.createTempDirectory("parts-$id").toFile(), minBytes = 1)
+        var now = 0L
         val exchange =
             BlobExchange(
                 transport = transport,
                 store = store,
                 selfId = { id },
                 onObtained = { _, _ -> },
+                now = { now },
                 partials = partials,
             )
         private val router =
@@ -203,7 +210,8 @@ class BlobExchangeTest {
             assertTrue("b should have cached the blob in transit", b.store.has("H"))
             assertTrue("c is served on its next ask, never pushed", !c.store.has("H"))
 
-            c.exchange.onNeighborAdded(Peer("b")) // the 60 s re-offer tick
+            c.now += BlobExchange.ROUND_MS
+            c.exchange.reask() // the 60 s re-offer tick, a round later
 
             assertTrue("c should have obtained the blob", c.store.has("H"))
             assertArrayEquals(bytes, c.store.fileFor("H")!!.readBytes())
@@ -227,7 +235,8 @@ class BlobExchangeTest {
             b.store.normalizeTo = "image/webp" // what b's own row says once the bytes land
 
             c.exchange.want("H")
-            c.exchange.onNeighborAdded(Peer("b")) // the re-ask that b now holds an answer to
+            c.now += BlobExchange.ROUND_MS
+            c.exchange.reask() // the re-ask that b now holds an answer to
 
             assertEquals("b must forward its resolved type, not a's header", "image/webp", c.store.mimeFor("H"))
         }
@@ -265,7 +274,7 @@ class BlobExchangeTest {
             store.seed("spooled", "image/jpeg", "bytes".toByteArray()) // obtained over the Internet plane
 
             r.connect(n)
-            exchange.onNeighborAdded(Peer("n"))
+            exchange.reask()
 
             assertEquals("only the blob we still lack is asked for", listOf("stillMissing"), asked)
         }
@@ -327,7 +336,7 @@ class BlobExchangeTest {
             exchange.want("c") // over the cap → oldest ("a") evicted
 
             r.connect(n)
-            exchange.onNeighborAdded(Peer("n"))
+            exchange.reask()
 
             assertEquals("oldest fetch evicted; the newest two are re-asked, oldest-first", listOf("b", "c"), asked)
         }
@@ -365,7 +374,7 @@ class BlobExchangeTest {
             assertTrue("a blob already streaming in is not asked for", asked.isEmpty())
 
             r.arriving.clear() // the transfer died
-            exchange.onNeighborAdded(Peer("n"))
+            exchange.reask()
             assertTrue("it was never marked as fetching — the database re-arms it", asked.isEmpty())
 
             exchange.want("H") // rewantMissingBlobs on the next tick
@@ -401,11 +410,11 @@ class BlobExchangeTest {
             exchange.want("H") // nobody linked yet — marked, nothing sent
             r.connect(n)
             r.arriving += "H" // n's serve has begun by the time the tick comes round
-            exchange.onNeighborAdded(Peer("n"))
+            exchange.reask()
             assertTrue("the tick stays quiet while the bytes stream in", asked.isEmpty())
 
             r.arriving.clear() // the link died mid-stream
-            exchange.onNeighborAdded(Peer("n"))
+            exchange.reask()
             assertEquals("the next tick asks again", listOf("H"), asked)
         }
 
@@ -438,51 +447,363 @@ class BlobExchangeTest {
             exchange.want("H") // nobody linked yet — marked, nothing sent
             r.connect(n)
             store.storingNow += "H" // its copy came in and is being screened
-            exchange.onNeighborAdded(Peer("n"))
+            exchange.reask()
             store.storingNow += "G"
             exchange.want("G")
             assertTrue("nothing is asked for a blob the store is storing", asked.isEmpty())
 
             store.storingNow.clear() // the store refused both copies
-            exchange.onNeighborAdded(Peer("n"))
+            exchange.reask()
             assertEquals("the memo still holds H, so the next tick asks again; G was never marked", listOf("H"), asked)
         }
 
     @Test
-    fun theTickDoesNotReAskAPeerWhoseFileIsStreamingIn() =
+    fun aPeerAskedBeforeIsNotAskedAgainNorPassedOverWhileItsFileStreamsIn() =
         runTest(UnconfinedTestDispatcher()) {
-            // #121: n is streaming us G and has already fed H into the stack's buffer behind it. H is not arriving and
-            // n no longer counts it in flight, so an ask now would buy a second copy. The other neighbour is asked.
+            // #121: n was asked for H and is streaming us G, and H may already sit in the stack's buffer behind it. H is
+            // not arriving and n no longer counts it in flight, so asking n again — or asking m, who holds it too —
+            // would buy a second copy. The round waits for n's stream, then gives H its grace to show up.
             val r = FakeLoopTransport("r")
             val n = FakeLoopTransport("n")
             val m = FakeLoopTransport("m")
-            val store = FakeBlobStore(Files.createTempDirectory("blob-busy").toFile())
+            r.connect(n)
+            r.connect(m)
+            var now = 0L
             val exchange =
                 BlobExchange(
                     transport = r,
-                    store = store,
+                    store = FakeBlobStore(Files.createTempDirectory("blob-busy").toFile()),
                     selfId = { "r" },
                     onObtained = { _, _ -> },
-                    now = { 0L },
+                    now = { now },
                     partials = partials(),
                 )
             val askedOfN = backgroundScope.asksArrivingAt(n)
             val askedOfM = backgroundScope.asksArrivingAt(m)
 
-            exchange.want("H") // nobody linked yet — marked, nothing sent
-            r.connect(n)
-            r.connect(m)
-            r.arriving += "G"
+            exchange.want("H", author = "n")
+            assertEquals(listOf("H" to null), askedOfN)
             r.arrivingFrom += "n"
-            exchange.onNeighborAdded(Peer("n"))
-            exchange.onNeighborAdded(Peer("m"))
-            assertTrue("no ask to the peer streaming to us: $askedOfN", askedOfN.isEmpty())
-            assertEquals("the quiet neighbour is still asked", listOf("H" to null), askedOfM)
+            now += 3 * BlobExchange.FIRST_ASK_GRACE_MS
+            exchange.reask()
+            assertTrue("nobody else is asked while the first holder streams to us: $askedOfM", askedOfM.isEmpty())
 
-            r.arriving.clear() // G landed, and H with it never came: the stream is over
+            r.arrivingFrom.clear() // G landed, and H did not follow it
+            exchange.reask()
+            assertTrue("the grace starts again when the stream ends", askedOfM.isEmpty())
+            now += BlobExchange.FIRST_ASK_GRACE_MS
+            exchange.reask()
+            assertEquals("then the round widens", listOf("H" to null), askedOfM)
+
+            r.arrivingFrom += "n" // streaming again when the next round opens
+            now += BlobExchange.ROUND_MS
+            exchange.reask()
+            assertEquals("a peer asked before is not asked while its file streams in", listOf("H" to null), askedOfN)
+            assertEquals("the quiet neighbour opens the round", listOf("H" to null, "H" to null), askedOfM)
+
             r.arrivingFrom.clear()
-            exchange.onNeighborAdded(Peer("n"))
-            assertEquals("the first tick after the stream asks", listOf("H" to null), askedOfN)
+            now += BlobExchange.FIRST_ASK_GRACE_MS
+            exchange.reask()
+            assertEquals("the first step after the stream asks it", listOf("H" to null, "H" to null), askedOfN)
+        }
+
+    @Test
+    fun aRoundAsksTheAuthorAloneThenEveryOtherNeighbourOnceItsGraceIsUp() =
+        runTest(UnconfinedTestDispatcher()) {
+            // #136: every holder answers a fresh ask, so asking all of them at once bought a whole copy from each.
+            val r = FakeLoopTransport("r")
+            val peers = listOf("a", "b", "c").map { FakeLoopTransport(it).also(r::connect) }
+            var now = 0L
+            val exchange =
+                BlobExchange(
+                    transport = r,
+                    store = FakeBlobStore(Files.createTempDirectory("blob-round").toFile()),
+                    selfId = { "r" },
+                    onObtained = { _, _ -> },
+                    now = { now },
+                    partials = partials(),
+                )
+            val asked = peers.associate { it.nodeId to backgroundScope.asksArrivingAt(it) }
+
+            fun counts() = asked.mapValues { it.value.size }
+
+            exchange.want("H", author = "c")
+            exchange.want("H", author = "c") // the frame again, re-served by custody
+            exchange.reask()
+            assertEquals("the author alone, once", mapOf("a" to 0, "b" to 0, "c" to 1), counts())
+
+            now += BlobExchange.FIRST_ASK_GRACE_MS - 1
+            exchange.reask()
+            assertEquals("still inside its grace", mapOf("a" to 0, "b" to 0, "c" to 1), counts())
+
+            now += 1
+            exchange.reask()
+            assertEquals("then everyone else at once", mapOf("a" to 1, "b" to 1, "c" to 1), counts())
+            exchange.reask()
+            assertEquals("and nobody twice in a round", mapOf("a" to 1, "b" to 1, "c" to 1), counts())
+
+            now += BlobExchange.ROUND_MS
+            exchange.reask()
+            assertEquals("the next round opens with the author again", mapOf("a" to 1, "b" to 1, "c" to 2), counts())
+        }
+
+    @Test
+    fun theFirstAskGoesToTheAuthorThenTheFastPlaneThenTheSourceHop() =
+        runTest(UnconfinedTestDispatcher()) {
+            val r = FakeLoopTransport("r")
+            val byId = listOf("author", "fast", "reach", "hop", "other").associateWith { FakeLoopTransport(it).also(r::connect) }
+            r.bulkRoutes["fast"] = BulkRoute.Linked
+            r.bulkRoutes["reach"] = BulkRoute.Reachable
+            r.bulkRoutes["author"] = BulkRoute.None
+            val exchange =
+                BlobExchange(
+                    transport = r,
+                    store = FakeBlobStore(Files.createTempDirectory("blob-rank").toFile()),
+                    selfId = { "r" },
+                    onObtained = { _, _ -> },
+                    now = { 0L },
+                    partials = partials(),
+                )
+            val asked = byId.mapValues { (_, t) -> backgroundScope.asksArrivingAt(t) }
+
+            fun firstAskOf(hash: String) = asked.filterValues { list -> list.any { it.first == hash } }.keys
+
+            exchange.want("H1", author = "author", via = "hop")
+            exchange.want("H2", author = "gone", via = "hop") // an author who is not a neighbour ranks nobody
+            r.disconnect(byId.getValue("fast"))
+            exchange.want("H3", via = "hop")
+            r.disconnect(byId.getValue("reach"))
+            exchange.want("H4", via = "hop")
+            exchange.want("H5")
+
+            assertEquals("the author, over a Bluetooth link", setOf("author"), firstAskOf("H1"))
+            assertEquals("a neighbour linked over the fast plane", setOf("fast"), firstAskOf("H2"))
+            assertEquals("one the fast plane can reach", setOf("reach"), firstAskOf("H3"))
+            assertEquals("where the frame came from", setOf("hop"), firstAskOf("H4"))
+            assertEquals("else the lowest id, so the choice is stable", setOf("author"), firstAskOf("H5"))
+            assertEquals("only a reachable first choice is armed", listOf("reach"), r.bulkArmed)
+        }
+
+    @Test
+    fun aFirstChoiceWhoseLinkIsGoneWidensTheRoundAtOnce() =
+        runTest(UnconfinedTestDispatcher()) {
+            // It can serve nothing on a link that is gone; waiting out its grace only delays the holders still in reach.
+            val r = FakeLoopTransport("r")
+            val a = FakeLoopTransport("a").also(r::connect)
+            val b = FakeLoopTransport("b").also(r::connect)
+            val exchange =
+                BlobExchange(
+                    transport = r,
+                    store = FakeBlobStore(Files.createTempDirectory("blob-gone").toFile()),
+                    selfId = { "r" },
+                    onObtained = { _, _ -> },
+                    now = { 0L },
+                    partials = partials(),
+                )
+            backgroundScope.asksArrivingAt(a)
+            val askedOfB = backgroundScope.asksArrivingAt(b)
+
+            exchange.want("H", author = "a")
+            assertTrue(askedOfB.isEmpty())
+            r.disconnect(a)
+            exchange.reask() // the link-down's next step, still inside the grace
+            assertEquals(listOf("H" to null), askedOfB)
+        }
+
+    @Test
+    fun aNeighbourThatLinksAgainIsAskedAgainAtOnce() =
+        runTest(UnconfinedTestDispatcher()) {
+            // An ask sent before the link dropped may have died with it. Before #136 every link-up re-asked its
+            // newcomer; a round that still counts the old ask would wait out a grace, then the round, for nothing.
+            val r = FakeLoopTransport("r")
+            val a = FakeLoopTransport("a").also(r::connect)
+            val b = FakeLoopTransport("b").also(r::connect)
+            val exchange =
+                BlobExchange(
+                    transport = r,
+                    store = FakeBlobStore(Files.createTempDirectory("blob-relink").toFile()),
+                    selfId = { "r" },
+                    onObtained = { _, _ -> },
+                    now = { 0L },
+                    partials = partials(),
+                )
+            val askedOfA = backgroundScope.asksArrivingAt(a)
+            val askedOfB = backgroundScope.asksArrivingAt(b)
+
+            exchange.want("H", author = "a")
+            r.disconnect(a)
+            r.connect(a) // the link drops and comes back inside the first ask's grace
+            exchange.linked(listOf("a"))
+            exchange.reask()
+            assertEquals("asked again on the new link", listOf("H" to null, "H" to null), askedOfA)
+            assertTrue("and alone: the round's first ask starts again", askedOfB.isEmpty())
+
+            exchange.want("G", author = "a")
+            r.disconnect(b) // b is asked once the round widens; then its link drops and comes back
+            r.connect(b)
+            exchange.linked(listOf("b"))
+            exchange.reask()
+            assertTrue("a link-up inside a first ask's grace waits for the widening", askedOfB.none { it.first == "G" })
+        }
+
+    @Test
+    fun aReachableFirstChoiceGetsTheBulkGraceOnTopBeforeTheRoundWidens() =
+        runTest(UnconfinedTestDispatcher()) {
+            // A holder that can raise the Wi-Fi Aware link waits up to the composite's bulk grace for it before it falls
+            // back to Bluetooth; widening inside that wait would buy a second copy over Bluetooth.
+            val r = FakeLoopTransport("r")
+            val reach = FakeLoopTransport("reach").also(r::connect)
+            val other = FakeLoopTransport("other").also(r::connect)
+            r.bulkRoutes["reach"] = BulkRoute.Reachable
+            var now = 0L
+            val exchange =
+                BlobExchange(
+                    transport = r,
+                    store = FakeBlobStore(Files.createTempDirectory("blob-reach").toFile()),
+                    selfId = { "r" },
+                    onObtained = { _, _ -> },
+                    now = { now },
+                    partials = partials(),
+                )
+            val askedOfReach = backgroundScope.asksArrivingAt(reach)
+            val askedOfOther = backgroundScope.asksArrivingAt(other)
+
+            exchange.want("H")
+            assertEquals(listOf("H" to null), askedOfReach)
+            now += BlobExchange.FIRST_ASK_GRACE_MS
+            exchange.reask()
+            assertTrue("the fast link may still be coming up", askedOfOther.isEmpty())
+            now += CompositeMeshTransport.BULK_GRACE_MS
+            exchange.reask()
+            assertEquals(listOf("H" to null), askedOfOther)
+        }
+
+    @Test
+    fun aNeighbourThatLinksWaitsOutAFirstAsksGraceButIsAskedAtOnceInAWidenedRound() =
+        runTest(UnconfinedTestDispatcher()) {
+            val r = FakeLoopTransport("r")
+            val a = FakeLoopTransport("a").also(r::connect)
+            val b = FakeLoopTransport("b")
+            val c = FakeLoopTransport("c")
+            var now = 0L
+            val exchange =
+                BlobExchange(
+                    transport = r,
+                    store = FakeBlobStore(Files.createTempDirectory("blob-join").toFile()),
+                    selfId = { "r" },
+                    onObtained = { _, _ -> },
+                    now = { now },
+                    partials = partials(),
+                )
+            backgroundScope.asksArrivingAt(a)
+            val askedOfB = backgroundScope.asksArrivingAt(b)
+            val askedOfC = backgroundScope.asksArrivingAt(c)
+
+            exchange.want("H", author = "a")
+            r.connect(b)
+            exchange.reask() // the link-up
+            assertTrue("a's ask still has its grace", askedOfB.isEmpty())
+            now += BlobExchange.FIRST_ASK_GRACE_MS
+            exchange.reask()
+            assertEquals(listOf("H" to null), askedOfB)
+
+            r.connect(c)
+            exchange.reask()
+            assertEquals("the round is already wide", listOf("H" to null), askedOfC)
+        }
+
+    @Test
+    fun theGraceIsTimedOnTheSessionSoTheRoundWidensWithoutATick() =
+        runTest {
+            val r = FakeLoopTransport("r")
+            val a = FakeLoopTransport("a").also(r::connect)
+            val b = FakeLoopTransport("b").also(r::connect)
+            val exchange =
+                BlobExchange(
+                    transport = r,
+                    store = FakeBlobStore(Files.createTempDirectory("blob-timer").toFile()),
+                    selfId = { "r" },
+                    onObtained = { _, _ -> },
+                    now = { testScheduler.currentTime },
+                    partials = partials(),
+                    timers = { backgroundScope },
+                )
+            val askedOfA = backgroundScope.asksArrivingAt(a)
+            val askedOfB = backgroundScope.asksArrivingAt(b)
+            runCurrent()
+
+            exchange.want("H", author = "a")
+            runCurrent()
+            assertEquals(listOf("H" to null), askedOfA)
+            advanceTimeBy(BlobExchange.FIRST_ASK_GRACE_MS - 1)
+            runCurrent()
+            assertTrue(askedOfB.isEmpty())
+            advanceTimeBy(2)
+            runCurrent()
+            assertEquals("widened by the timer alone", listOf("H" to null), askedOfB)
+        }
+
+    @Test
+    fun aTimerArmedOnAStoppedSessionDoesNotBlockTheNextOne() =
+        runTest {
+            // A timer launched on a cancelled scope never runs its body; the want must still get a timer next time.
+            val r = FakeLoopTransport("r")
+            val a = FakeLoopTransport("a").also(r::connect)
+            val b = FakeLoopTransport("b").also(r::connect)
+            var session: CoroutineScope = CoroutineScope(Job().apply { cancel() })
+            val exchange =
+                BlobExchange(
+                    transport = r,
+                    store = FakeBlobStore(Files.createTempDirectory("blob-dead-timer").toFile()),
+                    selfId = { "r" },
+                    onObtained = { _, _ -> },
+                    now = { testScheduler.currentTime },
+                    partials = partials(),
+                    timers = { session },
+                )
+            backgroundScope.asksArrivingAt(a)
+            val askedOfB = backgroundScope.asksArrivingAt(b)
+            runCurrent()
+
+            exchange.want("H", author = "a") // its grace timer lands on the stopped session
+            session = backgroundScope // the mesh starts again
+            exchange.reask() // still inside the grace: arms a timer on the live session
+            advanceTimeBy(BlobExchange.FIRST_ASK_GRACE_MS + 1)
+            runCurrent()
+            assertEquals("widened by the new session's timer", listOf("H" to null), askedOfB)
+        }
+
+    @Test
+    fun aBlobPulledForANeighbourIsNotAskedOfItThatRoundButIsTheNext() =
+        runTest(UnconfinedTestDispatcher()) {
+            // It asked us because it lacks the bytes, so asking it back costs the round a grace for nothing. By the next
+            // round it may hold them, and it may be the one path they have to us (a relay, or the only link).
+            val r = FakeLoopTransport("r")
+            val asker = FakeLoopTransport("a").also(r::connect)
+            val other = FakeLoopTransport("z").also(r::connect)
+            var now = 0L
+            val exchange =
+                BlobExchange(
+                    transport = r,
+                    store = FakeBlobStore(Files.createTempDirectory("blob-asker").toFile()),
+                    selfId = { "r" },
+                    onObtained = { _, _ -> },
+                    now = { now },
+                    partials = partials(),
+                )
+            val askedOfAsker = backgroundScope.asksArrivingAt(asker)
+            val askedOfOther = backgroundScope.asksArrivingAt(other)
+
+            exchange.onRequest("H", "a")
+            exchange.want("H", author = "a") // its frame lands too: still not this round
+            now += BlobExchange.FIRST_ASK_GRACE_MS
+            exchange.reask()
+            assertTrue("not asked back the round we pull for it: $askedOfAsker", askedOfAsker.isEmpty())
+            assertEquals(listOf("H" to null), askedOfOther)
+
+            now += BlobExchange.ROUND_MS
+            exchange.reask()
+            assertEquals("the next round opens with it, the author", listOf("H" to null), askedOfAsker)
         }
 
     @Test
@@ -580,12 +901,14 @@ class BlobExchangeTest {
             val n = FakeLoopTransport("n")
             r.connect(n)
             val partials = partials()
+            var now = 0L
             val exchange =
                 BlobExchange(
                     transport = r,
                     store = FakeBlobStore(Files.createTempDirectory("blob-resume-tick").toFile()),
                     selfId = { "r" },
                     onObtained = { _, _ -> },
+                    now = { now },
                     partials = partials,
                 )
             val asked = backgroundScope.asksArrivingAt(n)
@@ -594,7 +917,8 @@ class BlobExchangeTest {
             assertTrue(partials.keep(HASH_H, cutFile(ByteArray(300)), basedOn = null)) // a link was cut 300 B in
 
             exchange.want(HASH_H)
-            exchange.onNeighborAdded(Peer("n")) // the 60 s tick, or the link coming back
+            now += BlobExchange.ROUND_MS
+            exchange.reask() // the 60 s tick, a round later
             assertEquals(listOf(PICTURE_HASH to null, HASH_H to 300L, PICTURE_HASH to null, HASH_H to 300L), asked)
         }
 
@@ -629,7 +953,7 @@ class BlobExchangeTest {
         }
 
     @Test
-    fun aSpliceThatFailsItsHashDropsThePrefixAndAsksEveryNeighborForTheWholeBlobAtOnce() =
+    fun aSpliceThatFailsItsHashDropsThePrefixAndOpensARoundForTheWholeBlobAtOnce() =
         runTest(UnconfinedTestDispatcher()) {
             val r = FakeLoopTransport("r")
             val n1 = FakeLoopTransport("n1")
@@ -639,12 +963,14 @@ class BlobExchangeTest {
             val store = FakeBlobStore(Files.createTempDirectory("blob-splice-bad").toFile()).apply { checkHashes = true }
             val partials = partials()
             var refused = 0
+            var now = 0L
             val exchange =
                 BlobExchange(
                     transport = r,
                     store = store,
                     selfId = { "r" },
                     onObtained = { _, _ -> },
+                    now = { now },
                     partials = partials,
                     onSpliceRefused = { refused++ },
                 )
@@ -659,7 +985,10 @@ class BlobExchangeTest {
 
             assertEquals(1, refused)
             assertEquals("the prefix may be what was wrong", 0L, partials.length(PICTURE_HASH))
-            assertEquals("asked again from byte 0, now", listOf(PICTURE_HASH to null), asked1)
+            assertEquals("asked again from byte 0, now, inside the first ask's grace", listOf(PICTURE_HASH to null), asked1)
+            assertTrue("a new round opens with one ask", asked2.isEmpty())
+            now += BlobExchange.FIRST_ASK_GRACE_MS
+            exchange.reask()
             assertEquals(listOf(PICTURE_HASH to null), asked2)
             assertTrue("still wanted", !store.has(PICTURE_HASH))
         }
@@ -746,7 +1075,7 @@ class BlobExchangeTest {
             exchange.want(otherHash)
             partials.keep(otherHash, cutFile(other.copyOf(4)), basedOn = null)
             store.seed(otherHash, "image/jpeg", other)
-            exchange.onNeighborAdded(Peer("n"))
+            exchange.reask()
             assertEquals(0L, partials.length(otherHash))
         }
 

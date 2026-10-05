@@ -130,13 +130,13 @@ class MessageRepositoryTest : RoomDbTest() {
         }
 
     @Test
-    fun `hashesNeedingFetch returns referenced hashes not yet held`() =
+    fun `attachmentsNeedingFetch returns referenced hashes not yet held, with their senders`() =
         runTest {
             val repo = repo()
             repo.save(msg("m1", attachmentHash = "H1"))
             repo.save(msg("m2", attachmentHash = "H2"))
             db.blobDao().insert(BlobEntity(hash = "H2", mime = "image/jpeg", bytes = ByteArray(0)))
-            assertEquals(listOf("H1"), repo.hashesNeedingFetch())
+            assertEquals(mapOf("H1" to "s"), repo.attachmentsNeedingFetch())
         }
 
     @Test

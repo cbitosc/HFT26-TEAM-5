@@ -201,6 +201,9 @@ class MeshManager(
     // cannot shorten. Injectable for `mesh/lab` like [tickDebounceMs]; only [scopeSync]'s initializer reads them.
     spoolTickMs: Long = ScopeSync.TICK_INTERVAL_MS,
     spoolAttachmentRetryMs: Long = ScopeSync.ATTACHMENT_RETRY_MS,
+    // How long a blob round's first ask has before every other neighbour is asked ([BlobExchange.FIRST_ASK_GRACE_MS],
+    // ADR 2026-10.f7gg). Injectable for `mesh/lab`, whose scenarios must not hang an assertion on a wall-clock race.
+    private val firstAskGraceMs: Long = BlobExchange.FIRST_ASK_GRACE_MS,
     // What the session's collectors and everything they launch run on. Production takes the default; the
     // `mesh/lab` harness hands in its seeded chaos dispatcher (`LabChaos`), a busy pool on demand.
     private val sessionDispatcher: CoroutineDispatcher = Dispatchers.Default,
@@ -245,6 +248,10 @@ class MeshManager(
             onObtained = { hash, _ -> pipeline.onObtained(hash) },
             partials = partials,
             onSpliceRefused = metrics::onSpliceRefused,
+            // A first ask's grace runs on the session (ADR 2026-10.f7gg); stopped, the tick and link-ups step it.
+            firstAskGraceMs = firstAskGraceMs,
+            timers = { sessionScope },
+            log = { Log.d(TAG, it) },
         )
 
     // Store-and-forward DM custody: carries DMs we originate/relay and re-offers them to neighbors that
@@ -257,7 +264,7 @@ class MeshManager(
             authenticate = { wire, env -> pipeline.canCarry(wire, env) },
             // Fired once when a chat frame is actually carried: eager-pull its image blob so a custodied image
             // survives to a late joiner (the carrier holds ciphertext it can't read, like the frame itself).
-            onCarried = { pipeline.onCarriedFrame(it) },
+            onCarried = { env, from -> pipeline.onCarriedFrame(env, from) },
             // A carried frame actually sent to a peer that lacked it — the ledger decides whether it counts.
             onServed = { env, to -> ledger.onHandedOff(env, setOf(to)) },
             // A sender whose backlog goes to a peer that may not hold their key, and whose profile custody no
@@ -2285,15 +2292,17 @@ class MeshManager(
      * a hash already in flight and returns at once for one the store has, so the repeat costs one bounded query.
      */
     private suspend fun rewantMissingBlobs() {
-        // Own/received message attachments: always re-pull (uncapped, kept alive by their message row).
-        val ownHashes = messages.hashesNeedingFetch()
-        ownHashes.forEach { blobExchange.want(it) }
+        // Own/received message attachments: always re-pull (uncapped, kept alive by their message row). Each is
+        // wanted with its row's sender, so a want re-armed after a restart or the sweep asks the author first.
+        val ownHashes = messages.attachmentsNeedingFetch()
+        ownHashes.forEach { (hash, author) -> blobExchange.want(hash, author = author) }
         // Carrier-only custody blobs backfill only while under the byte budget (the same pull-time soft cap
         // onCarriedFrame applies), so a restart re-attempts pulls that a live-session over-budget skip left
         // missing; skip ones already re-requested above as our own/received attachments.
         if (blobs.carrierOnlyBlobBytes() < CARRIER_BLOB_BUDGET_BYTES) {
-            val own = ownHashes.toHashSet()
-            forwardStore.attachmentHashesNeedingFetch().forEach { if (it !in own) blobExchange.want(it) }
+            forwardStore.attachmentsNeedingFetch().forEach { (hash, author) ->
+                if (hash !in ownHashes) blobExchange.want(hash, author = author)
+            }
         }
         // A group's decided photo not shown yet (ADR 2026-09.nxcq): the row is the durable want, so a pull lost
         // to a restart or the fetch TTL comes back here and not only on the group's next frame. A photo
@@ -2370,16 +2379,17 @@ class MeshManager(
      */
     internal suspend fun reofferToNeighbors() {
         val neighbors = transport.neighbors.value
-        // Before the per-neighbor re-ask, so a want the 30-min sweep reclaimed is back in the memo it
+        // Before the blob re-ask below, so a want the 30-min sweep reclaimed is back in the memo it
         // reads from; skipped with nobody linked, where a want has nowhere to go anyway.
         if (neighbors.isNotEmpty()) rewantMissingBlobs()
         neighbors.forEach { peer ->
             forwardSync.onNeighborAdded(peer) // re-advertise our custody digest → pull anything we lack
-            blobExchange.onNeighborAdded(peer) // re-ask for blobs we still need
             keyExchange.onNeighborAdded(peer) // re-ask for keys we still need
             ackSync.onNeighborAdded(peer) // re-send any broadcast/group delivery tick we owe it
             flushPendingGroupKeysFor(peer.nodeId) // re-send unacked group epoch seeds it never got
         }
+        // Once for everyone: each blob we still need takes its next step of asks (ADR 2026-10.f7gg).
+        if (neighbors.isNotEmpty()) blobExchange.reask()
     }
 
     // --- Profile broadcasting ---
@@ -2412,10 +2422,16 @@ class MeshManager(
                 linksActedOn = currentIds
                 // A newcomer may be the holder of bytes whose want the sweep already reclaimed — re-arm from
                 // the database first, so the re-ask below has the full missing set to ask it for.
+                // A newcomer holds no ask of ours — one sent before may have died with its old link — so each round
+                // may ask it again (ADR 2026-10.f7gg). Ahead of the re-arm, whose wants step at once.
+                blobExchange.linked(newcomers.map { it.nodeId })
                 if (newcomers.isNotEmpty()) rewantMissingBlobs()
+                // Blobs we still need take their next step of asks, which reaches a newcomer at once in a round
+                // already widened (ADR 2026-10.f7gg). Ahead of the per-newcomer hooks, so the digest stays the
+                // batch's last send — the step `mesh/lab` waits on.
+                if (newcomers.isNotEmpty()) blobExchange.reask()
                 newcomers.forEach {
                     pushProfileTo(it)
-                    blobExchange.onNeighborAdded(it) // re-ask the new neighbor for blobs we still need
                     forwardSync.onNeighborAdded(it) // re-offer carried DMs addressed to / routable via it
                     keyExchange.onNeighborAdded(it) // re-ask the new neighbor for keys we're still missing
                     ackSync.onNeighborAdded(it) // re-send any broadcast/group delivery tick we owe it, over the link

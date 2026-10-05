@@ -42,6 +42,12 @@ class FakeLoopTransport(
     /** Node ids a test declares as streaming a file in to us right now. */
     val arrivingFrom = mutableSetOf<String>()
 
+    /** The plane a test declares a file from each peer would ride ([bulkRouteTo]); unnamed peers ride none. */
+    val bulkRoutes = mutableMapOf<String, BulkRoute>()
+
+    /** Peers a test saw this node arm a bulk transfer toward ([expectBulkTransfer]), in order. */
+    val bulkArmed = java.util.concurrent.CopyOnWriteArrayList<String>()
+
     /** What every [sendFile] that reached a peer asked of the link, offset included (#116), in order. */
     val filesSent = java.util.concurrent.CopyOnWriteArrayList<FileMeta>()
 
@@ -92,6 +98,13 @@ class FakeLoopTransport(
     override fun arrivingFiles(): Map<String, ArrivingFile> = arriving.associateWith { ArrivingFile(it, bytes = 0, total = null) }
 
     override fun fileArrivingFrom(nodeId: String): Boolean = nodeId in arrivingFrom
+
+    override fun bulkRouteTo(nodeId: String): BulkRoute = bulkRoutes[nodeId] ?: BulkRoute.None
+
+    override fun expectBulkTransfer(nodeId: String): Boolean {
+        bulkArmed += nodeId
+        return bulkRoutes[nodeId] == BulkRoute.Reachable
+    }
 
     override fun fileInFlightTo(
         nodeId: String,

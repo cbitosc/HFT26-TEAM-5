@@ -141,7 +141,8 @@ class MessageRepository(
     /** Marks attachment [hash] animated on every row naming it — the "GIF" label's locally-derived flag. */
     suspend fun markAttachmentAnimated(hash: String) = dao.markAttachmentAnimated(hash)
 
-    suspend fun hashesNeedingFetch(): List<String> = dao.hashesNeedingFetch()
+    /** Attachment hashes stored rows name but the store lacks, each to the sender of the earliest such row. */
+    suspend fun attachmentsNeedingFetch(): Map<String, String> = dao.attachmentsNeedingFetch().associate { it.hash to it.senderId }
 
     /** The held identity a file whose bytes hash to [bytesHash] already goes by, if any (ADR 2026-10.mptm). */
     suspend fun attachmentIdentityFor(bytesHash: String): AttachmentIdentityRow? = dao.identityFor(bytesHash)

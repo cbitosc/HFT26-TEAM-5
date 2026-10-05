@@ -36,8 +36,9 @@ class ForwardSync(
     private val authenticate: suspend (WireEnvelope, RelayEnvelope) -> Boolean = { _, _ -> true },
     // Invoked once when a frame is actually persisted, so the orchestrator can custody any out-of-band blob it
     // references (an image): the frame carries only a content hash, so the carrier eager-pulls + holds the bytes
-    // keyed to the frame's lifetime. Defaulted to a no-op so the pure tests and non-blob call sites are unaffected.
-    private val onCarried: suspend (RelayEnvelope) -> Unit = {},
+    // keyed to the frame's lifetime, asking the neighbour the frame came from (null for our own) among the likeliest
+    // holders (ADR 2026-10.f7gg). Defaulted to a no-op so the pure tests and non-blob call sites are unaffected.
+    private val onCarried: suspend (RelayEnvelope, String?) -> Unit = { _, _ -> },
     // Invoked once per carried frame [onDigest] actually sends, with the peer it went to — the fact behind the
     // Your mesh screen's "passed along" / "handed straight to" numbers (`ContributionLedger` decides whether
     // it counts). Defaulted to a no-op so the pure tests are unaffected.
@@ -67,6 +68,8 @@ class ForwardSync(
         wire: WireEnvelope,
         envelope: RelayEnvelope,
         origin: Int,
+        // The neighbour a relayed frame came from, handed to [onCarried]; null for our own.
+        from: String? = null,
     ) {
         if (!envelope.isStorable()) return
         if (acked.contains(envelope.id) || store.has(envelope.id)) return
@@ -90,7 +93,7 @@ class ForwardSync(
             return
         }
         // Now custody any blob the frame references (e.g. an image), so a late joiner can still pull it from us.
-        onCarried(envelope)
+        onCarried(envelope, from)
     }
 
     /**

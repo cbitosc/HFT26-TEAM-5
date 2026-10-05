@@ -247,7 +247,7 @@ class MeshManagerTest {
 
         override suspend fun liveIds(now: Long): List<String> = synchronized(frames) { frames.keys.toList() }
 
-        override suspend fun attachmentHashesNeedingFetch(): List<String> = emptyList()
+        override suspend fun attachmentsNeedingFetch(): Map<String, String> = emptyMap()
 
         override suspend fun recipientOf(id: String): String? = synchronized(frames) { frames[id]?.envelope?.recipientId }
 

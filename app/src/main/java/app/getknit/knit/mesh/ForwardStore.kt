@@ -76,9 +76,10 @@ interface ForwardStore {
     /**
      * Content hashes referenced by a carried chat frame whose blob we don't yet hold — the carrier's side of
      * the "still-missing blobs" set. Re-requested on startup / neighbor-join so a carrier keeps pulling the
-     * image it is custodying until it (or the frame's TTL) resolves.
+     * image it is custodying until it (or the frame's TTL) resolves. Each maps to the author of the earliest frame
+     * naming it, whom the re-armed want asks first (ADR 2026-10.f7gg).
      */
-    suspend fun attachmentHashesNeedingFetch(): List<String>
+    suspend fun attachmentsNeedingFetch(): Map<String, String>
 
     /** The carried frame [id]'s cleartext recipient, or null if not held. */
     suspend fun recipientOf(id: String): String?

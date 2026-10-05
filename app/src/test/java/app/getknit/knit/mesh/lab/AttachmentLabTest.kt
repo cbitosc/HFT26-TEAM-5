@@ -4,7 +4,6 @@ import app.getknit.knit.data.message.Conversations
 import app.getknit.knit.data.message.DeliveryPlane
 import app.getknit.knit.mesh.BlobExchange
 import app.getknit.knit.mesh.lora.FakeMeshtasticAir
-import app.getknit.knit.mesh.protocol.FrameType
 import app.getknit.knit.mesh.sha256Hex
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -292,12 +291,12 @@ class AttachmentLabTest {
      * the Moto G's slow controller — Bob's copy takes minutes to land. In that window the 60 s re-offer
      * re-asked every neighbour for it, Alice served it again, and Carol — who had Bob's first ask on file as
      * a *wanter* and pulled the bytes for it — pushed him a third copy the moment hers landed; Bob then pushed
-     * Carol one she held. Here Alice's link to Bob is the slow one (her serve is parked with its header
-     * across), and Alice's frame to Carol is parked too, so Bob's ask is the first Carol hears of the picture
-     * and she pulls her copy *for* it: the wanter shape, pinned rather than raced. Left to the race, Carol's
-     * own pull can land before Bob's ask reaches her, and her serve of that fresh ask — correct under the ADR —
-     * reads as the push (CI job 4939, one slow core). The re-link Bob ↔ Carol is the tick, and the file
-     * recorder on every transport is the phone's `file …` line: exactly one copy per (hash, link), asked for once.
+     * Carol one she held. Since #136 (ADR 2026-10.f7gg) Bob's first ask goes to Alice alone, the author, and the
+     * round widens to Carol only if no header lands within its grace. Here Alice's link to Bob is the slow one
+     * (her serve is parked with its header across), so the round never widens: Carol hears of the picture only
+     * from Bob's relay of the frame, pulls her own copy from Alice as a carrier, and never has an ask of Bob's on
+     * file. The re-link Bob ↔ Carol is the tick, and the file recorder on every transport is the phone's `file …`
+     * line: exactly one copy per (hash, link), and Bob asks once.
      */
     @Test
     fun aPictureAlreadyStreamingInIsNeitherAskedForAgainNorServedTwice() =
@@ -307,48 +306,37 @@ class AttachmentLabTest {
             val carol = lab.node("carol").apply { setDisplayName("Carol") }
             lab.linkAll(alice to bob, bob to carol, alice to carol)
             lab.awaitAcquainted(alice, bob, carol)
-            // Bob's own link-up hooks re-ask each new neighbour for every blob he lacks, and custody parity does not
-            // wait for them (the other end's digest can settle it). One that runs after the picture's frame lands
-            // is a second ask before the header — a legitimate one, and not the re-ask this scenario pins. His
-            // digest to a neighbour is sent after that neighbour's re-ask (`MeshManager.watchNeighbors`). Carol's
-            // hooks too: one stalled past her want for the picture re-asks Bob, and handled after his bytes land
-            // it is a fresh ask he rightly serves — which reads as the push this scenario pins.
+            // Each end's link-up hooks have run (its digest goes out after its re-ask), so none of them asks below.
             lab.await(1) {
                 val ran = listOf(bob to listOf(alice, carol), carol to listOf(alice, bob))
                 ran.all { (node, peers) -> peers.all { it.nodeId in node.transport.digestsSent } }.let { if (it) 1 else 0 }
             }
 
             alice.transport.holdFiles(bob.transport) // Bob's link is the Moto's: the header lands, the bytes take their time
-            alice.transport.hold(carol.transport) // Carol hears of the picture from Bob, never from Alice's frame
+            alice.transport.hold(carol.transport) // Carol hears of the picture from Bob's relay, never from Alice's frame
             val picture = Random(7).nextBytes(4_096)
             assertTrue(alice.sendImage(picture, "for bob", to = bob))
             val id = alice.ownMessageId(alice.dmWith(bob), "for bob")
             val hash = checkNotNull(alice.attachmentHash(alice.dmWith(bob), id))
             val fileToBob = "${bob.nodeId} ATTACHMENT $hash"
 
-            // Alice's serve to Bob is on the link. Bob's ask is emitted before his relay is even scheduled, so it
-            // is the first frame at Carol to name the hash: she processes it holding nothing, asks for the picture
-            // herself, and pulls her copy whole and at once — Bob's ask on file behind it.
+            // Alice's serve to Bob is on the link, header across. Carol carries Bob's relay of the frame and asks the
+            // author for her own copy, which lands whole: Alice's files to her are not held, only her frames.
             lab.await(1) { alice.transport.heldFiles(bob.transport).count { it == hash } }
             lab.await(1) { if (carol.blobs.exists(hash)) 1 else 0 }
             assertTrue("the header across is what Bob reads as arriving", hash in bob.transport.arrivingFiles())
-            assertTrue("Carol holds the bytes and had Bob's ask — and pushes nothing", carol.transport.files.none { it == fileToBob })
-            // Carol's own ask reached Bob too, and Bob handles frames one at a time: it can sit behind the tail of
-            // his work on Alice's frame. Answered only after his bytes land, it is a fresh ask he rightly serves —
-            // which reads as the push this scenario pins (CI job 5268). Answered now, it finds the bytes arriving.
-            lab.await(1) { if (bob.metrics.files().blobAsksHandled > 0) 1 else 0 }
             alice.transport.release(carol.transport) // Alice's copy of the frame lands on Carol, behind Bob's relay of it
 
-            // The 60 s re-offer, for the link that is not busy: Bob re-arms from the database and re-asks each
-            // neighbour for what he still lacks — unless its bytes are already on the way.
+            // Past the first ask's grace, and a round on: the 60 s re-offer, for the link that is not busy. Bob
+            // re-arms from the database and steps every blob he lacks — but this one's bytes are already on the way.
+            lab.clock.advance(BlobExchange.ROUND_MS + MeshLab.FIRST_ASK_GRACE_MS)
             val digests = bob.transport.digestsSent.count { it == carol.nodeId }
             lab.unlink(bob, carol)
             lab.link(bob, carol)
             lab.await(digests + 1) { bob.transport.digestsSent.count { it == carol.nodeId } } // the batch's last hook
-            val asks = bob.transport.sent.filter { it.contains(" ${FrameType.BLOB_REQ} ") }
-            assertEquals("one ask per neighbour, and none while the bytes stream in:\n$asks", 2, asks.size)
-            assertEquals(1, asks.count { it.contains(" ${alice.nodeId.take(6)} ") })
-            assertEquals(1, asks.count { it.contains(" ${carol.nodeId.take(6)} ") })
+            bob.reoffer()
+            val asks = bob.transport.blobAsks.filter { it.hash == hash }
+            assertEquals("one ask, of the author alone, none while the bytes stream in:\n$asks", listOf(alice.nodeId), asks.map { it.to })
             assertEquals("Alice served Bob once", 1, alice.transport.files.count { it == fileToBob })
 
             alice.transport.releaseFiles(bob.transport) // the bytes land
@@ -409,7 +397,12 @@ class AttachmentLabTest {
             assertTrue(first.contentEquals(bob.attachmentPlain(bob.dmWith(alice), firstId)))
             assertTrue(second.contentEquals(bob.attachmentPlain(bob.dmWith(alice), secondId)))
             listOf(firstHash, secondHash).forEach { hash ->
-                assertEquals("Alice served $hash once", 1, alice.transport.files.count { it == "${bob.nodeId} ATTACHMENT $hash" })
+                val which = if (hash == firstHash) "the first picture" else "the second picture"
+                assertEquals(
+                    "Alice served $which once; Bob's asks for it: ${bob.transport.blobAsks.filter { it.hash == hash }}",
+                    1,
+                    alice.transport.files.count { it == "${bob.nodeId} ATTACHMENT $hash" },
+                )
             }
         }
 

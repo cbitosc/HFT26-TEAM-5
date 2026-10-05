@@ -98,11 +98,14 @@ class ForwardSyncTest {
 
         // Attachment hashes of held chat frames (the fake doesn't track blob presence, so it doesn't filter
         // already-held ones — enough for the sync tests, which drive the pull via the onCarried hook).
-        override suspend fun attachmentHashesNeedingFetch(): List<String> =
+        override suspend fun attachmentsNeedingFetch(): Map<String, String> =
             rows.values
-                .mapNotNull {
-                    WireCodec.decodePayload<ChatContent>(it.frame.envelope.payload)?.attachmentHash
-                }.distinct()
+                .mapNotNull { row ->
+                    WireCodec.decodePayload<ChatContent>(row.frame.envelope.payload)?.attachmentHash?.let {
+                        it to
+                            row.frame.envelope.senderId
+                    }
+                }.toMap()
     }
 
     /** Records what the sync sends and exposes a fixed neighbor set. */
@@ -342,7 +345,7 @@ class ForwardSyncTest {
         runTest {
             val carried = mutableListOf<String>()
             val store = FakeForwardStore()
-            val sync = ForwardSync(RecordingTransport(), store, clock = { 0L }, onCarried = { carried += it.id })
+            val sync = ForwardSync(RecordingTransport(), store, clock = { 0L }, onCarried = { env, _ -> carried += env.id })
 
             val relay = dm("m1", "a", "b")
             sync.onSeen(wireOf(relay), relay, ForwardStore.ORIGIN_RELAY)
@@ -363,12 +366,13 @@ class ForwardSyncTest {
                     FakeForwardStore(),
                     clock = { 0L },
                     authenticate = { _, _ -> false },
-                    onCarried = { carried += it.id },
+                    onCarried = { env, _ -> carried += env.id },
                 )
             val relay = dm("m1", "a", "b")
             rejecting.onSeen(wireOf(relay), relay, ForwardStore.ORIGIN_RELAY) // auth-rejected → not stored
 
-            val allowing = ForwardSync(RecordingTransport(), FakeForwardStore(), clock = { 0L }, onCarried = { carried += it.id })
+            val allowing =
+                ForwardSync(RecordingTransport(), FakeForwardStore(), clock = { 0L }, onCarried = { env, _ -> carried += env.id })
             val kr = keyReq("q")
             allowing.onSeen(wireOf(kr), kr, ForwardStore.ORIGIN_RELAY) // non-storable control frame → not stored
 
@@ -387,7 +391,7 @@ class ForwardSyncTest {
                     RecordingTransport(),
                     FakeForwardStore(refuseAll = true),
                     clock = { 0L },
-                    onCarried = { carried += it.id },
+                    onCarried = { env, _ -> carried += env.id },
                 )
             val env = dm("m1", "a", "b")
             sync.onSeen(wireOf(env), env, ForwardStore.ORIGIN_RELAY)
@@ -400,7 +404,7 @@ class ForwardSyncTest {
         runTest {
             val carried = mutableListOf<String>()
             val store = FakeForwardStore()
-            val sync = ForwardSync(RecordingTransport(), store, clock = { 0L }, onCarried = { carried += it.id })
+            val sync = ForwardSync(RecordingTransport(), store, clock = { 0L }, onCarried = { env, _ -> carried += env.id })
             val env = dm("m1", "a", "b")
             sync.onSeen(wireOf(env), env, ForwardStore.ORIGIN_RELAY)
             sync.onAck("m1", senderId = "b") // recipient ack → purge + tombstone
@@ -464,7 +468,7 @@ class ForwardSyncTest {
         runTest {
             val carried = mutableListOf<String>()
             val store = FakeForwardStore()
-            val sync = ForwardSync(RecordingTransport(), store, clock = { 0L }, onCarried = { carried += it.id })
+            val sync = ForwardSync(RecordingTransport(), store, clock = { 0L }, onCarried = { env, _ -> carried += env.id })
             val env = dm("m1", "a", "b")
 
             sync.onAck("m1", senderId = "b") // the recipient's receipt, served ahead of the DM
@@ -861,7 +865,7 @@ class ForwardSyncTest {
         val delivered = mutableListOf<String>()
         val notified = mutableListOf<String>()
         private val seenDelivered = mutableSetOf<String>()
-        val sync = ForwardSync(transport, store, clock = { 0L }, onCarried = ::onCarried)
+        val sync = ForwardSync(transport, store, clock = { 0L }, onCarried = { env, _ -> onCarried(env) })
         private val router = MeshRouter(transport, scope, jitter = { 0L }) { wire, env, from, _ -> onDeliver(wire, env, from) }
 
         // Custody a carried chat frame's image: eager-pull the blob so a late joiner can pull it from us
@@ -933,7 +937,7 @@ class ForwardSyncTest {
                 transport.neighbors.collect { current ->
                     current.filter { it.nodeId !in known }.forEach {
                         sync.onNeighborAdded(it)
-                        blobExchange.onNeighborAdded(it)
+                        blobExchange.reask()
                     }
                     known = current.map { it.nodeId }.toSet()
                 }

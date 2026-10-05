@@ -167,6 +167,14 @@ data class ArrivingFile(
         get() = total?.takeIf { it > 0 && bytes <= it }?.let { bytes.toFloat() / it }
 }
 
+/**
+ * How a file from a neighbour would most likely reach us ([MeshTransport.bulkRouteTo]): [Linked] when a
+ * high-throughput plane (Wi-Fi Aware) holds a live link to it now, [Reachable] when that plane sees it but holds no
+ * link (a holder serving a large attachment arms one and waits for it, `CompositeMeshTransport.sendFile`), else
+ * [None]. `BlobExchange` orders its first ask by it (ADR 2026-10.f7gg); nothing routes on it.
+ */
+enum class BulkRoute { Linked, Reachable, None }
+
 /** One entry per key; when two links stream the same blob, the copy furthest along is the one that counts. */
 fun Iterable<ArrivingFile>.furthestByKey(): Map<String, ArrivingFile> =
     groupingBy { it.key }.reduce { _, kept, other -> if (other.bytes > kept.bytes) other else kept }
@@ -350,6 +358,21 @@ interface MeshTransport {
      * come). Default no-op false — a link-based transport (Bluetooth) is always "up" and needs no arming.
      */
     fun expectBulkTransfer(nodeId: String): Boolean = false
+
+    /**
+     * How a file from [nodeId] would most likely reach us: over a live high-throughput link, over one such a plane
+     * can raise, or over neither ([BulkRoute]). A read of the plane's own sets, cheap and non-blocking, for
+     * `BlobExchange` to put a Wi-Fi Aware neighbour ahead of a Bluetooth-only one when it picks whom to ask first.
+     * The default answers from this transport's own [neighbors] and [reachable], and only for a
+     * [highThroughput] one; the composite asks its high-throughput child.
+     */
+    fun bulkRouteTo(nodeId: String): BulkRoute =
+        when {
+            !highThroughput -> BulkRoute.None
+            neighbors.value.any { it.nodeId == nodeId } -> BulkRoute.Linked
+            reachable.value.any { it.nodeId == nodeId } -> BulkRoute.Reachable
+            else -> BulkRoute.None
+        }
 
     /**
      * The files whose bytes are streaming **in** on a live link right now — a `FILE_HEADER` has arrived and

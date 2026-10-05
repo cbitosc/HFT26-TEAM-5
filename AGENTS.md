@@ -351,15 +351,21 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   `MeshController.neighbors` (ADR 2026-09.2ajk) — don't add a second gate. Counters flush on the 60 s tick,
   never per frame, and nothing here leaves the phone.
 - **When touching `mesh/BlobExchange`, `FramedLink`'s `rxKey` / pending-file count, `MeshTransport.arrivingFiles`
-  / `fileInFlightTo`, or what re-asks for a blob (`rewantMissingBlobs`, the tick's `onNeighborAdded`):** READ
+  / `fileInFlightTo`, or what re-asks for a blob (`rewantMissingBlobs`, the tick's `reask`):** READ
   ADR 2026-09.4tx5 (and 2026-09.ptv8 for the database re-arm). A blob is served only to a fresh ask — nothing
   is pushed to a peer that did not just ask, there is no wanter set — and "is it on the way" is a read of the
   link (and of the store, `BlobStore.storing`: a blob is screened before it is held, #109), never a memo with a
   TTL: the receiver stays quiet for a hash whose header is in, the holder refuses a
   re-ask for a key still queued or streaming to that peer. The Bluetooth stack's buffer sits between those reads
-  (ADR 2026-10.nxfb, #121): the tick asks nothing of a peer whose file is streaming in (`fileArrivingFrom`), and a
-  file the link fed in full stays in flight while the link goes on feeding that peer. The lab pins it with `LabTransport.holdFiles` and
-  the `files` recorder (one copy per (hash, link)). **Before touching `FramedLink.rxFile`, `ArrivingFile`,
+  (ADR 2026-10.nxfb, #121): a peer asked before is not asked again while its file is streaming in
+  (`fileArrivingFrom`), and a file the link fed in full stays in flight while the link goes on feeding that peer. The
+  lab pins it with `LabTransport.holdFiles` and the `files` recorder (one copy per (hash, link)). **Before touching
+  `BlobExchange.want`'s hints, its round (`nextAsk`, `FIRST_ASK_GRACE_MS`, `ROUND_MS`) or
+  `MeshTransport.bulkRouteTo`:** READ ADR 2026-10.f7gg — a round asks the likeliest holder alone (author, then Wi-Fi
+  Aware linked, then reachable, then the source hop) and widens to everyone only after its grace, because every
+  holder serves a fresh ask; there is no negative answer on the wire, so never make it one-at-a-time without one.
+  A link-up clears its newcomer's asks (`BlobExchange.linked`), since an ask can die with a link.
+  Lab: `BlobFirstAskLabTest`. **Before touching `FramedLink.rxFile`, `ArrivingFile`,
   `FileHeaderWire.size`, `MeshController.arrivals` / `arrivalTicker`, `ChatViewModel.arrivals` or
   `ui/chat/ArrivalIndicator`:** READ ADR 2026-10.y9qh — the chat's progress ring is the same read of the link
   (bytes in, and the size the header declared: a label, never a bound), polled only while an attachment the

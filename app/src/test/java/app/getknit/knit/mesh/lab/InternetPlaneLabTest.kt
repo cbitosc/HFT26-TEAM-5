@@ -1,6 +1,7 @@
 package app.getknit.knit.mesh.lab
 
 import app.getknit.knit.data.message.DeliveryPlane
+import app.getknit.knit.mesh.BlobExchange
 import app.getknit.knit.mesh.crypto.scope.ScopeCrypto
 import app.getknit.knit.mesh.protocol.FrameType
 import app.getknit.knit.mesh.spool.AttachmentDeferPolicy
@@ -396,12 +397,14 @@ class InternetPlaneLabTest {
      * The asker re-asks on its own 60 s tick while it still lacks them (`rewantMissingBlobs`, ADR 2026-09.ptv8),
      * so the wait is a minute at most, not the half hour #53 saw.
      *
-     * Carol is the asker and holds the frame only as a carrier: she is linked to Bob alone, has no relay, and
-     * Alice is off the radios entirely, so Bob is the one node that can ever hand her these bytes. The relay
-     * starts out as a frames-only one (no attachment limits in its HELLO, so a conforming client sends it no
-     * attachment record at all), which is what makes the order the case needs a fact rather than a race:
-     * Carol necessarily asks while the picture exists nowhere but on Alice. Growing the support mid-run —
-     * the spool re-advertises on the next dial — is what lands the bytes on Bob; the re-link is Carol's tick.
+     * Carol holds the frame only as a carrier: she is linked to Bob alone, has no relay, and Alice is off the
+     * radios entirely, so Bob is the one node that can ever hand her these bytes. The relay starts out as a
+     * frames-only one (no attachment limits in its HELLO, so a conforming client sends it no attachment record at
+     * all), which is what makes the order the case needs a fact rather than a race: Bob asks his one neighbour
+     * while the picture exists nowhere but on Alice, and Carol, who wants it too, learns from that ask that he
+     * lacks it — so her round asks nobody (ADR 2026-10.f7gg). Growing the support mid-run — the spool
+     * re-advertises on the next dial — is what lands the bytes on Bob; a round on, the re-link is Carol's tick,
+     * and her next round asks him.
      */
     @Test
     fun aPhotoTheRelayDeliveredIsServedToTheNeighbourWhoAskedWhileWeLackedItOnItsNextAsk() =
@@ -430,14 +433,14 @@ class InternetPlaneLabTest {
                     bob.decrypted(bob.dmWith(alice)).count { it.second == "off the relay" }
                 },
             )
-            // Bob relays the frame on; Carol carries it, wants the picture it names, and asks the one
-            // neighbour she has — who cannot serve her, because the bytes are still Alice's alone.
+            // Bob asks the one neighbour he has, and relays the frame on; Carol carries it and wants the picture too,
+            // but cannot serve him — the bytes are still Alice's alone — and he is the only one she could ask.
             assertTrue(
-                "carol never asked bob for the picture: ${carol.transport.sent}",
-                lab.tryAwait(1) { carol.transport.sent.count { it.contains(" ${FrameType.BLOB_REQ} ") } },
+                "bob never asked carol for the picture: ${bob.transport.blobAsks}",
+                lab.tryAwait(1) { bob.transport.blobAsks.count { it.to == carol.nodeId && it.hash == hash } },
             )
             assertTrue("the bytes reached the relay after all: ${spool.chunksPut}", spool.chunksPut.isEmpty())
-            assertFalse("bob held the picture before carol asked for it", bob.blobs.exists(hash))
+            assertFalse("bob held the picture before he asked carol for it", bob.blobs.exists(hash))
 
             spool.attachments = true // the relay grows attachment support; the limits are read per dial
             spool.dropSockets()
@@ -448,17 +451,23 @@ class InternetPlaneLabTest {
                 lab.tryAwait(1, timeoutMs = MeshLab.SPOOL_AWAIT_MS) { if (bob.blobs.exists(hash)) 1 else 0 },
             )
 
-            // Bob remembers nothing about Carol's ask and pushes nothing: she may hold the bytes by now, or be
-            // receiving them from someone Bob cannot see. Her own next ask is what says she still lacks them.
+            // Bob pushes nothing: Carol may hold the bytes by now, or be receiving them from someone Bob cannot see.
+            // Her own next ask is what says she still lacks them.
             val fileToCarol = "${carol.nodeId} ATTACHMENT $hash"
             assertTrue("bob pushed the picture unasked", bob.transport.files.none { it == fileToCarol })
+            lab.clock.advance(BlobExchange.ROUND_MS) // her next round is due
             lab.unlink(bob, carol)
-            lab.link(bob, carol) // the 60 s re-offer: Carol re-arms from the database and re-asks her one neighbour
+            lab.link(bob, carol) // the 60 s re-offer: Carol re-arms from the database and asks her one neighbour
             assertTrue(
                 "carol was never served the picture bob pulled off the relay",
                 lab.tryAwait(1) { if (carol.blobs.exists(hash)) 1 else 0 },
             )
             assertEquals("served once, to the fresh ask", 1, bob.transport.files.count { it == fileToCarol })
+            // Carol had Bob's ask on file while she lacked the bytes and pulled for it: holding them, she pushes nothing.
+            assertTrue(
+                "carol pushed bob the copy she pulled for his ask",
+                carol.transport.files.none { it.startsWith("${bob.nodeId} ATTACHMENT $hash") },
+            )
             // Carol carries the sealed blob and cannot read it; Bob, the addressee, is who the picture is for.
             assertArrayEquals(bob.blobs.bytes(hash), carol.blobs.bytes(hash))
             assertArrayEquals(picture, bob.attachmentPlain(bob.dmWith(alice), id))

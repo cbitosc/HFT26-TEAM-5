@@ -203,7 +203,7 @@ class InboundPipelineTest {
 
         override suspend fun liveIds(now: Long): List<String> = frames.keys.toList()
 
-        override suspend fun attachmentHashesNeedingFetch(): List<String> = emptyList()
+        override suspend fun attachmentsNeedingFetch(): Map<String, String> = emptyMap()
 
         override suspend fun recipientOf(id: String): String? = frames[id]?.envelope?.recipientId
 
@@ -2096,7 +2096,7 @@ class InboundPipelineTest {
             assertEquals("decided the moment it is heard", "photoB", rig.groupMap[group.id]?.photoHash)
             assertEquals(100L, rig.groupMap[group.id]?.photoUpdatedAt)
             assertNull("not shown until its bytes arrive", rig.groupMap[group.id]?.photoShownHash)
-            coVerify { rig.blobExchange.want("photoB") }
+            coVerify { rig.blobExchange.want("photoB", any(), any(), any()) }
 
             // The pulled blob lands → the group shows it now that it still decides on it.
             rig.pipeline.onObtained("photoB")
@@ -2132,7 +2132,7 @@ class InboundPipelineTest {
             coVerify(exactly = 0) { rig.blobs.deleteIfUnreferenced("photoC") }
 
             rig.deliver(alice, rig.groupUpdate(alice, group, sentAt = 8L))
-            coVerify(exactly = 1) { rig.blobExchange.want("photoC") }
+            coVerify(exactly = 1) { rig.blobExchange.want("photoC", any(), any(), any()) }
         }
 
     /**
@@ -2216,7 +2216,7 @@ class InboundPipelineTest {
             val same = rig.group(members = members, createdBy = alice.nodeId, id = "g-p", photoHash = "new", photoUpdatedAt = 9L)
             rig.deliver(alice, rig.groupUpdate(alice, same, sentAt = 12L))
 
-            coVerify { rig.blobExchange.want("new") }
+            coVerify { rig.blobExchange.want("new", alice.nodeId, null, null) }
             assertEquals("old", rig.groupMap["g-p"]?.photoShownHash)
             assertEquals(0, rig.msgMap.values.count { it.kind == MessageEntity.KIND_GROUP_PHOTO })
 
@@ -2316,9 +2316,29 @@ class InboundPipelineTest {
 
             rig.pipeline.onCarriedFrame(env)
 
-            // Passed the have-it gate (has=false) and the budget gate (bytes=0) → pulled.
+            // Passed the have-it gate (has=false) and the budget gate (bytes=0) → pulled, asked of its author first.
             coVerify { rig.blobStore.has("att1") }
             coVerify { rig.blobs.carrierOnlyBlobBytes() }
+            coVerify { rig.blobExchange.want("att1", alice.nodeId, null, null) }
+
+            rig.pipeline.onCarriedFrame(rig.attachmentChat(alice, id = "a9", attachmentHash = "att9"), via = "carrier")
+            coVerify { rig.blobExchange.want("att9", alice.nodeId, "carrier", null) }
+        }
+
+    /** #136: the first ask goes to the likeliest holder alone — the author, and the hop the frame came from ranks too. */
+    @Test
+    fun aDeliveredAttachmentIsWantedWithItsAuthorAndTheHopItCameFrom() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.peerMap[alice.nodeId] =
+                PeerEntity(nodeId = alice.nodeId, pubKey = alice.bundle.encoded, verified = true, updatedAt = 1L)
+
+            rig.deliver(alice, rig.attachmentChat(alice, id = "r1", attachmentHash = "room-pic", mime = "image/jpeg"), from = "carrier")
+            rig.deliver(alice, rig.sealedFileDm(alice, id = "d1", attachmentHash = "dm-doc", fileName = "plan.pdf"), from = "carrier")
+
+            coVerify { rig.blobExchange.want("room-pic", alice.nodeId, "carrier", null) }
+            coVerify { rig.blobExchange.want("dm-doc", alice.nodeId, "carrier", null) }
         }
 
     @Test
@@ -2508,7 +2528,7 @@ class InboundPipelineTest {
             assertEquals("room-hash", row.attachmentHash)
             assertEquals("image/jpeg", row.attachmentMime)
             assertNull(row.attachmentKey)
-            coVerify(exactly = 0) { rig.blobExchange.want("room-hash") } // held already: nothing asked of the mesh
+            coVerify(exactly = 0) { rig.blobExchange.want("room-hash", any(), any(), any()) } // held already: nothing asked of the mesh
             coVerify { rig.messages.attachmentKeyWantingPlain("room-hash") }
         }
 
@@ -3843,7 +3863,7 @@ class InboundPipelineTest {
             rig.deliver(alice, rig.profile(alice, avatarHash = "av3", sentAt = 5L))
 
             assertNull("a held but refused avatar stays off the row", rig.peerMap[alice.nodeId]?.avatarHash)
-            coVerify(exactly = 0) { rig.blobExchange.want("av3") }
+            coVerify(exactly = 0) { rig.blobExchange.want("av3", any(), any(), any()) }
 
             rig.settings.contentFilteringEnabled.value = false
             rig.deliver(alice, rig.profile(alice, avatarHash = "av3", sentAt = 6L))
@@ -3875,7 +3895,7 @@ class InboundPipelineTest {
 
             assertEquals("Ann", rig.peerMap[alice.nodeId]?.name)
             assertNull("a held but refused avatar stays off the row", rig.peerMap[alice.nodeId]?.avatarHash)
-            coVerify(exactly = 0) { rig.blobExchange.want("av4") }
+            coVerify(exactly = 0) { rig.blobExchange.want("av4", any(), any(), any()) }
 
             rig.settings.contentFilteringEnabled.value = false
             rig.deliver(

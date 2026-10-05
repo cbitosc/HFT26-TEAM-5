@@ -1,6 +1,7 @@
 package app.getknit.knit
 
 import app.getknit.knit.mesh.ArrivingFile
+import app.getknit.knit.mesh.BulkRoute
 import app.getknit.knit.mesh.CompositeMeshTransport
 import app.getknit.knit.mesh.FanoutHint
 import app.getknit.knit.mesh.FileKind
@@ -458,6 +459,25 @@ class CompositeMeshTransportTest {
         }
 
     private fun bigAttachment() = FileMeta(FileKind.ATTACHMENT, "k", "image/jpeg")
+
+    @Test
+    fun aFilesPlaneIsTheHighThroughputChildsLinkThenItsReachThenNone() =
+        runTest(UnconfinedTestDispatcher()) {
+            // BlobExchange ranks its first ask by this (ADR 2026-10.f7gg): a peer Bluetooth links but Wi-Fi Aware only
+            // sees is Reachable, never Linked — the Bluetooth link carries the ask, and the holder raises the NDP.
+            val bt = FakeChild()
+            val nan = FakeChild(highThroughput = true)
+            val composite = CompositeMeshTransport(listOf(bt, nan), backgroundScope)
+            bt.setNeighbors(Peer("linked"), Peer("seen"), Peer("bt"))
+            nan.setNeighbors(Peer("linked"))
+            nan.setReachable(Peer("linked"), Peer("seen"))
+            advanceUntilIdle()
+            assertEquals(BulkRoute.Linked, composite.bulkRouteTo("linked"))
+            assertEquals(BulkRoute.Reachable, composite.bulkRouteTo("seen"))
+            assertEquals(BulkRoute.None, composite.bulkRouteTo("bt"))
+            val btOnly = CompositeMeshTransport(listOf(bt), backgroundScope)
+            assertEquals("Bluetooth alone answers None", BulkRoute.None, btOnly.bulkRouteTo("linked"))
+        }
 
     @Test
     fun bigAttachmentPrefersTheHighThroughputPlaneWhenBothLinked() =

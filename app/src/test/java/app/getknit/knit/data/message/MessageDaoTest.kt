@@ -20,15 +20,15 @@ class MessageDaoTest : RoomDbTest() {
     private val dao get() = db.messageDao()
 
     @Test
-    fun `hashesNeedingFetch returns referenced hashes not yet in blobs, deduped`() =
+    fun `attachmentsNeedingFetch returns referenced hashes not yet in blobs, deduped, with the earliest sender`() =
         runTest {
-            dao.upsert(msg("m1", attachmentHash = "H1"))
+            dao.upsert(msg("m1", attachmentHash = "H1", sender = "forwarder", sentAt = 5L))
             dao.upsert(msg("m2", attachmentHash = "H2")) // H2 is held below → excluded
-            dao.upsert(msg("m3", attachmentHash = "H1")) // duplicate reference → H1 appears once
+            dao.upsert(msg("m3", attachmentHash = "H1", sender = "author", sentAt = 2L)) // duplicate → H1 once, earliest
             dao.upsert(msg("m4", attachmentHash = null)) // no attachment → excluded
             db.blobDao().insert(BlobEntity(hash = "H2", mime = "image/jpeg", bytes = ByteArray(0)))
 
-            assertEquals(listOf("H1"), dao.hashesNeedingFetch())
+            assertEquals(listOf(NeededAttachment("H1", "author")), dao.attachmentsNeedingFetch())
         }
 
     @Test
