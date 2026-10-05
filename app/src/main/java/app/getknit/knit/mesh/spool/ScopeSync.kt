@@ -239,6 +239,12 @@ class ScopeSync(
     private val metrics: MeshMetrics = MeshMetrics(),
     private val clock: () -> Long = { System.currentTimeMillis() },
     private val jitter: () -> Long = { Random.nextLong(RECONNECT_JITTER_MS) },
+    // The two `delay`s a calendar-only transition waits on: the timed round ([TICK_INTERVAL_MS]) and the
+    // re-look at an attachment a round could not finish ([ATTACHMENT_RETRY_MS]). A jumped clock cannot move
+    // a `delay`, so the multi-node JVM harness (`mesh/lab`) shortens them for the scenario that waits on one;
+    // production wiring takes the defaults.
+    private val tickIntervalMs: Long = TICK_INTERVAL_MS,
+    private val attachmentRetryMs: Long = ATTACHMENT_RETRY_MS,
 ) {
     private val workers = ConcurrentHashMap<String, Worker>()
     private val sealCache = SealCache(SEAL_CACHE_MAX)
@@ -780,7 +786,7 @@ class ScopeSync(
                 val ticker =
                     host.launch {
                         while (isActive) {
-                            delay(TICK_INTERVAL_MS)
+                            delay(tickIntervalMs)
                             tickDue.set(true)
                             wake()
                         }
@@ -1435,7 +1441,7 @@ class ScopeSync(
                     existing
                 } else {
                     host.launch {
-                        delay(ATTACHMENT_RETRY_MS)
+                        delay(attachmentRetryMs)
                         markDirty(scope.idHex)
                     }
                 }
@@ -2037,7 +2043,7 @@ class ScopeSync(
          * it was the only way a new scope was found.
          */
         private const val RECONCILE_INTERVAL_MS = 60_000L
-        private const val TICK_INTERVAL_MS = 60_000L
+        internal const val TICK_INTERVAL_MS = 60_000L
         private const val HANDSHAKE_TIMEOUT_MS = 20_000L
         private const val RECONNECT_JITTER_MS = 750L
 
@@ -2045,7 +2051,7 @@ class ScopeSync(
         private const val OFFLINE_RECHECK_MS = 60_000L
 
         /** The re-look for an attachment a round could not finish — the cadence the old reconcile gave every scope. */
-        private const val ATTACHMENT_RETRY_MS = 15_000L
+        internal const val ATTACHMENT_RETRY_MS = 15_000L
 
         /** How long a settled attachment goes unasked-about before a timed round checks the spool still has it. */
         private const val ATTACHMENT_RECHECK_MS = 10 * 60_000L

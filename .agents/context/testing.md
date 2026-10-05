@@ -310,8 +310,9 @@ hop (fixed in `MeshRouter.countOverheard`, pinned by `MeshRouterTest`).
   (`meetThenSplit`), then cut the cross-pocket links; the slow path is the clock tier's to pin. And a Trickle
   interval of a second spends the window on offers alone, so the tick that follows is deferred
   (`loraTickDeferred`) — four to eight seconds is the lab's setting.
-- **A DM that arrived over the board is ticked through `DmAckCoalescer`'s 45 s hold** (ADR 054), which the
-  lab does not shorten; a LoRa DM scenario passes `timeoutMs = 60_000` to the oracle.
+- **A DM that arrived over the board is ticked through `DmAckCoalescer`'s 45 s hold** (ADR 054). A LoRa DM
+  scenario whose oracle waits for that tick boots its nodes with `LabLimits(dmAckHoldMs = 1_000)` and keeps the
+  default oracle timeout, never a 60 s one (`aDmSentWhileTheFarBoardWasOffLandsThroughTheBridge`).
 - **Every sealed frame carries the epoch key**, so an absent recipient opens whatever survives a custody
   quota without the conversation's first frames and asks for no reset — the quota is loss, never a wedge
   (`CustodyQuotaLabTest`; the "evicted init needs a reset" premise was wrong).
@@ -322,7 +323,13 @@ hop (fixed in `MeshRouter.countOverheard`, pinned by `MeshRouterTest`).
   moves *decisions* (expiry, floors, LWW, tombstones, presence), never *schedulers* — every periodic loop is
   `delay()`-based and blind to it — so the scenario pokes the work itself: `node.heal()` (fire-and-forget:
   await the effect), `sweepLocalStorage()`, `manager.refreshRelays()`, a re-link for the digest exchange, or
-  a fresh send. Forward only. The seam is `MeshManager(clock = …)` plus the one-liners that hand the same
+  a fresh send. Where no poke reaches the timer, the node boots with it shortened instead of the scenario
+  sitting it out in real time: `LabLimits.calendarRounds()` cuts the Internet plane's timed round (60 s) and
+  attachment re-look (15 s) to a second, `dmAckHoldMs` the LoRa DM ✓✓ hold (45 s, ADR 054). Both stay at the
+  field values by default, so the other spool scenarios still converge on the events, and a lost wake shows as
+  a slow scenario rather than a pass. An oracle that needs the jump goes after it: `assertConverged`'s
+  attachment half waits for bytes a deferral holds until the grace a jump ends (2026-10-04, a 60 s scenario
+  that was waiting out `ACK_GRACE_MS` on the wall clock). Forward only. The seam is `MeshManager(clock = …)` plus the one-liners that hand the same
   clock to `ForwardSync` (load-bearing — its `now` is what `ForwardRepository.store`'s dead-on-arrival and
   future-skew guards compare a frame's `sentAt` against), `KeyExchange`, `BlobExchange`, `PendingInbound`,
   `PendingGroupKeys` and the router's `SeenSet`; production passes the wall clock everywhere. **Not** the
@@ -376,8 +383,21 @@ hop (fixed in `MeshRouter.countOverheard`, pinned by `MeshRouterTest`).
   after the far end has the frame, in order; a hold holds), so a chaos failure is a schedule a slow CI runner
   can produce too: a latent flake, not an artefact. `-Pknit.labChaosRuns=<n>` repeats each scenario n times
   in one JVM on consecutive seeds, each with a fresh `MeshLab` — `scripts/lab-chaos.sh --tests '<Class>'
-  [--runs 20] [--seed S]` wraps it and prints each failure with its seed. A seed replays a distribution of
-  delays, not a schedule (the threads still race for the draws), so re-run a failing seed a few times. Every
+  [--runs 20] [--seed S]` wraps it and prints each failure with its seed. The script splits the seeds across
+  parallel test JVMs (`--shards`, default a quarter of the cores, ~2.5 GB of free memory each; the
+  `labChaosShard<i>` tasks `-Pknit.labChaosShards` registers in `app/build.gradle.kts`), since a chaos JVM is
+  mostly asleep in its own stalls: `SessionLabTest` at 5 runs went from 115 s to 49 s on five. It stamps each
+  sweep with a fingerprint of the tree it compiled (HEAD plus every uncommitted byte under `app/`, `gradle/` and
+  the root build files, kept in the git dir), and `--reuse` answers from that stamp when the tree has not moved
+  and it covered the asked-for patterns with at least as many runs — the reviewer's second sweep of the same
+  tree. It also names as `slow` every scenario that spends more than 6 s a run past its node boots per node it
+  built (the rule prints a `MESHLAB-RUN … ms= bootMs= nodes=` line per passing run; boots are timed in
+  `MeshLab.node` and `LabNode.restart`): work grows with the nodes and a timer sat out does not, so the
+  eight-node flood's 28 s a run is 3.5 s a node while a two-node scenario sitting out a 15 s timer is past 7. That
+  one is waiting out a field timer (the bullet on the calendar above). Boots are about a tenth of a chaos sweep's
+  time (measured 2026-10-04), so shortening them would buy little. A seed replays a
+  distribution of delays, not a schedule (the threads still race for the draws), so re-run a failing seed a few
+  times. Every
   `*LabTest` carries `@get:Rule val chaos = LabChaos.rule()` (`LabChaosCoverageTest` fails a class without
   it), and a failure names its seed in stderr, a suppressed cause and `MeshLab.report`. The one `mesh/` seam is
   `MeshManager(sessionDispatcher = …)`, `Dispatchers.Default` in production. Run it on every lab test you

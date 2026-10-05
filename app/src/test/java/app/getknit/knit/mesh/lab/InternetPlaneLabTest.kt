@@ -56,6 +56,9 @@ class InternetPlaneLabTest {
 
     private fun LabNode.dmThreadWith(other: LabNode): (LabNode) -> String = { if (it === this) dmWith(other) else it.dmWith(this) }
 
+    /** For a scenario whose step is a clock jump the next timed round must notice (see [LabLimits.spoolTickMs]). */
+    private val rounds = LabLimits().calendarRounds()
+
     /**
      * The two-island trial ADR 064 still owes: a group the three founded together, then Alice and Bob one
      * island (linked) and Carol the other, all three on one relay. Carol writes across the relay through
@@ -190,8 +193,8 @@ class InternetPlaneLabTest {
     fun aPhotoTheRadioCarriedIsNotUploadedUntilThePeersPart() =
         runBlocking {
             val spool = FakeSpool()
-            val alice = lab.node("alice", spool = spool).apply { setDisplayName("Alice") }
-            val bob = lab.node("bob", spool = spool).apply { setDisplayName("Bob") }
+            val alice = lab.node("alice", rounds, spool = spool).apply { setDisplayName("Alice") }
+            val bob = lab.node("bob", rounds, spool = spool).apply { setDisplayName("Bob") }
             lab.meetOnTheRelay(alice, bob)
             lab.link(alice, bob)
             lab.awaitAcquainted(alice, bob)
@@ -221,6 +224,7 @@ class InternetPlaneLabTest {
             // `lastSeen` is a stamp, not a live read, so unlinking alone leaves Bob deferrable for the rest
             // of the sighting window — the lapse is the reversing half and it is measured on the calendar.
             // Well inside the 24 h custody TTL, so the frame still names the attachment and can still push.
+            // The jump cannot move the timed round that notices it, so this pair runs `calendarRounds`.
             lab.unlink(alice, bob)
             lab.clock.advance(AttachmentDeferPolicy.RADIO_WINDOW_MS + 60_000L)
             assertTrue(
@@ -478,8 +482,8 @@ class InternetPlaneLabTest {
     fun aPhotoAckedOnlyAcrossTheSpoolIsNeverDeferredOnThatAck() =
         runBlocking {
             val spool = FakeSpool()
-            val alice = lab.node("alice", spool = spool).apply { setDisplayName("Alice") }
-            val bob = lab.node("bob", spool = spool).apply { setDisplayName("Bob") }
+            val alice = lab.node("alice", rounds, spool = spool).apply { setDisplayName("Alice") }
+            val bob = lab.node("bob", rounds, spool = spool).apply { setDisplayName("Bob") }
             // Derives both DM scopes, and leaves the pair unlinked.
             lab.meetOnTheRelay(alice, bob)
 
@@ -495,9 +499,8 @@ class InternetPlaneLabTest {
 
             val picture = Random(52).nextBytes(4_096)
             assertTrue(alice.sendImage(picture, "only the relay carried this", to = bob))
-            lab.assertConverged(listOf(alice, bob), atLeast = 3, timeoutMs = MeshLab.SPOOL_AWAIT_MS) {
-                alice.dmThreadWith(bob)(it)
-            }
+            // The receipt only, not the oracle yet: the bytes are held for the grace by design, so the
+            // attachment half of `assertConverged` would sit out the grace in real time before the jump.
             val thread = alice.dmWith(bob)
             val sent = alice.ownMessageId(thread, "only the relay carried this")
             assertTrue(
@@ -507,11 +510,15 @@ class InternetPlaneLabTest {
                 },
             )
 
+            // Noticed by the next re-look, which `calendarRounds` brings inside a second.
             lab.clock.advance(AttachmentDeferPolicy.ACK_GRACE_MS)
             assertTrue(
                 "an ack that only crossed the spool is not evidence the radios carried the bytes",
                 lab.tryAwait(1, timeoutMs = MeshLab.SPOOL_AWAIT_MS) { spool.chunksPut.size },
             )
+            lab.assertConverged(listOf(alice, bob), atLeast = 3, timeoutMs = MeshLab.SPOOL_AWAIT_MS) {
+                alice.dmThreadWith(bob)(it)
+            }
         }
 
     /**

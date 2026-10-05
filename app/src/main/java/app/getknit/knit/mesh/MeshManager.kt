@@ -192,6 +192,14 @@ class MeshManager(
     // How long a room tick waits for a ride before it is sealed and sent by itself
     // ([AckSync.RIDE_HOLD_MS], ADR 2026-09.y5f3). Injectable for `mesh/lab` exactly like [tickDebounceMs].
     private val rideHoldMs: Long = AckSync.RIDE_HOLD_MS,
+    // How long the ✓✓ for a DM that arrived over the LoRa board batches ([DmAckCoalescer.HOLD_MS], ADR 054).
+    // Injectable for `mesh/lab` exactly like [tickDebounceMs].
+    private val dmAckHoldMs: Long = DmAckCoalescer.HOLD_MS,
+    // The Internet plane's timed round and attachment re-look ([ScopeSync.TICK_INTERVAL_MS],
+    // [ScopeSync.ATTACHMENT_RETRY_MS]) — the waits a calendar-only transition rides, which a jumped clock
+    // cannot shorten. Injectable for `mesh/lab` like [tickDebounceMs]; only [scopeSync]'s initializer reads them.
+    spoolTickMs: Long = ScopeSync.TICK_INTERVAL_MS,
+    spoolAttachmentRetryMs: Long = ScopeSync.ATTACHMENT_RETRY_MS,
     // What the session's collectors and everything they launch run on. Production takes the default; the
     // `mesh/lab` harness hands in its seeded chaos dispatcher (`LabChaos`), a busy pool on demand.
     private val sessionDispatcher: CoroutineDispatcher = Dispatchers.Default,
@@ -339,6 +347,7 @@ class MeshManager(
             now = clock,
             flush = { authorId, ackIds -> flushDmAcks(authorId, ackIds) },
             flushScope = { sessionScope },
+            holdMs = dmAckHoldMs,
         )
 
     // The "someone nearby is open to chat" cue: the join of our own flag, the short-range reachable set, the
@@ -534,6 +543,8 @@ class MeshManager(
                 deliver = { wire, env, from -> router.handleInbound(wire, env, from) },
                 metrics = metrics,
                 clock = clock,
+                tickIntervalMs = spoolTickMs,
+                attachmentRetryMs = spoolAttachmentRetryMs,
             )
         }
 

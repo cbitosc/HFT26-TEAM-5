@@ -11,6 +11,8 @@ import org.robolectric.shadows.ShadowLog
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.CoroutineContext
 import kotlin.random.Random
 
@@ -92,6 +94,21 @@ class LabChaos private constructor(
 
     internal fun dispatchLag(): Long = draw(DISPATCH_PERCENT, DISPATCH_MAX_MS)
 
+    /** Wall time this run spent building and starting nodes, which chaos stretches like any other work. */
+    private val bootNanos = AtomicLong()
+
+    /** How many nodes this run built: the work a scenario does grows with them, a timer it sits out does not. */
+    private val nodesBuilt = AtomicInteger()
+
+    /** A node built ([fresh], [MeshLab.node]) or relaunched (`LabNode.restart`) in [elapsedNanos]. */
+    internal fun noteBoot(
+        elapsedNanos: Long,
+        fresh: Boolean,
+    ) {
+        bootNanos.addAndGet(elapsedNanos)
+        if (fresh) nodesBuilt.incrementAndGet()
+    }
+
     override fun toString() = "chaos seed=$seed tail=$tailPermille‰ (reproduce: scripts/lab-chaos.sh --seed $seed --tests <class>)"
 
     private class ChaosDispatcher(
@@ -126,6 +143,7 @@ class LabChaos private constructor(
         private const val JITTER_MAX_MS = 15
         private const val STALL_PERCENT = 5
         private const val STALL_MAX_MS = 3
+        private const val NANOS_PER_MS = 1_000_000L
 
         /** Gradle forwards `-Pknit.labChaos` / `-Pknit.labChaosRuns` as these (app/build.gradle.kts). */
         const val SEED_PROPERTY = "knit.labChaos"
@@ -170,8 +188,16 @@ class LabChaos private constructor(
                     // Robolectric resets the log per test, outside this rule: without this a failing run's
                     // report would quote the previous run's warnings (and its cancelled nodes' stragglers).
                     ShadowLog.clear()
+                    val started = System.nanoTime()
                     try {
                         base.evaluate()
+                        // One line a run for scripts/lab-chaos.sh: what a scenario spends past its boots is what
+                        // it waits on, and a wait of many seconds there is a field timer the lab did not shorten.
+                        System.err.println(
+                            "MESHLAB-RUN ${description.className}.${description.methodName} " +
+                                "ms=${(System.nanoTime() - started) / NANOS_PER_MS} bootMs=${chaos.bootNanos.get() / NANOS_PER_MS} " +
+                                "nodes=${chaos.nodesBuilt.get()}",
+                        )
                     } catch (skip: AssumptionViolatedException) {
                         throw skip
                     } catch (t: Throwable) {

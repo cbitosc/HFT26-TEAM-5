@@ -695,6 +695,61 @@ tasks.withType<Test>().configureEach {
     }
 }
 
+// Mesh-lab chaos shards (scripts/lab-chaos.sh, LabChaos.kt). Gradle's forks split a run by class, never by seed, so a
+// sweep of one class on n seeds ran in one JVM, one seed after another, on a 24-core box — and under chaos that JVM is
+// mostly asleep in the stalls it injects. `-Pknit.labChaosShards=<k>` registers k copies of testDebugUnitTest, each
+// running every selected scenario on its own slice of the seeds `knit.labChaos .. + knit.labChaosRuns - 1`, filtered by
+// `knit.labChaosTests` (comma-separated `--tests` patterns: a task option binds to one task, a property to all k). With
+// the configuration cache on they run in parallel, each writing build/test-results/labChaosShard<i>/. Never up to date:
+// a sweep is a draw, not a build product. Off unless asked for, so nothing else sees these tasks.
+val labChaosShards =
+    providers
+        .gradleProperty("knit.labChaosShards")
+        .map(String::toInt)
+        .orElse(0)
+        .get()
+if (labChaosShards > 0) {
+    val firstSeed = providers.gradleProperty("knit.labChaos").get().toLong()
+    val totalRuns =
+        providers
+            .gradleProperty("knit.labChaosRuns")
+            .map(String::toInt)
+            .orElse(1)
+            .get()
+    val patterns =
+        providers
+            .gradleProperty("knit.labChaosTests")
+            .orElse("app.getknit.knit.mesh.lab.*")
+            .get()
+            .split(',')
+            .map(String::trim)
+            .filter(String::isNotEmpty)
+    var nextSeed = firstSeed
+    for (i in 0 until minOf(labChaosShards, totalRuns)) {
+        val runs = totalRuns / labChaosShards + if (i < totalRuns % labChaosShards) 1 else 0
+        val seed = nextSeed
+        nextSeed += runs
+        tasks.register<Test>("labChaosShard$i") {
+            description = "Mesh-lab scenarios under chaos on seeds $seed..${seed + runs - 1} (scripts/lab-chaos.sh)."
+            group = "verification"
+            // AGP registers the unit-test task once the variants exist; this action runs later, when the shard is
+            // realized, and copies what `testOptions.unitTests.all` gave it (classpath, JPMS flags, heap).
+            val base = tasks.named<Test>("testDebugUnitTest").get()
+            testClassesDirs = base.testClassesDirs
+            classpath = base.classpath
+            javaLauncher.set(base.javaLauncher)
+            jvmArgs(base.jvmArgs.orEmpty())
+            maxHeapSize = base.maxHeapSize
+            systemProperties(base.systemProperties)
+            systemProperty("knit.labChaos", seed.toString())
+            systemProperty("knit.labChaosRuns", runs.toString())
+            useJUnit()
+            filter { patterns.forEach(::includeTestsMatching) }
+            outputs.upToDateWhen { false }
+        }
+    }
+}
+
 // `room3`, not `room`: the Room 3 Gradle plugin (id "androidx.room3") registers its extension under that
 // name. Same DSL, same output layout.
 room3 {

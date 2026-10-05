@@ -52,6 +52,7 @@ import app.getknit.knit.identity.Identity
 import app.getknit.knit.identity.NodeId
 import app.getknit.knit.mesh.CompositeMeshTransport
 import app.getknit.knit.mesh.ContributionLedger
+import app.getknit.knit.mesh.DmAckCoalescer
 import app.getknit.knit.mesh.DropReason
 import app.getknit.knit.mesh.IngressBudget
 import app.getknit.knit.mesh.IntroState
@@ -81,6 +82,7 @@ import app.getknit.knit.mesh.sha256Hex
 import app.getknit.knit.mesh.spool.FakeSpool
 import app.getknit.knit.mesh.spool.RelayInvite
 import app.getknit.knit.mesh.spool.ScopeStatus
+import app.getknit.knit.mesh.spool.ScopeSync
 import app.getknit.knit.mesh.spool.spoolPresentPeers
 import app.getknit.knit.moderation.ImageModerator
 import app.getknit.knit.moderation.ImageScreeningService
@@ -177,6 +179,7 @@ class MeshLab {
         // its own node id, as the radios do), they only meet each other's frames through a third node.
         sameIdentityAs: LabNode? = null,
     ): LabNode {
+        val started = System.nanoTime()
         val node =
             LabNode(
                 name,
@@ -194,6 +197,8 @@ class MeshLab {
             )
         nodes += node
         node.boot()
+        // The keygen, the Room build and the start, for the sweep's per-run timing ([LabChaos.noteBoot]).
+        chaos?.noteBoot(System.nanoTime() - started, fresh = true)
         return node
     }
 
@@ -733,6 +738,12 @@ class MeshLab {
         /** What a node with a [FakeSpool] dials; the fake ignores the address. */
         const val SPOOL_URL = "wss://lab.spool/spool/v1"
 
+        /**
+         * The Internet plane's timed round and attachment re-look under [LabLimits.calendarRounds] — fields
+         * 60 s and 15 s. Long enough that a round is never back to back with the event-driven one before it.
+         */
+        const val CALENDAR_ROUND_MS = 1_000L
+
         /** How long a departure is left visible before the next topology change ([unlink], [LabNode.restart]). */
         const val SETTLE_MS = 100L
 
@@ -779,7 +790,24 @@ data class LabLimits(
      */
     val loraGossipMinMs: Long = LoraGossipPolicy.MIN_INTERVAL_MS,
     val loraGossipMaxMs: Long = LoraGossipPolicy.MAX_INTERVAL_MS,
-)
+    /**
+     * How long the ✓✓ for a DM that arrived over the board batches ([DmAckCoalescer.HOLD_MS], ADR 054). The
+     * field value by default: a scenario that waits for that tick shortens it, as [loraGossipMinMs].
+     */
+    val dmAckHoldMs: Long = DmAckCoalescer.HOLD_MS,
+    /**
+     * The Internet plane's timed round and attachment re-look ([ScopeSync.TICK_INTERVAL_MS],
+     * [ScopeSync.ATTACHMENT_RETRY_MS]). The field values by default, so every spool scenario still converges on
+     * the events and a lost wake shows as a slow scenario (`scripts/lab-chaos.sh` names those). Only a scenario
+     * whose step is a calendar transition — a [LabClock.advance] the next timed round must notice — shortens
+     * them, as [calendarRounds] does: the jump cannot move a `delay`.
+     */
+    val spoolTickMs: Long = ScopeSync.TICK_INTERVAL_MS,
+    val spoolAttachmentRetryMs: Long = ScopeSync.ATTACHMENT_RETRY_MS,
+) {
+    /** These limits with the Internet plane's timed waits cut to [MeshLab.CALENDAR_ROUND_MS] (see [spoolTickMs]). */
+    fun calendarRounds(): LabLimits = copy(spoolTickMs = MeshLab.CALENDAR_ROUND_MS, spoolAttachmentRetryMs = MeshLab.CALENDAR_ROUND_MS)
+}
 
 /**
  * One phone. The persistent half (identity secret, database, settings file) outlives [boot]/[shutdown], so
@@ -1042,6 +1070,9 @@ class LabNode internal constructor(
                 clock = now,
                 tickDebounceMs = MeshLab.TICK_DEBOUNCE_MS,
                 rideHoldMs = limits.rideHoldMs,
+                dmAckHoldMs = limits.dmAckHoldMs,
+                spoolTickMs = limits.spoolTickMs,
+                spoolAttachmentRetryMs = limits.spoolAttachmentRetryMs,
                 sessionDispatcher = session,
                 ingressBudget = IngressBudget(burst = limits.ingressBurst, perMinute = limits.ingressPerMinute, clock = now),
                 spoolDialer = spool,
@@ -1062,6 +1093,13 @@ class LabNode internal constructor(
         }
     }
 
+    /** [boot], counted toward the sweep's per-run boot time ([LabChaos.noteBoot]). */
+    private suspend fun timedBoot() {
+        val started = System.nanoTime()
+        boot()
+        chaos?.noteBoot(System.nanoTime() - started, fresh = false)
+    }
+
     /**
      * Process death and relaunch: the live stack goes, the identity, database and settings stay. The links
      * go too, and every peer's neighbor collector is handed the departure before the node is back (see
@@ -1070,7 +1108,7 @@ class LabNode internal constructor(
     suspend fun restart() {
         val peers = shutdownLive()
         awaitPeersSettled(peers)
-        boot()
+        timedBoot()
     }
 
     /**
@@ -1098,7 +1136,7 @@ class LabNode internal constructor(
         awaitPeersSettled(peers)
         db.withWriteTransaction { BackupTables.TRANSIENT.forEach { executeSQL("DELETE FROM $it") } }
         dataStore.edit { it[booleanPreferencesKey(SettingsKeys.RESTORE_PENDING)] = true }
-        boot()
+        timedBoot()
     }
 
     internal fun shutdown() {

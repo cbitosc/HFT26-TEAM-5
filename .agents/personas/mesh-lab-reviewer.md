@@ -99,11 +99,15 @@ enqueue; …). If you believe a read-safe entry is wrong, say so as a separate f
 Run the changed scenario classes under seeded chaos (the lab's slow-runner simulator, `LabChaos.kt`):
 
 ```bash
-scripts/lab-chaos.sh --runs 10 --tests 'app.getknit.knit.mesh.lab.<Class>' [--tests …]
+scripts/lab-chaos.sh --reuse --runs 10 --tests 'app.getknit.knit.mesh.lab.<Class>' [--tests …]
 ```
 
-Use `--tests '<Class>.<method>'` for the changed methods only when a class is large. It prints each failing
-scenario with its seed. A chaos failure is a finding by construction (chaos only produces schedules a slow
+Use `--tests '<Class>.<method>'` for the changed methods only when a class is large. `--reuse` answers from the
+sweep your caller already ran when the tree has not moved since and it covered these patterns with at least as
+many runs (it says so in its first line); otherwise it sweeps, the seeds split across parallel JVMs. It prints
+each failing scenario with its seed, and names as `slow` any scenario that spends more than a few seconds a run:
+that one is waiting out a production timer (or a lost wake that only a timed round covers) — report it as a
+finding, with the timer, and the `LabLimits` knob or poke that would end the wait. A chaos failure is a finding by construction (chaos only produces schedules a slow
 runner can produce) — report it with the seed and the assertion's first line, then find which shape above
 it is. A green sweep does **not** clear a finding you reasoned out: the 2026-09-16 audit's five sites never
 reproduced in ten throttled runs. If the build fails to compile, report that and stop.

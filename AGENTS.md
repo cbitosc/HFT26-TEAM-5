@@ -530,10 +530,13 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   or `IntroSync.onPairsChanged`: READ ADR 2026-09.dcah — the scope table derives on its inputs' events and the
   60 s poll is only the net under the calendar; a hook that fires on an unchanged input is the old poll back.
 - **When creating or modifying anything under `app/src/test/java/app/getknit/knit/mesh/lab/`:** RUN
-  `scripts/lab-chaos.sh --tests '<Class>'` on the changed classes and ADOPT (Claude Code: spawn) the
-  `mesh-lab-reviewer` persona in `.agents/personas/mesh-lab-reviewer.md` before calling the change done — every
-  lab flake has been a scenario assuming an order the mesh does not promise. A Stop hook enforces the review.
-  Chaos mode is the "Chaos mode" bullet in `.agents/context/testing.md`.
+  `scripts/lab-chaos.sh --tests '<Class>'` on the changed classes (or `'<Class>.<method>'` for the changed
+  scenarios of a large class) once your edits are in, then ADOPT (Claude Code: spawn) the `mesh-lab-reviewer`
+  persona in `.agents/personas/mesh-lab-reviewer.md` before calling the change done — every lab flake has been a
+  scenario assuming an order the mesh does not promise. A Stop hook enforces the review; the reviewer reuses your
+  sweep (`--reuse`) while the tree has not moved, so sweep last, not between edits. A scenario the sweep names
+  `slow` is sitting out a production timer: shorten it through `LabLimits`, never a longer await. Chaos mode is
+  the "Chaos mode" bullet in `.agents/context/testing.md`.
 - **When creating or modifying anything under `mesh/bluetooth/` (its `meshtastic/` and `wear/` included),
   `mesh/link/FramedLink.kt`, `mesh/power/ElapsedWait.kt` or `mesh/power/PowerState.kt` (`PowerPolicy`):** ADOPT (Claude Code:
   spawn) the `bluetooth-reviewer` persona in `.agents/personas/bluetooth-reviewer.md` before calling the change

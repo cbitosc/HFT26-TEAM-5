@@ -195,8 +195,11 @@ class LoraPocketLabTest {
     fun aDmSentWhileTheFarBoardWasOffLandsThroughTheBridge() =
         runBlocking {
             val air = FakeMeshtasticAir()
-            val alice = lab.node("alice", quick, air = air).apply { setDisplayName("Alice") }
-            val bob = lab.node("bob", quick, air = air).apply { setDisplayName("Bob") }
+            // A DM that arrived over the board is ticked through DmAckCoalescer's 45 s hold (ADR 054); the
+            // oracle waits for that tick, so the pair holds it for a second instead.
+            val ticked = quick.copy(dmAckHoldMs = 1_000L)
+            val alice = lab.node("alice", ticked, air = air).apply { setDisplayName("Alice") }
+            val bob = lab.node("bob", ticked, air = air).apply { setDisplayName("Bob") }
             lab.link(alice, bob)
             lab.awaitAcquainted(alice, bob)
             assertTrue(alice.sendDm(bob, "hello"))
@@ -212,9 +215,7 @@ class LoraPocketLabTest {
             air.lossy = { _, _ -> false }
 
             assertTrue("the bridge never carried it", lab.tryAwait(3) { bob.decrypted(bob.dmWith(alice)).size })
-            // A DM that arrived over the board is ticked through DmAckCoalescer's 45 s hold (ADR 054), which
-            // the lab does not shorten yet; the oracle waits it out.
-            lab.assertConverged(listOf(alice, bob), atLeast = 3, timeoutMs = 60_000) { it.dmWith(if (it === alice) bob else alice) }
+            lab.assertConverged(listOf(alice, bob), atLeast = 3) { it.dmWith(if (it === alice) bob else alice) }
         }
 
     /** The board's gateway role, the field its plane transmits by (`LoraMeshTransport.gatewayRole`), not its status. */
