@@ -91,7 +91,8 @@ the context doc. Read its bullet before you call a result converged or diverged.
 
 Extras and reply fields: the action's bullet in `.agents/context/debug-bridge.md` under *Headless bridge*.
 
-- **Messaging:** `SEND`, `SENDIMG` (stage the file into app storage with `run-as` first), `REACT`,
+- **Messaging:** `SEND`, `SENDIMG` (stage the file into app storage with `run-as` first; `--ez file true` for a
+  non-image), `SAVEATT` (Save into app storage, to pick it again), `REACT`,
   `TYPING`, `MKGROUP`, `LEAVE`, `PURGE` (clean soak traffic off every phone).
 - **Mesh state:** `STATE`, `STORE`, `HEAL`, `PAUSE`, `RESUME`, `BLECAP`, `NANOFF` (Wi-Fi Aware off, Bluetooth
   alone), `PHY` (the Coded PHY experiment).

@@ -17,6 +17,7 @@ import android.util.Log
 import androidx.core.graphics.createBitmap
 import app.getknit.knit.BuildConfig
 import app.getknit.knit.crash.ProcessExitReasons
+import app.getknit.knit.data.AttachmentIdentities
 import app.getknit.knit.data.AttachmentStore
 import app.getknit.knit.data.BlobRepository
 import app.getknit.knit.data.GroupRepository
@@ -53,12 +54,15 @@ import app.getknit.knit.mesh.bluetooth.CodedPhyPolicy
 import app.getknit.knit.mesh.bluetooth.LinkPhy
 import app.getknit.knit.mesh.bluetooth.PhyTuning
 import app.getknit.knit.mesh.bluetooth.PromotionConfig
+import app.getknit.knit.mesh.crypto.AttachmentCrypto
+import app.getknit.knit.mesh.crypto.b64d
 import app.getknit.knit.mesh.indirectPeers
 import app.getknit.knit.mesh.link.LinkFraming
 import app.getknit.knit.mesh.lora.BoardOwner
 import app.getknit.knit.mesh.lora.BoardSettings
 import app.getknit.knit.mesh.lora.ProvisionMode
 import app.getknit.knit.mesh.protocol.ReplyRef
+import app.getknit.knit.mesh.sha256Hex
 import app.getknit.knit.mesh.spool.CommonsInvite
 import app.getknit.knit.mesh.wifiaware.NanFaultInjector
 import app.getknit.knit.mesh.wifiaware.NanMsgFault
@@ -108,6 +112,9 @@ import java.nio.ByteBuffer
  *   target extras as [ACTION_SEND] (`conv`/`to`, default the broadcast room) and optional `--es text`.
  *   Runs the exact production pipeline (AttachmentStore.ingest → MeshManager.sendChat), so the image
  *   send→pull→verify loop is fully scriptable; replies with the attachment `hash` to poll for on receivers.
+ *   `--ez file true` takes the file picker's door instead (a PDF); `reused` names the identity a pick reused.
+ * - [ACTION_SAVEATT] — the chat's Save into the app's own storage: `--es id <messageId> --es out <path>` writes
+ *   the attachment's plaintext there, so [ACTION_SENDIMG] can pick it again (the forward loop, ADR 2026-10.mptm).
  * - [ACTION_STATE] — self id/name, transport health, the reachable peer set, and the mesh metrics; add
  *   `--es conv <id>` to also dump that thread's most recent messages (`--ei limit N`, default
  *   [DEFAULT_MESSAGE_LIMIT]) with each message's `received` delivery tick — how "verify receipt" works.
@@ -238,6 +245,7 @@ class DebugBridgeReceiver :
     private val peers: PeerRepository by inject()
     private val groups: GroupRepository by inject()
     private val blobs: BlobRepository by inject()
+    private val identities: AttachmentIdentities by inject()
     private val metrics: MeshMetrics by inject()
     private val startGate: MeshStartGate by inject()
     private val identity: Identity by inject()
@@ -280,6 +288,10 @@ class DebugBridgeReceiver :
 
                         ACTION_SENDIMG -> {
                             handleSendImg(intent)
+                        }
+
+                        ACTION_SAVEATT -> {
+                            handleSaveAtt(intent)
                         }
 
                         ACTION_STATE -> {
@@ -566,14 +578,21 @@ class DebugBridgeReceiver :
         if (!file.exists()) return reply("error", "no such file: $path")
         val text = intent.getStringExtra(EXTRA_TEXT).orEmpty()
         val conv = intent.getStringExtra(EXTRA_CONV) ?: intent.getStringExtra(EXTRA_TO) ?: Conversations.NEARBY
+        // `--ez file true` takes the file picker's door (ingestFile) instead of the photo picker's, so a PDF can be
+        // sent. A file:// Uri offers no display name, so a non-image falls back to the file's own name, as a
+        // document provider would give it.
+        val asFile = intent.getBooleanExtra(EXTRA_FILE, false)
+        val picked = if (asFile) attachments.ingestFile(Uri.fromFile(file)) else attachments.ingest(Uri.fromFile(file))
         val ingested =
-            when (val result = attachments.ingest(Uri.fromFile(file))) {
+            when (picked) {
                 is AttachmentStore.IngestResult.Success -> {
-                    result.ingested
+                    picked.ingested.let {
+                        if (asFile && it.name == null && !it.mime.startsWith("image/")) it.copy(name = file.name) else it
+                    }
                 }
 
                 is AttachmentStore.IngestResult.Failed -> {
-                    return reply("error", "ingest failed (${result.reason}): $path")
+                    return reply("error", "ingest failed (${picked.reason}): $path")
                 }
             }
         val sent =
@@ -604,7 +623,40 @@ class DebugBridgeReceiver :
             null -> reply("error", "unknown group (not joined on this device): $conv")
             true -> reply("ok", "sent image to $conv")
             false -> reply("blocked", "blocked by on-device content filter")
-        }.put("conversation", conv).put("hash", ingested.hash).put("mime", ingested.mime)
+        }.put("conversation", conv)
+            .put("hash", ingested.hash)
+            .put("mime", ingested.mime)
+            // The identity this pick reused (ADR 2026-10.mptm): the hash the frame names, null for a fresh seal.
+            .put("reused", ingested.reuse?.hash ?: JSONObject.NULL)
+    }
+
+    /**
+     * Saves a received attachment the way the chat's Save does — its plaintext, opened with the row's key when it is
+     * sealed, and its plaintext name recorded on the way (ADR 2026-10.mptm) — but into `--es out <path>` in the app's
+     * own storage rather than the gallery, so `SENDIMG --es path` can pick it again: the save-and-forward loop with
+     * no UI. `--es id <messageId>` names the message. Replies with the plaintext's hash and size.
+     */
+    private suspend fun handleSaveAtt(intent: Intent): JSONObject {
+        val id = intent.getStringExtra(EXTRA_ID) ?: return reply("error", "missing 'id' extra")
+        val out = intent.getStringExtra(EXTRA_OUT) ?: return reply("error", "missing 'out' extra")
+        val row = messages.observeMessage(id).first() ?: return reply("error", "no message $id")
+        val hash = row.attachmentHash ?: return reply("error", "message $id has no attachment")
+        val stored = blobs.bytes(hash) ?: return reply("error", "attachment $hash is not held")
+        val key = row.attachmentKey
+        val plain =
+            if (key == null) {
+                stored
+            } else {
+                AttachmentCrypto.open(stored, b64d(key)) ?: return reply("error", "the row's key does not open $hash")
+            }
+        if (key != null) identities.notePlain(hash, plain)
+        File(out).writeBytes(plain)
+        return reply("ok", "saved $id")
+            .put("path", out)
+            .put("hash", hash)
+            .put("plainHash", sha256Hex(plain))
+            .put("bytes", plain.size)
+            .put("mime", row.attachmentMime ?: JSONObject.NULL)
     }
 
     /**
@@ -884,7 +936,14 @@ class DebugBridgeReceiver :
                     .put("reactions", rx)
                     .put("replyToId", m.replyToId ?: JSONObject.NULL)
                     .put("replyToAuthor", m.replyToAuthor ?: JSONObject.NULL)
-                    .put("replyToSnippet", m.replyToSnippet ?: JSONObject.NULL),
+                    .put("replyToSnippet", m.replyToSnippet ?: JSONObject.NULL)
+                    // The attachment's identity (ADR 2026-10.mptm): the hash it travels under, whether it is sealed, the
+                    // plaintext's name once known, and whether the bytes are here — what a forward trial compares.
+                    .put("attachmentHash", m.attachmentHash ?: JSONObject.NULL)
+                    .put("attachmentKeyed", m.attachmentKey != null)
+                    .put("attachmentPlainHash", m.attachmentPlainHash ?: JSONObject.NULL)
+                    .put("attachmentHeld", m.attachmentHash?.let { blobs.exists(it) } ?: JSONObject.NULL)
+                    .put("attachmentAnimated", m.attachmentAnimated),
             )
         }
         return arr
@@ -2259,6 +2318,7 @@ class DebugBridgeReceiver :
 
         const val ACTION_SEND = "app.getknit.knit.debug.SEND"
         const val ACTION_SENDIMG = "app.getknit.knit.debug.SENDIMG"
+        const val ACTION_SAVEATT = "app.getknit.knit.debug.SAVEATT"
         const val ACTION_STATE = "app.getknit.knit.debug.STATE"
         const val ACTION_STORE = "app.getknit.knit.debug.STORE"
         const val ACTION_REACT = "app.getknit.knit.debug.REACT"
@@ -2308,6 +2368,7 @@ class DebugBridgeReceiver :
         const val EXTRA_EMOJI = "emoji"
         const val EXTRA_LIMIT = "limit"
         const val EXTRA_PATH = "path"
+        const val EXTRA_FILE = "file"
         const val EXTRA_OUT = "out"
         const val EXTRA_COUNT = "count"
         const val EXTRA_FROM = "from"

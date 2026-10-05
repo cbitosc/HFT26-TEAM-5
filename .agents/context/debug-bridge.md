@@ -37,10 +37,20 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   /sdcard paths): `adb push img.jpg /data/local/tmp/ && adb shell "cat /data/local/tmp/img.jpg | run-as
   app.getknit.knit sh -c 'cat > files/img.jpg'"`, then pass `--es path /data/data/app.getknit.knit/files/img.jpg`.
   Runs the production pipeline (AttachmentStore.ingest → sendChat), and the reply carries the attachment
-  `hash` to poll for on receivers.
+  `hash` to poll for on receivers (the plaintext's, as staged) and `reused`: the identity a pick of bytes this phone
+  already holds went out under, else null (ADR 2026-10.mptm). `--ez file true` takes the file picker's door
+  (`ingestFile`) instead, for a PDF or any non-image; a file:// path has no display name, so the file's own name stands in.
+- `…debug.SAVEATT` — the chat's Save, into the app's own storage instead of the gallery: `--es id <messageId>
+  --es out /data/data/app.getknit.knit/files/<name>` writes the attachment's plaintext (opened with the row's key
+  when sealed, recording its plaintext name as a real save does). Pair it with `SENDIMG --es path <out>` for the
+  save-and-forward loop with no UI. Replies `hash` (the row's), `plainHash`, `bytes`, `mime`; an unheld blob or a
+  key that will not open it is an `error`.
 - `…debug.STATE` — self id/name, transport health, reachable peers, and mesh metrics. Add `--es conv <id>`
   to also dump that thread's latest messages (`--ei limit N`, default 20) — this is how you **verify receipt
   on the other device without a screenshot**: the body turning up in the receiver's `messages[]`. Each row
+  with an attachment carries `attachmentHash` (the hash the frame names), `attachmentKeyed` (sealed or not),
+  `attachmentPlainHash`, `attachmentHeld` (the bytes are here) and `attachmentAnimated` — a forward trial compares
+  the first across rows and reads the fourth instead of the blob store (ADR 2026-10.mptm). Each row
   also carries `received`, which on the sender's own row (`mine: true`) is the ✓✓ — the delivery tick
   coming home — plus its `reactions`; the top-level `typing` map shows a cue that landed.
   `indirect` lists the authors another phone handed us a fresh frame from within the linger
