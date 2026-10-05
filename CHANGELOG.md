@@ -37,6 +37,9 @@ document:
 
 ### Fixed
 
+- A direct message sent over LoRa while the Nearby room is busy no longer waits behind room posts until the
+  room goes quiet. When your board runs short of airtime, direct messages now go out ahead of room posts and
+  delivery ticks.
 - Two phones a few metres apart could take over a minute to reconnect over Bluetooth, and sometimes didn't
   reconnect at all. Your phone now reconnects sooner and can link with phones a little further away.
 - When your phone connected to a watch or another Bluetooth device, other phones nearby could lose sight of

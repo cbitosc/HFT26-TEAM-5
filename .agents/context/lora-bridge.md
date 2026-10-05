@@ -362,7 +362,10 @@ Counter: `loraProfileRefanSkipped`.
 
 `LoraPacePolicy` (pure): 3 s min inter-packet gap, a 32-frame queue (ADR 054 — sized to hold a 15-minute
 wait), NAK back-off (rate/duty → a 60 s cool-down), hold while `queueFree == 0`, and (ADR 044) a hold while the
-frame's [AirBucket] budget is spent — a refused frame is skipped rather than blocking the queue behind it.
+frame's [AirBucket] budget is spent — a refused frame is skipped rather than blocking the queue behind it, except
+past a live frame the window's **total** refused: that one holds everything ranked behind it until the air it needs
+comes back (`LoraAirtime.refusal`, ADR 044's 2026-10-04 amendment). Otherwise one-packet room posts take each
+packet's worth the window hands back and a two-packet DM never fits.
 When full the queue **sheds by class** (`FrameClass`: BOOTSTRAP > GOSSIP > DM > ROOM > TICK): the oldest
 **whole** frame (never a lone fragment) of the lowest class present goes, the newcomer included — a room post
 alone at the bottom is `REFUSED` rather than evicting a DM, and nothing ever evicts the profile bootstrap

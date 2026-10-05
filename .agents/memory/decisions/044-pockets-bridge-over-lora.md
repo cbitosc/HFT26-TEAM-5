@@ -127,3 +127,50 @@ served frame lost to the air waits for the next round; a passive gateway is dead
 O(1); and the time-on-air figure is an estimate that does not know the board's preamble length or how many
 neighbours repeated us. `KnitChannel`'s derivation is untouched, so `docs/NEXT_WIRE_BREAK.md`'s open question
 about the LoRa rendezvous marker does not come due. Scheme + device bring-up: `context/lora-bridge.md`.
+
+## Amendment 2026-10-04 — a live frame the total refuses holds what ranks behind it
+
+**What was observed.** On the 2026-10-04 field test the P9 carried a LoRa board ~100 m out with an iPhone and a P8 linked
+to it, all three chatting in the Nearby room. The P7 and its board were in the lab. The P9's DM to the P7 ("Seacliff
+test", 16:28:33) waited behind room posts until 16:39, and its ✓✓ came home only over Bluetooth at 16:47. From the
+P9's logs and `…debug.LORA`:
+
+- The board reported 0 % channel utilization; Knit's own governor was the limit.
+- The P9 aired nothing from 16:27:40 to 16:34:01: the window's total was spent.
+- The window then handed air back one booking at a time, about 1.7 s each. Each time, a one-packet room post fitted
+  and the two-packet DM did not. `take` skips a refused frame (this ADR) and dequeues by class, so it skipped the DM
+  and sent the room post.
+- Over the walk: `loraAirtimeHeld` 183 (97 LIVE), `loraDroppedQueue` 46 and 26 frames stale at send.
+
+The class order already said the DM goes first. The skip rule let smaller, lower-ranked frames spend the air the DM was
+waiting for.
+
+**What changed.**
+
+- **A refusal has a reason.** `LoraAirtime.refusal` returns `TOTAL`, `SHARE`, `TICK_TAIL` or `NEVER`, and `admits` is
+  `refusal == null`, with every verdict unchanged.
+- **A live frame refused on the total is a holder.** `LoraPacePolicy.admitBest` finds the best-ranked `AirBucket.LIVE`
+  frame refused on `Refusal.TOTAL`. Nothing that ranks behind it may go while it waits: no lower class, and nothing
+  of its own class queued after it. Air the window hands back accumulates until it fits. The held frames count once
+  each in `loraAirtimeHeld`, like any frame waiting for air.
+- **What still goes ahead.** The classes above it (the profile bootstrap on its own share, the gossip OFFER), and an
+  earlier frame of its own class that fits.
+- **What never holds.** A frame refused on its own share (`SHARE`): a backfilled DM on `AirBucket.BRIDGE` keeps DM
+  class, and holding live chat behind it would let backfill crowd live chat, which the share exists to prevent. A tick
+  refused for the tail. A frame larger than the whole allowance (`NEVER`), which no window would ever admit.
+- **What ends a hold.** The frame airing, being shed by class, or going stale at send (15 min, `FRESH_MS`).
+
+**What it costs.** Under a spent window, room posts and ticks wait behind a DM for one more booking to roll off
+instead of going first. Those were the frames the window was already shedding (46 queue drops on the walk). Nothing
+changes while the window has room.
+
+**Not changed:**
+
+- The allowance itself, 45 s per 15 min on a stock LongFast slot (5 %). The band was idle, so a governor that raises
+  its ceiling on a quiet channel is the obvious next question, but it is a product decision of its own.
+- The DM-form frames that finally aired at 16:39:22–36 did not reach the P7. The logs do not say why (the P7's own
+  three-packet profile sends at 16:38:58 and 16:39:04 are the nearest suspect), and this change does not touch it.
+
+Tests: `LoraPacePolicyTest`: the field case, a backfilled DM holding nothing, the classes above going, FIFO inside the
+class, nothing waiting on an oversized frame, held frames reported once. `LoraAirtimeTest`: each refusal reason.
+A negative control with the hold disabled fails three of them.

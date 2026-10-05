@@ -2,6 +2,7 @@ package app.getknit.knit.mesh.lora
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -596,5 +597,40 @@ class LoraAirtimeTest {
     fun theSnapshotReportsWhetherTheSignatureIsBeingChargedFor() {
         assertTrue(LoraAirtime().snapshot(0L).signing)
         assertFalse(LoraAirtime().apply { onFirmware("2.7.26.b246bcd") }.snapshot(0L).signing)
+    }
+
+    @Test
+    fun aRefusalSaysWhichBudgetSaidNo() {
+        val air = LoraAirtime()
+        val packet = listOf(MeshtasticProto.MAX_PAYLOAD)
+        assertNull(air.refusal(AirBucket.LIVE, FrameClass.DM, packet, now = 0))
+        var now = 0L
+        while (air.admits(AirBucket.BRIDGE, FrameClass.ROOM, packet, now)) {
+            air.record(AirBucket.BRIDGE, MeshtasticProto.MAX_PAYLOAD, now)
+            now += 3_000
+        }
+        assertEquals("the bridge's own share", LoraAirtime.Refusal.SHARE, air.refusal(AirBucket.BRIDGE, FrameClass.DM, packet, now))
+        assertNull("live still has the rest of the total", air.refusal(AirBucket.LIVE, FrameClass.DM, packet, now))
+        while (air.admits(AirBucket.LIVE, FrameClass.ROOM, packet, now)) {
+            air.record(AirBucket.LIVE, MeshtasticProto.MAX_PAYLOAD, now)
+            now += 3_000
+        }
+        assertEquals(LoraAirtime.Refusal.TOTAL, air.refusal(AirBucket.LIVE, FrameClass.DM, packet, now))
+        val tooBig =
+            List((air.budgetMs(AirBucket.LIVE) / air.timeOnAirMs(MeshtasticProto.MAX_PAYLOAD) + 1).toInt()) { MeshtasticProto.MAX_PAYLOAD }
+        assertEquals(LoraAirtime.Refusal.NEVER, air.refusal(AirBucket.LIVE, FrameClass.DM, tooBig, now = 0))
+    }
+
+    @Test
+    fun aTickInTheTailIsRefusedForTheTail() {
+        val air = LoraAirtime()
+        val packet = listOf(MeshtasticProto.MAX_PAYLOAD)
+        var now = 0L
+        while (air.admits(AirBucket.LIVE, FrameClass.TICK, packet, now)) {
+            air.record(AirBucket.LIVE, MeshtasticProto.MAX_PAYLOAD, now)
+            now += 3_000
+        }
+        assertEquals(LoraAirtime.Refusal.TICK_TAIL, air.refusal(AirBucket.LIVE, FrameClass.TICK, packet, now))
+        assertNull("content still has the tail", air.refusal(AirBucket.LIVE, FrameClass.DM, packet, now))
     }
 }

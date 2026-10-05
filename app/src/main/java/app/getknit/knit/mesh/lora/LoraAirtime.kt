@@ -370,7 +370,7 @@ internal class LoraAirtime(
      * an [AirBucket.BOOTSTRAP] frame is judged against its own share alone, and an [AirBucket.GOSSIP] one is
      * judged against nothing but the total (see the class doc for both). Note every bucket's spending counts
      * against the **total** as well as its own budget: each is a share of the one allowance, not a second
-     * allowance beside it.
+     * allowance beside it. [refusal] says why a frame does not fit.
      */
     @Synchronized
     fun admits(
@@ -380,12 +380,28 @@ internal class LoraAirtime(
         now: Long,
         /** The signature cliff for these packets' port — a Knit frame's unless the caller says otherwise. */
         signedUpTo: Int = MeshtasticProto.MAX_SIGNED_PAYLOAD,
-    ): Boolean {
+    ): Boolean = refusal(bucket, klass, payloadSizes, now, signedUpTo) == null
+
+    /**
+     * Why [admits] refuses a frame, or null when it fits. The pacer needs the reason, not just the verdict: a live
+     * frame the [Refusal.TOTAL] refuses holds every frame ranked below it off the total until it has gone
+     * ([LoraPacePolicy]), and a frame refused on its own [Refusal.SHARE] must never hold anything, or a spent
+     * backfill share would freeze live chat, the one thing that share exists to prevent.
+     */
+    @Synchronized
+    fun refusal(
+        bucket: AirBucket,
+        klass: FrameClass,
+        payloadSizes: List<Int>,
+        now: Long,
+        signedUpTo: Int = MeshtasticProto.MAX_SIGNED_PAYLOAD,
+    ): Refusal? {
         prune(now)
         val cost = payloadSizes.sumOf { timeOnAirMs(it, signedUpTo) }
         val used = liveUsedMs + bridgeUsedMs + bootstrapUsedMs + publicUsedMs + gossipUsedMs
-        val tickCeiling = (budgetMs(AirBucket.LIVE) * (1 - tickTailShare)).toLong()
-        // A `when` rather than a ladder of early returns only because there are now five answers; the order
+        val total = budgetMs(AirBucket.LIVE)
+        val tickCeiling = (total * (1 - tickTailShare)).toLong()
+        // A `when` rather than a ladder of early returns only because there are several answers; the order
         // is the same and load-bearing. Note the TICK arm refuses but does not admit — a tick under the tail
         // still has to pass the bridge test below it, exactly as it did when this was a guard clause.
         return when {
@@ -393,21 +409,26 @@ internal class LoraAirtime(
             // still be able to hand a far pocket the key that makes that chat readable. Its own share is what
             // stops that exemption from becoming the whole allowance (ADR 056).
             bucket == AirBucket.BOOTSTRAP -> {
-                bootstrapUsedMs + cost <= budgetMs(AirBucket.BOOTSTRAP)
+                if (bootstrapUsedMs + cost <= budgetMs(AirBucket.BOOTSTRAP)) null else Refusal.SHARE
             }
 
-            used + cost > budgetMs(AirBucket.LIVE) -> {
-                false
+            // No window, however empty, would ever admit it: it must never be waited for.
+            cost > total -> {
+                Refusal.NEVER
+            }
+
+            used + cost > total -> {
+                Refusal.TOTAL
             }
 
             // The public channel is judged against its own share as well as the total, in both directions: it
             // cannot crowd out the pocket's own traffic, and the pocket's own traffic leaves it a floor.
             bucket == AirBucket.PUBLIC -> {
-                publicUsedMs + cost <= budgetMs(AirBucket.PUBLIC)
+                if (publicUsedMs + cost <= budgetMs(AirBucket.PUBLIC)) null else Refusal.SHARE
             }
 
             klass == FrameClass.TICK && used + cost > tickCeiling -> {
-                false
+                Refusal.TICK_TAIL
             }
 
             // [AirBucket.GOSSIP] lands here and passes: the OFFER is not backfill, it is the one packet that
@@ -415,11 +436,29 @@ internal class LoraAirtime(
             // does not pay for — so serving must not be able to starve it (ADR 2026-09.t8t8). The total above
             // still binds it. It used to reach that exemption as a [FrameClass.GOSSIP] frame *on this
             // bucket*, which is what let it spend the share it was exempt from; ADR 2026-09.7c8n.
+            bucket == AirBucket.BRIDGE && bridgeUsedMs + cost > budgetMs(AirBucket.BRIDGE) -> {
+                Refusal.SHARE
+            }
+
             else -> {
-                bucket != AirBucket.BRIDGE ||
-                    bridgeUsedMs + cost <= budgetMs(AirBucket.BRIDGE)
+                null
             }
         }
+    }
+
+    /** Why [refusal] turned a frame away. */
+    enum class Refusal {
+        /** The window's total is spent: the frame fits once enough of the window rolls off. */
+        TOTAL,
+
+        /** The frame's own share is spent: [AirBucket.BOOTSTRAP], [AirBucket.BRIDGE] or [AirBucket.PUBLIC]. */
+        SHARE,
+
+        /** A [FrameClass.TICK] inside the last [tickTailShare] of the window (ADR 054). */
+        TICK_TAIL,
+
+        /** Larger than the whole allowance: no window will ever admit it, so nothing may wait on it. */
+        NEVER,
     }
 
     /** Books [payloadBytes] of air against [bucket]. Called once the board has actually accepted the write. */

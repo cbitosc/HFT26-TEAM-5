@@ -134,7 +134,9 @@ internal class LoraPacePolicy(
      * A frame the airtime budget refuses is **skipped, not dropped** — it stays queued for a later window
      * while a frame from a bucket with headroom goes now. Without the skip, one refused BRIDGE frame would
      * block everything behind it until its budget recovered. A frame that never gets a window eventually ages
-     * out through the ordinary class shedding instead.
+     * out through the ordinary class shedding instead. The one exception: nothing is skipped *past* a live frame
+     * the window's total refused, or the smaller frames behind it would take the air it is waiting for, one
+     * packet's worth at a time, for as long as they keep coming ([admitBest]).
      */
     @Synchronized
     fun take(now: Long): OutboundFrame? {
@@ -166,33 +168,75 @@ internal class LoraPacePolicy(
     private fun mayDrain(now: Long): Boolean = queue.isNotEmpty() && now >= nextDueAt() && boardFree != 0
 
     /**
-     * The index of the frame to send, or -1 when the budget refuses them all. Records [lastAirtimeRefusals]
-     * and [lastAirtimeHolds] on the way past.
+     * The index of the frame to send, or -1 when the budget refuses them all — or when everything it would admit
+     * ranks behind a live frame the window's total is holding. Records [lastAirtimeRefusals] and [lastAirtimeHolds]
+     * on the way past.
+     *
+     * A refused frame is skipped rather than blocking the queue (ADR 044), but not past a live frame the **total**
+     * refused: air comes back as the window rolls, a packet's worth at a time, and a one-packet room post fits each
+     * time while a two-packet DM never does. Field-observed 2026-10-04: a DM queued at 16:28 waited eleven minutes
+     * behind the room posts that kept taking that air. So the best-ranked such frame holds every frame ranked behind
+     * it (class, then queue order) until the air it needs has come back. Only a [AirBucket.LIVE] frame holds, and only
+     * on [LoraAirtime.Refusal.TOTAL]: a frame refused on its own share must never hold live traffic (that share
+     * exists so backfill cannot crowd it), and one no window would admit must never be waited for.
      */
     private fun admitBest(now: Long): Int {
-        var refused = 0
-        var best = -1
+        // What is still owed, not the whole frame: a resumed frame's earlier fragments are already on the air and
+        // already booked, so charging admission for them again would refuse a frame that fits.
+        val refusals = queue.map { airtime.refusal(it.bucket, it.klass, it.remaining.map { part -> part.size }, now) }
+        val best = bestAdmitted(refusals)
+        val holder = holderOf(refusals)
+        // Everything admissible ranks behind the holder when the best of it does: it all waits with the holder.
+        val blocked = best >= 0 && holder >= 0 && ranksBehind(best, holder)
         var held: MutableList<AirBucket>? = null
+        var waiting = 0
         for (i in queue.indices) {
-            val frame = queue[i]
-            // What is still owed, not the whole frame: a resumed frame's earlier fragments are already on the
-            // air and already booked, so charging admission for them again would refuse a frame that fits.
-            if (!airtime.admits(frame.bucket, frame.klass, frame.remaining.map { it.size }, now)) {
-                refused++
-                // Once per frame, not once per wake: the pacer re-asks this question every few seconds, and a
-                // counter that ticked on each of them would report the clock rather than the congestion.
-                if (!frame.heldForAir) {
-                    frame.onAirtimeHeld()
-                    (held ?: mutableListOf<AirBucket>().also { held = it }) += frame.bucket
-                }
-                continue
-            }
-            // Strictly-better only, so the earliest frame of the winning class keeps its place in line.
-            if (best < 0 || frame.klass < queue[best].klass) best = i
+            if (refusals[i] == null && !blocked) continue
+            waiting++
+            held = noteHeld(queue[i], held)
         }
-        lastAirtimeRefusals = refused
+        lastAirtimeRefusals = waiting
         lastAirtimeHolds = held ?: emptyList()
+        return if (blocked) -1 else best
+    }
+
+    /** The best-ranked frame [refusals] admits, or -1: strictly-better class only, so the earliest of a class wins. */
+    private fun bestAdmitted(refusals: List<LoraAirtime.Refusal?>): Int {
+        var best = -1
+        for (i in queue.indices) {
+            if (refusals[i] == null && (best < 0 || queue[i].klass < queue[best].klass)) best = i
+        }
         return best
+    }
+
+    /** The best-ranked live frame the window's total refused, or -1: the one nothing ranked behind may pass. */
+    private fun holderOf(refusals: List<LoraAirtime.Refusal?>): Int {
+        var holder = -1
+        for (i in queue.indices) {
+            val holds = refusals[i] == LoraAirtime.Refusal.TOTAL && queue[i].bucket == AirBucket.LIVE
+            if (holds && (holder < 0 || queue[i].klass < queue[holder].klass)) holder = i
+        }
+        return holder
+    }
+
+    /** Whether the frame at [i] dequeues after the one at [j]: a lower class, or the same class queued later. */
+    private fun ranksBehind(
+        i: Int,
+        j: Int,
+    ): Boolean = queue[i].klass > queue[j].klass || (queue[i].klass == queue[j].klass && i > j)
+
+    /**
+     * Notes [frame] as held for air the first time it is, into [held]. Once per frame, not once per wake: the pacer
+     * re-asks this question every few seconds, and a counter that ticked on each of them would report the clock
+     * rather than the congestion.
+     */
+    private fun noteHeld(
+        frame: OutboundFrame,
+        held: MutableList<AirBucket>?,
+    ): MutableList<AirBucket>? {
+        if (frame.heldForAir) return held
+        frame.onAirtimeHeld()
+        return (held ?: mutableListOf()).also { it += frame.bucket }
     }
 
     /**

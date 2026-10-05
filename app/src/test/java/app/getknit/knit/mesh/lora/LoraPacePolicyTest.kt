@@ -1,6 +1,7 @@
 package app.getknit.knit.mesh.lora
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -146,6 +147,114 @@ class LoraPacePolicyTest {
         assertEquals("live", pace.take(now)!!.label)
         assertEquals("the refused backfill is still queued, not dropped", 1, pace.pending)
         assertEquals(1, pace.lastAirtimeRefusals)
+    }
+
+    /**
+     * Spends the window's total down to one packet's worth: everything booked live until a single full packet no
+     * longer fits, then the window rolls far enough to hand the oldest booking back. A one-packet frame now fits
+     * and a two-packet one does not, the state the 2026-10-04 walk sat in for eleven minutes. Returns the time.
+     */
+    private fun oneSlotLeft(air: LoraAirtime): Long {
+        var now = 0L
+        while (air.admits(AirBucket.LIVE, FrameClass.ROOM, listOf(MeshtasticProto.MAX_PAYLOAD), now)) {
+            air.record(AirBucket.LIVE, MeshtasticProto.MAX_PAYLOAD, now)
+            now += 3_000
+        }
+        now = air.nextReleaseAt(now)!!
+        assertTrue(air.admits(AirBucket.LIVE, FrameClass.ROOM, listOf(MeshtasticProto.MAX_PAYLOAD), now))
+        assertFalse(air.admits(AirBucket.LIVE, FrameClass.DM, List(2) { MeshtasticProto.MAX_PAYLOAD }, now))
+        return now
+    }
+
+    private fun live(
+        label: String,
+        klass: FrameClass,
+        parts: Int,
+        bucket: AirBucket = AirBucket.LIVE,
+    ) = OutboundFrame(List(parts) { ByteArray(MeshtasticProto.MAX_PAYLOAD) }, label, klass, bucket)
+
+    @Test
+    fun aDmTheTotalRefusesHoldsTheRoomPostsThatWouldTakeItsAir() {
+        // The 2026-10-04 walk: a two-packet DM waited from 16:28 to 16:39 while one-packet room posts took each
+        // packet's worth of air the rolling window handed back.
+        val air = LoraAirtime()
+        val pace = LoraPacePolicy(minGapMs = 0, airtime = air)
+        var now = oneSlotLeft(air)
+        pace.enqueue(live("dm", FrameClass.DM, parts = 2))
+        pace.enqueue(live("room", FrameClass.ROOM, parts = 1))
+        assertNull("the room post fits, but it would spend the air the DM is waiting for", pace.take(now))
+        assertEquals("both still queued", 2, pace.pending)
+        assertEquals(2, pace.lastAirtimeRefusals)
+        now = air.nextReleaseAt(now)!!
+        assertEquals("a second packet's worth back, and the DM goes first", "dm", pace.take(now)!!.label)
+    }
+
+    @Test
+    fun aBackfilledDmNeverHoldsLiveChat() {
+        // A backfilled DM keeps DM class but spends the bridge's share (ADR 044): it waits for air like any frame,
+        // but holding live traffic behind it would let backfill crowd live chat, which the share exists to prevent.
+        val air = LoraAirtime()
+        val pace = LoraPacePolicy(minGapMs = 0, airtime = air)
+        val now = oneSlotLeft(air)
+        pace.enqueue(live("backfill", FrameClass.DM, parts = 2, bucket = AirBucket.BRIDGE))
+        pace.enqueue(live("room", FrameClass.ROOM, parts = 1))
+        assertEquals("room", pace.take(now)!!.label)
+    }
+
+    @Test
+    fun theClassesAboveAHeldDmStillGo() {
+        // The hold is on what ranks behind the DM. The profile is judged on its own share, and the offer outranks
+        // the DM as it always has.
+        val air = LoraAirtime()
+        val pace = LoraPacePolicy(minGapMs = 0, airtime = air)
+        val now = oneSlotLeft(air)
+        pace.enqueue(live("dm", FrameClass.DM, parts = 2))
+        pace.enqueue(live("offer", FrameClass.GOSSIP, parts = 1, bucket = AirBucket.GOSSIP))
+        pace.enqueue(live("profile", FrameClass.BOOTSTRAP, parts = 1, bucket = AirBucket.BOOTSTRAP))
+        assertEquals("profile", pace.take(now)!!.label)
+        assertEquals("offer", pace.take(now)!!.label)
+    }
+
+    @Test
+    fun aDmQueuedAheadOfTheHeldOneStillGoesAndOneBehindItWaits() {
+        // FIFO within the class: the hold is on what dequeues after the held frame, not on the whole class.
+        val air = LoraAirtime()
+        val pace = LoraPacePolicy(minGapMs = 0, airtime = air)
+        val now = oneSlotLeft(air)
+        pace.enqueue(live("dm:short", FrameClass.DM, parts = 1))
+        pace.enqueue(live("dm:long", FrameClass.DM, parts = 2))
+        pace.enqueue(live("dm:later", FrameClass.DM, parts = 1))
+        assertEquals("dm:short", pace.take(now)!!.label)
+        val after = LoraPacePolicy(minGapMs = 0, airtime = LoraAirtime())
+        val then = oneSlotLeft(after.airtime)
+        after.enqueue(live("dm:long", FrameClass.DM, parts = 2))
+        after.enqueue(live("dm:later", FrameClass.DM, parts = 1))
+        assertNull("the later DM would take the long one's air", after.take(then))
+    }
+
+    @Test
+    fun nothingWaitsOnAFrameNoWindowWouldAdmit() {
+        // Bigger than the whole allowance: holding the queue behind it would hold it forever.
+        val air = LoraAirtime()
+        val pace = LoraPacePolicy(minGapMs = 0, airtime = air)
+        val now = oneSlotLeft(air)
+        val parts = (air.budgetMs(AirBucket.LIVE) / air.timeOnAirMs(MeshtasticProto.MAX_PAYLOAD) + 1).toInt()
+        pace.enqueue(live("huge", FrameClass.DM, parts = parts))
+        pace.enqueue(live("room", FrameClass.ROOM, parts = 1))
+        assertEquals("room", pace.take(now)!!.label)
+    }
+
+    @Test
+    fun aFrameHeldBehindAHeldDmIsReportedOnce() {
+        val air = LoraAirtime()
+        val pace = LoraPacePolicy(minGapMs = 0, airtime = air)
+        val now = oneSlotLeft(air)
+        pace.enqueue(live("dm", FrameClass.DM, parts = 2))
+        pace.enqueue(live("room", FrameClass.ROOM, parts = 1))
+        assertNull(pace.take(now))
+        assertEquals(listOf(AirBucket.LIVE, AirBucket.LIVE), pace.lastAirtimeHolds)
+        assertNull(pace.take(now + 1))
+        assertEquals("still waiting, no longer news", emptyList<AirBucket>(), pace.lastAirtimeHolds)
     }
 
     @Test
