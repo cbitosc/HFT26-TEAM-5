@@ -29,6 +29,9 @@ data class CodedPhyStatus(
     val txPower: String,
     val links: List<PhyLinkStatus>,
     val peers: List<PhyPeerStatus>,
+    /** Whether the scan's last window hunted ([CodedPhyPolicy.hunts]), and the peers lost at range it is hunting. */
+    val hunting: Boolean = false,
+    val hunted: Set<String> = emptySet(),
 )
 
 /**

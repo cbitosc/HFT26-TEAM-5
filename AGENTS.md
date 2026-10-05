@@ -57,7 +57,8 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   trial (CHECK `.agents/memory/roadmap.md`). The receive scan is Off for an all-linked clique with nothing
   streaming (ADR 2026-09.u8qj) — the link copy already reaches every linked peer; don't widen that gate. `hasFastPlane` is now true for Bluetooth: the link copy the
   composite used to send lives inside the transport's `fastFanout`/`fastSend`; don't add it back upstream.
-- **When touching `CodedPhyPolicy`, `PhyStepper`, `BlePhyControl`, `CodedPhyDiag`, `CodedAdvertPace`,
+- **When touching `CodedPhyPolicy`, `PhyStepper`, `BlePhyControl`, `CodedPhyDiag`, `CodedAdvertPace`, `RangeHunt`,
+  `AppVisibility`,
   `BleAdvertiser.codedParams` / `setInterval`, `BleScanner.phys`, `BlePresenceTracker`'s per-PHY RSSI,
   `BuildConfig.BLE_CODED_PHY` or `…debug.PHY`:** READ ADR
   2026-10.yvn6 and the Coded PHY section of `.agents/context/mesh-transport.md`. An experiment, dark in release: a
@@ -66,7 +67,10 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   handle on the link's ACL. Capability is inferred from hearing the Coded advert — no flags-byte bit. A dialer heard on
   Coded alone is admitted as unsighted (shzv's tie-break holds for 1M), and OFF leaves a link on its PHY. A Coded dial
   gets a 25 s watchdog, and a link that drops at range makes the dialed side's Coded advert fast for 3 min, its
-  interval moved in place (`CodedAdvertPace`, `BleAdvertiser.setInterval`; the amendment of 2026-10-02). CHECK
+  interval moved in place (`CodedAdvertPace`, `BleAdvertiser.setInterval`; the amendment of 2026-10-02), while the
+  dialing side hunts it — lonely gap, Coded windows, no settled floor, whatever other links it holds — for those
+  3 min, or up to 30 while Knit is open on a lit screen, which hunts on its own too (`RangeHunt`, the 2026-10-04
+  amendment). CHECK
   `.agents/memory/roadmap.md` for what the release flag waits on.
 - **When touching `CodedPhyPolicy.pace`, `PhyTuning.filePaceBytesPerSec` / `BLE_PACE_BYTES_PER_SEC`, `PaceConfig` /
   `PaceWindow` / `TransferPacePolicy`, `BluetoothMeshTransport.paceFor`, or `FramedLink`'s `pace`:** READ ADR

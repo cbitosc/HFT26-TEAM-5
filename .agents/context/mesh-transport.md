@@ -591,6 +591,16 @@ that reports `isLeCodedPhySupported`:
   refused fast enables give the window up. The Coded set rides the presence set's re-assert turns (9utz) and has
   retries of its own (`codedKeeper`): a refused enable, and up to five restarts of a start the stack failed
   internally (status 4); TOO_MANY_ADVERTISERS and FEATURE_UNSUPPORTED stay dark until the next bring-up.
+- **…and the dialing side hunts it.** For the same drop, the larger id holds the peer in `RangeHunt` and its scan
+  hunts (`CodedPhyPolicy.hunts`): the 12 s lonely gap (`PowerPolicy.HUNT_IDLE_MS`, on the elapsed clock), every
+  other window Coded-only, never the settled floor, whatever other links it holds, and a window that a dial ends;
+  A2DP still floors it. That lasts 3 min (`fastHoldMs`),
+  or up to 30 min from the drop while Knit is in use (`huntInUseHoldMs`), until the peer links again. "In use" is
+  `AppVisibility` (`MainActivity` started, kept off `PowerState` so NAN does not heal on it) with the screen lit,
+  and it hunts on its own too, with nobody lost. A NAN chase of a peer heard on Coded before also gets Coded-only
+  windows. Before this a dialer
+  holding any other link (an iPhone in the same pocket) floored its scan and never heard its lost peer again (the
+  2026-10-04 walk). Log: `bt hunt <id>: lost at range…`, `bt scan → hunt (lost=[…] inUse=…)` / `bt scan hunt over`.
 - **Admission.** While the experiment runs, a dialer heard on Coded alone counts as unsighted
   (`CodedPhyPolicy.sightedForAdmission`) and is admitted whatever the id order. Otherwise a far pair waits on
   each other: the responder refuses, and its own dial never clears the dwell (the first walk, the ADR's

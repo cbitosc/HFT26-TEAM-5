@@ -359,3 +359,107 @@ edge is owed after it.
 The 1M/2M side of this pace moved to ADR 2026-10.8jwn (#117): one 4 KiB/s budget split among the links on 1M or 2M
 feeding a file at once, in chunks of two seconds of the share. A link on Coded keeps the pace above, outside the
 split.
+
+## Amendment 2026-10-04 — the dialing side hunts a peer it lost at range, and harder while Knit is in use
+
+**What was observed.** On the 2026-10-04 walk the P9 and the iPhone 12 stayed together and the P8 was left on its own,
+about 100 m out. All three ran main @47485429 in AUTO. Logs: `~/knit-trials/2026-10-04-field-coded-lora/`.
+
+- The P9↔P8 link stepped 1M→Coded at −89 (16:15:27) and dropped on a supervision timeout at 16:17:23. The P8 dialed
+  back on Coded at 16:24:01, and that link dropped the same way at 16:30:20. BQR "Approaching LSTO" read −100/−103 dBm
+  and −106 dBm, with the P9 transmitting at +17 dBm. Both drops were the RF floor, not code.
+- Both relinks took about 6 minutes, and both were the P8's lonely dial (hj4a). The P9 is the larger id, the side
+  that dials back, and it never heard the P8 again: its `reach` lacked it for the whole of both gaps.
+- The P9 held a link to the iPhone the whole walk. With one link and no sighted candidate, its scan sat at the settled
+  floor, one window per 120 s. Coded-only windows run only when a phone is alone or already hears a peer on Coded
+  alone, so they never came on. Wi-Fi Aware discovered the P8 at range twice (chase boosts at 16:22:42 and 16:33:17),
+  but a boost is an all-PHY scan, and it ended at the floor again 80 s later.
+- The 2026-10-02 amendment made the dialed side (the P8) advertise fast after a drop, but nothing made the dialing side
+  listen for it.
+- Walking back toward the P8 at 16:35, the P9's side-channel scanner heard a P8 page at 16:35:33, so the P8 was within
+  1M range. The link still waited for the P8's dial at 16:36:08 and stepped to 2M at −60 a minute later.
+
+**What changed.**
+
+- **The dialing side hunts.** `CodedPhyPolicy.huntAfterDrop` is `fastAdvertAfterDrop`'s twin: the same drop at range
+  (`eof`, on Coded or at or under the step-down), on the side that `drives`. The transport holds the peer in `RangeHunt`
+  until it links again or its hold runs out.
+- **What a hunt is** (`CodedPhyPolicy.hunts`):
+  - the 12 s lonely gap (`PowerPolicy.HUNT_IDLE_MS`) on the elapsed clock (pj9w);
+  - every other window Coded-only (`scanPhys`' new `farWanted`);
+  - never the settled floor;
+  - a window that ends when a dial begins (`dialStarted`, sent from `beginConnect`). The hunted peer's dwell ripens
+    inside a hunting window, and a scan left running through a Coded dial takes the radio from the initiator's 15 ms
+    in 60. The cut window keeps its slot (`nextWindowAt`): the next one starts no sooner than the cut one would have
+    ended, so windows still start at least 8 s apart and the app stays under Android's five scan starts per 30 s
+    however fast dials begin and end. Every other window still runs its length, as pj9w describes;
+  - all of it whatever other links the phone holds;
+  - except under Bluetooth audio: A2DP keeps the scan at its floor, a hunt included, as it does everywhere else. The
+    lost peer stays held, so the hunt resumes when the audio stops, inside its hold.
+  The window length and scan mode still follow the screen.
+- **Knit in use hunts harder and longer.** "In use" is Knit's UI on screen (`AppVisibility`, which `MainActivity` sets
+  between `onStart` and `onStop`) with the screen lit.
+  - A phone in that state hunts with nobody lost.
+  - A lost peer stays hunted for up to `PhyTuning.huntInUseHoldMs` (30 min) from the drop, not `fastHoldMs` (3 min).
+  - `RangeHunt` keeps the drop time, not a deadline. Opening Knit two minutes after a drop picks the hunt up, and
+    closing it ten minutes in ends the hunt at the next window.
+  - A drop older than the longer hold is forgotten.
+  - `AppVisibility` is its own flow rather than a `PowerState` field, because the Wi-Fi Aware transport heals on every
+    `PowerState` change and opening the app is no reason to re-arm NAN.
+- **A NAN chase gets Coded-only windows too**, for a chased peer this phone has heard on Coded before (`codedCapable`):
+  one that 1M cannot hear may be one only Coded can (`ScanDemandPolicy.chasing`, split out of `decide`). Any other
+  chased peer gets none: a chase usually buys one woken window, and a Coded-only one is deaf to a Pixel 3, a release
+  build or a phone in mode OFF.
+- **The record.**
+  - `bt hunt <id>: lost at range, for <ms>ms or <ms>ms in use` at the drop.
+  - `bt scan → hunt (lost=[…] inUse=…)` each time the verdict or its reason changes, `bt scan hunt held (… a2dp)`
+    while audio holds it off, and `bt scan hunt over`.
+  - `bt scan coded windows on (hunt|chase=[…])`.
+  - `hunt=` on the `bt state` line.
+  - `…debug.PHY` reports `hunting` and `hunted` and sets `--ei huntInUseHoldMs`.
+
+**What it costs.** It is all dark in release, like the rest of the experiment.
+
+- A pocket phone pays for at most 3 minutes per drop at range, at the same cadence a lonely phone runs in its first
+  three minutes.
+- A phone with Knit open on a lit screen scans 12 s on and 12 s off for as long as it stays open, about 12 % receiver
+  duty at BALANCED, half of it on Coded. That overrides w3xk's relaxed screen-on gap for a lonely phone, and the floor
+  and duty-cycle gaps for a linked one. The display costs more than that, and the person is looking at Knit.
+- Coded-only windows halve the 1M listening while a hunt runs. Legacy-only peers are still heard every other window.
+  A Coded-capable peer coming back close can still read Coded alone for a while: its 1M mark is the one from its last
+  visit, and the 1M clock ran on while it was away. Heard first in a Coded-only window, its dial can go out on Coded
+  and the link step up to 2M about 10 s later at −62 (the fast hold). That was already so for a phone alone; a hunt
+  makes it likelier. `dialTarget` also falls back to the peer's last 1M address when its Coded one is unknown, which
+  is not pruned. Both are left alone here.
+- The in-use hunt scans about half the time on a phone that may be feeding a file. The 4 KiB/s budget of ADR
+  2026-10.8jwn was measured at the old cadence, so whether a 1M link's drain holds under the hunt is unmeasured. The
+  bench below measures it; if it does not hold, the nobody-lost hunt yields while a file streams.
+
+**Not taken.**
+
+- Hunting on the dialed side as well. It does not dial a sighted larger id (shzv), and its fast advert is the half
+  that helps.
+- Feeding side-channel pages into presence. A page names its frame's author, not the phone that aired it.
+- An app-in-use hunt in release on 1M alone. It would change the shipped plane's battery, so it waits until the
+  experiment ships or is split out.
+
+Tests: `RangeHuntTest` (the pocket hold, the in-use bound, an open picking up an ended hunt, forgetting, a relink, a
+second drop, `clear`), `CodedPhyPolicyTest` (`huntAfterDrop`, `hunts`, `scanPhys` with `farWanted`),
+`ScanDemandPolicyTest` (`chasing`), and `PowerPolicyTest` (`HUNT_IDLE_MS`).
+
+**The next walk checks:**
+
+- With the iPhone linked: on the P9, `bt hunt <P8>` at `link dropped on CODED`, then `bt scan → hunt (lost=[<P8>] …)` by
+  the end of the window running at the drop (up to 12 s), and `bt scan coded windows on (hunt)` if they were off.
+- The P9's own dial `via=coded`, linked before the P8's lonely dial (against about 6 minutes), in a pocket and again
+  walking back with Knit open, where it should link before 1M range.
+- `bt coded heard` tallies during a screen-off hunt, to see whether its LOW_POWER Coded windows hear the 250 ms advert.
+- One leg with earbuds streaming: `bt scan hunt held (lost=[…] … a2dp)` by the window after the drop, and no audible dropouts. (The floor
+  line will not show: `floorScan` logs a change of tier, and the phone was already at the floor.)
+- Walking Knit open into three or more smaller-id peers at once: no `scan failed: 6` from `BleScanner`, and no
+  `via=coded` dial to a peer reading −70 or stronger.
+- A chase bench: a dialer in AUTO holding a link, a Pixel 3 or a phone in mode OFF returning. It must relink within a
+  window of the chase, as before this change.
+- An in-use bench: Knit open, a ~700 KB photo to a linked peer, texts at +5/+15/+30 s. The receiver's drain stays at or
+  over 4.8 KB/s and the texts arrive inside 8jwn's bound. Note `hunt=` in every `ble-link-trial` rep: a lab phone with
+  Knit in front and its screen lit now hunts the whole time.

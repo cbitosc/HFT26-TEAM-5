@@ -98,3 +98,11 @@ transport and restarts when the last link goes down. `lastLinkOrStartAt` and `lo
 
 `PowerPolicy` is unchanged. No JVM harness runs `scanLoop`. Trial step 1 above becomes the oracle: after the last
 `bt link down`, `bt scan lonely: relaxed … (alone ≈180000ms)` appears about three minutes later, never sooner.
+
+## Amendment 2026-10-04 — Knit in use is not "screen on"
+
+The rule above relaxes a lonely phone with its screen on because a lit screen does not mean the person is using Knit.
+While the Coded PHY experiment runs, ADR 2026-10.yvn6's 2026-10-04 amendment tells those two apart: with Knit's own
+UI on screen (`AppVisibility`) and the screen lit, the Bluetooth scan hunts (the 12 s gap, Coded-only windows
+alternating) for as long as Knit stays open, alone or not. A phone with its screen on for anything else relaxes
+exactly as above, and the NAN loop is untouched. Dark in release with the experiment.

@@ -28,6 +28,13 @@ class PowerPolicyTest {
     }
 
     @Test
+    fun theHuntingGapIsTheLonelyGapWhateverLinksAreHeld() {
+        // ADR 2026-10.yvn6, the 2026-10-04 amendment: a hunt idles like a lonely phone in its first three minutes.
+        assertEquals(PowerPolicy.idleAfterScan(PowerState(interactive = false), 0, lonelyForMs = 0), PowerPolicy.HUNT_IDLE_MS)
+        assertEquals(12_000L, PowerPolicy.HUNT_IDLE_MS)
+    }
+
+    @Test
     fun screenOffAndBatteryLowBacksOffFurthest() {
         val duty =
             PowerPolicy.dutyCycle(

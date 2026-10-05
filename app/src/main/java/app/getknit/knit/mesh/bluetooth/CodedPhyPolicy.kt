@@ -76,8 +76,17 @@ data class PhyTuning(
     val codedCreditDb: Double = CodedPhyPolicy.CODED_RSSI_CREDIT_DB,
     /** The Coded advert's interval while a far peer that just dropped is wanted back ([CodedAdvertPace]). */
     val fastAdvertMs: Int = 250,
-    /** How long a drop at range keeps the Coded advert fast, unless the peer links again first. */
+    /**
+     * How long a drop at range keeps the Coded advert fast on the dialed side, and the scan hunting on the dialing side
+     * ([RangeHunt]), unless the peer links again first.
+     */
     val fastHoldMs: Long = 180_000,
+    /**
+     * How long the dialing side keeps hunting a peer it lost at range while Knit is open on a lit screen, from the drop
+     * ([RangeHunt]); never less than [fastHoldMs]. A bound, so a peer that left for good is not hunted for as long as
+     * the app happens to stay open.
+     */
+    val huntInUseHoldMs: Long = 1_800_000,
     /**
      * A file's feed rate and chunk on a link on Coded ([CodedPhyPolicy.pace], #114): about what S=8 drained at the edge
      * of the 2026-10-02 walk (~1.1 KB/s), so a frame queued behind a file waits about one chunk, not the file.
@@ -168,7 +177,42 @@ object CodedPhyPolicy {
         phy: LinkPhy,
         linkRssi: Int?,
         tuning: PhyTuning,
-    ): Boolean = !drives(localNodeId, peerNodeId) && (phy == LinkPhy.CODED || (linkRssi != null && linkRssi <= tuning.stepDownDbm))
+    ): Boolean = !drives(localNodeId, peerNodeId) && droppedAtRange(phy, linkRssi, tuning)
+
+    /**
+     * The other half of [fastAdvertAfterDrop]: whether this phone should hunt the peer whose link just went down on its
+     * own — on the side that dials back ([drives]), for the same drop at range. The fast advert is only worth what the
+     * dialer's scan hears of it, and a dialer that still held another link sat at the settled floor with no Coded
+     * window and never heard its lost peer again (the 2026-10-04 walk: about 6 min to each relink, both by the far
+     * peer's lonely dial). A [RangeHunt] holds the peer, and the scan runs [hunts]' cadence while it is wanted.
+     */
+    fun huntAfterDrop(
+        localNodeId: String,
+        peerNodeId: String,
+        phy: LinkPhy,
+        linkRssi: Int?,
+        tuning: PhyTuning,
+    ): Boolean = drives(localNodeId, peerNodeId) && droppedAtRange(phy, linkRssi, tuning)
+
+    /** Whether a link went down where its peer is just out of reach: on Coded, or at or under the step-down as it went. */
+    private fun droppedAtRange(
+        phy: LinkPhy,
+        linkRssi: Int?,
+        tuning: PhyTuning,
+    ): Boolean = phy == LinkPhy.CODED || (linkRssi != null && linkRssi <= tuning.stepDownDbm)
+
+    /**
+     * Whether the presence scan hunts: the lonely gap ([app.getknit.knit.mesh.power.PowerPolicy.HUNT_IDLE_MS]) and every
+     * other window on Coded, whatever links the phone holds, never at the settled floor. Only while the experiment runs
+     * ([codedOn]), and then while a peer lost at range is wanted back ([lostWanted], from [RangeHunt]) or while Knit is
+     * open on a lit screen ([inUse]): the person is looking for somebody, and the screen costs far more than the
+     * receiver. A phone in a pocket hunts only for the [PhyTuning.fastHoldMs] after a drop.
+     */
+    fun hunts(
+        codedOn: Boolean,
+        lostWanted: Boolean,
+        inUse: Boolean,
+    ): Boolean = codedOn && (lostWanted || inUse)
 
     /** [ms] as an advertising interval in the stack's 0.625 ms units, no shorter than the 100 ms it allows. */
     fun advertIntervalUnits(ms: Int): Int = maxOf((ms / ADVERT_UNIT_MS).roundToInt(), MIN_ADVERT_INTERVAL_UNITS)
@@ -208,16 +252,22 @@ object CodedPhyPolicy {
      * unlinked peer heard on Coded alone, gives every other window to Coded entirely — an all-PHY window splits its
      * time, and a far peer's Coded hits are sparse — and never two in a row, so a legacy-only peer (an iPhone, a
      * controller without Coded) is still heard every other window. Otherwise every window is all-PHY.
+     *
+     * [farWanted] gives the same windows to a phone that holds links but is looking for somebody it cannot hear on 1M:
+     * it [hunts], or another plane sees a peer it would dial that Bluetooth has not sighted (the scan's chase). Before
+     * the 2026-10-04 amendment such a phone listened on Coded only in the slice an all-PHY window gives it, so a far
+     * peer it had never heard on Coded alone stayed unheard.
      */
     fun scanPhys(
         codedOn: Boolean,
         alone: Boolean,
         codedOnlyUnlinked: Boolean,
         lastWasCoded: Boolean,
+        farWanted: Boolean = false,
     ): ScanPhys =
         when {
             !codedOn -> ScanPhys.ONE_M
-            (alone || codedOnlyUnlinked) && !lastWasCoded -> ScanPhys.CODED
+            (alone || codedOnlyUnlinked || farWanted) && !lastWasCoded -> ScanPhys.CODED
             else -> ScanPhys.ALL
         }
 

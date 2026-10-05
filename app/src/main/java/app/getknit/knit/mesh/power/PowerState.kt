@@ -124,6 +124,11 @@ object PowerPolicy {
     // radio contention" in AGENTS.md.
     private const val LONELY_IDLE_MS = 12_000L
 
+    // The Bluetooth scan's gap while it hunts (`CodedPhyPolicy.hunts`): a peer it lost at range is wanted back, or Knit
+    // is open on a lit screen. The lonely gap, for the same reason, whatever links the phone holds (ADR 2026-10.yvn6,
+    // the 2026-10-04 amendment). It keeps wall time through sleep, like the lonely gap (ADR 2026-10.pj9w).
+    const val HUNT_IDLE_MS = LONELY_IDLE_MS
+
     // On battery — screen on or off — only stay in the aggressive isolated cadence this long before
     // relaxing — bounds drain for a node that is simply alone (e.g. left in a drawer, or in use with
     // nobody around).

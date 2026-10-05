@@ -287,7 +287,9 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   N` / `stepUp` / `stepDownReads` / `minGapMs` / `stepUpHoldMs` / `stepUpFast` / `stepUpFastHoldMs` (the fast step-up
   tier, −62 held 10 s) override the step thresholds and `--ei credit N` the
   dB a Coded advert reading gains on the 1M scale (default 12, what every −90 floor reads), and `--ei fastAdvertMs N`
-  / `fastHoldMs N` the Coded advert's interval after a link at range drops (250) and how long it holds (180000), and
+  / `fastHoldMs N` the Coded advert's interval after a link at range drops (250) and how long it holds (180000) — on
+  the dialing side, how long the scan hunts the lost peer — and `--ei huntInUseHoldMs N` that hunt's bound while Knit
+  is open on a lit screen (1800000), and
   `--ei codedPace N` / `codedChunk N` a file's feed rate in B/s (1024; 0 unbounded) and chunk (2048, capped at 16384)
   on a link on Coded (#114), and `--ei filePace N` the file budget the links on 1M or 2M share, split evenly among those
   feeding a file (4096; 0 unbounded; a share's chunk is two seconds of it, 2048 to 16384 — #117, ADR 2026-10.8jwn), until the process dies (`--ez resetTuning true` restores them); no
@@ -296,7 +298,8 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   `retrying` / `dark <status>`), `txPower`, `tuning` (with `fileChunk`, the chunk of a 1M/2M link feeding alone),
   `links[]` (`nodeId`, `phy` ONE_M|TWO_M|CODED|UNKNOWN, `linkRssi`, `drives`, `attached`, `switches`, `gaveUp`) and
   `peers[]` (`nodeId`, `rssi` on the 1M scale, `oneMSeenAgoMs`, `codedSeenAgoMs`, each PHY's own `rssi1m` /
-  `rssiCoded`, and `codedLagMs`: the 1M listening its Coded hits outlast its 1M ones by, over 8000 meaning Coded alone). Oracle for a step: `links[].phy` plus `bt phy <id> ONE_M→CODED` in logcat (and the PHY chip on the
+  `rssiCoded`, and `codedLagMs`: the 1M listening its Coded hits outlast its 1M ones by, over 8000 meaning Coded alone),
+  then `hunting` (the last scan window hunted) and `hunted` (the peers lost at range it hunts). Oracle for a step: `links[].phy` plus `bt phy <id> ONE_M→CODED` in logcat (and the PHY chip on the
   Diagnostics row). Oracle for a file's pace: `file …/… <N>B in <ms>ms @<B/s> → <id>` on the sender (`@1024` on
   Coded, `@<share>` otherwise), which times only the hand-off to the stack; what the air drained is the receiver's
   `rx …/… <N>B in <ms>ms ← <id>`, and `bt file pace budget=… feeding=… share=… chunk=…` marks each change of the
@@ -304,7 +307,8 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   dials=…` once a minute per unlinked peer heard on Coded, `bt scan coded windows on|off`, `bt refused client … codedOnly=`,
   `bt initiating to … via=coded`, `bt phy <id> step-up hold none|slow|fast (rssi=…)` as a Coded link's smoothed RSSI
   crosses −72 / −62, and at a drop `bt phy <id> link dropped on <PHY> rssi=… (<reason>)` then
-  `bt coded advert fast (…)` / `slow` and any `bt coded advert refused` — raise the buffer first (`adb logcat -G 16M`; the default 256 KiB holds ~40 min).
+  `bt coded advert fast (…)` / `slow` and any `bt coded advert refused` on the dialed side, `bt hunt <id>: lost at
+  range…` then `bt scan → hunt (lost=[…] inUse=…)` / `bt scan hunt held (… a2dp)` / `bt scan hunt over` on the dialing side — raise the buffer first (`adb logcat -G 16M`; the default 256 KiB holds ~40 min).
   Negative control: on a phone without Coded (the Pixel 3) `supported` is false, `advert` stays `off` and no link
   gets a PHY handle; `mode off` restores the legacy scan and lets every handle go, leaving each link on its PHY.
 - `…debug.FLAGMSG` — injects one inbound message **the text moderator flagged** (the UI collapses it behind a

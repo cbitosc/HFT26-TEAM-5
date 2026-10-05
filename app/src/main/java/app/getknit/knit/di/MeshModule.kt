@@ -48,6 +48,7 @@ import app.getknit.knit.mesh.lora.MeshtasticGattDialer
 import app.getknit.knit.mesh.lora.MeshtasticLink
 import app.getknit.knit.mesh.lora.MeshtasticSession
 import app.getknit.knit.mesh.meshExceptionHandler
+import app.getknit.knit.mesh.power.AppVisibility
 import app.getknit.knit.mesh.power.PowerMonitor
 import app.getknit.knit.mesh.power.PowerStateSource
 import app.getknit.knit.mesh.spool.OkHttpSpoolDialer
@@ -92,6 +93,8 @@ val meshModule =
         single { StoreDigest() }
         // Tracks screen/charge/battery state and feeds it to the transport's discovery duty cycle.
         single { PowerStateSource() }
+        // Whether Knit's UI is on screen (MainActivity writes it); the BLE scan hunts harder while Knit is in use.
+        single { AppVisibility() }
         // Lets the Meshtastic board GATT dial pause the mesh BLE scan for its connect window (shared singleton).
         single { BleConnectArbiter() }
         single { PowerMonitor(androidContext(), get()) }
@@ -138,6 +141,7 @@ val meshModule =
                                     linkCap,
                                     gattPeers = BuildConfig.BLE_GATT_PEERS,
                                     phyMode = phyMode,
+                                    appVisible = get<AppVisibility>().visible,
                                     partials = get(),
                                 ),
                             )

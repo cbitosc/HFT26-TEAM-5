@@ -206,14 +206,16 @@ import java.nio.ByteBuffer
  *   high|medium` re-raises the Coded advert, and `--ei stepDown|stepUp|stepDownReads|minGapMs|stepUpHoldMs N` and
  *   `--ei stepUpFast|stepUpFastHoldMs N` (−62, 10000) override the step thresholds, `--ei credit N` the dB a Coded
  *   advert reading gains on the 1M scale (12), `--ei fastAdvertMs|fastHoldMs N` the Coded advert's interval after a
- *   link at range drops (250) and how long it holds (180000), `--ei codedPace|codedChunk N` a file's feed rate in B/s
+ *   link at range drops (250) and how long it holds (180000) — on the dialing side, how long the scan hunts the lost
+ *   peer — with `--ei huntInUseHoldMs N` that hunt's bound while Knit is open on a lit screen (1800000), `--ei codedPace|codedChunk N` a file's feed rate in B/s
  *   and chunk on a link on Coded (1024, 2048), and `--ei filePace N` the file budget the links on 1M or 2M share, split
  *   among those feeding (4096; 0 unbounded; a share's chunk is two seconds of it, 2048 to 16384 — ADR 2026-10.8jwn),
  *   until the process dies (`--ez resetTuning true` restores them). The reply: `mode`, `supported`, `advert`
  *   (off|starting|live|dark <status>), `txPower`, the tuning (with `fileChunk`, a lone 1M/2M feed's chunk), `links[]`
  *   (nodeId, phy, linkRssi, drives, attached, switches, gaveUp) and `peers[]` (nodeId, rssi on the 1M scale,
  *   oneMSeenAgoMs, codedSeenAgoMs, each PHY's own rssi1m / rssiCoded, and codedLagMs — the 1M listening its Coded hits
- *   outlast its 1M ones by; over 8000 is Coded alone).
+ *   outlast its 1M ones by; over 8000 is Coded alone), then `hunting` (whether the last scan window hunted) and
+ *   `hunted` (the peers lost at range it is hunting).
  * - [ACTION_HEAL] — nudges the transport to rescan/re-advertise.
  * - [ACTION_PAUSE] / [ACTION_RESUME] — the notification's Pause and Resume, by their store write alone
  *   (`--ei minutes 15|60`, the two offered spans): `MeshService` follows `SettingsStore.meshPausedUntil`, so
@@ -2114,6 +2116,7 @@ class DebugBridgeReceiver :
                 codedCreditDb = int("credit")?.toDouble() ?: t.codedCreditDb,
                 fastAdvertMs = int("fastAdvertMs") ?: t.fastAdvertMs,
                 fastHoldMs = int("fastHoldMs")?.toLong() ?: t.fastHoldMs,
+                huntInUseHoldMs = int("huntInUseHoldMs")?.toLong() ?: t.huntInUseHoldMs,
                 codedPaceBytesPerSec = int("codedPace") ?: t.codedPaceBytesPerSec,
                 codedChunkBytes = int("codedChunk")?.coerceIn(1, LinkFraming.FILE_CHUNK_BYTES) ?: t.codedChunkBytes,
                 filePaceBytesPerSec = int("filePace") ?: t.filePaceBytesPerSec,
@@ -2140,6 +2143,7 @@ class DebugBridgeReceiver :
                     .put("credit", tuned.codedCreditDb.toInt())
                     .put("fastAdvertMs", tuned.fastAdvertMs)
                     .put("fastHoldMs", tuned.fastHoldMs)
+                    .put("huntInUseHoldMs", tuned.huntInUseHoldMs)
                     .put("codedPace", tuned.codedPaceBytesPerSec)
                     .put("codedChunk", tuned.codedChunkBytes)
                     .put("filePace", tuned.filePaceBytesPerSec)
@@ -2172,7 +2176,8 @@ class DebugBridgeReceiver :
                             .put("codedLagMs", it.codedLagMs ?: JSONObject.NULL)
                     },
                 ),
-            )
+            ).put("hunting", status.hunting)
+            .put("hunted", JSONArray(status.hunted.sorted()))
     }
 
     private fun handleNanMsg(intent: Intent): JSONObject {

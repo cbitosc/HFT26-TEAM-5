@@ -275,6 +275,33 @@ class CodedPhyPolicyTest {
     }
 
     @Test
+    fun aDropAtRangeMakesTheDialingSideHunt() {
+        // The twin of the fast advert: "b" sorts above "a", so "b" dials back and must listen for it.
+        assertTrue(CodedPhyPolicy.huntAfterDrop("b", "a", LinkPhy.CODED, linkRssi = -99, tuning = tuning))
+        assertFalse(
+            "the dialed side advertises fast instead; its hunt would dial nobody",
+            CodedPhyPolicy.huntAfterDrop("a", "b", LinkPhy.CODED, linkRssi = -99, tuning = tuning),
+        )
+        assertTrue(CodedPhyPolicy.huntAfterDrop("b", "a", LinkPhy.ONE_M, linkRssi = tuning.stepDownDbm, tuning = tuning))
+        assertFalse(
+            "a close drop is not a far peer",
+            CodedPhyPolicy.huntAfterDrop("b", "a", LinkPhy.TWO_M, linkRssi = -60, tuning = tuning),
+        )
+        assertFalse(CodedPhyPolicy.huntAfterDrop("b", "a", LinkPhy.ONE_M, linkRssi = null, tuning = tuning))
+    }
+
+    @Test
+    fun theScanHuntsForALostPeerOrWhileKnitIsInUse() {
+        assertTrue(CodedPhyPolicy.hunts(codedOn = true, lostWanted = true, inUse = false))
+        assertTrue("open on a lit screen hunts with nobody lost", CodedPhyPolicy.hunts(codedOn = true, lostWanted = false, inUse = true))
+        assertFalse(CodedPhyPolicy.hunts(codedOn = true, lostWanted = false, inUse = false))
+        assertFalse(
+            "dark in release: the experiment off never hunts",
+            CodedPhyPolicy.hunts(codedOn = false, lostWanted = true, inUse = true),
+        )
+    }
+
+    @Test
     fun advertIntervalsAreInStackUnits() {
         assertEquals(400, CodedPhyPolicy.advertIntervalUnits(250))
         assertEquals(1600, CodedPhyPolicy.advertIntervalUnits(1_000))
@@ -290,6 +317,24 @@ class CodedPhyPolicyTest {
     }
 
     // --- scan windows ---
+
+    @Test
+    fun aLinkedPhoneLookingForAFarPeerAlternatesCodedOnlyWindows() {
+        // The 2026-10-04 walk: the dialer held a link to an iPhone, so it was neither alone nor hearing its lost peer.
+        assertEquals(
+            ScanPhys.CODED,
+            CodedPhyPolicy.scanPhys(codedOn = true, alone = false, codedOnlyUnlinked = false, lastWasCoded = false, farWanted = true),
+        )
+        assertEquals(
+            "never two Coded-only windows in a row",
+            ScanPhys.ALL,
+            CodedPhyPolicy.scanPhys(codedOn = true, alone = false, codedOnlyUnlinked = false, lastWasCoded = true, farWanted = true),
+        )
+        assertEquals(
+            ScanPhys.ONE_M,
+            CodedPhyPolicy.scanPhys(codedOn = false, alone = false, codedOnlyUnlinked = false, lastWasCoded = false, farWanted = true),
+        )
+    }
 
     @Test
     fun aLonePhoneAlternatesCodedOnlyWindows() {

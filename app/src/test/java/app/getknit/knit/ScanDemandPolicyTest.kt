@@ -3,6 +3,8 @@ package app.getknit.knit
 import app.getknit.knit.mesh.bluetooth.ScanDemandPolicy
 import app.getknit.knit.mesh.bluetooth.ScanDemandPolicy.Demand
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /** Unit tests for [ScanDemandPolicy] — the pure Boost/Floor scan-cadence decision + chase fold, virtual clock. */
@@ -15,6 +17,17 @@ class ScanDemandPolicyTest {
         linked: Set<String> = emptySet(),
         now: Long = 0,
     ) = ScanDemandPolicy.decide(linkCount, candidates, chase, sighted, linked, now)
+
+    // --- chasing ---
+
+    @Test
+    fun aChaseRunsInsideItsWindowUntilBluetoothSeesOrLinksThePeer() {
+        val chase = ScanDemandPolicy.ChaseState(mapOf("far" to 60_000L))
+        assertTrue(ScanDemandPolicy.chasing(chase, bleSighted = emptySet(), bleLinked = emptySet(), now = 0))
+        assertFalse("the window ran out", ScanDemandPolicy.chasing(chase, emptySet(), emptySet(), now = 60_000))
+        assertFalse("sighted: promotion takes it from here", ScanDemandPolicy.chasing(chase, setOf("far"), emptySet(), now = 0))
+        assertFalse(ScanDemandPolicy.chasing(chase, emptySet(), setOf("far"), now = 0))
+    }
 
     // --- decide ---
 

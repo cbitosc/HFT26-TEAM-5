@@ -57,10 +57,18 @@ object ScanDemandPolicy {
     ): Demand {
         if (linkCount == 0) return Demand.Boost // isolated → never Floor (lonely rejoin)
         if (promotableCandidates.isNotEmpty()) return Demand.Boost // promotion work right in front of us
-        val chasing =
-            chase.deadlines.any { (id, until) ->
-                now < until && id !in bleSighted && id !in bleLinked
-            }
-        return if (chasing) Demand.Boost else Demand.Floor
+        return if (chasing(chase, bleSighted, bleLinked, now)) Demand.Boost else Demand.Floor
     }
+
+    /**
+     * Whether a foreign peer is still being chased at [now]: inside its window, and neither sighted nor linked on BLE.
+     * The scan also gives such a chase Coded windows while the Coded experiment runs (`CodedPhyPolicy.scanPhys`): a
+     * peer another plane sees that 1M does not may be one only Coded can hear.
+     */
+    fun chasing(
+        chase: ChaseState,
+        bleSighted: Set<String>,
+        bleLinked: Set<String>,
+        now: Long,
+    ): Boolean = chase.deadlines.any { (id, until) -> now < until && id !in bleSighted && id !in bleLinked }
 }

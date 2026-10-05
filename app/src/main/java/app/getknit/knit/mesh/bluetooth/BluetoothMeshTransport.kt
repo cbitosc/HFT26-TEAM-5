@@ -60,11 +60,13 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.isActive
@@ -132,6 +134,9 @@ class BluetoothMeshTransport(
     // The Coded PHY experiment's mode (`SettingsStore.debugBlePhyMode`, ADR 2026-10.yvn6): the DI hands OFF, always,
     // while `BuildConfig.BLE_CODED_PHY` keeps it dark — the one seam; nothing here gates on the flag again.
     private val phyMode: Flow<CodedPhyMode> = flowOf(CodedPhyMode.OFF),
+    // Whether Knit's UI is on screen (`AppVisibility`): with the screen lit, the person is using Knit, and the scan hunts
+    // while the Coded experiment runs ([CodedPhyPolicy.hunts]). False, always, in a process with no UI.
+    private val appVisible: StateFlow<Boolean> = MutableStateFlow(false),
     // Where a link keeps an attachment cut mid-stream and resumes it from (#116, ADR 2026-10.wtyc): one store
     // shared with the Wi-Fi Aware plane and BlobExchange, so any holder on either radio can finish the transfer.
     private val partials: PartialBlobs,
@@ -202,6 +207,15 @@ class BluetoothMeshTransport(
     // 2026-10.yvn6, amendment 3). [paceJob] makes the next change — a drop's settle, a link's return, the hold's end.
     private val codedPace = CodedAdvertPace()
 
+    // The dialing side's twin of [codedPace]: the peers a link of ours dropped at range, hunted by the scan until they
+    // link again or the hold runs out (ADR 2026-10.yvn6, the 2026-10-04 amendment). [hunting] and [huntWhy] are the
+    // last window's verdict, for one log line per change and the state line.
+    private val rangeHunt = RangeHunt()
+
+    @Volatile private var hunting = false
+
+    private var huntWhy = ""
+
     @Volatile private var paceJob: Job? = null
 
     @Volatile private var codedFast = false
@@ -216,6 +230,11 @@ class BluetoothMeshTransport(
     // windows are running at all, for the one log line per edge. Touched by [scanLoop] alone.
     private var lastScanCoded = false
     private var codedWindows = false
+
+    // When the last presence window's full length would have ended. A dial ends a hunting window early, and the next
+    // one still waits for this: windows then start at least a window apart, as they always did, which keeps the app
+    // under Android's five scan starts per 30 s however fast dials begin and end. Touched by [scanLoop] alone.
+    private var nextWindowAt = 0L
 
     // The waits a relink waits on — the scan's window, its pause behind a dial and its hunting gap, the connect loop,
     // the dial and HELLO watchdogs, the GATT payload read — run on the elapsed clock, so a phone that suspends between
@@ -318,6 +337,11 @@ class BluetoothMeshTransport(
     private val healSignal = Channel<Unit>(Channel.CONFLATED)
     private val scanWake = Channel<Unit>(Channel.CONFLATED)
 
+    // A dial began ([beginConnect]): it ends a hunting window that is running, so the dial the hunt exists for does not
+    // contend with our own scan for the radio (scanning starves connects). Conflated, and drained as each window
+    // starts, so a dial that began before the window cannot end it.
+    private val dialStarted = Channel<Unit>(Channel.CONFLATED)
+
     // Cross-plane early-warning: nodeIds another plane (Wi-Fi Aware) can see that we'd initiate to but haven't
     // linked or BLE-sighted yet — pushed by [CompositeMeshTransport.onForeignReachable] — plus their per-peer
     // chase deadlines. The scan boosts to try to catch them on BLE; the chase expires so a NAN-only / out-of-range
@@ -348,6 +372,7 @@ class BluetoothMeshTransport(
     private var diagJob: Job? = null
     private var audioJob: Job? = null
     private var arbiterJob: Job? = null
+    private var visibleJob: Job? = null
     private var sideJob: Job? = null
     private var capJob: Job? = null
     private var phyJob: Job? = null
@@ -448,6 +473,9 @@ class BluetoothMeshTransport(
             audioJob = scope.launch { audioMonitor.contended.drop(1).collect { wakeScan() } }
             // The board dial holds an arbiter slot; wake the scan on release so it resumes without waiting out the gap.
             arbiterJob = scope.launch { arbiter.busy.drop(1).collect { wakeScan() } }
+            // Knit coming on screen starts a hunt now (CodedPhyPolicy.hunts); leaving it ends one at the next window, 12 s
+            // on, so the falling edge wakes nothing. Nothing at all while the experiment is off: release never hunts.
+            visibleJob = scope.launch { appVisible.drop(1).filter { it }.collect { if (codedOn()) wakeScan() } }
             // A new cap re-runs the promotion decision now: a lower one sheds the weakest evictable links.
             capJob =
                 scope.launch {
@@ -475,6 +503,7 @@ class BluetoothMeshTransport(
         diagJob?.cancel()
         audioJob?.cancel()
         arbiterJob?.cancel()
+        visibleJob?.cancel()
         capJob?.cancel()
         phyJob?.cancel()
         advertJob?.cancel()
@@ -495,6 +524,11 @@ class BluetoothMeshTransport(
         codedDeviceFor.clear()
         codedCapable.clear()
         codedTallies.clear()
+        rangeHunt.clear()
+        hunting = false
+        huntWhy = ""
+        codedWindows = false
+        lastScanCoded = false
         synchronized(lock) {
             inFlight.clear()
             backoffs.clear()
@@ -878,6 +912,12 @@ class BluetoothMeshTransport(
         Log.i(TAG, "bt phy ${status.nodeId} link dropped on ${status.phy} rssi=${status.linkRssi} ($reason)")
         val tuning = CodedPhyDiag.tuning
         if (reason != "eof" || !codedOn()) return
+        if (CodedPhyPolicy.huntAfterDrop(localNodeId, status.nodeId, status.phy, status.linkRssi, tuning)) {
+            rangeHunt.onDrop(status.nodeId, elapsed())
+            Log.i(TAG, "bt hunt ${status.nodeId}: lost at range, for ${tuning.fastHoldMs}ms or ${tuning.huntInUseHoldMs}ms in use")
+            wakeScan()
+            return
+        }
         if (!CodedPhyPolicy.fastAdvertAfterDrop(localNodeId, status.nodeId, status.phy, status.linkRssi, tuning)) return
         codedPace.onDrop(status.nodeId, elapsed(), tuning.fastHoldMs)
         schedulePace(AdvertReassertPolicy.SETTLE_MS)
@@ -989,6 +1029,7 @@ class BluetoothMeshTransport(
 
     private fun codedPhyStatus(): CodedPhyStatus {
         val now = elapsed()
+        val tuning = CodedPhyDiag.tuning
         return CodedPhyStatus(
             mode = codedMode,
             supported = codedSupported,
@@ -1007,6 +1048,8 @@ class BluetoothMeshTransport(
                         it.codedLagMs,
                     )
                 },
+            hunting = hunting,
+            hunted = rangeHunt.wanted(now, inUse(powerState.state.value), tuning.fastHoldMs, tuning.huntInUseHoldMs),
         )
     }
 
@@ -1014,32 +1057,18 @@ class BluetoothMeshTransport(
 
     private suspend fun scanLoop() {
         while (scope.isActive) {
-            val inflight = inFlightSnapshot()
-            val canScan = adapter?.isEnabled == true && inflight.isEmpty() && !arbiter.busy.value
-            if (!canScan) {
-                // A connect is in flight (radio contention) or the adapter is off — wait, don't scan. Log the
-                // pause so a scanning gap (which starves presence for the whole mesh) is attributable.
-                val adapterOn = adapter?.isEnabled == true
-                if (adapterOn) Log.d(TAG, "scan paused: connect in flight $inflight arbiter=${arbiter.busy.value}")
-                // Wait for the event that ends the pause — the connect's end (`registerLink`/`failConnect` →
-                // `wake()`), the arbiter freeing (its collector → `wakeScan()`), the adapter coming back
-                // (`STATE_ON` → `wake()`) — with a timeout sized to that event, not a 2 s poll: an adapter left
-                // off used to wake this loop thirty times a minute for as long as it stayed off.
-                elapsedWait.receiveWithin(scanWake, if (adapterOn) CONNECT_PAUSE_WAIT_MS else ADAPTER_OFF_WAIT_MS)
-                continue
-            }
+            // Drained before the in-flight check: a dial that began before it pauses the scan below, and one that begins
+            // after it stays in the channel and ends the hunting window it lands in.
+            dialStarted.tryReceive()
+            if (waitedBeforeWindow()) continue
             val power = powerState.state.value
-            scanWindow(power)
+            val hunt = huntNow(power)
+            scanWindow(power, hunt)
             val aloneFor = aloneForMs()
-            val idle =
-                if (floorScan()) {
-                    PowerPolicy.settledIdleAfterScan(power, links.size, aloneFor)
-                } else {
-                    PowerPolicy.idleAfterScan(power, links.size, aloneFor)
-                }
-            logLonelyTransition(links.isEmpty() && PowerPolicy.lonelyRelaxed(power, aloneFor), idle, aloneFor)
-            // The hunting gap keeps wall time through sleep; every other gap is a power budget and stretches (pj9w).
-            if (PowerPolicy.hunting(power, links.size, aloneFor)) {
+            val idle = idleAfterWindow(power, hunt, aloneFor)
+            logLonelyTransition(!hunt && links.isEmpty() && PowerPolicy.lonelyRelaxed(power, aloneFor), idle, aloneFor)
+            // The hunting gaps keep wall time through sleep; every other gap is a power budget and stretches (pj9w).
+            if (hunt || PowerPolicy.hunting(power, links.size, aloneFor)) {
                 elapsedWait.receiveWithin(scanWake, idle)
             } else {
                 // stretches: a power budget: the settled, linked and relaxed gaps (pj9w).
@@ -1048,17 +1077,92 @@ class BluetoothMeshTransport(
         }
     }
 
+    /**
+     * Waits instead of scanning, and says so, while a window may not start: a dial or the board's connect holds the
+     * radio, the adapter is off, or a window a dial cut short still holds its slot ([nextWindowAt]).
+     */
+    private suspend fun waitedBeforeWindow(): Boolean {
+        val inflight = inFlightSnapshot()
+        val canScan = adapter?.isEnabled == true && inflight.isEmpty() && !arbiter.busy.value
+        if (!canScan) {
+            // A connect is in flight (radio contention) or the adapter is off — wait, don't scan. Log the
+            // pause so a scanning gap (which starves presence for the whole mesh) is attributable.
+            val adapterOn = adapter?.isEnabled == true
+            if (adapterOn) Log.d(TAG, "scan paused: connect in flight $inflight arbiter=${arbiter.busy.value}")
+            // Wait for the event that ends the pause — the connect's end (`registerLink`/`failConnect` →
+            // `wake()`), the arbiter freeing (its collector → `wakeScan()`), the adapter coming back
+            // (`STATE_ON` → `wake()`) — with a timeout sized to that event, not a 2 s poll: an adapter left
+            // off used to wake this loop thirty times a minute for as long as it stayed off.
+            elapsedWait.receiveWithin(scanWake, if (adapterOn) CONNECT_PAUSE_WAIT_MS else ADAPTER_OFF_WAIT_MS)
+            return true
+        }
+        val early = nextWindowAt - elapsed()
+        if (early <= 0) return false
+        elapsedWait.receiveWithin(scanWake, early) // a window a dial cut short keeps its slot
+        return true
+    }
+
+    /** The gap after a presence window: the hunting gap while it [hunt]s, else the settled floor or the duty cycle's. */
+    private fun idleAfterWindow(
+        power: PowerState,
+        hunt: Boolean,
+        aloneFor: Long,
+    ): Long =
+        when {
+            hunt -> PowerPolicy.HUNT_IDLE_MS
+            floorScan() -> PowerPolicy.settledIdleAfterScan(power, links.size, aloneFor)
+            else -> PowerPolicy.idleAfterScan(power, links.size, aloneFor)
+        }
+
+    /**
+     * Whether this window hunts ([CodedPhyPolicy.hunts]): a peer lost at range is wanted back ([rangeHunt]), or Knit is
+     * open on a lit screen, and no Bluetooth audio contends the radio. Logs one line each time the answer or its reason
+     * changes.
+     */
+    private fun huntNow(power: PowerState): Boolean {
+        val tuning = CodedPhyDiag.tuning
+        val inUse = inUse(power)
+        val lost = rangeHunt.wanted(elapsed(), inUse, tuning.fastHoldMs, tuning.huntInUseHoldMs)
+        // Audio streaming over Bluetooth keeps the scan at its floor, a hunt included: the radio it would take is the
+        // one the music and our own dials share (the a2dp floor). The lost peer stays held, so the hunt resumes.
+        val wants = CodedPhyPolicy.hunts(codedOn(), lost.isNotEmpty(), inUse)
+        val hunt = wants && !audioMonitor.contended.value
+        val why = if (wants) "lost=$lost inUse=$inUse" + (if (hunt) "" else " a2dp") else ""
+        if (why != huntWhy) {
+            huntWhy = why
+            Log.i(
+                TAG,
+                when {
+                    hunt -> "bt scan → hunt ($why)"
+                    wants -> "bt scan hunt held ($why)"
+                    else -> "bt scan hunt over"
+                },
+            )
+        }
+        hunting = hunt
+        return hunt
+    }
+
+    /** Whether the person is using Knit now: its UI on screen and the screen lit. */
+    private fun inUse(power: PowerState): Boolean = appVisible.value && power.interactive
+
     /** One presence scan window, on the PHYs [nextScanPhys] picks, for the window [power] gives. */
-    private suspend fun scanWindow(power: PowerState) {
-        val phys = nextScanPhys()
+    private suspend fun scanWindow(
+        power: PowerState,
+        hunt: Boolean,
+    ) {
+        val phys = nextScanPhys(hunt)
         scanner.phys = phys
         scanner.start(if (power.interactive || power.charging) ScanSettings.SCAN_MODE_BALANCED else ScanSettings.SCAN_MODE_LOW_POWER)
         val windowStart = elapsed()
         val scanned = scanner.isScanning
         // The clock codedOnly is measured on runs only while 1M is heard (ADR 2026-10.yvn6).
         presence.onOneMListening(scanned && phys != ScanPhys.CODED, windowStart)
+        val windowMs = PowerPolicy.dutyCycle(power).scanWindowMs
+        nextWindowAt = windowStart + windowMs
         try {
-            elapsedWait.sleep(PowerPolicy.dutyCycle(power).scanWindowMs)
+            // A hunt's own dial ripens inside its windows, so a dial ends one; any other window runs its length (pj9w).
+            if (hunt) elapsedWait.receiveWithin(dialStarted, windowMs) else elapsedWait.sleep(windowMs)
         } finally {
             presence.onOneMListening(false, elapsed())
         }
@@ -1068,30 +1172,45 @@ class BluetoothMeshTransport(
 
     /**
      * The next presence window's PHYs ([CodedPhyPolicy.scanPhys]): every other one Coded-only while this phone has no
-     * link or an unlinked peer is heard on Coded alone. Logs one line per edge of those windows.
+     * link, an unlinked peer is heard on Coded alone, it [hunt]s, or another plane sees a peer it would dial that
+     * Bluetooth has not sighted (the chase). Logs one line per edge of those windows.
      */
-    private fun nextScanPhys(): ScanPhys {
+    private fun nextScanPhys(hunt: Boolean): ScanPhys {
         val on = codedOn()
+        val now = elapsed()
+        val sighted = if (on) presence.snapshots(now) else emptyList()
         val far =
-            if (on) {
-                presence
-                    .snapshots(elapsed())
-                    .filter { it.nodeId !in links.keys && CodedPhyPolicy.codedOnly(it.codedLagMs) }
-                    .map { it.nodeId }
-            } else {
-                emptyList()
-            }
+            sighted
+                .filter { it.nodeId !in links.keys && CodedPhyPolicy.codedOnly(it.codedLagMs) }
+                .map { it.nodeId }
+        // Only a chased peer this phone has heard on Coded: a Coded-only window cannot hear one without it (a Pixel 3, a
+        // release build, a phone in mode OFF), and the chase's one wake would spend its whole window deaf to it.
+        val codedChase = ScanDemandPolicy.ChaseState(chase.deadlines.filterKeys { codedCapable.containsKey(it) })
+        val chased = on && ScanDemandPolicy.chasing(codedChase, sighted.mapTo(HashSet()) { it.nodeId }, links.keys.toSet(), now)
         val alone = links.isEmpty()
-        val phys = CodedPhyPolicy.scanPhys(on, alone, far.isNotEmpty(), lastScanCoded)
+        val phys = CodedPhyPolicy.scanPhys(on, alone, far.isNotEmpty(), lastScanCoded, farWanted = hunt || chased)
         lastScanCoded = phys == ScanPhys.CODED
-        val windows = on && (alone || far.isNotEmpty())
+        val windows = on && (alone || far.isNotEmpty() || hunt || chased)
         if (windows != codedWindows) {
             codedWindows = windows
-            val why = if (alone) "alone" else "codedOnly=$far"
+            val why = codedWindowsWhy(alone, hunt, far)
             Log.i(TAG, if (windows) "bt scan coded windows on ($why)" else "bt scan coded windows off")
         }
         return phys
     }
+
+    /** Why Coded-only windows came on, for their edge's log line: the first of the reasons [nextScanPhys] reads. */
+    private fun codedWindowsWhy(
+        alone: Boolean,
+        hunt: Boolean,
+        far: List<String>,
+    ): String =
+        when {
+            alone -> "alone"
+            hunt -> "hunt"
+            far.isNotEmpty() -> "codedOnly=$far"
+            else -> "chase=${chase.deadlines.keys.filter { codedCapable.containsKey(it) }}"
+        }
 
     /** A window of [ms] ran on [phys]: GATT-payload quiet time, unless it was Coded-only — which cannot hear an iPhone. */
     private fun noteQuietScan(
@@ -1631,6 +1750,7 @@ class BluetoothMeshTransport(
         }
         ensurePhyControl(framed)
         codedPace.onLinkUp(nodeId)
+        rangeHunt.onLinkUp(nodeId)
         if (codedFast) schedulePace(AdvertReassertPolicy.SETTLE_MS) // its peer is back: slow again, after the settle
         synchronized(lock) {
             inFlight.remove(nodeId)
@@ -1690,7 +1810,10 @@ class BluetoothMeshTransport(
                 inFlight.add(nodeId)
                 true
             }
-        if (begun) wakeSide() // the side scan stops for the connect window (scanning starves connects)
+        if (begun) {
+            wakeSide() // the side scan stops for the connect window (scanning starves connects)
+            dialStarted.trySend(Unit) // and so does a hunting presence window
+        }
         return begun
     }
 
@@ -2027,7 +2150,7 @@ class BluetoothMeshTransport(
                 "alone=${aloneForMs()}ms psm=$currentPsm advert=$presenceAdvert " +
                 "doorbells=${doorbells.size} rings=${rings.get()}" +
                 (if (gattPeers) " gattPayloads=${gattPayloads.payloadCount} gattReads=${gattReads.get()}" else "") +
-                (if (codedOn()) " phy=${codedMode.wire} coded=$codedAdvert phyLinks=${phyControls.size}" else "") +
+                (if (codedOn()) " phy=${codedMode.wire} coded=$codedAdvert phyLinks=${phyControls.size} hunt=$hunting" else "") +
                 (sideChannel?.let { " ${it.diag()} $sideDecision" } ?: ""),
         )
     }
