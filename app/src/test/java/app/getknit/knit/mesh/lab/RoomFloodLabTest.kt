@@ -97,7 +97,7 @@ class RoomFloodLabTest {
             val refused = lab.tryAwait(15) { alice.drops(DropReason.INGRESS_REFUSED).toInt() }
             assertTrue("Alice refused ${alice.drops(DropReason.INGRESS_REFUSED)} of the fifteen over-budget posts", refused)
             assertTrue(lab.tryAwait(5) { bob.roomPosts()[mallory.nodeId]?.size ?: 0 })
-            lab.settle()
+            lab.settle() // lab-lint: allow sleep-as-sync — a pause before checking nothing past the budget arrived
             assertEquals("Alice delivered exactly the budget", 5, alice.roomPosts()[mallory.nodeId]?.size)
             assertEquals("Bob heard only what Alice admitted", 5, bob.roomPosts()[mallory.nodeId]?.size)
             assertEquals("the flood never reached Bob's meter", 0L, bob.drops(DropReason.INGRESS_REFUSED))

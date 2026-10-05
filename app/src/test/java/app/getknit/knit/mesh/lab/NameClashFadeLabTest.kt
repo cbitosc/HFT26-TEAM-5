@@ -41,6 +41,7 @@ class NameClashFadeLabTest {
         lab.close()
     }
 
+    // lab-lint: allow missing-oracle — the subject is one node's labels, and Eve is retired before the end.
     @Test
     fun aStrangersClashFadesAWeekAfterItWasLastHeardAndComesBackWithItsNextPost() =
         runBlocking {

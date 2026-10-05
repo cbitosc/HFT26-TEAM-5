@@ -38,6 +38,18 @@ Load the catalogue before you judge: `.agents/context/testing.md`, section "Mesh
 "Wait for the frame, not for the state that precedes it" down to "Time is real"). It records every flake the
 lab has had, with its fix, and the **read-safe list** (orderings already proven safe — do not re-flag those).
 
+## First: the linter
+
+Run `python3 scripts/lab-lint.py <the changed *LabTest.kt files>` (or with no arguments for a fixture change). It reads
+the source for the shapes the text shows, in a second: a `delay`/`sleep`/`withTimeout`/`lab.settle()` as a sync point
+(shape 6), a dropped `tryAwait` (9), a pipe held again after a release (5), a `release` reorder that may drop a frame
+with no re-link before the oracle (5), a direct `transport.disconnect` (6), a missing chaos rule (11), clock jumps
+past 48 h before a `heal()`/`restart()`/`restoreFromBackup()` (8), a relay-decision count used as a wait (1, #119),
+an `@Ignore` with no issue and a scenario that never reaches `assertConverged`. Its own blind spots: a pipe or
+counter named through a variable or a helper, an `it.transport` pair, and helpers outside the scenario's file. Each finding is a finding: report it with its rule. A `// lab-lint: allow <rule> — <why>` the
+diff adds is a claim to check: say so if the reason does not hold. Then spend your reading on what no linter sees —
+shapes 1–4, 7 and 10, and the parts of 5, 6 and 8 that need the mesh's order.
+
 ## Method: walk the scenario as two threads
 
 For every step of the scenario, write down (for yourself) the pair **observes → assumes**: what the

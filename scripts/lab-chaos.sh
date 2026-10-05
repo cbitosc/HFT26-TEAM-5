@@ -33,6 +33,8 @@
 #             memory each, at most 8 and never more than --runs)
 #   --quota   also cap the run at <pct>% of one core (systemd-run), the slow-runner loop's throttle; one shard
 #   --reuse   print the last sweep's result instead when it ran on this same tree and covers this request
+#   --no-lint skip scripts/lab-lint.py, which otherwise runs on the selected classes first and stops the sweep on a
+#             finding: a flaw the source shows is fixed in a second, not found by minutes of seeds
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -43,6 +45,7 @@ seed=""
 quota=""
 shards=auto
 reuse=""
+lint=1
 while (($#)); do
   case "$1" in
     --tests) patterns+=("$2"); shift 2 ;;
@@ -51,6 +54,7 @@ while (($#)); do
     --shards) shards="$2"; shift 2 ;;
     --quota) quota="$2"; shift 2 ;;
     --reuse) reuse=1; shift ;;
+    --no-lint) lint=""; shift ;;
     -h | --help) sed -n '2,/^set -euo/p' "$0" | sed 's/^# \{0,1\}//;$d'; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -96,6 +100,25 @@ EOF
   status=$?
   set -e
   ((status == 100)) || exit "$status"
+fi
+
+if [[ -n "$lint" ]]; then
+  # The classes the patterns name (a wildcard in the class part names them all), linted before any seed is drawn.
+  lab_dir=app/src/test/java/app/getknit/knit/mesh/lab
+  lint_files=()
+  for p in "${patterns[@]}"; do
+    cls=${p#app.getknit.knit.mesh.lab.}
+    cls=${cls%%.*}
+    if [[ "$cls" == *[*?]* ]]; then
+      lint_files=()
+      break
+    fi
+    [[ -f "$lab_dir/$cls.kt" ]] && lint_files+=("$lab_dir/$cls.kt")
+  done
+  if ! python3 scripts/lab-lint.py "${lint_files[@]}"; then
+    echo "lab-chaos: fix what lab-lint names (or allow it with its reason) before a sweep spends minutes on it; --no-lint skips"
+    exit 4
+  fi
 fi
 
 if [[ -z "$seed" || "$seed" == random ]]; then seed=$((($(date +%s%N) / 1000) % 1000000000)); fi

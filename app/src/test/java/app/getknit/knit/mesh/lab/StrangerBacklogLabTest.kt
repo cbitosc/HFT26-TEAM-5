@@ -99,10 +99,7 @@ class StrangerBacklogLabTest {
                 "carol holds ${carol.roomPosts()[alice.nodeId]?.size} of alice's $POSTS posts\n${lab.report(listOf(alice, bob, carol))}",
                 lab.tryAwait(POSTS) { carol.roomPosts()[alice.nodeId]?.size ?: 0 },
             )
-            assertTrue(
-                "carol is short ${bob.custodyIds() - carol.custodyIds()} of bob's custody",
-                lab.tryAwait(1) { if ((bob.custodyIds() - carol.custodyIds()).isEmpty()) 1 else 0 },
-            )
+            assertConvergedShortOfTheForgottenProfile(bob, carol)
             val snap = carol.metrics.snapshot()
             assertEquals("every parked frame replayed", snap.keys.framesHeld, snap.keys.framesReplayed)
         }
@@ -125,7 +122,7 @@ class StrangerBacklogLabTest {
                 "carol holds ${carol.roomPosts()[alice.nodeId]?.size} of alice's $POSTS posts\n${lab.report(listOf(bob, carol))}",
                 lab.tryAwait(POSTS) { carol.roomPosts()[alice.nodeId]?.size ?: 0 },
             )
-            assertCarolShortNothingBobCarries(bob, carol)
+            assertConvergedShortOfTheForgottenProfile(bob, carol)
             val posts = alicesPosts(bob, alice)
             val refused = refusedForWantOfKey()
             assertTrue("carol refused alice's posts ${refused intersect posts} for want of her key", (refused intersect posts).isEmpty())
@@ -159,23 +156,28 @@ class StrangerBacklogLabTest {
             // post": the first frame of Alice's she meets may be Alice's answer to Bob's tick, and the key it asks
             // for can land ahead of every post.
             assertTrue("carol never recovered alice's key by asking", carol.metrics.keys().keysRecovered >= 1)
-            assertCarolShortNothingBobCarries(bob, carol)
+            assertConvergedShortOfTheForgottenProfile(bob, carol)
             val snap = carol.metrics.snapshot()
             assertEquals("every parked frame replayed", snap.keys.framesHeld, snap.keys.framesReplayed)
         }
 
     /**
-     * Custody parity short of Alice's profile: the seam drops Bob's copy by hand, and the copy of the key he serves
-     * Carol goes into her custody (it is still live), inside a seen window that dedups her re-serve of it to him. In
-     * the field the quota evicts that profile on every node alike, or the TTL refuses it everywhere.
+     * The oracle, with custody parity short of Alice's profile: the seam drops Bob's copy by hand
+     * (`forgetCustody`), and the copy of the key he serves Carol goes into her custody (it is still live), inside a
+     * seen window that dedups her re-serve of it to him. In the field the quota evicts that profile on every node
+     * alike, or the TTL refuses it everywhere. So custody is checked one way, Carol short nothing Bob carries, and
+     * every other leg of `assertConverged` runs as usual.
      */
-    private suspend fun assertCarolShortNothingBobCarries(
+    private suspend fun assertConvergedShortOfTheForgottenProfile(
         bob: LabNode,
         carol: LabNode,
-    ) = assertTrue(
-        "carol is short ${bob.custodyIds() - carol.custodyIds()} of bob's custody",
-        lab.tryAwait(1) { if ((bob.custodyIds() - carol.custodyIds()).isEmpty()) 1 else 0 },
-    )
+    ) {
+        assertTrue(
+            "carol is short ${bob.custodyIds() - carol.custodyIds()} of bob's custody",
+            lab.tryAwait(1) { if ((bob.custodyIds() - carol.custodyIds()).isEmpty()) 1 else 0 },
+        )
+        lab.assertConverged(listOf(bob, carol), atLeast = POSTS, custodyAcross = listOf(carol)) { Conversations.NEARBY }
+    }
 
     /**
      * Links Bob to Carol with the air losing Bob's *relays* toward her — a copy he forwards carries `hops > 0`,

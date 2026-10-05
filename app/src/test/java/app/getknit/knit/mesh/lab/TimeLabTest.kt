@@ -72,6 +72,8 @@ class TimeLabTest {
      * addressed DM (ADR 2026-09.bts9: the block list never enters the carry gate), so once the block is lifted
      * there is nothing for the sender's re-serve to bring — the stores already agree — and the message stays
      * unseen past the seen window too. Before bts9 it trickled in here by accident, off the peer's re-serve.
+     *
+     * lab-lint: allow missing-oracle — the DM must stay unseen on Bob, so the messages diverge by design.
      */
     @Test
     fun aDmReceivedWhileBlockedStaysUnseenAfterTheUnblock() =
@@ -96,8 +98,8 @@ class TimeLabTest {
             lab.unlink(alice, bob)
             lab.link(alice, bob)
             lab.awaitCustodyParity(alice, bob)
-            lab.settle()
-            lab.settle()
+            lab.settle() // lab-lint: allow sleep-as-sync — a pause before checking nothing arrived
+            lab.settle() // lab-lint: allow sleep-as-sync — a pause before checking nothing arrived
             assertTrue("still nothing after the unblock", bob.decrypted(bob.dmWith(alice)).isEmpty())
             assertFalse("and alice never got bob's tick", alice.receiptPlanes(dm).containsKey(bob.nodeId))
         }
@@ -142,8 +144,8 @@ class TimeLabTest {
             val carol = lab.node("carol").apply { setDisplayName("Carol") }
             lab.link(alice, carol)
             lab.awaitAcquainted(alice, carol)
-            lab.settle()
-            lab.settle()
+            lab.settle() // lab-lint: allow sleep-as-sync — a pause before checking nothing arrived
+            lab.settle() // lab-lint: allow sleep-as-sync — a pause before checking nothing arrived
             assertTrue("the newcomer was offered nothing of yesterday", carol.roomPosts().isEmpty())
             lab.assertConverged(listOf(alice, bob), atLeast = 2) { it.dmWith(if (it === alice) bob else alice) }
             assertEquals(1, alice.roomPosts().values.sumOf { it.size })

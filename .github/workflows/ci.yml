@@ -249,6 +249,20 @@ jobs:
       - name: Check .agents/memory/decisions.md
         run: python3 scripts/adr.py index --check
 
+  lab-lint:
+    name: Mesh-lab scenarios lint clean
+    runs-on: ubuntu-latest
+    # No JDK, no Android SDK, no Gradle: scripts/lab-lint.py reads the mesh/lab sources with the standard library
+    # and names the flake shapes the text shows (a delay as a sync point, a dropped tryAwait, a hold re-applied
+    # after a release, …). Enforced: each is a flake a slow runner finds later, and a deliberate one carries a
+    # `// lab-lint: allow <rule> — <why>` where it stands.
+    steps:
+      - uses: actions/checkout@v7
+      - name: Linter unit tests
+        run: python3 -m unittest scripts/test_lab_lint.py
+      - name: Lint app/src/test/.../mesh/lab/
+        run: python3 scripts/lab-lint.py
+
   generated-assets:
     name: Generated assets are in sync
     runs-on: ubuntu-latest

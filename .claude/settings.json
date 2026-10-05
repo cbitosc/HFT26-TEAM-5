@@ -53,6 +53,19 @@
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR}/scripts/lab-lint.py\" --hook",
+            "timeout": 15,
+            "statusMessage": "Linting mesh-lab scenarios (lab-lint)"
+          }
+        ]
+      }
     ]
   },
   "enabledPlugins": {

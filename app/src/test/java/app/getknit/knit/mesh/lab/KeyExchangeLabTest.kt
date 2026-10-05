@@ -1,5 +1,6 @@
 package app.getknit.knit.mesh.lab
 
+import app.getknit.knit.data.message.Conversations
 import app.getknit.knit.mesh.DropReason
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -109,6 +110,9 @@ class KeyExchangeLabTest {
             assertEquals("one frame parked, one replayed", 1L to 1L, snap.keys.framesHeld to snap.keys.framesReplayed)
             assertEquals("the missing key was recovered", 1L, snap.keys.keysRecovered)
             assertEquals("Alice", carol.peer(alice)?.name)
+            // Alice as a carrier: on a line her post's tick from Carol has no way back to her (no third party's room
+            // tick crosses Bob), so she is not asked for the tick check, only for custody.
+            lab.assertConverged(listOf(bob, carol), atLeast = 1, carriers = listOf(alice)) { Conversations.NEARBY }
         }
 
     /**

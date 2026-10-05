@@ -357,16 +357,21 @@ class InternetPlaneLabTest {
                 val body = "the relay was first by $lag ms"
                 assertTrue(alice.sendDm(bob, body))
                 // A 1 ms poll, not tryAwait's 25 ms: the offset below is only as tight as this wait.
+                // lab-lint: allow sleep-as-sync — a tighter poll for one row, bounded and asserted below
                 val landed =
                     withTimeoutOrNull(MeshLab.SPOOL_AWAIT_MS) {
                         while (bob.decrypted(bob.dmWith(alice)).none { it.second == body }) delay(1)
                     } != null
                 assertTrue("bob never got \"$body\" off the relay\n${lab.report(listOf(alice, bob, carol))}", landed)
-                delay(lag) // an offset into the router's real-time jitter, not a sync point
+                // lab-lint: allow sleep-as-sync — an offset into the router's real-time jitter, not a sync point
+                delay(lag)
+                // lab-lint: allow release-then-hold — the next pass re-holds the pipe for its own DM; nothing that
+                // crosses between belongs to that pass's held frame
                 alice.transport.release(bob.transport)
             }
 
             // Every one of Bob's relay decisions made, then the bug named where it happens — before the oracle.
+            // lab-lint: allow relay-count-sync — #119; the drained inbound below closes the window the count leaves
             lab.await(decided.toInt() + RADIO_LAG_MS.size) {
                 bob.metrics
                     .snapshot()
@@ -610,6 +615,9 @@ class InternetPlaneLabTest {
      * has joined its commons, shares the invite her relay row mints. Bob applies it once: consent is recorded,
      * the plane is on, the relay is stored, the room is joined and subscribed — and from there the two meet
      * as any two card holders do, plus a room post crosses.
+     *
+     * lab-lint: allow missing-oracle — the subject is what the invite writes, and a commons post lives on the
+     * spool, never in custody.
      */
     @Test
     fun aRelayInviteTurnsThePlaneOnAddsTheRelayAndJoinsTheRoomInOneStep() =

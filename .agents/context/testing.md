@@ -371,6 +371,25 @@ hop (fixed in `MeshRouter.countOverheard`, pinned by `MeshRouterTest`).
   `systemd-run --user --scope -q -p CPUQuota=50% taskset -c 0 ./gradlew :app:testDebugUnitTest --tests '…' --rerun --no-daemon`
   in a loop, tallying the per-class XMLs; isolated classes flake less than the whole package, so validate
   with `app.getknit.knit.mesh.lab.*` three or four times over.
+- **The lint comes before the chaos** (`scripts/lab-lint.py`, 2026-10-05). The flake shapes the source text
+  shows are found in a second, not a sweep: a `delay`/`sleep`/`withTimeout`/`lab.settle()` used as a sync point, a
+  `tryAwait` whose Boolean nobody reads, a pipe held again after a `release` that let go of it (a wait in between
+  widens the gap, it does not close it; a loop's next pass counts), a `release { … }` that may drop a frame (anything
+  but `reversed`/`sorted*`, a matched filter/filterNot pair or a partition whose halves are both used) with no
+  re-link before `assertConverged`, a direct `transport.disconnect`, a relay-decision count
+  (`framesRelayed`/`framesOriginated`/`framesSuppressed`) read inside a wait (#119), clock jumps past 48 h — or one it
+  cannot size — before a `heal()`, `restart()` or `restoreFromBackup()` (each runs the ratchet sweep), an `@Ignore`
+  with no `#NN`, a scenario that never reaches `assertConverged` (a helper in its file counts) and a class without
+  the chaos rule. `--rules` explains each. It blanks comments and strings first, so prose never matches. A deliberate
+  finding is allowed where it stands with its reason, `// lab-lint: allow <rule> — <why>`, on the line or in the
+  comment block (KDoc included) above it or above the statement it wraps, and the reviewer checks the reason: a
+  wrong one hides a flake (the first review, 2026-10-05, turned six of nine oracle allows into oracles —
+  per-pocket for LoRa, `carriers` on a line, `custodyAcross` past the `forgetCustody` seam). It runs as a
+  `PostToolUse` hook on every scenario edit (findings come back at once), first in `lab-chaos.sh` (exit 4,
+  `--no-lint` skips) and as the enforced `lab-lint` job on both CIs; its tests are `scripts/test_lab_lint.py`.
+  Validated on history: the 14 dropped awaits `49c0d381` fixed, the relay-count waits `7552268f` replaced and the
+  re-hold gap `a8c5b978` closed are what it names on their parents. A new rule needs a pattern that is wrong
+  wherever it appears, or an allow that says why it is not.
 - **Chaos mode: the slow runner on the workstation** (`LabChaos.kt`, 2026-09-24). `-Pknit.labChaos=<seed|random>`
   runs every node's session dispatcher, settings scope and Room queries through a dispatcher that lags some
   dispatches a few ms, jitters the sender around each pipe delivery and the collectors before each frame, and

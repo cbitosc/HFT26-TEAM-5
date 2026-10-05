@@ -117,6 +117,9 @@ class LoraPocketLabTest {
             assertTrue(lab.tryAwait(1) { carol.roomPosts()[bob.nodeId]?.size ?: 0 })
             val via = lab.awaitReceipt(bob, post, carol)
             assertTrue("the tick came the last hop over the link, not the board: $via", via != DeliveryPlane.LoRa)
+            // Per pocket, as the scenario above: the tick Alice hands on is `relay = false`, so neither custody moves.
+            lab.assertConverged(listOf(alice, bob), atLeast = 1) { Conversations.NEARBY }
+            lab.assertConverged(listOf(carol, dave), atLeast = 1) { Conversations.NEARBY }
         }
 
     /** ADR 054's recipient gate: a DM to someone on a live link never spends airtime. */
@@ -188,6 +191,7 @@ class LoraPocketLabTest {
             assertTrue("carol never heard it", lab.tryAwait(1) { carol.roomPosts()[passive.nodeId]?.size ?: 0 })
             assertTrue("the active board carried it", lab.tryAwait(activeFanned + 1) { active.loraTx("fanout:chat") })
             assertEquals("the passive board fanned nothing", 0, passive.loraTx("fanout:chat"))
+            lab.assertConverged(listOf(alice, amber), atLeast = 1) { Conversations.NEARBY }
         }
 
     /** The two-phone trial's last leg: a DM sent while the far board could not hear lands through the bridge. */

@@ -529,7 +529,9 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   Before touching `RECONCILE_INTERVAL_MS`, who calls `ScopeSync.onScopeTableChanged`, `RatchetSessions.rootChanges`
   or `IntroSync.onPairsChanged`: READ ADR 2026-09.dcah — the scope table derives on its inputs' events and the
   60 s poll is only the net under the calendar; a hook that fires on an unchanged input is the old poll back.
-- **When creating or modifying anything under `app/src/test/java/app/getknit/knit/mesh/lab/`:** RUN
+- **When creating or modifying anything under `app/src/test/java/app/getknit/knit/mesh/lab/`:** keep
+  `scripts/lab-lint.py` clean (a `PostToolUse` hook runs it on every scenario edit, `lab-chaos.sh` before every sweep,
+  both CIs as `lab-lint`; a deliberate finding carries `// lab-lint: allow <rule> — <why>`), then RUN
   `scripts/lab-chaos.sh --tests '<Class>'` on the changed classes (or `'<Class>.<method>'` for the changed
   scenarios of a large class) once your edits are in, then ADOPT (Claude Code: spawn) the `mesh-lab-reviewer`
   persona in `.agents/personas/mesh-lab-reviewer.md` before calling the change done — every lab flake has been a

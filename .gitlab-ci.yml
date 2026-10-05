@@ -352,6 +352,18 @@ verify:screenshot-wrappers:
   script:
     - python3 scripts/gen-screenshot-tests.py --check
 
+# The mesh-lab scenarios lint clean (scripts/lab-lint.py): the flake shapes the source text shows — a delay as a
+# sync point, a dropped tryAwait, a hold re-applied after a release, a filtered release with no re-link before the
+# oracle — fail here in seconds instead of on a slow runner one run in thirty. Enforced; a deliberate one carries a
+# `// lab-lint: allow <rule> — <why>`. Mirrors GitHub's `lab-lint` job.
+verify:lab-lint:
+  image: python:3.13-alpine
+  stage: verify
+  needs: []
+  script:
+    - python3 -m unittest scripts/test_lab_lint.py
+    - python3 scripts/lab-lint.py
+
 # --------------- verify (advisory) -------
 # detekt/ktlint run as Gradle plugins now (was: a downloaded detekt-cli jar). Both are advisory
 # (allow_failure) to mirror the prior detekt job and keep the pass/fail test signal clean; locally they
