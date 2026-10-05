@@ -15,7 +15,8 @@
 # mostly asleep in the stalls it injects, so one JVM per seed slice is nearly free time. Then it tallies the
 # per-class XMLs (never Gradle's summary — see the Gradle 9.5 result race in .agents/context/testing.md),
 # prints each failure with its seed and names every scenario slow enough to be waiting out a production timer
-# the lab should shorten. A seed replays a distribution of delays, not an exact schedule: re-run a failing
+# the lab should shorten. A failing class's XML (its MeshLab report) and the Gradle log are copied to
+# <git dir>/lab-chaos/kept/, the last ten failing sweeps, since the next sweep wipes the shard results. A seed replays a distribution of delays, not an exact schedule: re-run a failing
 # seed a few times, and fix the scenario by awaiting the event it needs.
 #
 # ONE SWEEP PER TREE. Each sweep is stamped (in the git dir, so per worktree) with a fingerprint of the tree
@@ -131,10 +132,13 @@ gradle_status=$?
 set -e
 
 mkdir -p "$state"
-python3 - "$results" "$seed" "$runs" "$gradle_status" "$stamp" "$before" "$(fingerprint)" "${patterns[@]}" <<'EOF'
-import glob, json, re, sys, xml.etree.ElementTree as ET
+python3 - "$results" "$seed" "$runs" "$gradle_status" "$stamp" "$before" "$(fingerprint)" "$state/kept" "${patterns[@]}" <<'EOF'
+import glob, json, os, re, shutil, sys, time, xml.etree.ElementTree as ET
 results, seed, runs, gradle_status, stamp, before, after = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), sys.argv[5], sys.argv[6], sys.argv[7]
-patterns = sys.argv[8:]
+kept_root = sys.argv[8]
+patterns = sys.argv[9:]
+# How many failing sweeps' reports are kept; the oldest beyond this are dropped.
+KEPT_SWEEPS = 10
 # A scenario that spends longer than this a run past its node boots, per node it built (LabChaos's MESHLAB-RUN
 # line), is waiting on something real — a production timer the lab has not shortened (LabLimits), or a lost
 # wake that only a timed round covers. Work grows with the nodes; a timer sat out does not. Under chaos the
@@ -144,6 +148,7 @@ files = glob.glob(f"{results}/labChaosShard*/*.xml")
 if not files:
     print("lab-chaos: no test results written — see app/build/lab-chaos.log"); sys.exit(3)
 scenarios = {}  # name -> {"time", "fails": [...], "skipped"}
+failing_files = set()  # the shard XMLs that hold a failure: its report, warnings and counters
 timed = {}  # name -> [runs, ms, boot ms, nodes], from the passing runs' MESHLAB-RUN lines
 for f in sorted(files):
     root = ET.parse(f).getroot()
@@ -161,6 +166,7 @@ for f in sorted(files):
         fail = tc.find("failure") if tc.find("failure") is not None else tc.find("error")
         if fail is None:
             continue
+        failing_files.add(f)
         where = [l for l in err.splitlines() if "MESHLAB-CHAOS-FAIL" in l and name in l]
         first = (fail.get("message") or "").splitlines()[0][:200] if fail.get("message") else ""
         s["fails"].append((where[-1].split("failed under ", 1)[-1] if where else "(seed not recorded)", first))
@@ -179,6 +185,18 @@ all_ms, all_boot = sum(t[1] for t in timed.values()), sum(t[2] for t in timed.va
 if all_ms:
     lines.append(f"lab-chaos: node boots took {100 * all_boot // all_ms}% of the scenarios' time")
 skipped = len(scenarios) - len(ran)
+if failing_files:
+    # The next sweep wipes the shard results, and a chaos failure may not come back for a hundred runs: keep the
+    # failing classes' XMLs (each holds MeshLab.report, the warnings and every node's counters) and the Gradle log.
+    kept = os.path.join(kept_root, f"{time.strftime('%Y%m%d-%H%M%S')}-seed{seed}")
+    os.makedirs(kept, exist_ok=True)
+    for f in sorted(failing_files):
+        shutil.copy2(f, os.path.join(kept, f"{os.path.basename(os.path.dirname(f))}-{os.path.basename(f)}"))
+    if os.path.exists("app/build/lab-chaos.log"):
+        shutil.copy2("app/build/lab-chaos.log", kept)
+    for old in sorted(glob.glob(os.path.join(kept_root, "*")), key=os.path.getmtime)[:-KEPT_SWEEPS]:
+        shutil.rmtree(old, ignore_errors=True)
+    lines.append(f"lab-chaos: failing reports kept in {kept}")
 lines.append(f"lab-chaos: {len(ran) - len(failed)}/{len(ran)} scenarios survived {runs} seeded runs each (first seed {seed})"
              + (f", {skipped} skipped" if skipped else ""))
 status = 1 if failed else 0

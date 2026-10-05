@@ -395,7 +395,10 @@ hop (fixed in `MeshRouter.countOverheard`, pinned by `MeshRouterTest`).
   `MeshLab.node` and `LabNode.restart`): work grows with the nodes and a timer sat out does not, so the
   eight-node flood's 28 s a run is 3.5 s a node while a two-node scenario sitting out a 15 s timer is past 7. That
   one is waiting out a field timer (the bullet on the calendar above). Boots are about a tenth of a chaos sweep's
-  time (measured 2026-10-04), so shortening them would buy little. A seed replays a
+  time (measured 2026-10-04), so shortening them would buy little. A failing sweep's failing-class XMLs (each
+  holds `MeshLab.report`, the warnings and every node's counters) and its Gradle log are copied to
+  `<git dir>/lab-chaos/kept/<time>-seed<S>/`, the last ten failing sweeps: the next sweep wipes the shard results,
+  and a 1-in-36 failure may not come back on demand (#137, #138 lost theirs that way). A seed replays a
   distribution of delays, not a schedule (the threads still race for the draws), so re-run a failing seed a few
   times. Every
   `*LabTest` carries `@get:Rule val chaos = LabChaos.rule()` (`LabChaosCoverageTest` fails a class without
