@@ -308,6 +308,7 @@ val meshModule =
                 online = get<InternetGate>()::isOnline,
                 publicChannel = { body -> get<PublicChannelSink>().postToPublicChannel(body) },
                 onTransferSignal = { sender, payload, sentAt -> get<TransferManager>().onSignal(sender, payload, sentAt) },
+                identities = get(),
             )
         }
         // UI ViewModels, MeshService, and the notification/debug entry points bind this narrow facade (not

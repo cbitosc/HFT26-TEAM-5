@@ -34,6 +34,9 @@ document:
 - If a stranger had the same name as one of your contacts, your contact's name kept an alias after it for
   good, even once the stranger was gone. The alias now goes away a week after your phone last heard from that
   person.
+- Forwarding a photo, GIF or file to someone who already has it no longer sends it again, and a forwarded GIF
+  keeps its animation. A file passed from chat to chat now costs nearby phones one copy instead of one per
+  message.
 
 ### Fixed
 

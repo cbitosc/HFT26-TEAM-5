@@ -33,6 +33,7 @@ import java.io.File
  * validates both the migrated schema and the carried data.
  */
 @RunWith(AndroidJUnit4::class)
+@Suppress("LargeClass") // one case per schema bump over one MigrationTestHelper: it grows by a test a version, by design
 class KnitDatabaseMigrationTest {
     private val dbFile = File.createTempFile("knit-migration", ".db").apply { delete() } // path must be free
 
@@ -46,7 +47,7 @@ class KnitDatabaseMigrationTest {
         )
 
     @Test
-    fun `the current schema (v19) creates and opens from the exported JSON`() =
+    fun `the current schema (v20) creates and opens from the exported JSON`() =
         runTest {
             helper.createDatabase(CURRENT_VERSION).close()
         }
@@ -672,6 +673,32 @@ class KnitDatabaseMigrationTest {
         }
 
     @Test
+    fun `migrate 19 to 20 adds the two identity columns empty and indexes the plaintext one`() =
+        runTest {
+            // Filling the plaintext name would mean decrypting blobs on the open path, so an existing attachment
+            // starts without one and learns it on its next save (ADR 2026-10.mptm).
+            helper.createDatabase(19).use { c ->
+                c.execSQL(
+                    "INSERT INTO messages (id, senderId, conversationId, body, sentAt, received, receivedVia, mentions, " +
+                        "replyToHasAttachment, moderation, pendingKey, kind, originViaMqtt, originSigned, attachmentHash, " +
+                        "attachmentMime, attachmentKey, attachmentAnimated) " +
+                        "VALUES ('m1','n1','peer-1','',1,1,0,'[]',0,0,0,0,0,0,'cafe','image/jpeg','a2V5',0)",
+                )
+            }
+            helper.runMigrationsAndValidate(20, listOf(KnitMigrations.MIGRATION_19_20)).use { c ->
+                c.prepare("SELECT attachmentPlainHash, attachmentSourceHash FROM messages WHERE id = 'm1'").use { s ->
+                    assertTrue(s.step())
+                    assertTrue(s.isNull(0))
+                    assertTrue(s.isNull(1))
+                }
+                c
+                    .prepare(
+                        "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'index_messages_attachmentPlainHash'",
+                    ).use { s -> assertTrue("the want path's lookup is indexed", s.step()) }
+            }
+        }
+
+    @Test
     fun `migrate 11 to 12 indexes every existing message and keeps the index in step from then on`() =
         runTest {
             // A device upgrading holds history; 'rebuild' must index all of it, and the sync triggers must
@@ -726,7 +753,7 @@ class KnitDatabaseMigrationTest {
          * KnitDatabase `@Database(version = …)` — bump alongside the DB (its retention is CLASS, so the version
          * can't be read reflectively). A missing schemas/<db>/<version>.json fails the smoke test.
          */
-        const val CURRENT_VERSION = 19
+        const val CURRENT_VERSION = 20
 
         /** The v16 column list with an attachment — MIGRATION_16_17's test seeds rows through it. */
         const val INSERT_V16 =

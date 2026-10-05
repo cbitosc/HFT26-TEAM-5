@@ -369,6 +369,16 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   (session-scoped, keep-the-longer, never written in place), the ask names its length, the holder streams the
   tail (`size` is the tail's; the whole is `offset + size`), and a spliced file that fails its hash drops the
   prefix and re-asks from 0. Receive-side changes go through `FileIntake` under the link's lock.
+- **When touching `data/AttachmentIdentities`, `messages.attachmentPlainHash` / `attachmentSourceHash`,
+  `AttachmentStore.ingestPicked` or its reuse check, `AttachmentStore.Ingested.reuse`, `MeshManager.sealAttachment`,
+  `InboundPipeline.copyFromOwnStore`, or `MessageDao.sealedHolding`:** READ ADR 2026-10.mptm. A phone seals a
+  plaintext once: a pick it already holds goes out as that identity (a sealed copy's hash and key, or a room picture's
+  plaintext hash with no key — key-less first, then earliest), its bytes unchanged. A key-less frame naming a
+  plaintext held sealed is shown from our own copy (through `MeshBlobStore.ingest`) **only when its author was party
+  to the conversation that copy came through** — never from `BlobExchange.want`, which an unsigned `blobreq` or a
+  stranger's post reaches: that would be a confirmation oracle. The plaintext name is recorded at send, on arrival
+  and on save, never by a bulk decrypt, and `identityFor` must skip a sealed row without one. Carriers see equality
+  on purpose; convergent encryption was rejected. Lab: `AttachmentReuseLabTest`.
 - **When touching a presence dot or an online / offline label** (Profile Details, Diagnostics' node
   sections, the Contacts dot): the four evidence tiers live in `ui/Reach.kt` — `Direct` is
   `MeshController.neighbors` (a short-range radio saw the peer's own radio), `Indirect` is

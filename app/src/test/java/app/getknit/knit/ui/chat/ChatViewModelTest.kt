@@ -57,6 +57,7 @@ import app.getknit.knit.mesh.lora.PublicPostPolicy
 import app.getknit.knit.mesh.protocol.LinkCard
 import app.getknit.knit.mesh.protocol.LinkPreviewBlob
 import app.getknit.knit.mesh.protocol.Protocol
+import app.getknit.knit.mesh.sha256Hex
 import app.getknit.knit.moderation.ImageScreeningService
 import app.getknit.knit.notifications.Notifier
 import app.getknit.knit.transfer.OfferOutcome
@@ -1733,6 +1734,29 @@ class ChatViewModelTest {
             coVerify { gallerySaver.saveToPictures(capture(exported), "ct", "image/webp") }
             assertArrayEquals("saved the decrypted image, not the stored ciphertext", plain, exported.captured)
             assertTrue(events.contains(R.string.chat_image_saved))
+        }
+
+    /**
+     * A save is what teaches an attachment received before the plaintext column existed its plaintext name, from the
+     * bytes it already opened, so forwarding the saved copy reuses the identity it came under (ADR 2026-10.mptm).
+     */
+    @Test
+    fun savingASealedAttachmentRecordsItsPlaintextNameAndAKeylessOneDoesNot() =
+        runTest {
+            val plain = byteArrayOf(1, 2, 3, 4, 5)
+            val sealed = AttachmentCrypto.seal(plain)
+            coEvery { blobs.bytes("ct") } returns sealed.blob
+            coEvery { blobs.bytes("room") } returns plain
+            coEvery { messages.attachmentKeyWantingPlain("ct") } returns b64(sealed.key)
+            coEvery { gallerySaver.saveToPictures(any(), any(), any()) } returns true
+            val vm = vm()
+
+            vm.saveAttachment("ct", b64(sealed.key), "image/webp")
+            vm.saveAttachment("room", null, "image/jpeg")
+            advanceUntilIdle()
+
+            coVerify(exactly = 1) { messages.setAttachmentPlainHash("ct", sha256Hex(plain)) }
+            coVerify(exactly = 0) { messages.setAttachmentPlainHash("room", any()) }
         }
 
     /** A key-less blob (a Nearby-room attachment) is already plaintext and goes out untouched. */

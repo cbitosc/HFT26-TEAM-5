@@ -469,6 +469,25 @@ object KnitMigrations {
             }
         }
 
+    /**
+     * v19 → v20: `messages.attachmentPlainHash` (indexed) and `messages.attachmentSourceHash` — the plaintext name
+     * of a sealed attachment and the picker's own bytes for one of ours, so a forward reuses the identity a file
+     * arrived under and a room copy of a picture held sealed is made locally (ADR 2026-10.mptm). Null on every
+     * existing row: filling the plaintext name means decrypting the blob, which no migration should do on the open
+     * path, so an older attachment learns it when it is next saved. Additive only; the SQL must stay
+     * byte-equivalent to what Room generates for `app/schemas/**/20.json`.
+     */
+    val MIGRATION_19_20 =
+        object : Migration(19, 20) {
+            override suspend fun migrate(connection: SQLiteConnection) {
+                connection.execSQL("ALTER TABLE `messages` ADD COLUMN `attachmentPlainHash` TEXT DEFAULT NULL")
+                connection.execSQL("ALTER TABLE `messages` ADD COLUMN `attachmentSourceHash` TEXT DEFAULT NULL")
+                connection.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_messages_attachmentPlainHash` ON `messages` (`attachmentPlainHash`)",
+                )
+            }
+        }
+
     /** All migrations, applied by Room in order. */
     val ALL: Array<Migration> =
         arrayOf(
@@ -490,5 +509,6 @@ object KnitMigrations {
             MIGRATION_16_17,
             MIGRATION_17_18,
             MIGRATION_18_19,
+            MIGRATION_19_20,
         )
 }

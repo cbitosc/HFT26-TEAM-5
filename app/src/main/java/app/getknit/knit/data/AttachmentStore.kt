@@ -41,11 +41,17 @@ import java.security.MessageDigest
  * share is the part that matters — the same content-addressed insert into the same encrypted table, which is
  * why every layer below this one (custody, `BlobExchange`, the spool plane) carries either with no changes
  * at all.
+ *
+ * A pick whose bytes this phone already holds under an identity — a photo saved from a chat, a file passed along,
+ * the same keyboard GIF twice — skips all of the above and goes out as that identity, unchanged
+ * ([AttachmentIdentities], ADR 2026-10.mptm): no re-encode, so no generation loss and no GIF flattened to a still,
+ * and no second copy for the mesh to carry.
  */
 class AttachmentStore(
     private val context: Context,
     private val blobs: BlobRepository,
     private val imageScreening: ImageScreeningService,
+    private val identities: AttachmentIdentities,
 ) {
     /**
      * The result of ingesting a picked/keyboard/captured image or a recorded voice note: its content [hash]
@@ -66,6 +72,11 @@ class AttachmentStore(
      *
      * [animated] rides along for [voice]'s reason: an image with more than one frame ([AnimatedImage]), read
      * off the exact bytes stored here so the sender's "GIF" label agrees with the one the recipient derives.
+     *
+     * [reuse] is the identity the bytes already go by when this pick is a file the phone holds (ADR
+     * 2026-10.mptm): [hash] is then its plaintext, and the send goes out under [reuse] rather than a fresh seal.
+     * [sourceHash] is the hash of the bytes the picker handed over when they are not the ones stored under
+     * [hash] — a re-encoded photo, a GIF made a WebP — so picking the same original again finds this send.
      */
     data class Ingested(
         val hash: String,
@@ -75,6 +86,8 @@ class AttachmentStore(
         val sizeBytes: Int = 0,
         val link: LinkCard? = null,
         val animated: Boolean = false,
+        val sourceHash: String? = null,
+        val reuse: AttachmentIdentities.Held? = null,
     )
 
     /**
@@ -118,15 +131,74 @@ class AttachmentStore(
      *
      * This is the *image* door, reached from the photo picker and the keyboard. [ingestFile] is the door for
      * everything else, and hands anything that turns out to be an image straight back here.
+     *
+     * The source is read whole first (bounded) so a picture this phone already holds is found by its bytes
+     * ([ingestPicked]). One past [MAX_BYTES] can be nothing we hold, so it takes the long way, decoded from [uri].
      */
     suspend fun ingest(uri: Uri): IngestResult =
         withContext(Dispatchers.IO) {
+            val sourceMime = context.contentResolver.getType(uri)
+            readBounded(uri)?.let { raw -> return@withContext ingestPicked(raw, sourceMime) }
             ingest(
-                sourceMime = context.contentResolver.getType(uri),
+                sourceMime = sourceMime,
                 readRaw = { context.contentResolver.openInputStream(uri)?.use { it.readBytes() } },
                 decodeOriented = { decodeOrientedBounded(context, uri, MAX_DIMENSION) },
             )
         }
+
+    /**
+     * Ingests a picked image already read into memory: as the identity it goes by when this phone holds those bytes
+     * (or their source) already ([reused]), else through the pipeline, remembering the source when the pipeline
+     * changed it. The keyboard's GIFs and the photo picker's pictures come through here; the lab feeds it directly.
+     */
+    internal suspend fun ingestPicked(
+        raw: ByteArray,
+        sourceMime: String?,
+    ): IngestResult =
+        withContext(Dispatchers.IO) {
+            reused(raw)?.let { return@withContext it }
+            val result =
+                ingest(
+                    sourceMime = sourceMime,
+                    readRaw = { raw },
+                    decodeOriented = { decodeOrientedBounded(raw, MAX_DIMENSION) },
+                )
+            if (result !is IngestResult.Success) return@withContext result
+            val source = sha256(raw)
+            if (source == result.ingested.hash) result else result.copy(ingested = result.ingested.copy(sourceHash = source))
+        }
+
+    /**
+     * The pick as the identity this phone already sends [raw] under ([AttachmentIdentities.find]), or null when
+     * there is none. The plaintext is staged under its own hash exactly as a fresh ingest would stage it — [raw]
+     * itself when it is that plaintext, else opened from the identity (a source match: the original of a photo we
+     * re-encoded) — and screened as a fresh image would be, so the room's block and a DM's confirmation behave as
+     * they always did. [name] and the size are kept for a file; an image carries neither, as on [ingestFile]'s image
+     * hand-back.
+     */
+    private suspend fun reused(
+        raw: ByteArray,
+        name: String? = null,
+    ): IngestResult.Success? {
+        if (raw.isEmpty()) return null
+        val bytesHash = sha256(raw)
+        val held = identities.find(bytesHash) ?: return null
+        val plain = if (bytesHash == held.plainHash) raw else identities.plaintextOf(held) ?: return null
+        blobs.insert(held.plainHash, held.mime, plain)
+        val image = held.mime.startsWith("image/")
+        return IngestResult.Success(
+            Ingested(
+                hash = held.plainHash,
+                mime = held.mime,
+                name = name.takeUnless { image },
+                sizeBytes = if (image) 0 else plain.size,
+                animated = held.animated,
+                sourceHash = bytesHash.takeIf { it != held.plainHash },
+                reuse = held,
+            ),
+            flagged = image && imageScreening.isImageExplicit(plain),
+        )
+    }
 
     /**
      * Ingests an image already held in memory — the in-app camera's captured JPEG, which deliberately
@@ -206,14 +278,10 @@ class AttachmentStore(
             }
             val bytes = readBounded(uri) ?: return@withContext IngestResult.Failed(IngestResult.Reason.TooLarge)
             failureFor(bytes)?.let { return@withContext it }
+            reused(bytes, name)?.let { return@withContext it }
 
             FileTypes.imageMimeOf(bytes)?.let { sniffed ->
-                val asImage =
-                    ingest(
-                        sourceMime = sniffed,
-                        readRaw = { bytes },
-                        decodeOriented = { decodeOrientedBounded(bytes, MAX_DIMENSION) },
-                    )
+                val asImage = ingestPicked(bytes, sniffed)
                 if (asImage is IngestResult.Success) return@withContext asImage
             }
 

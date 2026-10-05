@@ -8,6 +8,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.getknit.knit.R
 import app.getknit.knit.TextLimits
+import app.getknit.knit.data.AttachmentIdentities
 import app.getknit.knit.data.AttachmentStore
 import app.getknit.knit.data.BlobRepository
 import app.getknit.knit.data.FileTypes
@@ -469,6 +470,9 @@ class ChatViewModel(
     // Nullable and last so every existing test rig that builds this ViewModel positionally still compiles;
     // a plain parameter, because only the [publicIdentity] initializer reads it.
     commons: CommonsRepository? = null,
+    // A save opens a sealed attachment, which is when an older one learns its plaintext name, so a forward of the
+    // saved copy reuses the identity it came under (ADR 2026-10.mptm). Stateless; defaulted for every test rig.
+    private val identities: AttachmentIdentities = AttachmentIdentities(messages, blobs),
 ) : ViewModel() {
     /** This thread is the broadcast room (vs a 1:1 DM keyed by the peer's node id). */
     private val isRoom = conversationId == Conversations.NEARBY
@@ -2261,6 +2265,7 @@ class ChatViewModel(
         viewModelScope.launch {
             val raw = blobs.bytes(hash)
             val bytes = if (key != null && raw != null) AttachmentCrypto.open(raw, b64d(key)) else raw
+            if (key != null && bytes != null) identities.notePlain(hash, bytes)
             val type = mime ?: blobs.mimeFor(hash)
             val ok = bytes != null && type != null && gallerySaver.saveToPictures(bytes, hash, type)
             _events.tryEmit(if (ok) R.string.chat_image_saved else R.string.chat_image_save_failed)
@@ -2313,6 +2318,7 @@ class ChatViewModel(
                     val raw = blobs.bytes(pending.hash)
                     val bytes =
                         if (pending.key != null && raw != null) AttachmentCrypto.open(raw, b64d(pending.key)) else raw
+                    if (pending.key != null && bytes != null) identities.notePlain(pending.hash, bytes)
                     bytes != null &&
                         runCatching {
                             context.contentResolver.openOutputStream(dest)?.use { it.write(bytes) } != null

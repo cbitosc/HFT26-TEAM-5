@@ -13,6 +13,7 @@ import app.getknit.knit.contacts.ContactRemover
 import app.getknit.knit.crash.CrashReports
 import app.getknit.knit.crash.ProcessExitReasons
 import app.getknit.knit.crash.crashStore
+import app.getknit.knit.data.AttachmentIdentities
 import app.getknit.knit.data.AttachmentStore
 import app.getknit.knit.data.AvatarStore
 import app.getknit.knit.data.BlobRepository
@@ -124,7 +125,10 @@ val appModule =
         // nodeId is derived from the keypair's public bundle; the device id only feeds the block tag.
         single { Identity(get(), get()) }
         single { AvatarStore(androidContext(), get()) }
-        single { AttachmentStore(androidContext(), get(), get()) }
+        // One plaintext, one identity (ADR 2026-10.mptm): what a pick goes out as when the phone already holds it,
+        // and the room copy a want takes from a sealed one instead of the mesh.
+        single { AttachmentIdentities(get(), get()) }
+        single { AttachmentStore(androidContext(), get(), get(), get()) }
         // Link previews (sender-fetched cards, off by default). The decoded-card store is app-scoped like the
         // blobs it opens; the gate is the one ConnectivityManager user outside the NAN data path; the fetcher
         // is the one place besides the spool dialer that speaks OkHttp, bound to the gate's validated network.

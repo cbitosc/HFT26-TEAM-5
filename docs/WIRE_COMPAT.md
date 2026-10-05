@@ -95,6 +95,12 @@ derivation, or a discovery marker; or makes `RelayEnvelope.type` polymorphic.
 **Additive** (safe) if it only adds a nullable/defaulted field to a content/envelope type, a new `type`
 string with its own content class, or a new capability bit — and rule 4 holds.
 
+**A sealed chat may name a key-less attachment** (ADR 2026-10.mptm): a room picture forwarded into a DM or group
+keeps its public plaintext hash, so `MessageContent.attachmentKey` is null beside a set `attachmentHash`. No byte
+moved and no field changed meaning — a null key has always meant "plaintext" to every reader on both platforms
+(the room's own rows), so it needs no capability bit. A file passed along also reuses the ciphertext hash and key
+it arrived under, which no receiver can tell from a fresh seal.
+
 A change that genuinely needs a break does **not** get to schedule one. Park it in
 `docs/NEXT_WIRE_BREAK.md` — the staging list of everything waiting on the next coordinated break, so that
 if one ever happens they all ride it together and no single item has to justify the partition alone.

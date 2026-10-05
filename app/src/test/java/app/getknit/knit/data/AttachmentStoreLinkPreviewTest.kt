@@ -18,7 +18,7 @@ import org.junit.Test
 class AttachmentStoreLinkPreviewTest {
     private val blobs = mockk<BlobRepository>(relaxed = true)
     private val screening = mockk<ImageScreeningService>(relaxed = true)
-    private val store = AttachmentStore(mockk<Context>(relaxed = true), blobs, screening)
+    private val store = AttachmentStore(mockk<Context>(relaxed = true), blobs, screening, mockk(relaxed = true))
     private val stored = HashMap<String, Pair<String, ByteArray>>()
 
     init {

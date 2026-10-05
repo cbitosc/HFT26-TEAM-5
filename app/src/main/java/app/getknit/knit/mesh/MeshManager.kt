@@ -2,6 +2,7 @@ package app.getknit.knit.mesh
 
 import android.util.Log
 import app.getknit.knit.TextLimits
+import app.getknit.knit.data.AttachmentIdentities
 import app.getknit.knit.data.AttachmentStore
 import app.getknit.knit.data.BlobRepository
 import app.getknit.knit.data.GroupRepository
@@ -216,6 +217,10 @@ class MeshManager(
     // like publicChannel because the manager sends through this class. The default admits nothing. Not a
     // property: the only reader is [pipeline]'s initializer, which hands it straight to onTransferCtl.
     onTransferSignal: suspend (senderId: String, payload: TransferPayload, sentAt: Long) -> Boolean = { _, _, _ -> false },
+    // One plaintext, one identity (ADR 2026-10.mptm): handed to the inbound pipeline, which records each sealed
+    // attachment's plaintext name and makes a room copy from a sealed one this phone holds. Stateless over [messages]
+    // and [blobs], so the default is what every test wants; production hands in the Koin single.
+    private val identities: AttachmentIdentities = AttachmentIdentities(messages, blobs),
 ) : MeshController,
     TransferSignals,
     ProfileFrameSource,
@@ -432,6 +437,7 @@ class MeshManager(
             blobs = blobs,
             imageScreening = imageScreening,
             blobStore = blobStore,
+            identities = identities,
             db = db,
             identity = identity,
             settings = settings,
@@ -1056,6 +1062,9 @@ class MeshManager(
                     voiceDurationMs = attachment?.voice?.durationMs,
                     voicePeaks = attachment?.voice?.peaks,
                     attachmentAnimated = attachment?.animated == true,
+                    // The room's hash already is the plaintext's, so only the picker's own bytes are worth a
+                    // column: they are how the same original, picked again, finds this post (ADR 2026-10.mptm).
+                    attachmentSourceHash = attachment?.sourceHash,
                 ).withReply(replyTo),
             )
             val content =
@@ -1135,6 +1144,11 @@ class MeshManager(
                 attachmentSize = attachment?.takeIf { it.name != null }?.sizeBytes?.toLong(),
                 // Read off the frames at ingest, and by the recipient off the same bytes when they land.
                 attachmentAnimated = attachment?.animated == true,
+                // The plaintext's own name beside the ciphertext's, and the picker's bytes when ingest changed them:
+                // what a later forward or repeat of this file finds it by (ADR 2026-10.mptm). A key-less forward of a
+                // room picture already names its plaintext, so it records none.
+                attachmentPlainHash = attachment?.hash?.takeIf { sealedAttachment?.key != null },
+                attachmentSourceHash = attachment?.sourceHash,
                 pendingKey = envelope == null && group == null,
             ).withReply(replyTo),
         )
@@ -2012,18 +2026,30 @@ class MeshManager(
             }.toMap()
     }
 
-    /** Encrypted, content-addressed copy of a just-ingested attachment, plus its base64 key. */
+    /**
+     * The identity a DM or group attachment goes out under: its content-addressed hash, plus its base64 key — null
+     * only for a room picture forwarded under its own public, key-less name (ADR 2026-10.mptm).
+     */
     private data class SealedAttachment(
         val hash: String,
-        val key: String,
+        val key: String?,
     )
 
     /**
      * Encrypts the ingested (plaintext) attachment to a fresh key, stores the ciphertext blob under its
      * ciphertext hash (so the existing content-addressed pull/dedup still works), and drops the now-
      * unreferenced plaintext blob.
+     *
+     * Unless the file already goes by an identity here ([AttachmentStore.Ingested.reuse], ADR 2026-10.mptm): then
+     * that identity is the answer and nothing is sealed, so every phone holding it — carriers included — pulls nothing.
+     * A room picture keeps its key-less name and its blob; a sealed one keeps its ciphertext and key. If that blob
+     * went between the pick and the send, it is sealed fresh as ever.
      */
     private suspend fun sealAttachment(attachment: AttachmentStore.Ingested): SealedAttachment? {
+        attachment.reuse?.takeIf { blobs.exists(it.hash) }?.let { held ->
+            if (held.hash != attachment.hash) blobs.deleteIfUnreferenced(attachment.hash)
+            return SealedAttachment(held.hash, held.key)
+        }
         val plain = blobs.bytes(attachment.hash) ?: return null
         val sealed = AttachmentCrypto.seal(plain)
         val ctHash = sha256Hex(sealed.blob)

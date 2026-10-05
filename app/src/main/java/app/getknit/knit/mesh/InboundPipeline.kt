@@ -4,6 +4,7 @@ import android.util.Log
 import androidx.room3.withWriteTransaction
 import app.getknit.knit.TextLimits
 import app.getknit.knit.data.AnimatedImage
+import app.getknit.knit.data.AttachmentIdentities
 import app.getknit.knit.data.BlobRepository
 import app.getknit.knit.data.GroupRepository
 import app.getknit.knit.data.KnitDatabase
@@ -113,6 +114,10 @@ class InboundPipeline(
     private val blobs: BlobRepository,
     private val imageScreening: ImageScreeningService,
     private val blobStore: MeshBlobStore,
+    // Learns the plaintext name of each sealed attachment as its bytes arrive, and shows a room post of one this
+    // phone holds sealed from its own copy (ADR 2026-10.mptm). Stateless over [messages] and [blobs]; the default
+    // is what every test wants.
+    private val identities: AttachmentIdentities = AttachmentIdentities(messages, blobs),
     private val db: KnitDatabase,
     private val identity: IdentitySource,
     private val settings: InboundSettings,
@@ -209,9 +214,9 @@ class InboundPipeline(
     /**
      * A pulled blob just landed (the [BlobExchange] `onObtained` hook): attribute it to whoever advertised
      * it — a peer's avatar, a group's photo — screen its decrypted bytes if it's an E2E attachment we now
-     * hold the key for, and describe it if it's a voice note or an animated image. The five are
-     * order-independent and each is a no-op when the hash isn't theirs. This is the wrapper [MeshManager] wires
-     * as `blobExchange`'s onObtained callback.
+     * hold the key for, describe it if it's a voice note or an animated image, and record a sealed one's
+     * plaintext name so a forward reuses it (ADR 2026-10.mptm). The six are order-independent and each is a no-op
+     * when the hash isn't theirs. This is the wrapper [MeshManager] wires as `blobExchange`'s onObtained callback.
      */
     suspend fun onObtained(hash: String) {
         adoptAdvertisedAvatar(hash)
@@ -219,6 +224,7 @@ class InboundPipeline(
         screenObtainedAttachment(hash)
         deriveObtainedVoiceMeta(hash)
         deriveObtainedAnimation(hash)
+        identities.notePlain(hash)
     }
 
     /**
@@ -1961,12 +1967,16 @@ class InboundPipeline(
      * frame stays carried, only the image is absent) and the [resumePendingFetches]/neighbor-join retry backfills
      * as older custody frames expire. The carrier holds ciphertext it can't decrypt or screen (a fresh key never
      * arrives for it, so [screenObtainedAttachment] is a no-op); the addressed recipient screens on decrypt.
-     * A no-op for our own sends and delivered messages — [blobStore] already holds the blob.
+     * A no-op for our own sends and delivered messages — [blobStore] already holds the blob. A room post (or a
+     * key-less forward) of a picture we hold sealed from a conversation with its author is copied from our own store
+     * instead, exactly as [deliverChat] would (ADR 2026-10.mptm) — a carried room frame can be custodied before it
+     * is delivered here.
      */
     suspend fun onCarriedFrame(env: RelayEnvelope) {
         if (env.type != FrameType.CHAT) return
         val hash = WireCodec.decodePayload<ChatContent>(env.payload)?.attachmentHash ?: return
         if (blobStore.has(hash)) return
+        if (copyFromOwnStore(hash, env.senderId)) return
         if (blobs.carrierOnlyBlobBytes() >= CARRIER_BLOB_BUDGET_BYTES) return
         blobExchange.want(hash)
     }
@@ -2626,9 +2636,11 @@ class InboundPipeline(
         if (hash != null) {
             if (blobStore.has(hash)) {
                 screenHeldAttachment(hash, sealed?.attachmentKey, content.attachmentMime)
-                // Already held (cached while relaying), so no onObtained is coming to read its frames.
+                // Already held (cached while relaying, or a forward of a file we have), so no onObtained is
+                // coming to read its frames or learn its plaintext name.
                 deriveObtainedAnimation(hash)
-            } else {
+                identities.notePlain(hash)
+            } else if (sealed?.attachmentKey != null || !copyFromOwnStore(hash, env.senderId)) {
                 blobExchange.want(hash)
                 // Arm the fast plane toward the author — the guaranteed holder — so the pull can ride a NAN
                 // NDP instead of crawling over BLE (the serve side arms its own half in the composite; only
@@ -3377,6 +3389,24 @@ class InboundPipeline(
      */
     private suspend fun screenObtainedAttachment(hash: String) {
         screenHeldAttachment(hash, messages.attachmentKeyForHash(hash), messages.attachmentMimeForHash(hash))
+    }
+
+    /**
+     * Shows a key-less attachment — a room post, or a forward of one — from a sealed copy this phone already holds,
+     * when the frame's [author] was party to the conversation it came through (ADR 2026-10.mptm, and
+     * [AttachmentIdentities.localCopy] for why only then). The copy enters through [MeshBlobStore.ingest] like any
+     * arrival, so it is screened before it is held (#109), and the obtained hook runs as it would after a pull.
+     * False — pull it — when there is no such copy.
+     */
+    private suspend fun copyFromOwnStore(
+        hash: String,
+        author: String,
+    ): Boolean {
+        if (blobStore.storing(hash)) return true // the other door (delivery or custody) is copying it right now
+        val (bytes, mime) = identities.localCopy(hash, author) ?: return false
+        blobStore.ingest(hash, mime, bytes)
+        onObtained(hash)
+        return true
     }
 
     /**

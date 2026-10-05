@@ -1,5 +1,6 @@
 package app.getknit.knit.data
 
+import app.getknit.knit.data.message.AttachmentIdentityRow
 import app.getknit.knit.data.message.ConversationActivity
 import app.getknit.knit.data.message.ConversationSender
 import app.getknit.knit.data.message.Conversations
@@ -141,6 +142,27 @@ class MessageRepository(
     suspend fun markAttachmentAnimated(hash: String) = dao.markAttachmentAnimated(hash)
 
     suspend fun hashesNeedingFetch(): List<String> = dao.hashesNeedingFetch()
+
+    /** The held identity a file whose bytes hash to [bytesHash] already goes by, if any (ADR 2026-10.mptm). */
+    suspend fun attachmentIdentityFor(bytesHash: String): AttachmentIdentityRow? = dao.identityFor(bytesHash)
+
+    /**
+     * A held sealed attachment whose plaintext hashes to [plainHash], from a conversation [author] was party to, if
+     * any (ADR 2026-10.mptm).
+     */
+    suspend fun sealedAttachmentHolding(
+        plainHash: String,
+        author: String,
+    ): AttachmentIdentityRow? = dao.sealedHolding(plainHash, author)
+
+    /** The key of a sealed row naming [hash] whose plaintext name is not recorded yet, if any. */
+    suspend fun attachmentKeyWantingPlain(hash: String): String? = dao.keyWantingPlain(hash)
+
+    /** Records [plain] as the plaintext name of the sealed attachment [hash] where it is not known yet. */
+    suspend fun setAttachmentPlainHash(
+        hash: String,
+        plain: String,
+    ) = dao.setAttachmentPlainHash(hash, plain)
 
     /**
      * Whether the message naming attachment [hash] crossed a **short-range radio** between [me] and

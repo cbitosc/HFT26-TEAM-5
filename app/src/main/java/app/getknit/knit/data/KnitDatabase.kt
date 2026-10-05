@@ -52,7 +52,7 @@ import net.zetetic.database.sqlcipher.driver.SQLCipherDriver
  * The `@Database` version, as a top-level constant so the annotation and [KnitDatabase.SCHEMA_VERSION] read
  * one number (an annotation argument cannot name the class's own companion).
  */
-internal const val KNIT_DB_SCHEMA_VERSION = 19
+internal const val KNIT_DB_SCHEMA_VERSION = 20
 
 @Database(
     entities = [
@@ -185,6 +185,10 @@ internal const val KNIT_DB_SCHEMA_VERSION = 19
     //     stops adding an alias to a contact's label (ADR 2026-10.k8ge). Presentation only: never a presence
     //     tier, a route or an eviction key. Seeded from the profile version or the kept proof of key's publish
     //     stamp; migrated by KnitMigrations.MIGRATION_18_19.
+    // v20: `messages.attachmentPlainHash` (indexed) and `messages.attachmentSourceHash` — local only: the plaintext
+    //     name of a sealed attachment and the picker's bytes for one of ours, so a forward reuses the identity a file
+    //     arrived under and a room copy of a picture held sealed is made locally instead of pulled (ADR
+    //     2026-10.mptm). No wire change. Null on existing rows; migrated by KnitMigrations.MIGRATION_19_20.
     version = KNIT_DB_SCHEMA_VERSION,
     // Export the schema JSON to app/schemas/ (location set by the androidx.room Gradle plugin's
     // room { schemaDirectory(...) } in app/build.gradle.kts). Keeps the schema diffable in review and feeds

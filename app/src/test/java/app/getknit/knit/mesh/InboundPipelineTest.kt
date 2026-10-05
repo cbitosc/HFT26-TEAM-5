@@ -76,6 +76,7 @@ import app.getknit.knit.mesh.protocol.TransferPayload
 import app.getknit.knit.mesh.protocol.TypingContent
 import app.getknit.knit.mesh.protocol.WireCodec
 import app.getknit.knit.mesh.protocol.WireEnvelope
+import app.getknit.knit.mesh.sha256Hex
 import app.getknit.knit.mesh.spool.ScopeSync
 import app.getknit.knit.moderation.ImageScreeningService
 import app.getknit.knit.notifications.NotifConversation
@@ -2457,6 +2458,58 @@ class InboundPipelineTest {
             coVerify(exactly = 0) { rig.messages.markAttachmentAnimated("sticker") }
             coVerify(exactly = 0) { rig.messages.markAttachmentAnimated("jpeg") }
             coVerify(exactly = 0) { rig.messages.markAttachmentAnimated("nobody-claims-this") }
+        }
+
+    @Test
+    fun aPulledSealedAttachmentLearnsItsPlaintextNameAndARowlessOneDoesNot() =
+        runTest {
+            // What a later forward of the file finds it by (ADR 2026-10.mptm): its plaintext's own hash, recorded the
+            // moment the bytes and the key are both here. A carrier's blob has no row, so nothing is opened for it.
+            val rig = Rig(backgroundScope)
+            val plain = "the photo itself".toByteArray()
+            val seal = AttachmentCrypto.seal(plain)
+            coEvery { rig.messages.attachmentKeyWantingPlain("ct") } returns b64(seal.key)
+            coEvery { rig.blobs.bytes("ct") } returns seal.blob
+            coEvery { rig.messages.attachmentKeyWantingPlain("carried") } returns null
+
+            rig.pipeline.onObtained("ct")
+            rig.pipeline.onObtained("carried")
+
+            coVerify(exactly = 1) { rig.messages.setAttachmentPlainHash("ct", sha256Hex(plain)) }
+            coVerify(exactly = 0) { rig.messages.setAttachmentPlainHash("carried", any()) }
+        }
+
+    @Test
+    fun aKeylessForwardOfARoomPictureWeHoldIsShownWithNothingPulled() =
+        runTest {
+            // A DM forwarding a room picture names it by the room's own key-less hash (ADR 2026-10.mptm). Holding the
+            // post already, the recipient pulls nothing, and the row carries no key, so every reader treats the
+            // stored bytes as the plaintext they are. The row also learns its plaintext name if it is a sealed one.
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.pin(alice)
+            coEvery { rig.blobStore.has("room-hash") } returns true
+            val header = MessageCrypto.header("fw1", alice.nodeId, 5L, rig.self.nodeId)
+            val sealed = MessageContent(body = "", attachmentHash = "room-hash", attachmentMime = "image/jpeg")
+            val enc = alice.crypto.seal(sealed.encode(), header, mapOf(rig.self.nodeId to rig.self.bundle))!!
+            val env =
+                RelayEnvelope(
+                    type = FrameType.CHAT,
+                    id = "fw1",
+                    senderId = alice.nodeId,
+                    sentAt = 5L,
+                    recipientId = rig.self.nodeId,
+                    payload = WireCodec.encodePayload(ChatContent(enc = enc, attachmentHash = "room-hash")),
+                )
+
+            rig.deliver(alice, env)
+
+            val row = rig.msgMap.getValue("fw1")
+            assertEquals("room-hash", row.attachmentHash)
+            assertEquals("image/jpeg", row.attachmentMime)
+            assertNull(row.attachmentKey)
+            coVerify(exactly = 0) { rig.blobExchange.want("room-hash") } // held already: nothing asked of the mesh
+            coVerify { rig.messages.attachmentKeyWantingPlain("room-hash") }
         }
 
     /** A notification names its sender by the collision-aware label when another pinned peer shares the name (ADR 058). */

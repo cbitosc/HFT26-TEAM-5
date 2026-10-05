@@ -113,6 +113,7 @@ import kotlinx.serialization.json.Json
     indices = [
         Index(value = ["conversationId", "sentAt", "id"]),
         Index(value = ["conversationId", "kind", "senderId"]),
+        Index(value = ["attachmentPlainHash"]),
     ],
 )
 data class MessageEntity(
@@ -189,6 +190,21 @@ data class MessageEntity(
      * else, so false — also the value while a received blob is still on its way — is always a safe answer.
      */
     val attachmentAnimated: Boolean = false,
+    /**
+     * The SHA-256 of a **sealed** attachment's plaintext — the name the same bytes go by in the room, where an
+     * attachment is addressed by its plaintext. Null on a key-less row, whose [attachmentHash] already is that
+     * name, and on a sealed row whose blob has not landed or been opened yet. **Local only**: the sender writes it
+     * at send, a recipient once the blob lands or is saved (ADR 2026-10.mptm). It is what lets a phone forward
+     * a file under the identity it arrived under, and make a room copy of a picture it holds sealed instead of
+     * pulling it; indexed, because the second is asked on every blob want.
+     */
+    val attachmentPlainHash: String? = null,
+    /**
+     * The SHA-256 of the bytes the picker handed over for one of **our own** sends, when the ingest changed them
+     * (a photo re-encoded, a GIF made a WebP); null otherwise and on every received row. **Local only**: it is
+     * how picking the same original again finds the identity it went out under (ADR 2026-10.mptm).
+     */
+    val attachmentSourceHash: String? = null,
 ) {
     companion object {
         // [originSigned] values. Append-only like every other registry here: the value is stored on the row.

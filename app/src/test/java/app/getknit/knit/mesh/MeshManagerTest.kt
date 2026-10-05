@@ -2,6 +2,7 @@ package app.getknit.knit.mesh
 
 import androidx.room3.Room
 import androidx.test.core.app.ApplicationProvider
+import app.getknit.knit.data.AttachmentIdentities
 import app.getknit.knit.data.AttachmentStore
 import app.getknit.knit.data.BlobRepository
 import app.getknit.knit.data.GroupRepository
@@ -1065,6 +1066,126 @@ class MeshManagerTest {
             assertEquals("the sealed content references the same ciphertext blob", ctHash, opened.attachmentHash)
             assertEquals("and is the only carrier of the type", "image/jpeg", opened.attachmentMime)
             assertNotNull("and carries the AES key the recipient needs", opened.attachmentKey)
+        }
+
+    // --- attachment: a file this phone already holds goes out under that identity (ADR 2026-10.mptm) ---
+
+    @Test
+    fun aForwardGoesOutUnderTheIdentityItArrivedUnderAndSealsNothing() =
+        runTest(UnconfinedTestDispatcher()) {
+            val rig = Rig(backgroundScope)
+            rig.pin(rig.bob)
+            val held =
+                AttachmentIdentities.Held(
+                    hash = "ct-hash",
+                    key = "a2V5",
+                    mime = "image/jpeg",
+                    animated = true,
+                    plainHash = "plain-hash",
+                )
+            coEvery { rig.blobs.exists("ct-hash") } returns true
+
+            assertTrue(
+                rig.manager.sendChat(
+                    "passing this on",
+                    attachment = AttachmentStore.Ingested(hash = "plain-hash", mime = "image/jpeg", animated = true, reuse = held),
+                    recipientId = rig.bob.nodeId,
+                ),
+            )
+            advanceUntilIdle()
+
+            val frame = rig.sentChatFrames().single()
+            val content = WireCodec.decodePayload<ChatContent>(frame.payload)!!
+            assertEquals("every holder of the first copy already holds this one", "ct-hash", content.attachmentHash)
+            val header = MessageCrypto.header(frame.id, rig.me.nodeId, frame.sentAt, rig.bob.nodeId)
+            val opened = rig.bob.crypto.open(content.enc!!, header, rig.bob.nodeId)!!
+            assertEquals("ct-hash", opened.attachmentHash)
+            assertEquals("the same key opens it", "a2V5", opened.attachmentKey)
+            coVerify(exactly = 0) { rig.blobs.insert(any(), any(), any()) } // no fresh ciphertext
+            coVerify { rig.blobs.deleteIfUnreferenced("plain-hash") } // the staged plaintext goes as ever
+            val row = rig.saved.single()
+            assertEquals("ct-hash", row.attachmentHash)
+            assertEquals("a2V5", row.attachmentKey)
+            assertEquals("the row keeps the plaintext's name for the next forward", "plain-hash", row.attachmentPlainHash)
+        }
+
+    @Test
+    fun aRoomPictureForwardedToADmKeepsItsPublicKeylessName() =
+        runTest(UnconfinedTestDispatcher()) {
+            val rig = Rig(backgroundScope)
+            rig.pin(rig.bob)
+            val held =
+                AttachmentIdentities.Held(
+                    hash = "room-hash",
+                    key = null,
+                    mime = "image/jpeg",
+                    animated = false,
+                    plainHash = "room-hash",
+                )
+            coEvery { rig.blobs.exists("room-hash") } returns true
+
+            assertTrue(
+                rig.manager.sendChat(
+                    "",
+                    attachment = AttachmentStore.Ingested(hash = "room-hash", mime = "image/jpeg", reuse = held),
+                    recipientId = rig.bob.nodeId,
+                ),
+            )
+            advanceUntilIdle()
+
+            val frame = rig.sentChatFrames().single()
+            val content = WireCodec.decodePayload<ChatContent>(frame.payload)!!
+            assertEquals("named as the room names it, so everyone nearby already holds it", "room-hash", content.attachmentHash)
+            val header = MessageCrypto.header(frame.id, rig.me.nodeId, frame.sentAt, rig.bob.nodeId)
+            val opened = rig.bob.crypto.open(content.enc!!, header, rig.bob.nodeId)!!
+            assertNull("no key: the bytes are the room's plaintext", opened.attachmentKey)
+            assertEquals("the mime still rides only inside the seal", "image/jpeg", opened.attachmentMime)
+            assertNull(content.attachmentMime)
+            coVerify(exactly = 0) { rig.blobs.deleteIfUnreferenced("room-hash") } // the room's blob is the one sent
+            val row = rig.saved.single()
+            assertNull(row.attachmentKey)
+            assertNull("a key-less row's hash already is its plaintext's", row.attachmentPlainHash)
+        }
+
+    @Test
+    fun anIdentityWhoseBlobWentBeforeTheSendIsSealedFresh() =
+        runTest(UnconfinedTestDispatcher()) {
+            val rig = Rig(backgroundScope)
+            rig.pin(rig.bob)
+            val held =
+                AttachmentIdentities.Held(
+                    hash = "ct-hash",
+                    key = "a2V5",
+                    mime = "image/jpeg",
+                    animated = false,
+                    plainHash = "plain-hash",
+                )
+            coEvery { rig.blobs.exists("ct-hash") } returns false
+            coEvery { rig.blobs.bytes("plain-hash") } returns "raw-image-bytes".toByteArray()
+
+            rig.manager.sendChat(
+                "",
+                attachment = AttachmentStore.Ingested(hash = "plain-hash", mime = "image/jpeg", reuse = held),
+                recipientId = rig.bob.nodeId,
+            )
+            advanceUntilIdle()
+
+            val ctHash = WireCodec.decodePayload<ChatContent>(rig.sentChatFrames().single().payload)!!.attachmentHash!!
+            assertNotEquals("ct-hash", ctHash)
+            coVerify { rig.blobs.insert(ctHash, "image/jpeg", any()) }
+            assertEquals("plain-hash", rig.saved.single().attachmentPlainHash)
+        }
+
+    @Test
+    fun ourOwnSendRemembersThePickersBytesWhenTheIngestChangedThem() =
+        runTest(UnconfinedTestDispatcher()) {
+            val rig = Rig(backgroundScope)
+            rig.manager.sendChat(
+                "",
+                attachment = AttachmentStore.Ingested(hash = "plain-hash", mime = "image/webp", sourceHash = "gif-hash"),
+            )
+            advanceUntilIdle()
+            assertEquals("gif-hash", rig.saved.single().attachmentSourceHash)
         }
 
     @Test

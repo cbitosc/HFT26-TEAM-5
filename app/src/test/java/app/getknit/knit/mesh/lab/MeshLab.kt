@@ -14,6 +14,7 @@ import app.getknit.knit.TextLimits
 import app.getknit.knit.contacts.ContactCards
 import app.getknit.knit.contacts.ContactImporter
 import app.getknit.knit.contacts.ContactRemover
+import app.getknit.knit.data.AttachmentIdentities
 import app.getknit.knit.data.AttachmentStore
 import app.getknit.knit.data.BlobRepository
 import app.getknit.knit.data.GroupRepository
@@ -907,6 +908,9 @@ class LabNode internal constructor(
         private set
     private lateinit var messageCrypto: MessageCrypto
 
+    /** The composer's picker door, for a picture this node already holds ([forwardImage], ADR 2026-10.mptm). */
+    private lateinit var attachments: AttachmentStore
+
     /** What this node has done for other people's messages — the Your mesh screen's lifetime numbers. */
     lateinit var ledger: ContributionLedger
         private set
@@ -995,6 +999,7 @@ class LabNode internal constructor(
             }
         val imageScreening = ImageScreeningService(pictures, db.blobVerdictDao(), allowAll)
         val blobStore = MeshBlobStore(blobs, messages, imageScreening, File(dir, "blobtx"))
+        attachments = AttachmentStore(context, blobs, imageScreening, AttachmentIdentities(messages, blobs))
         val notifier = mockk<Notifier>(relaxed = true)
         // THE ratchet lock + the transaction that encloses it, shared by both session services (di/MeshModule).
         val ratchetMutex = Mutex()
@@ -1387,6 +1392,38 @@ class LabNode internal constructor(
             )
         }
     }
+
+    /**
+     * Sends [bytes] the way the composer sends a picture saved out of a chat and picked again (ADR 2026-10.mptm) —
+     * to [to], into [groupId], or into the room when both are null — through the real picker door, so it goes out
+     * as the identity this node already holds it under. The scenario owns that it does: a pick nothing here
+     * matches would take the bitmap path, which Robolectric's legacy graphics turn into a placeholder (see
+     * [sendImage]), so a miss fails here rather than as a puzzle in the oracle.
+     */
+    suspend fun forwardImage(
+        bytes: ByteArray,
+        text: String = "",
+        to: LabNode? = null,
+        groupId: String? = null,
+    ): Boolean {
+        val picked = attachments.ingestPicked(bytes, IMAGE_MIME)
+        val attachment = (picked as? AttachmentStore.IngestResult.Success)?.ingested
+        check(attachment?.reuse != null) { "$name holds no identity for those bytes: $picked" }
+        val group = groupId?.let { checkNotNull(groups.find(it)) { "$name holds no group $it" }.toGroupInfo() }
+        return spaced {
+            manager.sendChat(
+                text = text,
+                attachment = attachment,
+                mentions = emptyList(),
+                recipientId = to?.nodeId,
+                group = group,
+                replyTo = null,
+            )
+        }
+    }
+
+    /** Whether a pick of [bytes] here would go out as an identity this node already holds (ADR 2026-10.mptm). */
+    suspend fun holdsIdentityFor(bytes: ByteArray): Boolean = AttachmentIdentities(messages, blobs).find(sha256Hex(bytes)) != null
 
     /** Sets our avatar to [bytes], as the Profile screen's crop confirm does once the store holds the JPEG. */
     suspend fun setAvatar(bytes: ByteArray) {
@@ -1797,6 +1834,12 @@ class LabNode internal constructor(
         conversationId: String,
         messageId: String,
     ): String? = row(conversationId, messageId)?.attachmentHash
+
+    /** The key the message's row opens its attachment with, or null — a room picture, or a key-less forward of one. */
+    suspend fun attachmentKey(
+        conversationId: String,
+        messageId: String,
+    ): String? = row(conversationId, messageId)?.attachmentKey
 
     /** Whether screening here has reached a verdict on the message's attachment. */
     suspend fun attachmentScreened(

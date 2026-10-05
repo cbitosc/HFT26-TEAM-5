@@ -116,7 +116,9 @@ identical bytes are scanned once across send/receive):
 - **Inbound (flag-on-receive):** `MeshBlobStore.ingest()` → `ImageScreeningService.screenImage()`
   always caches a verdict for a plaintext blob, whichever plane brought it: a radio pull reaches it through
   `saveIncoming()`, a spool fetch through `MeshManager.scopeBlobs().save` (#109 — a bare insert there left a
-  spool-pulled group photo or avatar with no verdict). The screen runs **before** the bytes are stored (as does
+  spool-pulled group photo or avatar with no verdict), and so does a copy the phone makes from its own sealed one
+  instead of pulling it (a room post of a picture it holds from a DM or group with the poster, ADR 2026-10.mptm). The screen runs **before** the bytes
+  are stored (as does
   `onAvatarReceived`'s), so "held" always means "screened" to a frame handled on another coroutine. The chat UI blurs flagged attachments behind tap-to-view
   (`AttachmentImage`, `ChatRow.attachmentFlagged`) **only when the content-filtering toggle is on** —
   `ChatViewModel` gates `ChatRow.attachmentFlagged` on `contentFilteringEnabled` (reactive). Bytes are

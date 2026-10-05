@@ -195,6 +195,71 @@ interface MessageDao {
     @Query("UPDATE messages SET attachmentAnimated = 1 WHERE attachmentHash = :hash AND attachmentAnimated = 0")
     suspend fun markAttachmentAnimated(hash: String)
 
+    /**
+     * The identity this phone already sends a file under, found by the hash of the bytes about to go out (ADR
+     * 2026-10.mptm): a sealed row whose plaintext hashes to [bytesHash], one of our own sends whose picked
+     * source did, or a key-less row — a room picture — addressed by it. Only an identity whose blob is still held
+     * counts. A key-less one wins, then the earliest: once a file has been in the room, its public name is the
+     * one most phones nearby already hold. A sealed row without its plaintext name is skipped, since its
+     * [AttachmentIdentityRow.plainHash] would otherwise read the ciphertext hash. A whole-table read (no index
+     * on the three columns it ORs), run once per pick, never on the inbound path.
+     */
+    @Query(
+        "SELECT attachmentHash AS hash, attachmentKey AS `key`, attachmentMime AS mime, " +
+            "attachmentAnimated AS animated, COALESCE(attachmentPlainHash, attachmentHash) AS plainHash " +
+            "FROM messages WHERE attachmentHash IS NOT NULL AND attachmentMime IS NOT NULL " +
+            "AND (attachmentKey IS NULL OR attachmentPlainHash IS NOT NULL) " +
+            "AND (attachmentPlainHash = :bytesHash OR attachmentSourceHash = :bytesHash " +
+            "OR (attachmentKey IS NULL AND attachmentHash = :bytesHash)) " +
+            "AND attachmentHash IN (SELECT hash FROM blobs) " +
+            "ORDER BY attachmentKey IS NOT NULL, sentAt, id LIMIT 1",
+    )
+    suspend fun identityFor(bytesHash: String): AttachmentIdentityRow?
+
+    /**
+     * A **sealed** attachment we hold whose plaintext hashes to [plainHash], **in a conversation [author] was party
+     * to** — what lets a key-less frame of theirs naming that plaintext (a room post, a forward) be shown from our
+     * own copy instead of pulled (ADR 2026-10.mptm). The author rule is the privacy property: making the copy is
+     * observable (we serve bytes we never asked for), so only someone who already knows we hold the file — its
+     * sender, the DM peer we got it from or sent it to, a member of the group it came through — may trigger it.
+     * A group's roster is a JSON array of node ids, which carry no quote, `%` or `_`, so the quoted LIKE is exact.
+     * Asked on every delivered key-less attachment, so it leads with the `attachmentPlainHash` index.
+     */
+    @Query(
+        "SELECT m.attachmentHash AS hash, m.attachmentKey AS `key`, m.attachmentMime AS mime, " +
+            "m.attachmentAnimated AS animated, m.attachmentPlainHash AS plainHash " +
+            "FROM messages AS m WHERE m.attachmentPlainHash = :plainHash AND m.attachmentKey IS NOT NULL " +
+            "AND m.attachmentHash IS NOT NULL AND m.attachmentMime IS NOT NULL " +
+            "AND m.attachmentHash IN (SELECT hash FROM blobs) " +
+            "AND (m.senderId = :author OR m.conversationId = :author OR EXISTS (SELECT 1 FROM groups AS g " +
+            "WHERE g.groupId = m.conversationId AND g.members LIKE '%\"' || :author || '\"%')) " +
+            "ORDER BY m.sentAt, m.id LIMIT 1",
+    )
+    suspend fun sealedHolding(
+        plainHash: String,
+        author: String,
+    ): AttachmentIdentityRow?
+
+    /** The key of a sealed row naming ciphertext [hash] that does not know its plaintext name yet, if any. */
+    @Query(
+        "SELECT attachmentKey FROM messages WHERE attachmentHash = :hash AND attachmentKey IS NOT NULL " +
+            "AND attachmentPlainHash IS NULL LIMIT 1",
+    )
+    suspend fun keyWantingPlain(hash: String): String?
+
+    /**
+     * Records [plain] as the plaintext name of the sealed attachment [hash] on every row naming it that has none
+     * yet — keyed by hash for [setVoiceMeta]'s reason, and guarded so a repeat writes nothing.
+     */
+    @Query(
+        "UPDATE messages SET attachmentPlainHash = :plain WHERE attachmentHash = :hash " +
+            "AND attachmentKey IS NOT NULL AND attachmentPlainHash IS NULL",
+    )
+    suspend fun setAttachmentPlainHash(
+        hash: String,
+        plain: String,
+    )
+
     /** Attachment hashes referenced by stored messages whose bytes aren't in the `blobs` table yet. */
     @Query(
         "SELECT DISTINCT attachmentHash FROM messages " +
@@ -544,4 +609,17 @@ data class ConversationActivity(
 data class ConversationSender(
     val conversationId: String,
     val senderId: String,
+)
+
+/**
+ * Room projection for [MessageDao.identityFor] and [MessageDao.sealedHolding]: one attachment identity — the
+ * hash it travels under, its key (null for a key-less, plaintext one), its MIME and animated flag, and the hash
+ * of its plaintext.
+ */
+data class AttachmentIdentityRow(
+    val hash: String,
+    val key: String?,
+    val mime: String,
+    val animated: Boolean,
+    val plainHash: String,
 )

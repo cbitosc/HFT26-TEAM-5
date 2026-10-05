@@ -40,12 +40,15 @@ class AttachmentStoreIngestTest {
     private val context = ApplicationProvider.getApplicationContext<Context>()
     private val blobs = mockk<BlobRepository>(relaxed = true)
     private val screening = mockk<ImageScreeningService>(relaxed = true)
-    private val store = AttachmentStore(context, blobs, screening)
+    private val identities = mockk<AttachmentIdentities>(relaxed = true)
+    private val store = AttachmentStore(context, blobs, screening, identities)
     private val stored = HashMap<String, Pair<String, ByteArray>>()
     private val dir = File(context.cacheDir, "ingest-${System.nanoTime()}").apply { mkdirs() }
 
     init {
         coEvery { blobs.insert(any(), any(), any()) } answers { stored[firstArg()] = secondArg<String>() to thirdArg() }
+        // Nothing is held under an identity unless a test says so: a relaxed mock would hand back a mock identity.
+        coEvery { identities.find(any()) } returns null
     }
 
     @After
@@ -181,6 +184,122 @@ class AttachmentStoreIngestTest {
         runTest {
             assertEquals(IngestResult.Failed(IngestResult.Reason.Unreadable), store.ingestVoice(ByteArray(0)))
             assertTrue(stored.isEmpty())
+        }
+
+    // --- A pick this phone already holds (ADR 2026-10.mptm) ---
+
+    /** An animated WebP as the ingest stores a GIF: the VP8X chunk with its animation flag. Nothing decodes it. */
+    private val animatedWebp =
+        "RIFF".toByteArray() + byteArrayOf(0, 0, 0, 0) + "WEBPVP8X".toByteArray() + byteArrayOf(10, 0, 0, 0, 0x02, 0, 0, 0)
+
+    private fun held(
+        plainHash: String,
+        mime: String = "image/jpeg",
+        key: String? = "a2V5",
+        animated: Boolean = false,
+    ) = AttachmentIdentities.Held(hash = "c".repeat(64), key = key, mime = mime, animated = animated, plainHash = plainHash)
+
+    @Test
+    fun aPictureThePhoneHoldsGoesOutAsItsIdentityWithItsBytesUnchanged() =
+        runTest {
+            val photo = geotaggedJpeg()
+            val identity = held(plainHash = sha256Hex(photo))
+            coEvery { identities.find(sha256Hex(photo)) } returns identity
+
+            val result = success(store.ingest(fileUri("saved.jpg", photo)))
+
+            assertEquals(identity, result.ingested.reuse)
+            assertEquals(sha256Hex(photo), result.ingested.hash)
+            assertNull("the bytes are the plaintext: nothing was re-encoded", result.ingested.sourceHash)
+            // Byte for byte what was picked: no second JPEG generation, and no new identity for the mesh to carry.
+            assertArrayEquals(photo, stored.getValue(sha256Hex(photo)).second)
+            coVerify(exactly = 0) { identities.plaintextOf(any()) }
+            // Screened as a fresh pick would be, so the room's block and a DM's confirmation are unchanged.
+            coVerify(exactly = 1) { screening.isImageExplicit(photo) }
+        }
+
+    @Test
+    fun aForwardedGifStaysAnimatedBecauseItIsNeverDecoded() =
+        runTest {
+            val identity = held(plainHash = sha256Hex(animatedWebp), mime = "image/webp", key = null, animated = true)
+            coEvery { identities.find(sha256Hex(animatedWebp)) } returns identity
+
+            val result = success(store.ingest(fileUri("saved.webp", animatedWebp)))
+
+            assertTrue(result.ingested.animated)
+            assertEquals("image/webp", result.ingested.mime)
+            assertArrayEquals(animatedWebp, stored.getValue(result.ingested.hash).second)
+        }
+
+    @Test
+    fun theOriginalOfAPhotoWeSentFindsTheIdentityItWentOutUnder() =
+        runTest {
+            val original = geotaggedJpeg()
+            val sent = "the re-encoded plaintext".toByteArray()
+            val identity = held(plainHash = sha256Hex(sent))
+            coEvery { identities.find(sha256Hex(original)) } returns identity
+            coEvery { identities.plaintextOf(identity) } returns sent
+
+            val result = success(store.ingest(fileUri("original.jpg", original)))
+
+            assertEquals(sha256Hex(sent), result.ingested.hash)
+            assertEquals(sha256Hex(original), result.ingested.sourceHash)
+            assertArrayEquals(sent, stored.getValue(sha256Hex(sent)).second)
+        }
+
+    @Test
+    fun anIdentityWhoseBlobWillNotOpenFallsBackToAFreshIngest() =
+        runTest {
+            val original = geotaggedJpeg()
+            coEvery { identities.find(sha256Hex(original)) } returns held(plainHash = "f".repeat(64))
+            coEvery { identities.plaintextOf(any()) } returns null
+
+            val result = success(store.ingest(fileUri("original.jpg", original)))
+
+            assertNull(result.ingested.reuse)
+            assertNoMetadata(stored.getValue(result.ingested.hash).second)
+        }
+
+    @Test
+    fun aFilePassedAlongKeepsItsIdentityAndThePicksOwnNameAndSize() =
+        runTest {
+            val pdf = "%PDF-1.4\n1 0 obj << >> endobj\n%%EOF\n".toByteArray()
+            val identity = held(plainHash = sha256Hex(pdf), mime = "application/pdf")
+            coEvery { identities.find(sha256Hex(pdf)) } returns identity
+
+            val result = success(store.ingestFile(fileUri("evacuation_procedure.pdf", pdf)))
+
+            assertEquals(identity, result.ingested.reuse)
+            assertEquals("application/pdf", result.ingested.mime)
+            // The name is the pick's own, as on a fresh ingest (a file:// Uri offers none under Robolectric).
+            assertEquals(success(store.ingestFile(fileUri("other.pdf", "%PDF-other".toByteArray()))).ingested.name, result.ingested.name)
+            assertEquals(pdf.size, result.ingested.sizeBytes)
+            assertFalse(result.flagged)
+            coVerify(exactly = 0) { screening.isImageExplicit(any()) }
+        }
+
+    @Test
+    fun aPictureFoundThroughTheFileDoorCarriesNoNameAsAnyImageFromThere() =
+        runTest {
+            val photo = geotaggedJpeg()
+            coEvery { identities.find(sha256Hex(photo)) } returns held(plainHash = sha256Hex(photo))
+
+            val result = success(store.ingestFile(fileUri("IMG_0001.jpg", photo)))
+
+            assertNull(result.ingested.name)
+            assertEquals(0, result.ingested.sizeBytes)
+        }
+
+    @Test
+    fun aFreshPickRemembersTheBytesItCameFromWhenTheIngestChangedThem() =
+        runTest {
+            val photo = geotaggedJpeg()
+
+            val result = success(store.ingest(fileUri("photo.jpg", photo)))
+
+            assertNull(result.ingested.reuse)
+            assertEquals(sha256Hex(photo), result.ingested.sourceHash)
+            assertTrue(result.ingested.hash != sha256Hex(photo))
         }
 
     /** [AttachmentStore]'s private bounds, restated: a change there should be a deliberate change here. */

@@ -62,7 +62,11 @@ with the ratchet prekeys), advertised via `ProfileContent.pubKey`, pinned self-c
 `PeerEntity.pubKey` (immutable per nodeId), and confirmed out of band via the safety-number/QR screen
 (`PeerEntity.verified`) — identity keys are unchanged by the ratchet, so safety numbers are stable.
 Image attachments are encrypted to a per-attachment key and content-addressed by ciphertext hash, so
-`BlobExchange`/`BlobStore` are unchanged. Since ADR 035 the attachment's **type** stays inside the seal
+`BlobExchange`/`BlobStore` are unchanged. The key belongs to the file, not the send: a phone seals a plaintext once,
+and a file it passes along goes out under the identity it arrived under — a sealed copy's hash and key, or a room
+picture's own plaintext hash with **no key** (`AttachmentIdentities`, ADR 2026-10.mptm). So a sealed
+`MessageContent` may name a key-less attachment, and a carrier can see that two frames carry one file — never what
+it is, unless it holds the key or the room post. Since ADR 035 the attachment's **type** stays inside the seal
 too: a sealed frame sets `ChatContent.attachmentHash` and nothing else, so a relay or carrier no longer
 learns whether it is carrying a photo or a voice note (size still implies plenty). `MessageContent`
 carries the real mime, `InboundPipeline.plaintextContent` substitutes it on delivery, and the spool

@@ -573,10 +573,12 @@ custody the bytes. Two frame shapes name one (§9.5 lists them). The plane carri
 second
 object class beside frames.
 
-The input is that attachment ciphertext `A`: already AEAD-encrypted end to end under a fresh
-per-send key
+The input is that attachment ciphertext `A`: already AEAD-encrypted end to end under a key of its own
 that lives inside the sealed `MessageContent`, and already content-addressed by
-`aHash = SHA-256(A)`.
+`aHash = SHA-256(A)`. The key belongs to the file, not the send: a client that passes a file along reuses the
+`A` and key it arrived under, and a picture from the radio room forwarded into a DM or group travels as its own
+plaintext with no key at all, as public as the room post it came from. Neither changes this layer: the chunk seal
+below still blinds every `A` from the spool alike.
 This layer does not re-protect content that is already opaque. It blinds the *routing* of it,
 exactly as
 §4.2's outer seal does for frames.
