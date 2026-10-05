@@ -383,8 +383,23 @@ interface MeshTransport {
      * `streamInFlight` (ADR 2026-09.u8qj), so there is no memo to expire or abort to signal — a torn link
      * clears its own state and the next tick asks again. Default empty: a plane with no data path (LoRa)
      * carries no files.
+     *
+     * A file stays here past its `FILE_END`, whole, until the consumer of [incomingFiles] has taken it
+     * ([fileTaken]): between the link's end and the store's own mark (`BlobStore.storing`) it sits in the cache, in
+     * this transport's buffer and behind the consumer's earlier files, and a want or a first ask's timer that read
+     * the link and the store there found the bytes nowhere and asked again (#138).
      */
     fun arrivingFiles(): Map<String, ArrivingFile> = emptyMap()
+
+    /**
+     * The consumer of [incomingFiles] is done with [key] from [fromNodeId] — stored, refused, or dropped — so it
+     * stops counting in [arrivingFiles]. Idempotent; a key no live link holds is a no-op. Default no-op: a plane
+     * with no data path carries no files.
+     */
+    fun fileTaken(
+        fromNodeId: String,
+        key: String,
+    ) {}
 
     /**
      * True while a file from [nodeId] is streaming in on a live link: its `FILE_HEADER` is in and its `FILE_END` is

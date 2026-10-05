@@ -39,6 +39,7 @@ import app.getknit.knit.mesh.bleSupport
 import app.getknit.knit.mesh.furthestByKey
 import app.getknit.knit.mesh.link.FrameKey
 import app.getknit.knit.mesh.link.FramedLink
+import app.getknit.knit.mesh.link.LandingFiles
 import app.getknit.knit.mesh.link.LinkCallbacks
 import app.getknit.knit.mesh.link.LinkCrossings
 import app.getknit.knit.mesh.link.LinkHandshake
@@ -305,6 +306,9 @@ class BluetoothMeshTransport(
     private val _incomingFiles = MutableSharedFlow<ReceivedFile>(extraBufferCapacity = 32)
     override val incomingFiles = _incomingFiles.asSharedFlow()
 
+    // Files a link finished that the consumer has not taken yet (#138): every link lands into it, none clears it.
+    private val landing = LandingFiles()
+
     private val _incomingDigests = MutableSharedFlow<ReceivedDigest>(extraBufferCapacity = 32)
     override val incomingDigests = _incomingDigests.asSharedFlow()
 
@@ -420,7 +424,8 @@ class BluetoothMeshTransport(
         }
 
         override fun onFile(file: ReceivedFile) {
-            _incomingFiles.tryEmit(file)
+            // Dropped — a full buffer, or no collector yet (a value with no subscriber is discarded): nothing will take it.
+            if (_incomingFiles.subscriptionCount.value == 0 || !_incomingFiles.tryEmit(file)) landing.take(file.fromNodeId, file.key)
             wakeSide() // the one stream edge a link reports: rxInProgress just cleared, the side scan may go Off
         }
 
@@ -437,6 +442,7 @@ class BluetoothMeshTransport(
     }
 
     override fun start() {
+        landing.clear() // nothing landed before this session is one it will take
         if (!hasHardware) {
             _health.value = TransportHealth.Unavailable
             Log.w(TAG, "Bluetooth LE unsupported on this device; BT plane disabled")
@@ -519,6 +525,7 @@ class BluetoothMeshTransport(
         audioMonitor.stop()
         tearDownRadio()
         links.keys.toList().forEach { teardownLink(it, "stop") }
+        landing.clear() // after the links: a reader still running could land a file the next session never takes
         presence.clear()
         deviceFor.clear()
         codedDeviceFor.clear()
@@ -628,7 +635,14 @@ class BluetoothMeshTransport(
         return accepted
     }
 
-    override fun arrivingFiles(): Map<String, ArrivingFile> = links.values.mapNotNull { it.rxFile }.furthestByKey()
+    // Streaming, then landing: a file ends by joining the second before it leaves the first, so this order never
+    // reads it in neither (#138).
+    override fun arrivingFiles(): Map<String, ArrivingFile> = (links.values.mapNotNull { it.rxFile } + landing.all).furthestByKey()
+
+    override fun fileTaken(
+        fromNodeId: String,
+        key: String,
+    ) = landing.take(fromNodeId, key)
 
     override fun fileArrivingFrom(nodeId: String): Boolean = links[nodeId]?.rxInProgress ?: false
 
@@ -1716,6 +1730,7 @@ class BluetoothMeshTransport(
                 now = SystemClock::elapsedRealtime,
                 pace = { paceFor(events.link) }, // set just below; the writer starts only at framed.start()
                 log = { msg -> Log.d(TAG, msg) },
+                landing = landing,
             )
         events.link = framed
         crossings.forget(nodeId) // a fresh stream starts clean: the peer may have restarted with an empty SeenSet

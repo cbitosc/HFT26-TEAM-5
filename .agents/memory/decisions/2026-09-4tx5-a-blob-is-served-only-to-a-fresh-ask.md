@@ -18,7 +18,8 @@ ADR 2026-10.nxfb (2026-10-03, #121): the Bluetooth stack's buffer sits between t
 re-ask a peer whose file is streaming in (`MeshTransport.fileArrivingFrom`), and `fileInFlightTo` also covers a file
 the link fed in full while it goes on feeding that peer. Amended by ADR 2026-10.f7gg (2026-10-04, #136): the first
 ask goes to the likeliest holder alone and widens to every neighbour after its grace, so "one copy per asker per
-holder" is paid only when the first choice misses; `onNeighborAdded` is now `reask`.
+holder" is paid only when the first choice misses; `onNeighborAdded` is now `reask`. Point 1 amended 2026-10-05
+(#138, below): a file stays arriving past its `FILE_END` until the consumer of `incomingFiles` has taken it.
 
 **What was observed.** 2026-09-19 20:43, three phones linked over BLE (P3, Moto G, P9), a 699 KB DM
 attachment P3 → Moto. It crossed the mesh three times to the Moto and twice to P9: P3 served the Moto at
@@ -92,3 +93,31 @@ minutes — the Moto's stream ran 22:15:26–22:16:23 and P9's 22:15:29–22:17:
 (22:16:02, 22:16:13) fell inside their own streams, exactly where the old build re-asked, and no re-ask, no
 carrier push and no push back reached any link. The holders' `file ATTACHMENT/<hash>` lines are the oracle:
 two on P3, none on the Moto, none on P9.
+
+**Amendment (2026-10-05, knit/knit-next#138): a file is on the way until it is held.** Point 1's read ended at
+`FILE_END`, and `BlobStore.storing` (#109) began only when the consumer reached the store. Between the two, a
+finished file was being moved into the cache (`FileIntake.finalize`, a whole copy on a resume), sat in the
+transport's `incomingFiles` buffer, and waited behind the files `MeshManager`'s one collector was still screening.
+The link said it was not arriving, the store said it was neither storing nor held, and an ask in that window bought
+a second copy. ADR 2026-10.f7gg's first-ask timer made that likely in the field: it fires up to a grace after the
+holder's stream ends, and a widened round then asks every other holder. The lab caught the same shape under chaos
+in `AttachmentLabTest.aPictureStillInTheHoldersStackIsNotAskedForAgainWhileTheOneAheadOfItStreamsIn`.
+
+What changed, still reads and no memo: `FileIntake.end` lands the file in the transport's `LandingFiles` before it
+clears `arrivingFile`, and it stays there, by peer and key, until the consumer calls `MeshTransport.fileTaken(from,
+key)` (a refusal in `finalize`, or a `tryEmit` the buffer drops or that has no collector yet, takes it at once;
+the transport clears it after its links in `stop`, and again in `start`, since nothing landed outside a session
+is one it will take). The registry is the transport's, not the link's: `finalize`, the buffer and the store all outlive a link torn
+down or replaced just after `FILE_END`, so a mark kept on the link went with it while its file went on to the store
+(the bluetooth-reviewer's finding; Wi-Fi Aware tears a quiet link down within seconds). `arrivingFiles()` is the streaming files and the
+landing ones, read in that order so a file is never in neither; `fileArrivingFrom` and `rxInProgress` are
+unchanged, since nothing streams. `BlobExchange.onReceived` takes the file once the store has answered (so a
+refused splice's own landing never keeps its from-0 ask quiet), and `MeshManager` takes it again in a `finally`
+for an avatar, a throw, or a caller that passed no sender. Every "is it on the way or held" read in `BlobExchange`
+now runs the bytes' path backwards (the link, then `storing`, then `has`), so a blob that moves on between two
+reads is seen by the later one; read store-first, a `has` that answered before the insert and a `storing` read
+after it found the bytes nowhere. Kept true by
+`FileIntakeTest.anEndedFileLandsUntilItIsTakenAndARefusedOneLeavesAtOnce`,
+`BlobExchangeTest.aBlobThatLandsWhileItsReadsRunIsNotAskedForAgain` (fails with the store read first) and
+`…aFileIsTakenOffTheLinkOnceTheStoreHasAnsweredSoARefusedSpliceStillAsksFromZero`; the lab's `LabTransport` lands
+every delivered file the same way.

@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.io.File
+import java.util.concurrent.CopyOnWriteArrayList
 
 /**
  * In-process [MeshTransport] used for development and tests without any radios. Instances are
@@ -35,6 +36,9 @@ class FakeLoopTransport(
 
     /** Keys a test declares as streaming in right now (a real link reads them off its `FILE_HEADER`). */
     val arriving = mutableSetOf<String>()
+
+    /** `fromNodeId to key` for every file the consumer took ([fileTaken]), in order. */
+    val taken = CopyOnWriteArrayList<Pair<String, String>>()
 
     /** `nodeId to key` pairs a test declares as queued or streaming toward that peer. */
     val inFlight = mutableSetOf<Pair<String, String>>()
@@ -96,6 +100,15 @@ class FakeLoopTransport(
     }
 
     override fun arrivingFiles(): Map<String, ArrivingFile> = arriving.associateWith { ArrivingFile(it, bytes = 0, total = null) }
+
+    /** A taken file leaves [arriving], as a link's landing one does (#138). */
+    override fun fileTaken(
+        fromNodeId: String,
+        key: String,
+    ) {
+        taken += fromNodeId to key
+        arriving -= key
+    }
 
     override fun fileArrivingFrom(nodeId: String): Boolean = nodeId in arrivingFrom
 

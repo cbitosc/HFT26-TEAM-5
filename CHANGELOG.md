@@ -60,6 +60,8 @@ document:
 - When several nearby phones had the same photo or file, your phone could download a full copy from each of
   them. It now asks the phone that sent it, or one it has a faster Wi-Fi link to, and tries the others only if
   no copy starts within a few seconds.
+- A photo could be downloaded a second time just after it arrived, while your phone was still saving it. Your
+  phone now waits until the photo is saved before it asks anyone for it again.
 - A chat you deleted, someone you blocked or a group you left could still show up when you long-pressed the
   Knit icon, and tapping it opened an empty chat. That menu now matches your chat list and shows people's new
   photos and names.

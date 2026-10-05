@@ -186,6 +186,29 @@ class LabTransport(
     private val _incomingFiles = MutableSharedFlow<ReceivedFile>(extraBufferCapacity = BUFFER)
     override val incomingFiles: Flow<ReceivedFile> = _incomingFiles.asSharedFlow().lagged()
 
+    // Files handed to this node's consumer that it has not taken yet ([fileTaken]), by "<from>|<key>": the lab's twin
+    // of a transport's `LandingFiles` (#138), so a pipe torn down meanwhile leaves them standing. Under chaos the
+    // collector is late to them, as a phone's is behind the file it is storing.
+    private val landing = ConcurrentHashMap<String, ArrivingFile>()
+
+    /** [file] from [from] is on its way to this node's consumer: it counts as arriving until taken. */
+    private fun markLanding(
+        from: String,
+        key: String,
+        file: ArrivingFile,
+    ) {
+        landing["$from|$key"] = file
+    }
+
+    /** Hands [received] to [target]'s consumer, landing until it is taken — every file a pipe delivers. */
+    private suspend fun deliverFile(
+        target: LabTransport,
+        received: ReceivedFile,
+    ) {
+        target.markLanding(nodeId, received.key, ArrivingFile(received.key, File(received.path).length(), total = null))
+        target._incomingFiles.emit(received)
+    }
+
     private val _incomingDigests = MutableSharedFlow<ReceivedDigest>(extraBufferCapacity = BUFFER)
     override val incomingDigests: Flow<ReceivedDigest> = _incomingDigests.asSharedFlow().lagged()
 
@@ -527,6 +550,8 @@ class LabTransport(
             val batch =
                 synchronized(pipe.heldFiles) {
                     pipe.heldFiles.toList().also {
+                        // Landing before they stop being parked, in the lock a reader takes: never in neither (#138).
+                        it.forEach { held -> pipe.target.markLanding(nodeId, held.key, held.arriving ?: ArrivingFile(held.key, 0, null)) }
                         pipe.heldFiles.clear()
                         if (it.isEmpty()) {
                             pipe.holdingFiles = false
@@ -543,7 +568,7 @@ class LabTransport(
                         is HeldFile.Stacked -> held.file
                         is HeldFile.Streaming -> held.stream.land()
                     }
-                file?.let { pipe.target._incomingFiles.emit(it) }
+                if (file == null) pipe.target.fileTaken(nodeId, held.key) else deliverFile(pipe.target, file)
             }
         }
     }
@@ -553,11 +578,19 @@ class LabTransport(
      * streamed file, some of them are, and the receiver's intake says how many.
      */
     override fun arrivingFiles(): Map<String, ArrivingFile> =
-        pipes.values
-            .flatMap { link ->
+        (
+            pipes.values.flatMap { link ->
                 link.target.pipes[nodeId]?.let { toMe -> synchronized(toMe.heldFiles) { toMe.heldFiles.mapNotNull { it.arriving } } }
                     ?: emptyList()
-            }.furthestByKey()
+            } + landing.values // parked, then landing: the order a file moves in, read so it is never in neither
+        ).furthestByKey()
+
+    override fun fileTaken(
+        fromNodeId: String,
+        key: String,
+    ) {
+        landing.remove("$fromNodeId|$key")
+    }
 
     /** A linked sender's file streaming in to this node: one parked toward us with its header across. */
     override fun fileArrivingFrom(nodeId: String): Boolean {
@@ -758,7 +791,7 @@ class LabTransport(
         file.copyTo(staged, overwrite = true)
         val received = ReceivedFile(nodeId, staged.absolutePath, meta.kind, meta.key, meta.mime)
         if (pipe.parkFile(received)) return true
-        target._incomingFiles.emit(received)
+        deliverFile(target, received)
         chaos?.jitter()
         return true
     }
@@ -808,7 +841,7 @@ class LabTransport(
         stream.begin()
         val received = stream.land() ?: return true // refused at the receiver: the link carried it for nothing
         if (pipe.parkFile(received)) return true
-        pipe.target._incomingFiles.emit(received)
+        deliverFile(pipe.target, received)
         chaos?.jitter()
         return true
     }

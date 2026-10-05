@@ -30,6 +30,8 @@ import java.util.concurrent.atomic.AtomicReference
  *
  * [arrivingFile] is the published "a header is in and no end yet" snapshot `MeshTransport.arrivingFiles` reads
  * (ADR 2026-09.4tx5, 2026-10.y9qh): one reference, so a reader never pairs one file's key with another's count.
+ * [landing] carries a file on from its end until the transport's consumer has taken it (#138): the bytes are in, but
+ * not yet held, and a reader of both never finds them in neither.
  *
  * Not thread-safe by itself: its owner ([FramedLink]) makes every call under one lock — the chunk writes included,
  * so a `close()` from the transport's thread never races a write on the stream it closes. The one step that can
@@ -42,6 +44,8 @@ internal class FileIntake(
     private val peer: String,
     private val now: () -> Long,
     private val log: (String) -> Unit = {},
+    // The transport's files past their end and not yet taken ([LandingFiles], #138); a rig's own by default.
+    private val landing: LandingFiles = LandingFiles(),
 ) {
     /** A whole file, its `FILE_END` in: [finalize] it outside the owner's lock. */
     class Finished(
@@ -197,9 +201,12 @@ internal class FileIntake(
         if (current is State.Opening) current.resume.abandon() // never: the reader installs before its next record
         val keeping = current as? State.Keeping
         state = State.Idle
+        // Landing before it stops arriving: a reader between the two would find the bytes in neither and ask again.
+        keeping?.let { landing.land(peer, ArrivingFile(it.meta.key, it.bytes, arriving.get()?.total)) }
         arriving.set(null)
         if (keeping == null) return null
         if (runCatching { keeping.out.close() }.isFailure) {
+            landing.take(peer, keeping.meta.key)
             keeping.temp.delete()
             return null
         }
@@ -228,9 +235,12 @@ internal class FileIntake(
 
     /**
      * Moves a finished file into the cache under a safe name and returns it to announce (an avatar by node, an
-     * attachment by hash), or null when it is refused. Runs outside the owner's lock: it copies the whole file.
+     * attachment by hash), or null when it is refused — and then it is no longer landing. Runs outside the owner's
+     * lock: it copies the whole file.
      */
-    fun finalize(finished: Finished): ReceivedFile? {
+    fun finalize(finished: Finished): ReceivedFile? = moveToCache(finished) ?: null.also { landing.take(peer, finished.meta.key) }
+
+    private fun moveToCache(finished: Finished): ReceivedFile? {
         val meta = finished.meta
         // [meta.key] is peer-supplied and interpolated into the filename: reject anything but a 64-hex
         // content hash so a "../" can't escape the cache dir (path traversal → arbitrary in-sandbox write).

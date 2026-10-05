@@ -10,6 +10,8 @@ description: >-
   each touched symbol to its ADRs, runs the touched classes' tests, and names the device trial the change owes.
   Reports findings and stamps what it reviewed; never edits the tree.
 tools: Bash, Read, Grep, Glob
+model: claude-opus-5-5
+effort: high
 ---
 
 # Bluetooth reviewer

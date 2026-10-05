@@ -27,7 +27,9 @@ import kotlinx.coroutines.launch
  * ships nothing. Both are reads of the link, not memos here — a torn link clears its own state. The Bluetooth
  * stack's buffer sits between those two reads, so a peer asked before is not asked again while its file is
  * streaming in ([MeshTransport.fileArrivingFrom]), and a holder counts a fed file as in flight while its link goes on
- * feeding that peer (#121).
+ * feeding that peer (#121). A file stays arriving past its end until its consumer has taken it
+ * ([MeshTransport.fileTaken], here in [onReceived]), and every read takes the bytes' path backwards — the link, the
+ * store's own mark, then the store — so a blob that moves on between two reads is caught by the later one (#138).
  *
  * The `blobreq` that drives [onRequest] is **unsigned** (see `MeshManager.verifyInbound`), so, like
  * [KeyExchange]/[PendingInbound], the bookkeeping is **bounded**: [fetching] is capped (oldest-first
@@ -99,8 +101,8 @@ class BlobExchange(
         }
 
     /**
-     * Asks for [hash] unless we already hold it or its bytes are streaming in on a link or going into the store right
-     * now. The first ask goes to the likeliest holder alone and the rest follow its grace ([step]); a repeat want
+     * Asks for [hash] unless we already hold it or its bytes are streaming in or landing on a link or going into the
+     * store right now. The first ask goes to the likeliest holder alone and the rest follow its grace ([step]); a repeat want
      * moves the same round on, never a second one. An arriving hash is not even marked: if the transfer dies the
      * database re-arms it on the next tick (`rewantMissingBlobs`), and the memo is never the source.
      *
@@ -115,7 +117,7 @@ class BlobExchange(
         via: String? = null,
         asker: String? = null,
     ) {
-        if (store.has(hash) || store.storing(hash) || hash in transport.arrivingFiles()) return
+        if (onTheWayOrHeld(hash)) return
         recordWant(hash, now(), author, via, asker)
         step(hash, linkedNow())
     }
@@ -171,12 +173,12 @@ class BlobExchange(
         hash: String,
         linked: List<Candidate>,
     ) {
+        if (onTheWay(hash)) return
         if (store.has(hash)) {
             clearFetching(hash)
             partials.drop(hash) // obtained off-mesh: nothing left to resume
             return
         }
-        if (store.storing(hash) || hash in transport.arrivingFiles()) return
         when (val next = synchronized(lock) { fetching[hash]?.let { nextAsk(it, linked, now()) } } ?: return) {
             is Step.Wait -> {
                 armTimer(hash, next.ms)
@@ -297,6 +299,16 @@ class BlobExchange(
             else -> Rank.Neighbour
         }
 
+    /**
+     * The bytes of [hash] are coming: streaming in or landing on a link ([MeshTransport.arrivingFiles]), or going into
+     * the store ([BlobStore.storing]). Read in that order, the path's own backwards — a file joins the next stage
+     * before it leaves the last, so a blob moving on between the two reads is seen by the second (#138).
+     */
+    private suspend fun onTheWay(hash: String): Boolean = hash in transport.arrivingFiles() || store.storing(hash)
+
+    /** [onTheWay], or already held: read last, for the same reason. */
+    private suspend fun onTheWayOrHeld(hash: String): Boolean = onTheWay(hash) || store.has(hash)
+
     /** The linked neighbours as a round reads them: each one's plane for a file, and whether it is streaming to us. */
     private fun linkedNow(): List<Candidate> =
         transport.neighbors.value.map { Candidate(it, transport.bulkRouteTo(it.nodeId), transport.fileArrivingFrom(it.nodeId)) }
@@ -386,15 +398,19 @@ class BlobExchange(
 
     /**
      * A blob we wanted arrived over a link: persist it and notify. [resumedFrom] is the byte its stream started at
-     * when the link spliced it onto a prefix we kept (#116).
+     * when the link spliced it onto a prefix we kept (#116). [from] is the neighbour whose link delivered it: once the
+     * store has answered, the file is taken off that link's arriving ones ([MeshTransport.fileTaken]) — held now, or
+     * refused, and a refused splice's own landing must not keep its from-0 ask quiet.
      */
     suspend fun onReceived(
         hash: String,
         mime: String,
         srcPath: String,
         resumedFrom: Long = 0,
+        from: String? = null,
     ) {
         val stored = store.saveIncoming(hash, mime, srcPath)
+        from?.let { transport.fileTaken(it, hash) }
         if (stored == null) {
             // A whole file that fails its hash is the holder's bytes alone: a kept prefix stays, and the tick asks
             // again as it always has. A spliced one may have failed on the prefix.
@@ -416,7 +432,7 @@ class BlobExchange(
     private suspend fun reaskFromZero(hash: String) {
         onSpliceRefused()
         if (!partials.drop(hash)) return
-        if (store.has(hash) || store.storing(hash) || hash in transport.arrivingFiles()) return
+        if (onTheWayOrHeld(hash)) return
         val t = now()
         synchronized(lock) { fetching.getOrPut(hash) { Want(t, null, null, null) }.apply { wantedAt = t }.openRound(t) }
         step(hash, linkedNow())

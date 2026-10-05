@@ -58,6 +58,7 @@ import app.getknit.knit.mesh.link.FastFrameCodec
 import app.getknit.knit.mesh.link.FastFramePick
 import app.getknit.knit.mesh.link.FragReassembler
 import app.getknit.knit.mesh.link.FramedLink
+import app.getknit.knit.mesh.link.LandingFiles
 import app.getknit.knit.mesh.link.LinkCallbacks
 import app.getknit.knit.mesh.link.LinkHandshake
 import app.getknit.knit.mesh.link.LinkSocket
@@ -174,6 +175,9 @@ class WifiAwareTransport(
 
     private val _incomingFiles = MutableSharedFlow<ReceivedFile>(extraBufferCapacity = 32)
     override val incomingFiles = _incomingFiles.asSharedFlow()
+
+    // Files a link finished that the consumer has not taken yet (#138): every link lands into it, none clears it.
+    private val landing = LandingFiles()
 
     private val _incomingDigests = MutableSharedFlow<ReceivedDigest>(extraBufferCapacity = 32)
     override val incomingDigests = _incomingDigests.asSharedFlow()
@@ -328,7 +332,8 @@ class WifiAwareTransport(
             }
 
             override fun onFile(file: ReceivedFile) {
-                _incomingFiles.tryEmit(file)
+                // Dropped — a full buffer, or no collector yet (a value with no subscriber is discarded): nothing will take it.
+                if (_incomingFiles.subscriptionCount.value == 0 || !_incomingFiles.tryEmit(file)) landing.take(file.fromNodeId, file.key)
             }
 
             override fun onLinkDown(nodeId: String) {
@@ -557,6 +562,7 @@ class WifiAwareTransport(
     // SDK-tiered ICM/serveCap capability probes (+ their rationale comments) push this just past LongMethod=60.
     @Suppress("LongMethod")
     override fun start() {
+        landing.clear() // nothing landed before this session is one it will take
         if (!hasHardware) {
             _health.value = TransportHealth.Unavailable
             Log.w(TAG, "Wi-Fi Aware unsupported on this device; mesh disabled")
@@ -951,6 +957,7 @@ class WifiAwareTransport(
         NanFaultInjector.bind(onAvailability = null, status = null)
         NanFaultInjector.bindMsgPlane(null)
         peers.keys.toList().forEach { teardownPeer(it) }
+        landing.clear()
         stopResponder()
         runCatching { publishSession?.close() }
         runCatching { subscribeSession?.close() }
@@ -1141,7 +1148,14 @@ class WifiAwareTransport(
         return accepted
     }
 
-    override fun arrivingFiles(): Map<String, ArrivingFile> = peers.values.mapNotNull { it.link.rxFile }.furthestByKey()
+    // Streaming, then landing: a file ends by joining the second before it leaves the first, so this order never
+    // reads it in neither (#138).
+    override fun arrivingFiles(): Map<String, ArrivingFile> = (peers.values.mapNotNull { it.link.rxFile } + landing.all).furthestByKey()
+
+    override fun fileTaken(
+        fromNodeId: String,
+        key: String,
+    ) = landing.take(fromNodeId, key)
 
     override fun fileArrivingFrom(nodeId: String): Boolean = peers[nodeId]?.link?.rxInProgress ?: false
 
@@ -2718,6 +2732,7 @@ class WifiAwareTransport(
                 callbacks = linkCallbacks,
                 now = SystemClock::elapsedRealtime, // share the supervisor's clock for quiescence
                 log = { msg -> Log.d(TAG, msg) },
+                landing = landing,
             )
         val conn = NanLink(framed, callback)
         lastLinkOrAcceptAt = SystemClock.elapsedRealtime() // the data plane produced a link (either role) — clears the wedge watchdog

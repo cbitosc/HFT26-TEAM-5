@@ -73,6 +73,35 @@ class FileIntakeTest {
     }
 
     @Test
+    fun anEndedFileLandsUntilItIsTakenAndARefusedOneLeavesAtOnce() {
+        // #138: past FILE_END the bytes sit in the cache, the transport's buffer and behind the consumer's earlier
+        // files before the store marks them. They move from arriving to landing in one step, so a reader of both
+        // never finds them in neither, and they stay landing, in the transport's registry, until they are taken.
+        val landing = LandingFiles()
+        val intake = FileIntake(tmp.root, partials, "peer0001", now = { 0L }, log = { log += it }, landing = landing)
+        assertNull(intake.header(header(size = 1000)))
+        intake.chunk(body)
+        assertTrue(landing.all.isEmpty())
+        val finished = checkNotNull(intake.end())
+        assertNull("no longer streaming", intake.arrivingFile)
+        assertEquals("landing, whole", listOf(ArrivingFile(key, 1000, 1000)), landing.all.toList())
+        val received = checkNotNull(intake.finalize(finished))
+        assertEquals("handed on, and still landing", listOf(ArrivingFile(key, 1000, 1000)), landing.all.toList())
+        intake.cut() // the link goes: the file it finished goes on to the store, and so does its mark
+        assertEquals(1, landing.all.size)
+        landing.take(received.fromNodeId, received.key)
+        assertTrue("taken: held or refused by the store", landing.all.isEmpty())
+
+        val malformed = "not-a-hash"
+        assertNull(intake.header(header(key = malformed)))
+        intake.chunk(body)
+        val refused = checkNotNull(intake.end())
+        assertEquals(listOf(malformed), landing.all.map { it.key })
+        assertNull(intake.finalize(refused))
+        assertTrue("a file finalize refuses has nothing left to take", landing.all.isEmpty())
+    }
+
+    @Test
     fun aPrefixThatIsAlreadyCompleteFinishesOnAnEmptyTail() {
         // A cut can land between the last chunk and the end: the holder answers the whole length with no bytes.
         keepPrefix(1000)

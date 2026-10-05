@@ -66,7 +66,10 @@ class BlobExchangeTest {
             File(dir, hash).writeBytes(bytes)
         }
 
-        override suspend fun has(hash: String): Boolean = File(dir, hash).exists()
+        /** Runs while [has] is being read, after it has looked: a slow store read the bytes move on under (#138). */
+        var whileReadingHas: (suspend (String) -> Unit)? = null
+
+        override suspend fun has(hash: String): Boolean = File(dir, hash).exists().also { whileReadingHas?.invoke(hash) }
 
         /** What the real store reports while a blob is past the link's end but screened and not yet held. */
         val storingNow: MutableSet<String> = ConcurrentHashMap.newKeySet()
@@ -874,6 +877,77 @@ class BlobExchangeTest {
 
             exchange.onRequest("H", "b") // b's own 60 s tick, while it still lacks them
             assertEquals(listOf("H"), received)
+        }
+
+    // --- A blob that lands while it is being read (#138) ---
+
+    @Test
+    fun aBlobThatLandsWhileItsReadsRunIsNotAskedForAgain() =
+        runTest(UnconfinedTestDispatcher()) {
+            // The bytes move link → store → held, and every read goes the other way round: a blob that moves on between
+            // two reads is seen by the later one. Read store-first, the tick below saw it neither held (the store's
+            // answer predates the landing) nor arriving (it had left the link), and asked the holder for a second copy.
+            val r = FakeLoopTransport("r")
+            val n = FakeLoopTransport("n")
+            r.connect(n)
+            val store = FakeBlobStore(Files.createTempDirectory("blob-landing").toFile())
+            var now = 0L
+            val exchange =
+                BlobExchange(
+                    transport = r,
+                    store = store,
+                    selfId = { "r" },
+                    onObtained = { _, _ -> },
+                    now = { now },
+                    partials = partials(),
+                )
+            val asked = backgroundScope.asksArrivingAt(n)
+            exchange.want(PICTURE_HASH)
+            assertEquals(listOf(PICTURE_HASH to null), asked)
+
+            r.arriving += PICTURE_HASH // n's copy streams in
+            now += BlobExchange.ROUND_MS // and the next round is due
+            store.whileReadingHas = { hash ->
+                store.whileReadingHas = null
+                store.seed(hash, "image/jpeg", PICTURE) // it lands, and is held,
+                r.arriving -= hash // as it leaves the link
+            }
+            exchange.reask()
+            exchange.reask()
+            assertEquals("asked once, while it was the only way to the bytes", listOf(PICTURE_HASH to null), asked)
+        }
+
+    @Test
+    fun aFileIsTakenOffTheLinkOnceTheStoreHasAnsweredSoARefusedSpliceStillAsksFromZero() =
+        runTest(UnconfinedTestDispatcher()) {
+            val r = FakeLoopTransport("r")
+            val n = FakeLoopTransport("n")
+            r.connect(n)
+            val store = FakeBlobStore(Files.createTempDirectory("blob-taken").toFile()).apply { checkHashes = true }
+            val partials = partials()
+            val exchange =
+                BlobExchange(
+                    transport = r,
+                    store = store,
+                    selfId = { "r" },
+                    onObtained = { _, _ -> },
+                    partials = partials,
+                )
+            val asked = backgroundScope.asksArrivingAt(n)
+            exchange.want(PICTURE_HASH)
+            assertTrue(partials.keep(PICTURE_HASH, cutFile(ByteArray(100)), basedOn = null)) // a bad prefix
+            asked.clear()
+
+            r.arriving += PICTURE_HASH // the spliced file, landing: the link counts it until it is taken
+            exchange.onReceived(PICTURE_HASH, "image/jpeg", cutFile(ByteArray(PICTURE.size)).absolutePath, resumedFrom = 100, from = "n")
+            assertEquals("taken off n's link once the store refused it", listOf("n" to PICTURE_HASH), r.taken)
+            assertEquals("so its own landing never kept the from-0 ask quiet", listOf(PICTURE_HASH to null), asked)
+
+            r.arriving += PICTURE_HASH
+            exchange.onReceived(PICTURE_HASH, "image/jpeg", cutFile(PICTURE).absolutePath, from = "n")
+            assertTrue(store.has(PICTURE_HASH))
+            assertEquals("and once it held it", listOf("n" to PICTURE_HASH, "n" to PICTURE_HASH), r.taken)
+            assertTrue(PICTURE_HASH !in r.arrivingFiles())
         }
 
     // --- Resuming a transfer a link drop cut off (#116, ADR 2026-10.wtyc) ---

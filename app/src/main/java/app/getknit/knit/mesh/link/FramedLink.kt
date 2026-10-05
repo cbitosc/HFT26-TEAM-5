@@ -72,6 +72,8 @@ class FramedLink(
     // callers/tests are unchanged). See [TransferPacePolicy] and [PaceWindow] for the why.
     private val pace: () -> PaceConfig = { PaceConfig() },
     private val log: (String) -> Unit = {},
+    // The owning transport's files past their end and not yet taken (#138): they outlive this link.
+    landing: LandingFiles = LandingFiles(),
 ) {
     private val outbound = Channel<Outbound>(Channel.UNLIMITED)
 
@@ -100,7 +102,7 @@ class FramedLink(
     // [rxLock], which [close] takes too, so a teardown from the owner's thread never races the reader on the file
     // being written; the one call that can copy megabytes runs outside it ([beginRxFile]).
     private val rxLock = Any()
-    private val intake = FileIntake(cacheDir, partials, nodeId, now, log)
+    private val intake = FileIntake(cacheDir, partials, nodeId, now, log, landing)
 
     // Set by [close] under [rxLock]. The reader can still dispatch records already buffered behind the socket, and
     // a header among them must not open a file that nothing will ever clean up.

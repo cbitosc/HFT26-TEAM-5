@@ -199,7 +199,9 @@ free). Two invariants that are easy to break:
   side cannot tell an asker that still lacks them from one whose copy is already arriving from somebody else
   — in a clique that push bought every recipient a copy per neighbour (#79). Whether bytes are on the way
   is a **read of the link**, never a set with a TTL here: `MeshTransport.arrivingFiles()` (a `FILE_HEADER`
-  in, no `FILE_END` yet, off `FramedLink.rxKey`) keeps `want` and the tick's re-ask quiet for that hash,
+  in, no `FILE_END` yet, off `FramedLink.rxKey` — and past it, in the transport's `LandingFiles`, which outlives
+  the link, until the consumer of `incomingFiles` has taken it with `fileTaken`, #138) keeps `want` and the tick's
+  re-ask quiet for that hash,
   and `fileInFlightTo(peer, key)` (queued or streaming, counted from the enqueue) refuses a second copy on
   a re-ask whatever the 45 s memo says. A transfer's length is the receiver's controller's, so no constant
   covers it. Don't add a `noteIncoming` memo or a wanter TTL back. The Bluetooth stack's buffer sits between
