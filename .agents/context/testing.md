@@ -442,11 +442,13 @@ hop (fixed in `MeshRouter.countOverheard`, pinned by `MeshRouterTest`).
   diff moves more than 40 lines past what the last review stamped, touches a file it did not see, or sits on a
   newer commit (`--stamp`, the reviewer's last step) — so applying its findings asks nothing.
 - **What the first chaos sweep taught** (2026-09-24, nine failures, triage in `.agents/memory/roadmap.md`):
-  a stack **sends before it custodies** (`originateWire`), so a frame sent into a link that is going down is
-  re-offered only by the 60 s timer once the relaunch's digest exchange has run without it — `restart()` and
+  a frame sent into a link that is going down reaches the far side only through the relaunch's digest exchange,
+  which leaves it to the 60 s timer if it runs before the frame exists — `restart()` and
   `restoreFromBackup()` therefore wait for every peer's inbound to drain (`LabTransport.awaitInboundDrained`:
   each frame handed to the router has finished `handleInbound`), not just for the departure, and so does
-  `unlink` for both ends since #137 (a receipt sealed after the cut missed the re-link's digest exchange). `hold`/`release`
+  `unlink` for both ends since #137 (a receipt sealed after the cut missed the re-link's digest exchange). A stack custodies its own frame
+  *before* it floods it since #141 (`originateWire`): flooding first let a link raised between the two miss both;
+  `LabCustodyGate` holds a node's custody writes to stage that window. `hold`/`release`
   flip `holding` under the batch's lock, so a frame sent during a release is never parked into a batch
   already taken. A stranger on the pages is a stranger only while the first-sighting profile floods cannot
   reach it — they page out unawaited by `awaitAcquainted` — so make `pages.lossy` eat them. A spool scope's

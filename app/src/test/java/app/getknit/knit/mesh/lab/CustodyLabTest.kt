@@ -1,5 +1,8 @@
 package app.getknit.knit.mesh.lab
 
+import app.getknit.knit.data.message.Conversations
+import app.getknit.knit.mesh.protocol.FrameType
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertTrue
@@ -171,5 +174,34 @@ class CustodyLabTest {
             lab.link(alice, bob)
             lab.assertConverged(listOf(alice, bob), atLeast = 2) { it.dmWith(if (it === alice) bob else alice) }
             lab.assertConverged(listOf(alice, bob), atLeast = 1) { groupId }
+        }
+
+    /**
+     * A node's own frame is in its custody before it is on the air (#141). Alice posts while Bob is out of range and
+     * her database is slow to commit the custody row; Bob comes back while the write is still landing. The link-up's
+     * digest exchange reads a store without the post, so it is the flood that must carry it — and the flood goes out
+     * only once the row has landed, to whoever is linked by then. Flooding first had nobody to reach and left Bob
+     * without the post until the 60 s re-offer.
+     */
+    @Test
+    fun aPostWhoseCustodyWriteIsSlowReachesAPeerThatLinksMeanwhile() =
+        runBlocking {
+            val alice = lab.node("alice").apply { setDisplayName("Alice") }
+            val bob = lab.node("bob").apply { setDisplayName("Bob") }
+            lab.link(alice, bob)
+            lab.awaitAcquainted(alice, bob)
+
+            lab.unlink(alice, bob)
+            // Bob's sign that Alice has answered his link-up digest: a post he can only have from her custody.
+            assertTrue(alice.sendRoom("from custody"))
+            alice.custodyGate.hold { it.senderId == alice.nodeId && it.type == FrameType.CHAT }
+            val slow = async { alice.sendRoom("slow to commit") }
+            lab.await(1) { alice.custodyGate.parked }
+
+            lab.link(alice, bob)
+            lab.await(1) { if ("from custody" in bob.roomPosts()[alice.nodeId].orEmpty()) 1 else 0 }
+            alice.custodyGate.release()
+            assertTrue(slow.await())
+            lab.assertConverged(listOf(alice, bob), atLeast = 2) { Conversations.NEARBY }
         }
 }

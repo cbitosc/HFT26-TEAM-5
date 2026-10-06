@@ -229,10 +229,10 @@ class MeshLab {
      * ([LabNode.awaitBoardSawLinks]) and for the composite's own merged `neighbors`: each is handed over from a
      * coroutine of its own, and a send that outruns it meets a stale election or a peer still counted as
      * linked. Both ends then finish every frame they were handed before the cut ([LabTransport.awaitInboundDrained]),
-     * as [LabNode.restart]'s peers do: a stack sends before it custodies, so a receipt sealed after the cut goes to
-     * no one, and a re-link whose digest exchange ran before its custody row landed leaves it to the 60 s re-offer
-     * (#137). Last, each manager must have acted on the departure ([LabNode.awaitLinksActedOn]) — on a board
-     * node it collects the composite's `StateFlow`, a second conflation the radio's hand-off record cannot see.
+     * as [LabNode.restart]'s peers do: a receipt sealed after the cut goes to no one, and reaches the peer only
+     * through the re-link's digest exchange, which must not run before the receipt and its custody row exist (#137).
+     * Last, each manager must have acted on the departure ([LabNode.awaitLinksActedOn]) — on a board node it
+     * collects the composite's `StateFlow`, a second conflation the radio's hand-off record cannot see.
      * The [SETTLE_MS] pause stays for the composite's other `StateFlow`s (`reachable`, the status), and for a
      * board node's `merge`, which makes the drained signal early.
      */
@@ -940,6 +940,9 @@ class LabNode internal constructor(
     @Volatile
     var picturesExplicit = false
 
+    /** This node's custody writes, holdable by a scenario ([LabCustodyGate]): a database slow to commit. */
+    val custodyGate = LabCustodyGate()
+
     // --- the live stack, rebuilt by boot() ---
 
     /**
@@ -1128,7 +1131,7 @@ class LabNode internal constructor(
                 imageScreening = imageScreening,
                 blobStore = blobStore,
                 partials = partials,
-                forwardStore = forwardStore,
+                forwardStore = custodyGate.over(forwardStore),
                 notifier = notifier,
                 textModeration = allowAll,
                 messageCrypto = messageCrypto,
@@ -1201,9 +1204,9 @@ class LabNode internal constructor(
     /**
      * Every peer of a node going down has been handed the departure, and has finished handling each frame it
      * was handed before it ([LabTransport.awaitInboundDrained]) — its custody row, a DM receipt it seals inline.
-     * A stack sends before it custodies, so a frame sent into the dying link is otherwise re-offered only by the
-     * 60 s timer once the relaunched node's digest exchange has run without it. The settle stays for a peer with a board, whose
-     * composite `merge` makes the drained signal early.
+     * A frame sent into the dying link reaches the relaunched node only through its digest exchange, which must not
+     * run before the frame and its custody row exist, or the 60 s re-offer is left to carry it. The settle stays for a
+     * peer with a board, whose composite `merge` makes the drained signal early.
      */
     private suspend fun awaitPeersSettled(peers: List<LabTransport>) {
         peers.forEach { it.awaitNeighborsObserved() }

@@ -176,10 +176,15 @@ class MeshManagerTest {
             heals.incrementAndGet()
         }
 
+        /** Runs inside [send], before it records — what a test reads at the moment a frame goes on the air. */
+        @Volatile
+        var onSend: suspend (WireEnvelope) -> Unit = {}
+
         override suspend fun send(
             wire: WireEnvelope,
             to: Peer?,
         ) {
+            onSend(wire)
             sent += wire to to
         }
 
@@ -862,6 +867,29 @@ class MeshManagerTest {
             assertNull("and is not encrypted", content.enc)
             assertTrue("the message is captured for store-and-forward custody", rig.forwardStore.has(frame.id))
             assertTrue("a room post is not offered to the long-range plane (ADR 039)", rig.transport.longRangeFanouts.isEmpty())
+        }
+
+    /**
+     * Our own frame is in custody before it is on the air (#141): a link raised between the flood and a later custody
+     * write would read a digest without it and have missed the flood, and get it only from the 60 s re-offer.
+     */
+    @Test
+    fun anOwnFrameIsCustodiedBeforeItIsFlooded() =
+        runTest(UnconfinedTestDispatcher()) {
+            val rig = Rig(backgroundScope)
+            val heldAtSend = CopyOnWriteArrayList<Pair<String, Boolean>>()
+            rig.transport.onSend = { wire ->
+                val id = WireCodec.decodeEnvelope(wire.signed)?.id
+                if (id != null) heldAtSend += id to rig.forwardStore.has(id)
+            }
+
+            assertTrue(rig.manager.sendChat("custodied first"))
+            advanceUntilIdle()
+
+            val frame = rig.sentChatFrames().single()
+            val copies = heldAtSend.filter { it.first == frame.id }
+            assertTrue("the flood went out", copies.isNotEmpty())
+            assertTrue("every copy went out with its custody row already written", copies.all { it.second })
         }
 
     // --- DM: end-to-end encrypted when the key is known ---

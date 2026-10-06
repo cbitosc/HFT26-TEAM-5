@@ -2995,8 +2995,12 @@ class MeshManager(
         env: RelayEnvelope,
         hint: FanoutHint = FanoutHint.CONTENT,
     ) {
-        router.originate(wire, env.id)
+        // Custody first, then the air (#141): a link that comes up between the two learns of the frame from one of
+        // them — the flood reads the links as they are when it goes out, and the newcomer's digest exchange reads a
+        // store that already holds the row. Flooding first left a link raised in that gap with neither until the
+        // 60 s re-offer. A relayed frame keeps the same order (`InboundPipeline.onDeliver` custodies pre-flood).
         forwardSync.onSeen(wire, env, ForwardStore.ORIGIN_SELF)
+        router.originate(wire, env.id)
         if (shouldFastFanout(env)) transport.fastFanout(wire)
         env.recipientId?.let { if (shouldFastSend(env)) transport.fastSend(wire, Peer(it)) }
         if (shouldLongRangeFanout(env)) transport.longRangeFanout(wire, hint)

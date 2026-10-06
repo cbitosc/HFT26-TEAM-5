@@ -47,6 +47,8 @@ document:
 
 ### Fixed
 
+- A message you sent just as another phone came into range could miss that phone and reach it only about a
+  minute later. It now arrives as soon as the two phones connect.
 - When a contact's phone set up encryption with yours again, after a reinstall for example, their direct
   messages could stop opening hours later until the two phones started over. Those messages and their delivery
   ticks now arrive as normal.
