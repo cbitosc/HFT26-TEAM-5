@@ -83,7 +83,11 @@ class ProfileUpdateLabTest {
             lab.assertConverged(listOf(alice, bob, carol), atLeast = 1) { Conversations.NEARBY }
             assertEquals("Alice the Second", bob.peer(alice)?.name)
             assertEquals("Alice the Second", carol.peer(alice)?.name)
-            assertTrue("bob's thread shows the rename", MessageEntity.KIND_PEER_RENAMED in bob.notices(bob.dmWith(alice)))
+            // The row is not the notice: the cleartext writer commits the row, then writes the notice after its
+            // transaction (`applyPresentationFollowUps`), and the oracle has nothing left to wait on in between —
+            // the sealed copy, if it lands then, finds the new name already stored and writes none.
+            val renamed = lab.tryAwait(1) { if (MessageEntity.KIND_PEER_RENAMED in bob.notices(bob.dmWith(alice))) 1 else 0 }
+            assertTrue("bob's thread never showed the rename: ${bob.notices(bob.dmWith(alice))}", renamed)
         }
 
     /**
