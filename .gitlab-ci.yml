@@ -362,6 +362,7 @@ verify:lab-lint:
   needs: []
   script:
     - python3 -m unittest scripts/test_lab_lint.py
+    - python3 -m unittest scripts/test_hci_bridge.py
     - python3 scripts/lab-lint.py
 
 # The Bluetooth drain trial's snoop analyser (scripts/btsnoop-drain.py, #120) reads HCI snoops with the standard library;

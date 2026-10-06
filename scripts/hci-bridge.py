@@ -6,7 +6,7 @@
 """Put a real Bluetooth controller under an emulator's own Bluetooth stack, with a tap and faults in between.
 
     uv run scripts/hci-bridge.py serve --controller usb:2fe3:000b/SERIAL [--port 8877] [--control 8878]
-        [--snoop FILE.btsnoop] [--trace]
+        [--snoop FILE.btsnoop] [--trace] [--isolate]
     uv run scripts/hci-bridge.py ctl status|links|clear
     uv run scripts/hci-bridge.py ctl refuse 0x2039 0x0d [--count N] [--param0 0x01] [--pad N]
     uv run scripts/hci-bridge.py ctl cut all|HANDLE [--reason 0x08]
@@ -37,6 +37,16 @@ point: everything the host stack says to the controller, and everything the cont
     faster than after a real fade. Only the emulator's side of a cut is evidence; a two-sided fade needs the
     controller to stop transmitting, which is a firmware change (a vendor command in knit-ios's `knit-hci`).
   - `deafen` drops advertising reports on their way to the host for SECONDS: the scan runs, the host hears nothing.
+- **Isolation (`--isolate`).** Two bridged emulators that should mesh with each other and nobody else, over the
+  real air. Knit finds a peer only by its 16-bit service UUIDs (`BleConstants`: 0xFE30 presence, 0xFE38 side
+  pages), so an isolating bridge moves them in every advert its host hands the controller (to 0xFE20 / 0xFE28,
+  `ISOLATED_UUIDS`) and moves them back in every report the controller hands up. A report that carried a moved
+  UUID is a partner's; its address is remembered, so the rest of that advertiser's reports (a fragment's tail, a
+  scan response) pass too, and every other report is dropped before the host sees it. So the lab phones and the
+  iPhone hear no Knit advert from the pair, the pair hears none of theirs, and between the two the app, the host
+  stack, the controllers and the RF are all the real ones: only 2 bytes of each advert differ on air. Dropped
+  reports stay out of the capture (a busy room is tens a second); `counts.adv_isolated` counts them and `ctl
+  status` lists the partner addresses heard.
 - **The shim (`--no-shim` turns it off).** The nRF52840 has no BR/EDR radio, and Android's stack assumes one: GD
   aborts on a Read Local Name it cannot parse, and `btm_sec_dev_reset` refuses a controller without Secure Simple
   Pairing. So when the controller answers one of a fixed list of BR/EDR housekeeping commands with "unknown
@@ -112,6 +122,21 @@ STATUS_COMMANDS = {
     0x2044,  # LE Periodic Advertising Create Sync
 }
 PHYS = {1: "1M", 2: "2M", 3: "Coded"}
+
+# --isolate: Knit's 16-bit service UUIDs (BleConstants.SERVICE_UUID / SIDE_SERVICE_UUID) and where an isolated pair
+# airs them. Below 0xFE30 on purpose: Knit's own numbering only ever counts up from there.
+ISOLATED_UUIDS = {0xFE30: 0xFE20, 0xFE38: 0xFE28}
+RESTORED_UUIDS = {v: k for k, v in ISOLATED_UUIDS.items()}
+UUID16_AD_TYPES = {0x02, 0x03, 0x14}  # Incomplete / Complete List of 16-bit UUIDs, 16-bit Solicitation UUIDs
+SERVICE_DATA_16 = 0x16
+# Host commands that carry advertising data, and where it starts in their parameters.
+AD_COMMANDS = {
+    0x2008: 1,  # LE Set Advertising Data: length, data
+    0x2009: 1,  # LE Set Scan Response Data
+    0x2037: 4,  # LE Set Extended Advertising Data: handle, operation, fragment preference, length, data
+    0x2038: 4,  # LE Set Extended Scan Response Data
+}
+PARTNER_MEMORY_S = 30 * 60  # longer than the 15 min an Android stack keeps a resolvable private address
 UNKNOWN_COMMAND = 0x01
 
 # BR/EDR housekeeping an LE-only controller (Zephyr's) answers "unknown command", which Android's GD stack takes as a
@@ -182,6 +207,33 @@ def addr(b: bytes) -> str:
     return ":".join(f"{x:02X}" for x in reversed(b))
 
 
+def remap_uuids(data: bytes, mapping: dict[int, int]) -> tuple[bytes, bool]:
+    """[data] (AD structures) with every 16-bit service UUID in [mapping]'s keys swapped for its value, and whether
+    any was. A structure cut short by the end of the buffer (a fragmented advert's head) is remapped as far as it
+    goes; a zero length ends the significant part, as the spec has it."""
+    out = bytearray(data)
+    hit = False
+    i = 0
+    while i + 1 < len(out):
+        n = out[i]
+        if n == 0:
+            break
+        kind, body, end = out[i + 1], i + 2, min(i + 1 + n, len(out))
+        if kind == SERVICE_DATA_16:
+            spans = [body] if body + 2 <= end else []
+        elif kind in UUID16_AD_TYPES:
+            spans = range(body, end - 1, 2)
+        else:
+            spans = []
+        for j in spans:
+            uuid = out[j] | out[j + 1] << 8
+            if uuid in mapping:
+                out[j:j + 2] = mapping[uuid].to_bytes(2, "little")
+                hit = True
+        i += 1 + n
+    return bytes(out), hit
+
+
 @dataclass
 class Link:
     handle: int
@@ -214,12 +266,14 @@ class Refusal:
 
 
 class Bridge:
-    def __init__(self, host_sink, controller_sink, snooper, trace: bool, shim: bool = True):
+    def __init__(self, host_sink, controller_sink, snooper, trace: bool, shim: bool = True, isolate: bool = False):
         self.host_sink = host_sink  # packets to the emulator's stack
         self.controller_sink = controller_sink  # packets to the dongle
         self.snooper = snooper
         self.trace = trace
         self.shim = shim
+        self.isolate = isolate
+        self.partners: dict[str, float] = {}  # --isolate: "type/address" of each partner advertiser → last heard
         self.shimmed: set[int] = set()
         self.links: dict[int, Link] = {}
         self.refusals: list[Refusal] = []
@@ -241,7 +295,8 @@ class Bridge:
         self.scan_params_owed = False  # changed while a dial held the scanner off
         self.dialing = False
         self.counts = {"cmd": 0, "acl_out": 0, "acl_in": 0, "acl_out_bytes": 0, "acl_in_bytes": 0, "evt": 0,
-                       "adv_reports": 0, "adv_dropped": 0, "refused": 0, "controller_errors": 0, "cuts": 0}
+                       "adv_reports": 0, "adv_dropped": 0, "adv_isolated": 0, "refused": 0, "controller_errors": 0,
+                       "cuts": 0}
 
     # -- host → controller -------------------------------------------------------------------------------------------
     def from_host(self, packet: bytes) -> None:
@@ -258,6 +313,8 @@ class Bridge:
                 say(f"> {op_name(op)} {packet[4:].hex()}")
             if self.maybe_refuse(op, packet):
                 return
+            if self.isolate and op in AD_COMMANDS:
+                packet = self.isolate_out(op, packet)
             if op == 0x0C03:  # Reset: the host starts over, and so does what we know
                 say("host reset the controller")
                 self.links.clear()
@@ -325,6 +382,49 @@ class Bridge:
             self.inject(params, lambda p: p[3] and say(f"arbiter: scan parameters refused ({status_name(p[3])})"))
         enable = bytes([CMD, OP_SCAN_ENABLE & 0xFF, OP_SCAN_ENABLE >> 8, len(self.scan_enable)]) + self.scan_enable
         self.inject(enable, scan_back)
+
+    def isolate_out(self, op: int, packet: bytes) -> bytes:
+        """An advert on its way to the air, with Knit's UUIDs moved where only an isolating bridge looks."""
+        start = 4 + AD_COMMANDS[op]
+        data, _ = remap_uuids(packet[start:], ISOLATED_UUIDS)
+        return packet[:start] + data
+
+    def isolate_in(self, sub: int, packet: bytes) -> bytes | None:
+        """An advertising report event with every report but a partner's taken out (None when none is left), and
+        the partner's UUIDs moved back to Knit's."""
+        p = packet[4:]  # after the subevent code: Num_Reports, then the reports one after another
+        kept, i, now_s = [], 1, time.time()
+        try:
+            for _ in range(p[0]):
+                if sub == LE_EXTENDED_ADVERTISING_REPORT:  # 24 bytes to the data length, then the data
+                    head, key, n = 24, f"{p[i + 2]}/{addr(p[i + 3:i + 9])}", p[i + 23]
+                    report, i = p[i:i + head + n], i + head + n
+                    data_at = head
+                elif sub == LE_ADVERTISING_REPORT:  # type, address type, address, length, data, RSSI
+                    key, n = f"{p[i + 1]}/{addr(p[i + 2:i + 8])}", p[i + 8]
+                    report, i = p[i:i + 10 + n], i + 10 + n
+                    data_at = 9
+                else:  # a directed report carries no data: it can only be judged by its advertiser
+                    key = f"{p[i + 1]}/{addr(p[i + 2:i + 8])}"
+                    report, i, data_at = p[i:i + 16], i + 16, None
+                if data_at is not None:
+                    data, ours = remap_uuids(report[data_at:data_at + n], RESTORED_UUIDS)
+                    report = report[:data_at] + data + report[data_at + n:]
+                    if ours:
+                        if key not in self.partners:
+                            say(f"isolate: partner advertiser {key}")
+                        self.partners[key] = now_s
+                if now_s - self.partners.get(key, -PARTNER_MEMORY_S) < PARTNER_MEMORY_S:
+                    kept.append(report)
+                else:
+                    self.counts["adv_isolated"] += 1
+        except IndexError:  # a report shorter than its own lengths: nothing in it can be trusted
+            self.counts["adv_isolated"] += 1
+            return None
+        if not kept:
+            return None
+        params = bytes([sub, len(kept)]) + b"".join(kept)
+        return bytes([EVT, EV_LE_META, len(params)]) + params
 
     def maybe_refuse(self, op: int, packet: bytes) -> bool:
         for r in self.refusals:
@@ -463,6 +563,8 @@ class Bridge:
                 self.counts["adv_dropped"] += 1
                 self.snoop(packet, 1)
                 return None
+            if self.isolate:
+                return self.isolate_in(sub, packet)
         elif sub in CONNECTION_COMPLETES and len(p) >= 18:
             status, handle, role = p[0], p[1] | p[2] << 8, p[3]
             peer = addr(p[5:11])
@@ -557,6 +659,8 @@ class Bridge:
                     "shimmed": [op_name(op) for op in sorted(self.shimmed)],
                     "lmpFeatures": self.features.hex() if self.features else None,
                     "deafS": max(0.0, round(self.deaf_until - time.time(), 1)),
+                    "isolate": {"partners": {k: round(time.time() - t, 1) for k, t in self.partners.items()}}
+                    if self.isolate else None,
                     "hostCommandsInFlight": self.host_cmds_in_flight, "counts": self.counts}
         if cmd == "links":
             return {"links": [lk.view() for lk in self.links.values()]}
@@ -598,7 +702,7 @@ async def serve(args, snoop_file) -> None:
         async with await transport.open_transport(f"android-netsim:_:{args.port},mode=controller") as (
             host_source, host_sink,
         ):
-            bridge = Bridge(host_sink, ctl_sink, snooper, args.trace, not args.no_shim)
+            bridge = Bridge(host_sink, ctl_sink, snooper, args.trace, not args.no_shim, args.isolate)
             host_source.set_packet_sink(Sink(bridge.from_host))
             ctl_source.set_packet_sink(Sink(bridge.from_controller))
 
@@ -689,6 +793,8 @@ def main() -> None:
     s.add_argument("--control", type=int, default=8878)
     s.add_argument("--snoop", help="btsnoop file to write")
     s.add_argument("--trace", action="store_true", help="log every host command")
+    s.add_argument("--isolate", action="store_true",
+                   help="air Knit's UUIDs where only another isolating bridge looks, and hear nobody else")
     s.add_argument("--no-shim", action="store_true",
                    help="pass the controller through as it is: no BR/EDR shim, no scan arbiter")
     c = sub.add_parser("ctl")

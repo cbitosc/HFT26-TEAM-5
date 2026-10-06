@@ -260,6 +260,8 @@ jobs:
       - uses: actions/checkout@v7
       - name: Linter unit tests
         run: python3 -m unittest scripts/test_lab_lint.py
+      - name: HCI bridge isolation unit tests
+        run: python3 -m unittest scripts/test_hci_bridge.py
       - name: Lint app/src/test/.../mesh/lab/
         run: python3 scripts/lab-lint.py
 

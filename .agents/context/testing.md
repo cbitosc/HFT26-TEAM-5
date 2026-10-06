@@ -842,6 +842,40 @@ ways.
   is the phone-free cross-platform check. Give the peer an id above the emulator's (`keygen --above`), so the peer
   dials and the one-dial limit never bites. Then `deny-link` every other node it hears, as `interop.py` does.
 - **The emulator still hears the lab phones and the iPhone** and links them like any node, so it pulls their
-  custody. Driving none of them, it needs no go-ahead.
+  custody. Driving none of them, it needs no go-ahead. `KNIT_HCI_ISOLATE=1` (the bridge's `--isolate`) makes it hear
+  only another isolated emulator instead: the next section.
 - **Don't `pkill -f` the bridge or the peer's feed from an agent shell.** The pattern matches the shell's own
   command line and kills it. Use the pidfile.
+
+## Two emulators meshing over real Bluetooth (`ble-pair-test.sh`)
+
+`scripts/ble-pair-test.sh all` boots two emulators, one on each nRF52840 dongle through the bridge above, installs,
+runs `blepair/BlePairInstrumentedTest` on both at once, and tears down. (`up [a|b]` / `install` / `run` / `down`
+run the steps one at a time.) The class covers a link, a DM with its ✓✓, a Nearby post, a photo, and a cut link
+that comes back and carries a DM. Each side asserts what it sees itself. The first green run (2026-10-05) took
+about a minute: linked in 15.7 s, photos in 5.3–5.5 s each way, relinked 15.6 s after the cut. Each run writes
+`build/ble-pair/<stamp>/`: per side, the instrumentation output, logcat and that side's bridge log and btsnoop.
+
+- **Isolation is the bridge's job, not the app's.** `--isolate` moves Knit's 16-bit UUIDs (0xFE30 presence, 0xFE38
+  side pages) to 0xFE20/0xFE28 on the way to the air and back on the way in. It drops every report except a
+  partner's, before the host sees it, so the APK under test is the ordinary debug build. Both sides fail the
+  test if any other node ever shows up in `neighbors` (`@After`). Pinned by `scripts/test_hci_bridge.py`.
+- **The pair has an adb server of its own** (5038), and its consoles sit on 5602/5604, past 5585, where an adb
+  server's emulator scan stops. Android Studio's adb client floods the shared 5037 server while these emulators are
+  on it. It opened 12 k sockets within a minute, pegged the server and every adb call timed out, and a 5037
+  server Studio restarted found the emulators by its scan and brought the flood back. The lab phones also live on
+  5037, so the pair's `install` (`adb install` of the Gradle outputs, never `installDebug`) can't reach one.
+- **Lean on purpose: `Knit_BLE_Pair`** (`ble-pair-test.sh avd` creates it): `aosp_atd` API 34, 2 cores, 1.5 GB,
+  booted one at a time, `nice 10`. Two `google_apis` API 36 emulators at 4 cores each, cold-booting at once,
+  took the host to load 32. The AVD boots `-read-only`, so both run from it at once.
+- **Every run starts both apps clean** (`pm clear`). A read-only AVD booted twice also boots its userdata twice, so
+  an app installed in the AVD itself would come up as one identity on two phones. `KNIT_PAIR_KEEP=1` skips it, and
+  `run` refuses a pair with one node id.
+- **`am instrument` kills the app when its last test returns,** taking its mesh with it. The first run's cut test
+  failed this way: one side finished, and the ✓✓ it still owed the other died with it. So every test ends in a
+  rendezvous (a DM each way), and the class lingers 10 s before it returns. A new test keeps that shape: both sides
+  run the same steps, the run tag goes in every body, and one side alone does anything one-sided (the cut goes to
+  the smaller id, which never dials). The cut reaches the bridge through `adb reverse` of the bridge's control port.
+- **The class skips without `knitBlePeer`,** so `connectedDebugAndroidTest` and Firebase Test Lab pass straight
+  over it.
+

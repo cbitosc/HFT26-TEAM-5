@@ -15,4 +15,5 @@ radio** by passing a USB Bluetooth dongle through to it (`scripts/emulator-ble-m
 an emulator* in `context/testing.md`), or by bridging one of knit-ios's nRF52840 dongles to it with the HCI
 tapped (`scripts/emulator-hci-bridge.sh`, the next section there). It joins the actual mesh, and it is fair game
 under the rule above. The nRF52840 dongles belong to knit-ios's Linux peer rig: check no run of theirs is on the
-one you take, and hand it back with `down`.
+one you take, and hand it back with `down`. Two of them, one per dongle, mesh with each other and nobody else
+(`scripts/ble-pair-test.sh`, *Two emulators meshing over real Bluetooth* there).

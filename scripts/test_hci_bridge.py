@@ -1,0 +1,135 @@
+"""Unit tests for scripts/hci-bridge.py's isolation (--isolate). Run: python3 -m unittest scripts/test_hci_bridge.py
+
+Pure byte work, so no Bumble and no dongle: a Bridge with recording sinks, fed the HCI packets a host and a
+controller would send.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import sys
+import unittest
+from pathlib import Path
+
+_SPEC = importlib.util.spec_from_file_location("hci_bridge", Path(__file__).with_name("hci-bridge.py"))
+bridge_mod = importlib.util.module_from_spec(_SPEC)
+sys.modules["hci_bridge"] = bridge_mod  # dataclasses look their module up by name
+assert _SPEC.loader is not None
+_SPEC.loader.exec_module(bridge_mod)
+
+CMD, EVT, LE_META = 0x01, 0x04, 0x3E
+PARTNER = bytes.fromhex("c1c2c3c4c5c6")
+PHONE = bytes.fromhex("d1d2d3d4d5d6")
+
+
+class Sink:
+    def __init__(self):
+        self.packets: list[bytes] = []
+
+    def on_packet(self, packet: bytes) -> None:
+        self.packets.append(packet)
+
+
+def presence_ad(uuid: int, payload: bytes = b"\x01\x02\x03") -> bytes:
+    """Flags, then Service Data (16-bit UUID) the way BleAdvertiser builds Knit's presence advert."""
+    service = uuid.to_bytes(2, "little") + payload
+    return bytes([2, 0x01, 0x06, 1 + len(service), 0x16]) + service
+
+
+def ext_report(address: bytes, data: bytes, event_type: int = 0x0013) -> bytes:
+    """One LE Extended Advertising Report: the 24 bytes up to the data length, then the data."""
+    return (event_type.to_bytes(2, "little") + bytes([1]) + address + bytes([1, 0, 0xFF, 0x7F, 0xC4])
+            + bytes(2) + bytes([0]) + bytes(6) + bytes([len(data)]) + data)
+
+
+def ext_event(*reports: bytes) -> bytes:
+    params = bytes([0x0D, len(reports)]) + b"".join(reports)
+    return bytes([EVT, LE_META, len(params)]) + params
+
+
+def legacy_event(address: bytes, data: bytes) -> bytes:
+    report = bytes([0x00, 1]) + address + bytes([len(data)]) + data + bytes([0xC4])
+    params = bytes([0x02, 1]) + report
+    return bytes([EVT, LE_META, len(params)]) + params
+
+
+def ext_adv_data(data: bytes) -> bytes:
+    """LE Set Extended Advertising Data, handle 1, complete."""
+    params = bytes([1, 0x03, 0x01, len(data)]) + data
+    return bytes([CMD, 0x37, 0x20, len(params)]) + params
+
+
+class RemapUuidsTest(unittest.TestCase):
+    def test_service_data_and_uuid_lists_are_moved(self):
+        data = presence_ad(0xFE30) + bytes([5, 0x03, 0x0F, 0x18, 0x38, 0xFE])
+        out, hit = bridge_mod.remap_uuids(data, bridge_mod.ISOLATED_UUIDS)
+        self.assertTrue(hit)
+        self.assertEqual(out, presence_ad(0xFE20) + bytes([5, 0x03, 0x0F, 0x18, 0x28, 0xFE]))
+
+    def test_an_unrelated_uuid_and_payload_bytes_are_left_alone(self):
+        # The payload happens to hold Knit's UUID bytes; only the structure's UUID field is a UUID.
+        data = presence_ad(0x180F, payload=b"\x30\xfe\x38\xfe")
+        out, hit = bridge_mod.remap_uuids(data, bridge_mod.ISOLATED_UUIDS)
+        self.assertFalse(hit)
+        self.assertEqual(out, data)
+
+    def test_a_structure_cut_short_and_zero_padding_are_survived(self):
+        padded = presence_ad(0xFE30) + bytes(10)
+        out, hit = bridge_mod.remap_uuids(padded, bridge_mod.ISOLATED_UUIDS)
+        self.assertTrue(hit)
+        self.assertEqual(out, presence_ad(0xFE20) + bytes(10))
+        cut = presence_ad(0xFE30, payload=bytes(200))[:40]
+        out, hit = bridge_mod.remap_uuids(cut, bridge_mod.ISOLATED_UUIDS)
+        self.assertTrue(hit)
+        self.assertEqual(len(out), 40)
+
+
+class IsolateTest(unittest.TestCase):
+    def setUp(self):
+        self.host, self.controller = Sink(), Sink()
+        self.bridge = bridge_mod.Bridge(self.host, self.controller, None, trace=False, shim=False, isolate=True)
+        bridge_mod.say = lambda line: None
+
+    def test_the_hosts_advert_goes_out_under_the_isolated_uuid(self):
+        self.bridge.from_host(ext_adv_data(presence_ad(0xFE30)))
+        self.assertEqual(self.controller.packets, [ext_adv_data(presence_ad(0xFE20))])
+
+    def test_a_partners_report_reaches_the_host_under_knits_uuid(self):
+        self.bridge.from_controller(ext_event(ext_report(PARTNER, presence_ad(0xFE20))))
+        self.assertEqual(self.host.packets, [ext_event(ext_report(PARTNER, presence_ad(0xFE30)))])
+
+    def test_a_lab_phones_knit_advert_never_reaches_the_host(self):
+        self.bridge.from_controller(ext_event(ext_report(PHONE, presence_ad(0xFE30))))
+        self.bridge.from_controller(legacy_event(PHONE, presence_ad(0xFE30)))
+        self.assertEqual(self.host.packets, [])
+        self.assertEqual(self.bridge.counts["adv_isolated"], 2)
+
+    def test_a_partners_uuid_less_fragment_passes_once_its_head_was_heard(self):
+        tail = ext_report(PARTNER, b"\x00" * 7, event_type=0x0000)
+        self.bridge.from_controller(ext_event(tail))
+        self.assertEqual(self.host.packets, [])  # nothing heard from it yet
+        self.bridge.from_controller(ext_event(ext_report(PARTNER, presence_ad(0xFE20), event_type=0x0020)))
+        self.bridge.from_controller(ext_event(tail))
+        self.assertEqual(len(self.host.packets), 2)
+        self.assertEqual(self.host.packets[1], ext_event(tail))
+
+    def test_a_mixed_event_keeps_only_the_partners_report(self):
+        self.bridge.from_controller(ext_event(ext_report(PHONE, presence_ad(0xFE30)),
+                                              ext_report(PARTNER, presence_ad(0xFE20))))
+        self.assertEqual(self.host.packets, [ext_event(ext_report(PARTNER, presence_ad(0xFE30)))])
+
+    def test_a_malformed_report_is_dropped(self):
+        broken = ext_event(ext_report(PARTNER, presence_ad(0xFE20)))[:-4]
+        self.bridge.from_controller(broken)
+        self.assertEqual(self.host.packets, [])
+
+    def test_without_isolate_everything_passes_unchanged(self):
+        plain = bridge_mod.Bridge(self.host, self.controller, None, trace=False, shim=False)
+        plain.from_host(ext_adv_data(presence_ad(0xFE30)))
+        plain.from_controller(ext_event(ext_report(PHONE, presence_ad(0xFE30))))
+        self.assertEqual(self.controller.packets, [ext_adv_data(presence_ad(0xFE30))])
+        self.assertEqual(self.host.packets, [ext_event(ext_report(PHONE, presence_ad(0xFE30)))])
+
+
+if __name__ == "__main__":
+    unittest.main()
