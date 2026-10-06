@@ -230,4 +230,61 @@ class ImageStripTest {
         val source = riff(vp8x(0x3C), iccp, alph, vp8(), webpExif, webpXmp)
         for (length in 0 until source.size) assertNull("cut at $length", ImageStrip.of(source.copyOf(length)))
     }
+
+    // --- animated WebP (ADR 2026-10.8hmx) ---
+
+    private fun u24(value: Int) = bytes(value and 0xFF, (value shr 8) and 0xFF, (value shr 16) and 0xFF)
+
+    /** An `ANMF` covering a [width] × [height] frame at the origin for [durationMs], holding [content]. */
+    private fun anmf(
+        vararg content: ByteArray,
+        width: Int = 400,
+        height: Int = 300,
+        durationMs: Int = 100,
+    ) = chunk(
+        "ANMF",
+        u24(0) + u24(0) + u24(width - 1) + u24(height - 1) + u24(durationMs) + bytes(0) + content.fold(ByteArray(0)) { a, c -> a + c },
+    )
+
+    private val anim = chunk("ANIM", bytes(0, 0, 0, 0, 0, 0))
+
+    @Test
+    fun anAnimatedWebpLosesItsMetadataAndKeepsEveryFrameByteForByte() {
+        // ICC (0x20), alpha (0x10), EXIF (0x08), XMP (0x04), animation (0x02).
+        val frames = arrayOf(anmf(alph, vp8()), anmf(vp8()), anmf(chunk("VP8L", bytes(0x2F, 0, 0, 0, 0))))
+        val source = riff(vp8x(0x3E), iccp, anim, *frames, webpExif, webpXmp, unknown)
+
+        val stripped = checkNotNull(ImageStrip.animatedWebp(source))
+
+        assertArrayEquals(riff(vp8x(0x32), iccp, anim, *frames), stripped.bytes)
+        assertEquals(400 to 300, stripped.width to stripped.height)
+        assertEquals(3, stripped.frames)
+        assertArrayEquals(stripped.bytes, checkNotNull(ImageStrip.animatedWebp(stripped.bytes)).bytes)
+        // The still door still refuses it: an animation is the animated door's business.
+        assertNull(ImageStrip.of(source))
+    }
+
+    @Test
+    fun anAnimatedWebpThisWalkDoesNotFullyUnderstandIsNotStripped() {
+        val refused =
+            mapOf(
+                "a still" to riff(vp8x(0x10), alph, vp8()),
+                "no ANIM" to riff(vp8x(0x02), anmf(vp8())),
+                "no frame" to riff(vp8x(0x02), anim),
+                "a chunk it does not know inside a frame" to riff(vp8x(0x02), anim, anmf(vp8(), unknown)),
+                "metadata inside a frame" to riff(vp8x(0x02), anim, anmf(webpExif, vp8())),
+                "two bitstreams in a frame" to riff(vp8x(0x02), anim, anmf(vp8(), vp8())),
+                "an empty frame" to riff(vp8x(0x02), anim, anmf()),
+                "a still's bitstream outside a frame" to riff(vp8x(0x02), anim, anmf(vp8()), vp8()),
+                "a second ANIM" to riff(vp8x(0x02), anim, anmf(vp8()), anim),
+                "not a WebP" to ascii("GIF89a") + ByteArray(32),
+            )
+        for ((case, source) in refused) assertNull(case, ImageStrip.animatedWebp(source))
+    }
+
+    @Test
+    fun everyAnimatedWebpTruncationIsRefusedWithoutThrowing() {
+        val source = riff(vp8x(0x3E), iccp, anim, anmf(alph, vp8()), anmf(vp8()), webpExif)
+        for (length in 0 until source.size) assertNull("cut at $length", ImageStrip.animatedWebp(source.copyOf(length)))
+    }
 }

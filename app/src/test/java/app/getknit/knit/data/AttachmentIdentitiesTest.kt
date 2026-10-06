@@ -58,6 +58,7 @@ class AttachmentIdentitiesTest : RoomDbTest() {
         plainHash: String? = null,
         sourceHash: String? = null,
         conversation: String = "peer",
+        animated: Boolean = false,
     ) = db.messageDao().upsert(
         MessageEntity(
             id = id,
@@ -70,6 +71,7 @@ class AttachmentIdentitiesTest : RoomDbTest() {
             attachmentKey = key,
             attachmentPlainHash = plainHash,
             attachmentSourceHash = sourceHash,
+            attachmentAnimated = animated,
         ),
     )
 
@@ -125,6 +127,22 @@ class AttachmentIdentitiesTest : RoomDbTest() {
             row("dm", "c".repeat(64), "a2V5", sentAt = 10, plainHash = photoHash)
             assertNull(identities.find(photoHash))
             assertNull(identities.localCopy(photoHash, author = "peer"))
+        }
+
+    @Test
+    fun aSourceSentWithItsFramesWinsOverTheStillItWasFlattenedToBefore() =
+        runTest {
+            // Before #133 an animated WebP went out as a still; a pick of it since goes out animated (ADR 2026-10.8hmx).
+            val source = "5".repeat(64)
+            val (still, stillKey) = sealed("the flattened still".toByteArray())
+            val (frames, framesKey) = sealed("the animation".toByteArray())
+            row("then", still, stillKey, sentAt = 10, plainHash = "1".repeat(64), sourceHash = source)
+            row("now", frames, framesKey, sentAt = 20, plainHash = "2".repeat(64), sourceHash = source, animated = true)
+
+            val held = checkNotNull(identities.find(source))
+
+            assertEquals(frames, held.hash)
+            assertEquals(true, held.animated)
         }
 
     @Test

@@ -199,8 +199,10 @@ interface MessageDao {
      * The identity this phone already sends a file under, found by the hash of the bytes about to go out (ADR
      * 2026-10.mptm): a sealed row whose plaintext hashes to [bytesHash], one of our own sends whose picked
      * source did, or a key-less row — a room picture — addressed by it. Only an identity whose blob is still held
-     * counts. A key-less one wins, then the earliest: once a file has been in the room, its public name is the
-     * one most phones nearby already hold. A sealed row without its plaintext name is skipped, since its
+     * counts. An animated one wins, then a key-less one, then the earliest: once a file has been in the room, its
+     * public name is the one most phones nearby already hold. Rows naming one plaintext always agree on the
+     * animated flag, so it decides only between a pick's source sent flattened, before #133, and sent since with
+     * its frames (ADR 2026-10.8hmx). A sealed row without its plaintext name is skipped, since its
      * [AttachmentIdentityRow.plainHash] would otherwise read the ciphertext hash. A whole-table read (no index
      * on the three columns it ORs), run once per pick, never on the inbound path.
      */
@@ -212,7 +214,7 @@ interface MessageDao {
             "AND (attachmentPlainHash = :bytesHash OR attachmentSourceHash = :bytesHash " +
             "OR (attachmentKey IS NULL AND attachmentHash = :bytesHash)) " +
             "AND attachmentHash IN (SELECT hash FROM blobs) " +
-            "ORDER BY attachmentKey IS NOT NULL, sentAt, id LIMIT 1",
+            "ORDER BY attachmentAnimated DESC, attachmentKey IS NOT NULL, sentAt, id LIMIT 1",
     )
     suspend fun identityFor(bytesHash: String): AttachmentIdentityRow?
 

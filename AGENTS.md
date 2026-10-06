@@ -400,6 +400,11 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   "no GPS leaves the phone" invariant rests on the strip's allow-list: anything it does not fully understand answers
   null (the long way), and a segment is kept only if a decoder needs it. Tests: `ImageStripTest`,
   `AttachmentStoreIngestTest`.
+  **Before touching `ImageStrip.animatedWebp`, `AttachmentStore.animated`, `data/webp/AnimatedFrames` or
+  `WebpTranscode.shrinkAnimated`:** READ ADR 2026-10.8hmx — the bytes, not the provider's type, pick the door; an
+  animated WebP within 512 px / 200 frames / 1 MiB goes out stripped under the same allow-list rule, anything past
+  it and every APNG (Android cannot play one) is composited at the output size into an animated WebP, and
+  `identityFor` prefers an animated row so a send flattened before #133 is not reused. Tests: `AnimatedFramesTest`.
 - **When touching a presence dot or an online / offline label** (Profile Details, Diagnostics' node
   sections, the Contacts dot): the four evidence tiers live in `ui/Reach.kt` — `Direct` is
   `MeshController.neighbors` (a short-range radio saw the peer's own radio), `Indirect` is

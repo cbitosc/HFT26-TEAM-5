@@ -4,7 +4,9 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
 import android.provider.OpenableColumns
+import android.util.Log
 import androidx.exifinterface.media.ExifInterface
+import app.getknit.knit.data.webp.AnimatedFrames
 import app.getknit.knit.data.webp.WebpTranscode
 import app.getknit.knit.mesh.protocol.AttachmentName
 import app.getknit.knit.mesh.protocol.LinkCard
@@ -27,9 +29,12 @@ import java.security.MessageDigest
  * to a second encode. GIFs keep their animation but are re-encoded to a smaller **animated WebP** via
  * [app.getknit.knit.data.webp.WebpTranscode] (VP8 beats GIF's LZW even at the same size, and Coil plays
  * animated WebP like a GIF) so they transmit faster; a GIF that somehow can't be shrunk falls back to its
- * original bytes. The bytes never touch disk — they go straight into the encrypted database. That invariant is
- * why the in-app camera hands its capture over as a [ByteArray] rather than staging a plaintext JPEG in
- * `cacheDir`.
+ * original bytes. An animated WebP or APNG keeps its frames too ([animated], ADR 2026-10.8hmx): a sticker-sized
+ * WebP goes out as its own bytes with the metadata stripped, anything larger, and every APNG (which Android cannot
+ * play), is composited and resampled into an animated WebP the way a GIF is. Which door a picture takes is read off
+ * its bytes whenever they are in memory, not off the type its provider claimed. The bytes never touch disk — they
+ * go straight into the encrypted database. That invariant is why the in-app camera hands its capture over as a
+ * [ByteArray] rather than staging a plaintext JPEG in `cacheDir`.
  *
  * Before staging, the image is screened for explicit content via [ImageScreeningService]. Sending an
  * explicit image is *allowed but discouraged*: a flagged image is still ingested, and [ingest] reports the
@@ -128,8 +133,8 @@ class AttachmentStore(
     }
 
     /**
-     * Ingests [uri] into the blob store. GIFs are re-encoded smaller (animation preserved); other
-     * images are downscaled to [MAX_DIMENSION] and re-encoded as JPEG. Returns [IngestResult.Failed]
+     * Ingests [uri] into the blob store. GIFs are re-encoded smaller and animated WebPs and APNGs keep their frames
+     * ([animated]); other images are downscaled to [MAX_DIMENSION] and re-encoded as JPEG. Returns [IngestResult.Failed]
      * on a decode failure or if the processed image exceeds [MAX_BYTES], else [IngestResult.Success] with
      * [Success.flagged] set when on-device screening judged the image explicit.
      *
@@ -189,6 +194,9 @@ class AttachmentStore(
         if (raw.isEmpty()) return null
         val bytesHash = sha256(raw)
         val held = identities.find(bytesHash) ?: return null
+        // A still found by the source's hash for bytes that animate is a send from before #133, flattened: take the
+        // fresh ingest, whose animated identity the lookup then prefers (ADR 2026-10.8hmx).
+        if (bytesHash != held.plainHash && !held.animated && AnimatedImage.isAnimated(raw)) return null
         val plain = if (bytesHash == held.plainHash) raw else identities.plaintextOf(held) ?: return null
         blobs.insert(held.plainHash, held.mime, plain)
         val image = held.mime.startsWith("image/")
@@ -369,8 +377,10 @@ class AttachmentStore(
      * The one ingest pipeline, over whichever source the caller has: [readRaw] yields the untouched
      * source bytes (the GIF path re-encodes those directly) and [decodeOriented] yields an
      * EXIF-corrected, sub-sampled bitmap (every other format). Both are called at most once. [held] is
-     * the source when the caller already has it in memory, which is when a still can skip the decode
-     * ([passThrough]); null for a source too large to read whole, which no pass-through would take.
+     * the source when the caller already has it in memory, which is when its own signature picks the door
+     * (a GIF a provider typed as nothing, or as something else, is still a GIF) and when an animation ([animated])
+     * or a still ([passThrough]) can skip the decode; null for a source too large to read whole, which goes by
+     * [sourceMime] alone and which no pass-through would take.
      */
     private suspend fun ingest(
         sourceMime: String?,
@@ -378,8 +388,9 @@ class AttachmentStore(
         readRaw: () -> ByteArray?,
         decodeOriented: () -> Bitmap?,
     ): IngestResult {
+        val kind = held?.let(FileTypes::imageMimeOf) ?: sourceMime
         val (mime, bytes) =
-            if (sourceMime == "image/gif") {
+            if (kind == "image/gif") {
                 // Re-encode the GIF as a smaller animated WebP (its per-frame VP8 compression beats GIF's
                 // 256-colour LZW even at the same dimensions, and Coil's AnimatedImageDecoder plays it like
                 // a GIF). Keep the raw GIF only if that somehow isn't smaller, so a GIF is never regressed.
@@ -387,7 +398,8 @@ class AttachmentStore(
                 val webp = WebpTranscode.shrink(raw, GIF_MAX_DIMENSION, GIF_MAX_FPS, GIF_WEBP_QUALITY)
                 if (webp != null) "image/webp" to webp else "image/gif" to raw
             } else {
-                held?.let(::passThrough)
+                held?.let(::animated)
+                    ?: held?.let(::passThrough)
                     ?: reencoded(decodeOriented() ?: return IngestResult.Failed(IngestResult.Reason.Unreadable))
             }
         failureFor(bytes)?.let { return it }
@@ -448,9 +460,39 @@ class AttachmentStore(
         return if (clean) stripped.mime to stripped.bytes else null
     }
 
+    /**
+     * [raw] with its frames kept, when it is an animated WebP or APNG (ADR 2026-10.8hmx); null for a still, and for
+     * an animation neither route below will take, which then goes the still way and keeps its first frame.
+     *
+     * An animated WebP within [ANIMATED_PASS_MAX_DIMENSION], [ANIMATED_PASS_MAX_FRAMES] and [ANIMATED_PASS_MAX_BYTES]
+     * — the common sticker — goes out as its own bytes, its metadata stripped ([ImageStrip.animatedWebp]). Anything
+     * past those, and an APNG always, is composited and resampled into an animated WebP at the GIF door's bounds; a
+     * stripped WebP that the resample would not beat is sent stripped, so a WebP is never regressed.
+     */
+    private fun animated(raw: ByteArray): Pair<String, ByteArray>? {
+        if (!AnimatedImage.isAnimated(raw)) return null
+        val stripped = ImageStrip.animatedWebp(raw)
+        if (stripped != null && isSticker(stripped)) return WEBP to stripped.bytes
+        val webp =
+            AnimatedFrames.of(raw)?.let { WebpTranscode.shrinkAnimated(it, raw.size, GIF_MAX_DIMENSION, GIF_MAX_FPS, GIF_WEBP_QUALITY) }
+        return when {
+            webp != null && (stripped == null || webp.size < stripped.bytes.size) -> WEBP to webp
+            stripped != null -> WEBP to stripped.bytes
+            else -> null.also { Log.i(TAG, "animation (${raw.size} B) keeps one frame: neither the strip nor a resample took it") }
+        }
+    }
+
+    /** Whether [stripped] is within the bounds an animated WebP goes out untouched within. */
+    private fun isSticker(stripped: ImageStrip.Animated): Boolean =
+        maxOf(stripped.width, stripped.height) <= ANIMATED_PASS_MAX_DIMENSION &&
+            stripped.frames <= ANIMATED_PASS_MAX_FRAMES &&
+            stripped.bytes.size <= ANIMATED_PASS_MAX_BYTES
+
     private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 
     private companion object {
+        const val TAG = "AttachmentStore"
+        const val WEBP = "image/webp"
         const val MAX_DIMENSION = 1280
         const val JPEG_QUALITY = 85
         const val WEBP_QUALITY = 85
@@ -477,6 +519,15 @@ class AttachmentStore(
         const val GIF_MAX_DIMENSION = 480
         const val GIF_MAX_FPS = 15
         const val GIF_WEBP_QUALITY = 70
+
+        /**
+         * The bounds an animated WebP passes through untouched within (ADR 2026-10.8hmx). 512 px is the sticker
+         * canvas — at [GIF_MAX_DIMENSION] every sticker would be resampled for 32 px — the frame cap is
+         * [WebpTranscode]'s own, and the byte cap is what a Bluetooth link pays: a sticker is well under half of it.
+         */
+        const val ANIMATED_PASS_MAX_DIMENSION = 512
+        const val ANIMATED_PASS_MAX_FRAMES = 200
+        const val ANIMATED_PASS_MAX_BYTES = 1024 * 1024
 
         const val MAX_BYTES = 8 * 1024 * 1024 // 8 MiB cap (a transcoded GIF should land well under this)
 

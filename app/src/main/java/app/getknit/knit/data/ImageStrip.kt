@@ -23,7 +23,8 @@ import kotlin.math.roundToInt
  *   trailer). Its [Stripped.quality] is estimated from the luminance table, as libjpeg would have scaled it.
  * - **WebP**: a simple lossy file carries no metadata and is kept whole; an extended one keeps `VP8X` (its EXIF
  *   and XMP bits cleared), `ICCP`, `ALPH` and the one `VP8 ` frame. Lossless (`VP8L`) and animated WebP answer
- *   null: the first is PNG-sized, the second is the GIF door's business.
+ *   null from [of]: the first is PNG-sized, and the second has a door of its own, [animatedWebp]
+ *   (ADR 2026-10.8hmx), which keeps `VP8X`, `ICCP`, `ANIM` and the `ANMF` frames under the same allow-list rule.
  *
  * Every walk is bounds-checked, so truncated or hostile bytes answer null rather than throwing. Stripping is
  * idempotent: the stripped bytes strip to themselves, which is what keeps a re-picked picture's hash.
@@ -282,6 +283,102 @@ object ImageStrip {
         return Stripped(out, "image/webp", width, height, null)
     }
 
+    /**
+     * An animated WebP's own bytes with its metadata gone, the canvas [width] and [height], and how many [frames] it
+     * holds — the pass-through half of the animated door (ADR 2026-10.8hmx).
+     */
+    class Animated(
+        val bytes: ByteArray,
+        val width: Int,
+        val height: Int,
+        val frames: Int,
+    )
+
+    /**
+     * [bytes] stripped as an animated WebP, or null when they are not one this walk fully understands. Kept are
+     * `VP8X` (its EXIF and XMP bits cleared), `ICCP`, `ANIM` and every `ANMF`, whose payload must hold only a
+     * frame's `ALPH` and `VP8 ` / `VP8L` bitstream: an `ANMF` carrying anything else answers null rather than
+     * being rebuilt, so nothing this walk does not understand ever goes out. `EXIF`, `XMP ` and unknown top-level
+     * chunks are dropped, as in [of]. Idempotent, like [of].
+     */
+    @Suppress("MagicNumber", "ReturnCount", "CyclomaticComplexMethod")
+    fun animatedWebp(bytes: ByteArray): Animated? =
+        runCatching {
+            if (!bytes.matchesAt(RIFF, 0) || !bytes.matchesAt(WEBP, 8)) return@runCatching null
+            val end = 8L + bytes.u32le(4)
+            if (end > bytes.size || end < 30) return@runCatching null
+            if (bytes.fourcc(12) != "VP8X" || bytes.u32le(16) != 10L) return@runCatching null
+            if (bytes.u8(20) and VP8X_ANIMATION == 0) return@runCatching null
+            val width = 1 + bytes.u24le(24)
+            val height = 1 + bytes.u24le(27)
+            val kept = arrayListOf(Chunk("VP8X", 20, 10))
+            var animation = false
+            var frames = 0
+            var at = 30
+            while (at < end) {
+                if (at + 8 > end) return@runCatching null
+                val tag = bytes.fourcc(at)
+                val size = bytes.u32le(at + 4)
+                val dataEnd = at + 8L + size
+                if (dataEnd > end) return@runCatching null
+                when (tag) {
+                    "ICCP" -> {
+                        kept += Chunk(tag, at + 8, size.toInt())
+                    }
+
+                    "ANIM" -> {
+                        if (animation || frames > 0 || size != 6L) return@runCatching null
+                        animation = true
+                        kept += Chunk(tag, at + 8, size.toInt())
+                    }
+
+                    "ANMF" -> {
+                        if (!animation || !frameHoldsOnlyImage(bytes, at + 8, size.toInt())) return@runCatching null
+                        frames++
+                        kept += Chunk(tag, at + 8, size.toInt())
+                    }
+
+                    "VP8X", "VP8 ", "VP8L", "ALPH" -> {
+                        return@runCatching null // a second header, or a still's bitstream outside a frame
+                    }
+
+                    else -> {
+                        // EXIF, XMP and anything unknown: dropped
+                    }
+                }
+                at = (dataEnd + (size and 1L)).toInt()
+            }
+            if (frames == 0) return@runCatching null
+            val out = riff(kept, bytes)
+            out[20] = (out[20].toInt() and (VP8X_EXIF or VP8X_XMP).inv()).toByte()
+            Animated(out, width, height, frames)
+        }.getOrNull()
+
+    /** Whether the `ANMF` payload at [start] is its 16-byte header and then only `ALPH`, `VP8 ` or `VP8L`. */
+    @Suppress("MagicNumber", "ReturnCount")
+    private fun frameHoldsOnlyImage(
+        bytes: ByteArray,
+        start: Int,
+        size: Int,
+    ): Boolean {
+        var at = start + ANMF_HEADER
+        val end = start.toLong() + size
+        var image = false
+        while (at < end) {
+            if (at + 8 > end) return false
+            val tag = bytes.fourcc(at)
+            val chunkSize = bytes.u32le(at + 4)
+            if (at + 8L + chunkSize > end) return false
+            when (tag) {
+                "ALPH" -> if (image) return false
+                "VP8 ", "VP8L" -> if (image) return false else image = true
+                else -> return false
+            }
+            at = (at + 8L + chunkSize + (chunkSize and 1L)).toInt()
+        }
+        return image
+    }
+
     /** One chunk to copy: its [tag], and where its data sits in the source and how long it is. */
     private class Chunk(
         val tag: String,
@@ -380,6 +477,9 @@ object ImageStrip {
 
     /** `Adobe`, version, two flag words and the transform byte. */
     private const val ADOBE_SIZE = 12
+
+    /** Frame position, size, duration and flags ahead of an `ANMF`'s bitstream. */
+    private const val ANMF_HEADER = 16
 
     private const val VP8X_ANIMATION = 0x02
     private const val VP8X_XMP = 0x04

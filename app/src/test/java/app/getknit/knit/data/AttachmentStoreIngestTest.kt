@@ -8,6 +8,7 @@ import androidx.exifinterface.media.ExifInterface
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import app.getknit.knit.data.AttachmentStore.IngestResult
+import app.getknit.knit.data.webp.AnimatedWebpMuxer
 import app.getknit.knit.mesh.sha256Hex
 import app.getknit.knit.moderation.ImageScreeningService
 import io.mockk.coEvery
@@ -443,6 +444,176 @@ class AttachmentStoreIngestTest {
 
             val again = success(store.ingest(fileUri("saved.webp", bytes)))
             assertEquals(first.ingested.hash, again.ingested.hash)
+        }
+
+    // --- An animation picked from outside Knit keeps its frames (#133, ADR 2026-10.8hmx) ---
+
+    /** One frame of a [width]×[height] animation: [picture]'s gradient, moved along by [index]. */
+    private fun frame(
+        width: Int,
+        height: Int,
+        index: Int,
+    ): Bitmap {
+        val pixels = IntArray(width * height) { Color.argb(255, (it % width + 40 * index) % 256, (it / width) % 256, (60 * index) % 256) }
+        return Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888)
+    }
+
+    private fun le32(value: Int) = byteArrayOf(value.toByte(), (value shr 8).toByte(), (value shr 16).toByte(), (value ushr 24).toByte())
+
+    private fun be32(value: Int) = byteArrayOf((value ushr 24).toByte(), (value shr 16).toByte(), (value shr 8).toByte(), value.toByte())
+
+    private val planted = "MM GPS 37.42 -122.08 Pixel 8"
+
+    private fun ByteArray.holds(text: String): Boolean = String(this, Charsets.ISO_8859_1).contains(text)
+
+    /** A [width]×[height] animated WebP of [frames] frames, as a sticker app writes one, carrying an EXIF chunk. */
+    private fun animatedWebp(
+        width: Int,
+        height: Int,
+        frames: Int = 3,
+    ): ByteArray {
+        val stills = (0 until frames).map { encoded(frame(width, height, it), format = lossyWebpFormat(), quality = 90, tag = false) }
+        val muxed = checkNotNull(AnimatedWebpMuxer.mux(stills, IntArray(frames) { 100 }, width, height))
+        val exif = "EXIF".toByteArray() + le32(planted.length) + planted.toByteArray()
+        return (muxed + exif).also { webp ->
+            le32(webp.size - 8).copyInto(webp, 4)
+            webp[20] = (webp[20].toInt() or 0x08).toByte() // the EXIF flag
+            assertTrue(AnimatedImage.isAnimated(webp) && webp.holds(planted))
+        }
+    }
+
+    private fun png(
+        type: String,
+        data: ByteArray,
+    ): ByteArray {
+        val crc =
+            java.util.zip
+                .CRC32()
+                .apply { update(type.toByteArray()) }
+                .apply { update(data) }
+        return be32(data.size) + type.toByteArray() + data + be32(crc.value.toInt())
+    }
+
+    /** [png]'s chunks as (type, data). */
+    private fun chunksOf(png: ByteArray): List<Pair<String, ByteArray>> {
+        val chunks = ArrayList<Pair<String, ByteArray>>()
+        var at = 8
+        while (at + 8 <= png.size) {
+            val length =
+                java.nio.ByteBuffer
+                    .wrap(png, at, 4)
+                    .int
+            chunks += String(png, at + 4, 4, Charsets.US_ASCII) to png.copyOfRange(at + 8, at + 8 + length)
+            at += 12 + length
+        }
+        return chunks
+    }
+
+    /** A [width]×[height] APNG of [frames] full-canvas frames, its first the default image, carrying a `tEXt`. */
+    private fun apng(
+        width: Int,
+        height: Int,
+        frames: Int = 3,
+    ): ByteArray {
+        val stills = (0 until frames).map { encoded(frame(width, height, it), format = Bitmap.CompressFormat.PNG, tag = false) }
+        val ihdr = chunksOf(stills[0]).first { it.first == "IHDR" }.second
+        var sequence = 0
+        val out = ByteArrayOutputStream()
+        out.write(stills[0].copyOf(8))
+        out.write(png("IHDR", ihdr))
+        out.write(png("tEXt", "Comment".toByteArray() + byteArrayOf(0) + planted.toByteArray()))
+        out.write(png("acTL", be32(frames) + be32(0)))
+        stills.forEachIndexed { index, still ->
+            out.write(png("fcTL", be32(sequence++) + be32(width) + be32(height) + be32(0) + be32(0) + byteArrayOf(0, 1, 0, 10, 0, 0)))
+            for ((type, data) in chunksOf(still)) {
+                if (type != "IDAT") continue
+                out.write(if (index == 0) png("IDAT", data) else png("fdAT", be32(sequence++) + data))
+            }
+        }
+        out.write(png("IEND", ByteArray(0)))
+        return out.toByteArray().also { assertTrue(AnimatedImage.isAnimated(it)) }
+    }
+
+    /** An animated WebP's canvas, from its VP8X header. */
+    private fun canvasOf(webp: ByteArray): Pair<Int, Int> {
+        fun u24(at: Int) =
+            (webp[at].toInt() and 0xFF) or ((webp[at + 1].toInt() and 0xFF) shl 8) or ((webp[at + 2].toInt() and 0xFF) shl 16)
+        return (1 + u24(24)) to (1 + u24(27))
+    }
+
+    @Test
+    fun aStickerSizedAnimatedWebpKeepsItsFramesByteForByteAndLosesItsMetadata() =
+        runTest {
+            val sticker = animatedWebp(512, 512)
+
+            val first = success(store.ingest(fileUri("sticker", sticker)))
+            val (mime, bytes) = stored.getValue(first.ingested.hash)
+
+            assertEquals("image/webp", mime)
+            assertTrue(first.ingested.animated)
+            assertFalse("the EXIF chunk survived", bytes.holds(planted) || bytes.holds("EXIF"))
+            // Its frames are the picked ones: only the metadata went.
+            assertArrayEquals(checkNotNull(ImageStrip.animatedWebp(sticker)).bytes, bytes)
+            coVerify(exactly = 1) { screening.isImageExplicit(bytes) }
+
+            val again = success(store.ingest(fileUri("saved", bytes)))
+            assertEquals(first.ingested.hash, again.ingested.hash)
+        }
+
+    @Test
+    fun anAnimatedWebpPastTheStickerBoundIsResampledAndStaysAnimated() =
+        runTest {
+            val result = success(store.ingest(fileUri("big", animatedWebp(1000, 1000))))
+            val (mime, bytes) = stored.getValue(result.ingested.hash)
+
+            assertEquals("image/webp", mime)
+            assertTrue(AnimatedImage.isAnimated(bytes))
+            assertEquals(480 to 480, canvasOf(bytes))
+            assertFalse(bytes.holds(planted))
+        }
+
+    @Test
+    fun anApngLeavesAsAnAnimatedWebpWithoutItsText() =
+        runTest {
+            val result = success(store.ingest(fileUri("reaction", apng(200, 150))))
+            val (mime, bytes) = stored.getValue(result.ingested.hash)
+
+            assertEquals("image/webp", mime)
+            assertTrue(result.ingested.animated)
+            assertTrue(AnimatedImage.isAnimated(bytes))
+            assertEquals(200 to 150, canvasOf(bytes))
+            assertFalse(bytes.holds(planted))
+        }
+
+    @Test
+    fun aGifWhoseProviderNamesNoTypeStaysAnimated() =
+        runTest {
+            // Two 1×1 frames; a file:// Uri reports no type, which used to send this down the still door as a JPEG.
+            val frameBlock = byteArrayOf(0x21, 0xF9.toByte(), 4, 0, 10, 0, 0, 0, 0x2C, 0, 0, 0, 0, 1, 0, 1, 0, 0, 2, 2, 0x44, 1, 0)
+            val gif =
+                "GIF89a".toByteArray() + byteArrayOf(1, 0, 1, 0, 0x80.toByte(), 0, 0, 0, 0, 0, -1, -1, -1) + frameBlock + frameBlock +
+                    byteArrayOf(0x3B)
+            assertTrue(AnimatedImage.isAnimated(gif))
+
+            val result = success(store.ingest(fileUri("sticker", gif)))
+
+            // A GIF too small to shrink stays a GIF, and one that shrinks is an animated WebP: either keeps its frames.
+            assertTrue(AnimatedImage.isAnimated(stored.getValue(result.ingested.hash).second))
+            assertTrue(result.ingested.mime in setOf("image/gif", "image/webp"))
+        }
+
+    @Test
+    fun anAnimationSentFlattenedBeforeTheFixIsNotReusedAsTheStill() =
+        runTest {
+            val sticker = animatedWebp(256, 256)
+            coEvery { identities.find(sha256Hex(sticker)) } returns held(plainHash = "f".repeat(64), mime = "image/jpeg", animated = false)
+
+            val result = success(store.ingest(fileUri("sticker", sticker)))
+
+            assertNull(result.ingested.reuse)
+            assertTrue(result.ingested.animated)
+            assertEquals(sha256Hex(sticker), result.ingested.sourceHash)
+            coVerify(exactly = 0) { identities.plaintextOf(any()) }
         }
 
     /** [AttachmentStore]'s private bounds, restated: a change there should be a deliberate change here. */

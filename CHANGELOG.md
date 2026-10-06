@@ -77,6 +77,8 @@ document:
   photo the filter catches.
 - A direct file send could fail with "no connection was made in time" when the message carrying its Wi-Fi
   details was lost on the way. Your phone now sends those details again until the other phone connects.
+- An animated sticker or reaction image saved from another app went out as a still picture, and so did a GIF
+  picked from some file managers. Both now arrive animated.
 
 ## [2.8.0](https://github.com/getknit/knit/releases/tag/v2.8.0) — 2026-10-03T03:55:42Z
 
