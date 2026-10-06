@@ -74,6 +74,9 @@ class FramedLink(
     private val log: (String) -> Unit = {},
     // The owning transport's files past their end and not yet taken (#138): they outlive this link.
     landing: LandingFiles = LandingFiles(),
+    // Poked when [feeding] or [rxInProgress] may have changed, outside every lock, so a reader may ask either. A bare
+    // poke: the reader reads the state it wants (the Bluetooth link boost, #120); unbounded transports pass nothing.
+    private val onBusy: () -> Unit = {},
 ) {
     private val outbound = Channel<Outbound>(Channel.UNLIMITED)
 
@@ -123,6 +126,11 @@ class FramedLink(
 
     /** True while a file streams in: a transport's supervisor holds the link rather than tear it down mid-transfer. */
     val rxInProgress: Boolean get() = rxFile != null
+
+    // The (feeding, receiving) pair [onBusy] last reported, as two bits, and the lock that orders the reports. Every
+    // change is followed by a [noteBusy] on the thread that made it, so the last report always reads the last state.
+    private var busyReported = 0
+    private val busyLock = Any()
 
     // Files queued behind an in-progress file transfer (only one streams at a time).
     private val stash = ArrayDeque<Outbound.FileSend>()
@@ -186,8 +194,17 @@ class FramedLink(
         // Counted before the enqueue so a reader between the two never sees the file as neither queued nor
         // streaming; a refused enqueue (closed link) takes it straight back.
         notePending(meta.key, +1)
-        return outbound.trySend(Outbound.FileSend(file, meta)).isSuccess.also { if (!it) notePending(meta.key, -1) }
+        return outbound.trySend(Outbound.FileSend(file, meta)).isSuccess.also {
+            if (!it) notePending(meta.key, -1)
+            noteBusy()
+        }
     }
+
+    /** True while a file is queued on, or streaming over, this link: from its enqueue to its end. */
+    val feeding: Boolean get() = synchronized(pendingLock) { pendingFileKeys.isNotEmpty() }
+
+    /** True while a file is queued, streaming out or streaming in: either direction of the link carries a file. */
+    val busy: Boolean get() = feeding || rxInProgress
 
     /**
      * True while a file under [key] is queued on, or streaming over, this link — or was fed in full while the link
@@ -216,6 +233,16 @@ class FramedLink(
         if (pendingFileKeys.isEmpty()) fedWhileBusy.clear()
     }
 
+    /** Pokes [onBusy] when the (feeding, receiving) pair moved since the last poke; never under [pendingLock] or [rxLock]. */
+    private fun noteBusy() {
+        val changed =
+            synchronized(busyLock) {
+                val now = (if (feeding) FEEDING_BIT else 0) or (if (rxInProgress) RECEIVING_BIT else 0)
+                (now != busyReported).also { busyReported = now }
+            }
+        if (changed) onBusy()
+    }
+
     fun close() {
         readerJob?.cancel()
         writerJob?.cancel()
@@ -228,6 +255,7 @@ class FramedLink(
             pendingFileKeys.clear() // whatever was queued died with the link
             fedWhileBusy.clear()
         }
+        noteBusy()
         socket.close()
     }
 
@@ -251,16 +279,19 @@ class FramedLink(
                     LinkFraming.Type.FILE_HEADER -> {
                         touch()
                         beginRxFile(msg.payload)
+                        noteBusy()
                     }
 
                     LinkFraming.Type.FILE_CHUNK -> {
                         touch()
                         appendRxFile(msg.payload)
+                        noteBusy() // a chunk past the ceiling aborts the file
                     }
 
                     LinkFraming.Type.FILE_END -> {
                         touch()
                         endRxFile()
+                        noteBusy()
                     }
 
                     LinkFraming.Type.DIGEST -> {
@@ -418,6 +449,7 @@ class FramedLink(
         } finally {
             txInProgress = false
             noteStreamed(meta.key, fed)
+            noteBusy()
         }
     }
 
@@ -509,5 +541,10 @@ class FramedLink(
             val file: File,
             val meta: FileMeta,
         ) : Outbound
+    }
+
+    private companion object {
+        const val FEEDING_BIT = 1
+        const val RECEIVING_BIT = 2
     }
 }

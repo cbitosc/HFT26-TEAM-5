@@ -206,6 +206,7 @@ carries; never renumber an old one.
 | [2026-09.zapp](decisions/2026-09-zapp-a-photo-less-group-avatar-is-its-members-faces.md) | A photo-less group avatar is its members' faces, drawn the same in the shade | ui, identity, notifications |
 | [2026-09.zkma](decisions/2026-09-zkma-the-bridge-offer-and-its-backfill-draw-from-one-ranked-list.md) | The bridge offer and its backfill draw from one ranked list | lora, bridge, custody |
 | [2026-09.zu5t](decisions/2026-09-zu5t-content-capture-is-off.md) | Content capture is off | privacy, ui, performance |
+| [2026-10.2da4](decisions/2026-10-2da4-a-bluetooth-link-that-feeds-a-file-asks-for-a-short-interval-and-earns-a-larger.md) | A Bluetooth link that feeds a file asks for a short interval and earns a larger budget | ble, mesh |
 | [2026-10.47rw](decisions/2026-10-47rw-a-keystore-refusal-is-not-proof-a-secret-is-gone.md) | A Keystore refusal is not proof a secret is gone | crypto, storage, reliability |
 | [2026-10.5hzt](decisions/2026-10-5hzt-a-transfer-s-ready-is-sent-until-the-receiver-connects.md) | A transfer's READY is sent until the receiver connects, and a send that ended short is retried from its card | transfer, ui |
 | [2026-10.6e5t](decisions/2026-10-6e5t-a-blob-is-fetched-from-the-best-neighbour-that-says-it-holds-it.md) | A blob is fetched from the best neighbour that says it holds it | mesh, wire, blobs |

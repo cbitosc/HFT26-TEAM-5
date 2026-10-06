@@ -608,4 +608,40 @@ class CodedPhyPolicyTest {
     fun aCodedLinkIgnoresTheSplit() {
         assertEquals(PaceConfig(1024, 2048), CodedPhyPolicy.pace(LinkPhy.CODED, tuning, feeding = 5))
     }
+
+    @Test
+    fun anEarnedLinkAloneIsFedEighteenKibPerSecondInSixteenKibChunks() {
+        // #120: HIGH drained 22.5–29 KB/s from the Pixel 9; 18 KiB/s moved 700 KB in 41–42 s with texts under 3.4 s.
+        assertEquals(PaceConfig(18 * 1024, 16 * 1024), CodedPhyPolicy.pace(LinkPhy.ONE_M, PhyTuning(), earned = true))
+        assertEquals(PaceConfig(4096, 8192), CodedPhyPolicy.pace(LinkPhy.ONE_M, PhyTuning(), earned = false))
+    }
+
+    @Test
+    fun theEarnedBudgetIsSplitAmongTheLinksFeedingAsTheBaseOneIs() {
+        assertEquals(PaceConfig(9216, 16384), CodedPhyPolicy.pace(LinkPhy.TWO_M, PhyTuning(), feeding = 2, earned = true))
+        assertEquals(PaceConfig(3072, 6144), CodedPhyPolicy.pace(LinkPhy.ONE_M, PhyTuning(), feeding = 6, earned = true))
+    }
+
+    @Test
+    fun theEarnedBudgetIsTunableAndLeavesTheBaseOneAlone() {
+        val tuned = tuning.copy(filePaceBytesPerSec = 2048, boostPaceBytesPerSec = 12 * 1024)
+        assertEquals(PaceConfig(12 * 1024, 16 * 1024), CodedPhyPolicy.pace(LinkPhy.ONE_M, tuned, earned = true))
+        assertEquals(PaceConfig(2048, 4096), CodedPhyPolicy.pace(LinkPhy.ONE_M, tuned, earned = false))
+        val unbounded = tuning.copy(boostPaceBytesPerSec = 0)
+        assertEquals(PaceConfig(0, LinkFraming.FILE_CHUNK_BYTES), CodedPhyPolicy.pace(LinkPhy.ONE_M, unbounded, earned = true))
+    }
+
+    @Test
+    fun aPhoneHoldingMoreLeLinksEarnsTheCrowdedBudget() {
+        // #120: the host splits its LE buffers over every connection, so past four a link keeps fewer packets in flight.
+        assertEquals(18 * 1024, CodedPhyPolicy.pace(LinkPhy.ONE_M, PhyTuning(), earned = true, leLinks = 4).bytesPerSec)
+        assertEquals(PaceConfig(12 * 1024, 16 * 1024), CodedPhyPolicy.pace(LinkPhy.ONE_M, PhyTuning(), earned = true, leLinks = 5))
+        assertEquals(6 * 1024, CodedPhyPolicy.pace(LinkPhy.ONE_M, PhyTuning(), feeding = 2, earned = true, leLinks = 7).bytesPerSec)
+        assertEquals("unearned, the count is moot", 4096, CodedPhyPolicy.pace(LinkPhy.ONE_M, PhyTuning(), leLinks = 9).bytesPerSec)
+    }
+
+    @Test
+    fun aCodedLinkKeepsItsPaceEarnedOrNot() {
+        assertEquals(PaceConfig(1024, 2048), CodedPhyPolicy.pace(LinkPhy.CODED, tuning, feeding = 2, earned = true))
+    }
 }

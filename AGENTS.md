@@ -78,9 +78,15 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   feeding a file at once (`txInProgress`), in chunks of two seconds of the share; Coded keeps its own pace outside the
   split (yvn6's #114 amendment). The stack's queue hides the drain from the sender, so tune against the receiver's
   `rx … in <ms>ms` line — never the sender's `file … in`, which reads size ÷ pace. No wire change.
-  **Before touching `BleLinkTuner`, `LinkTuneDiag`, `LinkParamsCallback` or `…debug.LINKTUNE`, or measuring a drain:**
-  READ work item #120. The tuner is the drain trial's lever, debug builds only and without policy; the trial is
-  `scripts/ble-drain-trial.py`, and the oracle is both phones' HCI snoops read by `scripts/btsnoop-drain.py`.
+  **Before touching `LinkBoostPolicy`, `BleLinkBoost`, `BleLinkTuner`, `LinkParamsCallback`, `FramedLink`'s `onBusy` /
+  `feeding` / `busy`, `PhyTuning.boostPaceBytesPerSec`, `BuildConfig.BLE_LINK_BOOST`, `LinkTuneDiag` or
+  `…debug.LINKTUNE`, or measuring a drain:** READ ADR 2026-10.2da4 (and work item #120). A link's drain is the host's
+  buffer share times the interval, so while a file moves either way, a side whose screen is on asks for
+  `CONNECTION_PRIORITY_HIGH` (and the MTU once) through one GATT client per link, and lets go 15 s after neither
+  direction streams, or at once on screen-off; a dark side only listens. The budget rises to 18 KiB/s (12 past four LE
+  connections) only while every feeding link *reported* ≤ 15 ms (`earned`), else 8jwn's 4 KiB/s. Dark in release until
+  its trial. The trial is `scripts/ble-drain-trial.py --boost on|off`, and the oracle is both phones' HCI snoops read
+  by `scripts/btsnoop-drain.py` — the sender's, since only it shows the queue.
 - **When touching `mesh/lora/` or `mesh/bluetooth/meshtastic/` (the LoRa/Meshtastic bridge):** READ
   `.agents/context/lora-bridge.md` — a Meshtastic board over BLE GATT extends the **Nearby room and 1:1
   DMs** over LoRa as a fast-plane-only `MeshTransport` child, shipped visible since 2.5.0 behind
@@ -131,7 +137,7 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
 - **When touching `mesh/bluetooth/BleDoorbell`, `DoorbellPolicy`, `Protocol.CAP_DOORBELL`, or what
   `BluetoothMeshTransport.writeOnce` rings:** READ ADR 2026-09.dqvb (companion change A4 for the iOS port). A link
   rings only when the peer's HELLO carries `CAP_DOORBELL`, which Android never claims, so Android↔Android links never
-  touch GATT. The doorbell UUIDs are cross-platform law, and the schedule is the port's. `typing`, `blobreq`,
+  ring (they open a GATT client only for 2da4's link boost, never with discovery). The doorbell UUIDs are cross-platform law, and the schedule is the port's. `typing`, `blobreq`,
   `blobhave`, `blobhas` and `keyreq` don't ring. The GATT client attaches to the link's own ACL, closes on a 2 s attach timeout, and lives
   and dies with the link. A ring is a write without response, poked at the enqueue, never after the socket write.
   The lookup runs at link-up and each one that finds the doorbell asks for `CONNECTION_PRIORITY_BALANCED`: an

@@ -2,14 +2,17 @@
 """Time a file across one Bluetooth link, and the texts sent behind it, rep after rep (#120).
 
     python3 scripts/ble-drain-trial.py run --sender p9=SERIAL --receiver p8=SERIAL --cell NAME \\
-        [--pace 16384] [--reps 3] [--size 700000] [--image PATH] [--texts 5,15,30,60] [--relink] \\
-        [--tune SIDE:ASK[,ASK…]] [--quiet 60] [--timeout 900] [--out DIR]
+        [--pace 16384] [--boost on|off] [--boost-pace 18432] [--reps 3] [--size 700000] [--image PATH] \\
+        [--texts 5,15,30,60] [--relink] [--tune SIDE:ASK[,ASK…]] [--quiet 60] [--timeout 900] [--out DIR]
     python3 scripts/ble-drain-trial.py summary DIR [DIR ...]
 
 Each rep, on two debug builds that already share a Bluetooth link (Wi-Fi Aware dark with `…debug.NANOFF`, other phones
 paused, per the trial recipe on #120):
 
 1. Sets the sender's 1M/2M file budget with `…debug.LINKTUNE --ei filePace` (`--pace`, 0 unbounded) and checks it.
+   With `--boost on|off`, switches the link boost (Phase 2 of #120) on or off on both phones (`--ez boost`), so one
+   debug build gives both halves of an A/B; `--boost-pace` sets the budget a boosted link earns (`--ei boostPace`).
+   `--pace` then defaults to the shipped 4096, since the boost is what the cell measures.
 2. With `--relink`, sheds the link (`…debug.BLECAP --ei max 0` on the sender) and waits for it back, so asks made of
    the old link (a PHY, a priority) are gone. With `--tune`, asks the fresh link for them: `sender:phy=2m,priority=high`
    or `receiver:mtu=517` — the keys are LINKTUNE's extras (`phy`, `priority`, `mtu`).
@@ -23,10 +26,11 @@ paused, per the trial recipe on #120):
 6. Dumps both phones' `BluetoothMeshTransport` log for the rep (`logcat -d -v epoch`, never streamed: a stream over
    network adb is Wi-Fi traffic beside the link being measured) and reads the receiver's `rx … in <ms>ms` line — the
    drain — the sender's `file … in` line against size ÷ pace (a sender that slept stretches its own pace), and every
-   `bt file pace` and `bt tune` line.
+   `bt file pace`, `bt tune` and `bt boost` line: whether the sender's feed earned the boost, and how long after its
+   feed ended its boost let go (`releaseAfterS`; the linger is 15 s).
 
-On the way out, even after a failure, it puts both phones' budget back to 4096, lets their tuners go, and relinks a
-link `--tune` asked of, so a soak or a battery night run next measures shipped settings. A `--tune` that asks a PHY
+On the way out, even after a failure, it puts both phones' budgets back (4096 and 18432), switches the boost back on, lets
+their tuners go, and relinks a link `--tune` asked of, so a soak or a battery night run next measures shipped settings. A `--tune` that asks a PHY
 needs the Coded experiment off on both phones (`…debug.PHY --es mode off`); the driver checks and refuses otherwise.
 
 Every rep is one JSON line in DIR/reps.jsonl, with the Wi-Fi frequency and Coded mode each phone was on; the logcat dumps sit beside
@@ -60,7 +64,12 @@ TX_DONE = re.compile(r"^file (\S+) (\d+)B in (\d+)ms @(-?\d+) → (\S+)")
 STREAM = re.compile(r"^(rx|file) ")
 LINK_UP = re.compile(r"^bt link up: (\S+) \(")
 LINK_DOWN = re.compile(r"^bt link down: (\S+) \(")
-KEPT = re.compile(r"^(bt file pace |bt tune |bt conn params |bt phy |bt link )")
+KEPT = re.compile(r"^(bt file pace |bt tune |bt boost |bt conn params |bt phy |bt link )")
+EARNED = re.compile(r"^bt file pace .* earned=true")
+# The tuner's line for a BALANCED it served, not the boost's intent: an ask queued on a client that never attached
+# is dropped unserved.
+RELEASE = re.compile(r"^bt tune (\S+) ask priority=BALANCED requested=true")
+BASE_PACE = 4096
 
 
 def log(msg: str) -> None:
@@ -178,7 +187,7 @@ class Trial:
     def restore(self) -> None:
         """Leaves both phones as shipped: the budget back, the tuners gone, and a tuned link made afresh."""
         for p in (self.tx, self.rx):
-            for extras in (("--ez", "resetPace", "true"), ("--es", "node", "all", "--ez", "close", "true")):
+            for extras in (("--ez", "resetPace", "true", "--ez", "boost", "true"), ("--es", "node", "all", "--ez", "close", "true")):
                 try:
                     p.bridge("LINKTUNE", *extras)
                 except (RuntimeError, subprocess.SubprocessError, json.JSONDecodeError) as e:
@@ -241,9 +250,18 @@ class Trial:
     def rep(self, n: int) -> dict:
         a = self.args
         tag = f"drain {a.cell} {n} {int(time.time())}"
-        reply = self.tx.bridge("LINKTUNE", "--ei", "filePace", str(a.pace))
+        boost = []
+        if a.boost:
+            boost += ["--ez", "boost", "true" if a.boost == "on" else "false"]
+        if a.boost_pace is not None:
+            boost += ["--ei", "boostPace", str(a.boost_pace)]
+        if a.boost:
+            self.rx.bridge("LINKTUNE", *boost)
+        reply = self.tx.bridge("LINKTUNE", "--ei", "filePace", str(a.pace), *boost)
         if reply["filePace"] != a.pace:
             raise RuntimeError(f"filePace reads {reply['filePace']}, not {a.pace}")
+        if a.boost and reply.get("boost") != (a.boost == "on"):
+            raise RuntimeError(f"boost reads {reply.get('boost')}, not {a.boost} (a build without BLE_LINK_BOOST?)")
         if a.relink and not self.relink():
             return {"cell": a.cell, "rep": n, "error": "relink failed"}
         if a.tune:
@@ -286,8 +304,12 @@ class Trial:
         tx_lines = self.tx.dump(start - 5, self.out / f"{a.cell}-{n}-{self.tx.label}.logcat")
         drain = next(((int(m.group(2)), int(m.group(3))) for _, msg in rx_lines
                       if (m := RX_DONE.match(msg)) and abs(int(m.group(2)) - size) < max(4096, size // 20)), None)
-        fed = next(((int(m.group(3)), int(m.group(4))) for _, msg in tx_lines
-                    if (m := TX_DONE.match(msg)) and abs(int(m.group(2)) - size) < max(4096, size // 20)), None)
+        fed_at, fed = next(((t, (int(m.group(3)), int(m.group(4)))) for t, msg in tx_lines
+                            if (m := TX_DONE.match(msg)) and abs(int(m.group(2)) - size) < max(4096, size // 20)),
+                           (None, None))
+        released_at = next((t for t, msg in tx_lines
+                            if fed_at and t >= fed_at and (m := RELEASE.match(msg)) and m.group(1).startswith(self.rx.node_id[:8])),
+                           None)
         return {
             "cell": a.cell,
             "rep": n,
@@ -295,6 +317,10 @@ class Trial:
             "sender": self.tx.label,
             "receiver": self.rx.label,
             "pace": a.pace,
+            "boost": a.boost,
+            "boostPace": reply.get("boostPace"),
+            "earned": any(EARNED.match(m) for _, m in tx_lines),
+            "releaseAfterS": round(released_at - fed_at, 1) if released_at and fed_at else None,
             "tune": a.tune,
             "phyMode": {p.label: p.phy_mode for p in (self.tx, self.rx)},
             "relinked": a.relink,
@@ -330,7 +356,8 @@ def summary(dirs: list[str]) -> None:
     for d in dirs:
         for line in (Path(d) / "reps.jsonl").read_text().splitlines():
             r = json.loads(line)
-            cells.setdefault(f"{r['cell']} {r.get('sender')}→{r.get('receiver')} pace={r.get('pace')}", []).append(r)
+            boost = f" boost={r['boost']}" if r.get("boost") else ""
+            cells.setdefault(f"{r['cell']} {r.get('sender')}→{r.get('receiver')} pace={r.get('pace')}{boost}", []).append(r)
     for cell, reps in sorted(cells.items()):
         drains = [r["drainBps"] for r in reps if r.get("drainBps")]
         held = [r["fileHeldS"] for r in reps if r.get("fileHeldS")]
@@ -341,6 +368,9 @@ def summary(dirs: list[str]) -> None:
         print(f"  drain B/s {fmt(drains)}")
         print(f"  file held s {fmt(held)}")
         print(f"  text waits s {fmt(waits)}{f', {missed} never arrived' if missed else ''}")
+        if any(r.get("boost") for r in reps):
+            releases = [r["releaseAfterS"] for r in reps if r.get("releaseAfterS") is not None]
+            print(f"  earned {sum(1 for r in reps if r.get('earned'))}/{len(reps)}, released after feed s {fmt(releases)}")
 
 
 def main() -> None:
@@ -350,7 +380,9 @@ def main() -> None:
     r.add_argument("--sender", required=True, help="LABEL=SERIAL")
     r.add_argument("--receiver", required=True, help="LABEL=SERIAL")
     r.add_argument("--cell", required=True, help="a name for this cell of the matrix")
-    r.add_argument("--pace", type=int, default=16384, help="the sender's file budget, B/s (0 unbounded)")
+    r.add_argument("--pace", type=int, help="the sender's file budget, B/s (0 unbounded); 16384, or 4096 with --boost")
+    r.add_argument("--boost", choices=("on", "off"), help="switch the link boost on or off on both phones")
+    r.add_argument("--boost-pace", type=int, help="the budget a boosted link earns, B/s (0 unbounded)")
     r.add_argument("--reps", type=int, default=3)
     r.add_argument("--size", type=int, default=700_000, help="random bytes per file (ignored with --image)")
     r.add_argument("--image", help="send a copy of this picture instead of random bytes")
@@ -368,6 +400,8 @@ def main() -> None:
         summary(args.dirs)
         return
     args.text_offsets = [int(x) for x in args.texts.split(",") if x]
+    if args.pace is None:
+        args.pace = BASE_PACE if args.boost else 16384
     Trial(args).run()
 
 

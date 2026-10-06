@@ -28,6 +28,7 @@ internal data class LinkTuneRequest(
  * [mtu] is what the exchange settled on and [mtuAsked] what was asked: from Android 14 the first ask on an ACL
  * exchanges 517 whatever it names, and a later one exchanges nothing. [refused] says why an ask was not made: an iPhone
  * link, or a PHY asked while the Coded experiment runs on this phone. [codedOwned]: a Coded handle steps this link.
+ * [boosting] and [earned] are the link's [BleLinkBoost], null when it has none (no file has crossed it yet).
  */
 internal data class LinkTuneStatus(
     val nodeId: String,
@@ -42,19 +43,31 @@ internal data class LinkTuneStatus(
     val rssi: Int? = null,
     val codedOwned: Boolean = false,
     val refused: String? = null,
+    val boosting: Boolean? = null,
+    val earned: Boolean? = null,
 )
 
-/** What `…debug.LINKTUNE` reports: the links it asked, and how many links feed a file right now. */
+/**
+ * What `…debug.LINKTUNE` reports: the links it asked, how many links feed a file right now, whether every one of them
+ * has earned the boosted budget ([CodedPhyPolicy.pace]), and how many LE connections this phone holds (which picks the
+ * full or the crowded boosted budget).
+ */
 internal data class LinkTuneReport(
     val feeding: Int,
     val links: List<LinkTuneStatus>,
+    val earned: Boolean = false,
+    val leLinks: Int = 0,
 )
 
 /**
  * The debug bridge's handle on per-link tuning (#120), bound by [BluetoothMeshTransport] while it runs, and only on a
  * debug build: the same shape as [CodedPhyDiag], so the bridge needs no `android.bluetooth` import or transport
- * reference. A measuring tool for the drain trial; nothing in the mesh asks a link for anything through it.
+ * reference. A measuring tool for the drain trial. [boostOn] is the trial's A/B switch: off, every [BleLinkBoost]
+ * counts its link neither eligible nor listened to, so it lets a boost go, asks for none and attaches no client
+ * (`…debug.LINKTUNE --ez boost false`).
  */
 internal object LinkTuneDiag {
     @Volatile var tune: (suspend (LinkTuneRequest) -> LinkTuneReport)? = null
+
+    @Volatile var boostOn: Boolean = true
 }

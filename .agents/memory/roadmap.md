@@ -608,6 +608,15 @@ doc). **Don't start a deferred item without explicit direction.**
   shipped artifact (`BuildConfig.BLE_CODED_PHY`, debug on / release off) until: a walk-apart field trial (link-drop
   distance under off, auto and coded), the OFF-vs-AUTO 1M-sighting rate, chat latency behind a blob on a CODED link,
   and a battery night against OFF. iOS has no Coded PHY; 2M up-shift and PHY-aware blob scheduling are deferred.
+- **Bluetooth link boost: the release flag, screen-off feeds, iPhone links** — BUILT 2026-10-06 on
+  `fix/ble-link-boost-120` (ADR 2026-10.2da4, #120): while a file moves either way, a side whose screen is on asks for
+  `CONNECTION_PRIORITY_HIGH` (and the MTU once), and the 1M/2M budget rises to 18 KiB/s (12 past four LE connections)
+  while every feeding link reported ≤ 15 ms.
+  Dark in a shipped artifact (`BuildConfig.BLE_LINK_BOOST`, debug on / release off) until the device trial in the ADR:
+  single links, P3 both ways, fan-out, concurrent receive, a phone holding more LE links (it sets the shipped budget),
+  Wi-Fi Aware on, the Moto, screen-off, a mixed build. Deferred: a file between two dark phones (the linger's wait
+  cannot wake the CPU, and an alarm costs more than it saves), iPhone links (the doorbell's BALANCED owns them; the port would need
+  its own ask), and a 2M step (≈10% with HIGH).
 - **Blob holder query: the release flag, the iOS responder, partial fetch** — BUILT 2026-10-05 on `feat/blob-have`
   (ADR 2026-10.6e5t): a `blobhave` query to every neighbour whose link carries `CAP_BLOB_HAVE`, the best holder by
   plane and load asked alone, confirm then fall back, f7gg's round for the rest. Every build answers; asking is

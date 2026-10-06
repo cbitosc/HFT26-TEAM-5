@@ -100,3 +100,13 @@ Tests: `CodedPhyPolicyTest` (the 4 KiB/s and 8 KiB default, the split by `feedin
 clamps, a count under one, Coded outside the split, unbounded at ≤ 0), `TransferPacePolicyTest` (a split change
 charges the next chunk at the new share), and `FramedLinkTest` (a link counts as feeding every time it reads its
 pace, and stops once the file is out or its source is gone).
+
+**Amended 2026-10-06 (#120, ADR 2026-10.2da4): a boosted link earns a larger budget.** The follow-up above is done.
+Measured from the sending side, a link's drain is the host's share of the controller's buffers times the interval:
+about 2 packets per event, so 9 KB/s at 45 ms and 22.5–29 KB/s at 15 ms. While a file moves over a link either way,
+a side whose screen is on asks for `CONNECTION_PRIORITY_HIGH`, and lets go 15 s after the link last streamed. While
+every link feeding a file on 1M/2M has reported 15 ms or less, the budget is `PhyTuning.boostPaceBytesPerSec`
+(18 KiB/s), or 12 KiB/s on a phone holding more than four LE connections, split exactly as above. Otherwise it stays
+4 KiB/s. `CodedPhyPolicy.pace` takes the `earned` flag and the LE count, `paceFor` computes them, and the
+`bt file pace` line ends `earned=… le=…`. On the trial's best cell a 700 KB photo crossed in 41–42 s with every text behind
+it in 3.4 s or less. Dark in release behind `BLE_LINK_BOOST` until its device trial (2da4).

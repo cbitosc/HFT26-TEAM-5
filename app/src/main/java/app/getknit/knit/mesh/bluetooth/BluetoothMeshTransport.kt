@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothProfile
 import android.bluetooth.BluetoothServerSocket
 import android.bluetooth.BluetoothSocket
 import android.bluetooth.le.AdvertisingSetCallback
@@ -199,8 +200,17 @@ class BluetoothMeshTransport(
     // with the link.
     private val linkPhy = ConcurrentHashMap<FramedLink, LinkPhy>()
 
-    // The feeding count [paceFor] last logged, so `bt file pace` is written when the split changes, not every chunk.
+    // The feeding count and earned flag [paceFor] last logged, so `bt file pace` is written when the split or the budget
+    // changes, not every chunk.
     @Volatile private var lastFeeding = 0
+
+    @Volatile private var lastEarned = false
+
+    // This phone's LE connections as [leLinkCount] last counted them, and when: the boosted budget depends on how many
+    // share the controller's buffers, and the count costs a binder call, so a feed reads it at most every 10 s.
+    @Volatile private var leLinks = 1
+
+    @Volatile private var leLinksAt = Long.MIN_VALUE / 2
     private val linkDevices = ConcurrentHashMap<FramedLink, BluetoothDevice>()
 
     // What each unlinked peer's adverts did this minute, logged by [diagLoop] as `bt coded heard` while the experiment
@@ -271,9 +281,13 @@ class BluetoothMeshTransport(
     private val doorbells = ConcurrentHashMap<FramedLink, BleDoorbell>()
     private val rings = AtomicInteger()
 
-    // The drain trial's per-link tuners (#120), made by `…debug.LINKTUNE` on a debug build only and keyed by link like
-    // [doorbells]: a GATT client on the link's ACL that asks for a PHY, a priority or an MTU when the bridge says so.
+    // Each link's tuner (#120): a GATT client on the link's ACL that asks for a priority, an MTU or a PHY. Keyed by link
+    // like [doorbells], made on first use by the link's [boosts] entry or by `…debug.LINKTUNE`, one per link for both.
     private val tuners = ConcurrentHashMap<FramedLink, BleLinkTuner>()
+
+    // Each link's boost (#120): made at the link's first file either way when the build allows it and the peer is not an
+    // iPhone, it asks for a short interval while this side feeds and says whether the link earned the larger budget.
+    private val boosts = ConcurrentHashMap<FramedLink, BleLinkBoost>()
 
     // Which frames already crossed which link, either way: the router's flood copy and the fast path's link
     // copy are the same frame twice for the same stream, and a relayed frame's fast copy would go straight
@@ -478,12 +492,12 @@ class BluetoothMeshTransport(
                         readvertise()
                     }
                 }
-            powerJob = scope.launch { powerState.state.drop(1).collect { wake() } }
+            powerJob = scope.launch { powerState.state.drop(1).collect { onPowerChange() } }
             diagJob = scope.launch { diagLoop() }
             advertJob = scope.launch { advertLoop() }
             // A2DP forces the scan to its floor (audio contends the radio); wake the scan loop on any change so
             // the falling edge (audio stopped) resumes the normal cadence promptly instead of after the floor gap.
-            audioJob = scope.launch { audioMonitor.contended.drop(1).collect { wakeScan() } }
+            audioJob = scope.launch { audioMonitor.contended.drop(1).collect { onAudioChange() } }
             // The board dial holds an arbiter slot; wake the scan on release so it resumes without waiting out the gap.
             arbiterJob = scope.launch { arbiter.busy.drop(1).collect { wakeScan() } }
             // Knit coming on screen starts a hunt now (CodedPhyPolicy.hunts); leaving it ends one at the next window, 12 s
@@ -507,6 +521,18 @@ class BluetoothMeshTransport(
                 sideJob = scope.launch { sideScanLoop(it) }
             }
         }
+    }
+
+    /** The power state moved: the scan's cadence may change, and a dark screen lets a boost go at once. */
+    private fun onPowerChange() {
+        wake()
+        boosts.values.forEach(BleLinkBoost::poke)
+    }
+
+    /** Bluetooth audio started or stopped: the scan's floor moves, and audio starting lets a boost go. */
+    private fun onAudioChange() {
+        wakeScan()
+        boosts.values.forEach(BleLinkBoost::poke)
     }
 
     override fun stop() {
@@ -1008,27 +1034,148 @@ class BluetoothMeshTransport(
             }
         known.forEach { (link, status) -> if (links[link.nodeId] === link) linkPhy[link] = status.phy }
         CodedPhyDiag.publishLinkPhys(known.associate { (_, status) -> status.nodeId to status.phy })
+        boosts.values.forEach(BleLinkBoost::poke) // a link on Coded is never boosted
     }
 
     /**
      * The pace a file is fed to [link] at, by the PHY it was last read on (#114, ADR 2026-10.yvn6), and on 1M/2M by how
      * many links share the budget right now (#117, ADR 2026-10.8jwn): every link here streaming a file and not on Coded, this one included.
-     * Read before each chunk, so a feed that starts or ends re-splits the others at their next chunk. A feed whose
-     * writes stall keeps its share until its write fails.
+     * The budget is the boosted one only while every one of those links has earned it (#120): one that has not, or has
+     * no boost (an iPhone, the flag off), holds them all to the base. Read before each chunk, so a feed that starts or
+     * ends, or a link that earns or loses the boost, re-splits the others at their next chunk. A feed whose writes stall
+     * keeps its share until its write fails.
      */
     private fun paceFor(link: FramedLink): PaceConfig {
         val phy = linkPhy[link] ?: LinkPhy.UNKNOWN
-        val feeding = links.values.count { it.txInProgress && linkPhy[it] != LinkPhy.CODED }
-        val pace = CodedPhyPolicy.pace(phy, CodedPhyDiag.tuning, feeding)
-        if (phy != LinkPhy.CODED && feeding != lastFeeding) {
+        val feedingLinks = feedingLinks()
+        val feeding = feedingLinks.size
+        val earned = earned(feedingLinks)
+        val le = if (earned) leLinkCount() else links.size
+        val tuning = CodedPhyDiag.tuning
+        val pace = CodedPhyPolicy.pace(phy, tuning, feeding, earned, le)
+        if (phy != LinkPhy.CODED && (feeding != lastFeeding || earned != lastEarned)) {
             lastFeeding = feeding
+            lastEarned = earned
+            // `earned` and `le` ride last, so every parse of the line before them holds.
             Log.i(
                 TAG,
-                "bt file pace budget=${CodedPhyDiag.tuning.filePaceBytesPerSec} feeding=$feeding " +
-                    "share=${pace.bytesPerSec} chunk=${pace.chunkBytes}",
+                "bt file pace budget=${CodedPhyPolicy.budget(tuning, earned, le)} feeding=$feeding " +
+                    "share=${pace.bytesPerSec} chunk=${pace.chunkBytes} earned=$earned le=$le",
             )
         }
         return pace
+    }
+
+    /**
+     * This phone's LE connections: the mesh's links, and every other device a GATT client or server on this phone is
+     * connected to (a ring, a watch's LE fallback, a LoRa board), which take a share of the controller's buffers too.
+     * A mesh link appears there only while a tuner holds a client on it, so those are not counted twice. Counted at
+     * most every [LE_COUNT_MS].
+     */
+    private fun leLinkCount(): Int {
+        val now = elapsed()
+        if (now - leLinksAt < LE_COUNT_MS) return leLinks
+        val ours = linkAddresses.values.toSet()
+        val others =
+            runCatching { bluetoothManager?.getConnectedDevices(BluetoothProfile.GATT) }
+                .getOrNull()
+                .orEmpty()
+                .count { it.address !in ours }
+        leLinks = links.size + others
+        leLinksAt = now
+        return leLinks
+    }
+
+    /** The links sharing the 1M/2M file budget right now: every one streaming a file and not on Coded. */
+    private fun feedingLinks(): List<FramedLink> = links.values.filter { it.txInProgress && linkPhy[it] != LinkPhy.CODED }
+
+    /**
+     * Whether every one of [feedingLinks] has earned the boosted budget (none feeding earns nothing). Never while
+     * Bluetooth audio streams: the budget was measured with none, and A2DP takes the air a 15 ms link drains through.
+     */
+    private fun earned(feedingLinks: List<FramedLink>): Boolean =
+        feedingLinks.isNotEmpty() && !audioMonitor.contended.value && feedingLinks.all { boosts[it]?.earned == true }
+
+    /**
+     * Makes [link]'s boost at its first file either way, and pokes it on every file edge after (FramedLink's `onBusy`).
+     * None for an iPhone (its doorbell owns the parameters, ADR 2026-09.dqvb), none with the build flag off, and none for
+     * a link already torn down or replaced: its own close pokes this too.
+     */
+    private fun boostPoke(link: FramedLink) {
+        if (!BuildConfig.BLE_LINK_BOOST || DoorbellPolicy.serves(link.peer.capabilities)) return
+        val nodeId = link.nodeId
+        if (links[nodeId] !== link) return
+        val boost =
+            boosts[link] ?: BleLinkBoost(
+                nodeId = nodeId,
+                feeding = { link.feeding },
+                receiving = { link.rxInProgress },
+                observes = {
+                    LinkBoostPolicy.observes(
+                        enabled = LinkTuneDiag.boostOn,
+                        doorbell = false,
+                        coded = linkPhy[link] == LinkPhy.CODED,
+                    )
+                },
+                eligible = {
+                    LinkBoostPolicy.eligible(
+                        enabled = LinkTuneDiag.boostOn,
+                        doorbell = false,
+                        coded = linkPhy[link] == LinkPhy.CODED,
+                        interactive = powerState.state.value.interactive,
+                        audio = audioMonitor.contended.value,
+                    )
+                },
+                tuner = { make -> tunerFor(link, make) },
+                scope = scope,
+                wait = elapsedWait,
+                now = SystemClock::elapsedRealtime,
+            ).let { fresh ->
+                boosts.putIfAbsent(link, fresh) ?: fresh.also {
+                    it.start()
+                    if (links[nodeId] !== link) boosts.remove(link)?.close() // torn down meanwhile: its teardown missed this
+                }
+            }
+        boost.poke()
+    }
+
+    /**
+     * [link]'s tuner: the live one, or — when [make] — a new one, its reports routed to the link's boost. Null for a link
+     * gone or without a device, or when none is live and none may be made.
+     */
+    private fun tunerFor(
+        link: FramedLink,
+        make: Boolean,
+    ): BleLinkTuner? {
+        val live = tuners[link]?.takeIf { it.alive }
+        val device = linkDevices[link]
+        if (live != null || !make || device == null) return live
+        val nodeId = link.nodeId
+        var made: BleLinkTuner? = null
+        val tuner =
+            tuners.compute(link) { _, current ->
+                current?.takeIf { it.alive } ?: BleLinkTuner(
+                    context = appContext,
+                    device = device,
+                    nodeId = nodeId,
+                    scope = scope,
+                    isLive = { links[nodeId] === link },
+                    now = SystemClock::elapsedRealtime,
+                    onParams = { params, ok -> boosts[link]?.onParams(params, ok) },
+                    onEnded = { attached -> boosts[link]?.onTunerEnded(attached) },
+                ).also {
+                    current?.close()
+                    made = it
+                }
+            }
+        val fresh = made ?: return tuner
+        if (links[nodeId] !== link) { // torn down meanwhile: its teardown missed this
+            tuners.remove(link, fresh)
+            fresh.close()
+            return null
+        }
+        fresh.start()
+        return fresh
     }
 
     /** Gives [link] a PHY handle if the experiment runs, its peer was heard on Coded, and it has none yet. */
@@ -1063,6 +1210,7 @@ class BluetoothMeshTransport(
      * peer's step to Coded. The peer's own mode is not visible from here; the trial sets both phones' mode off.
      */
     private suspend fun tuneLinks(req: LinkTuneRequest): LinkTuneReport {
+        boosts.values.forEach(BleLinkBoost::poke) // `--ez boost` may have just flipped
         val named = links.values.filter { req.node == "all" || it.nodeId.startsWith(req.node) }
         // Side by side, so `all` answers within the bridge's 30 s however many links it names.
         val statuses =
@@ -1074,11 +1222,12 @@ class BluetoothMeshTransport(
                             when {
                                 req.close -> {
                                     tuners.remove(link)?.close()
+                                    boosts[link]?.forget() // nothing hears the link now
                                     LinkTuneStatus(link.nodeId, address, attached = false)
                                 }
 
                                 !req.asks -> {
-                                    tuners[link]?.status() ?: LinkTuneStatus(link.nodeId, address, attached = false)
+                                    withBoost(link, tuners[link]?.status() ?: LinkTuneStatus(link.nodeId, address, attached = false))
                                 }
 
                                 DoorbellPolicy.serves(link.peer.capabilities) -> {
@@ -1093,34 +1242,45 @@ class BluetoothMeshTransport(
                         }
                     }.awaitAll()
             }
-        val feeding = links.values.count { it.txInProgress && linkPhy[it] != LinkPhy.CODED }
-        return LinkTuneReport(feeding, statuses)
+        val feedingLinks = feedingLinks()
+        return LinkTuneReport(feedingLinks.size, statuses, earned(feedingLinks), leLinkCount())
     }
 
     private suspend fun tuneLink(
         link: FramedLink,
         req: LinkTuneRequest,
     ): LinkTuneStatus? {
-        val device = linkDevices[link] ?: return null
-        val nodeId = link.nodeId
-        val tuner =
-            tuners[link]?.takeIf { it.alive } ?: BleLinkTuner(
-                context = appContext,
-                device = device,
-                nodeId = nodeId,
-                scope = scope,
-                isLive = { links[nodeId] === link },
-                now = SystemClock::elapsedRealtime,
-            ).also { fresh ->
-                tuners.put(link, fresh)?.close()
-                if (links[nodeId] !== link) tuners.remove(link)?.close() // torn down meanwhile: its teardown missed this
-                fresh.start()
-            }
+        val tuner = tunerFor(link, make = true) ?: return null
         val codedRuns = codedOn()
         val status = tuner.tune(if (codedRuns) req.copy(phy = null) else req)
         val refused = if (codedRuns && req.phy != null) "the Coded experiment runs: …debug.PHY --es mode off on both" else null
-        return status.copy(codedOwned = phyControls.containsKey(link), refused = refused)
+        return withBoost(link, status.copy(codedOwned = phyControls.containsKey(link), refused = refused))
     }
+
+    /**
+     * Lets [link]'s boost and tuner go with the link. A link replaced by a fresh one from the same peer ([sharedAcl]) may
+     * keep its ACL, so a boost still holding the short interval asks for BALANCED as the tuner's last ask, served without
+     * waiting for a report: nothing else would put that ACL back. A link torn down lets its client go at once — an open
+     * client holds the ACL, and the ACL takes the interval with it when it goes.
+     */
+    private fun closeTuning(
+        link: FramedLink,
+        sharedAcl: Boolean,
+    ) {
+        val boosting = boosts.remove(link)?.let { boost -> boost.boosting.also { boost.close() } } == true
+        val tuner = tuners.remove(link) ?: return
+        if (sharedAcl && boosting) {
+            Log.i(TAG, "bt boost ${link.nodeId} release (link replaced)")
+            tuner.finish(LinkTuneRequest(node = link.nodeId, priority = TunePriority.BALANCED))
+        } else {
+            tuner.close()
+        }
+    }
+
+    private fun withBoost(
+        link: FramedLink,
+        status: LinkTuneStatus,
+    ): LinkTuneStatus = boosts[link]?.let { status.copy(boosting = it.boosting, earned = it.earned) } ?: status
 
     private fun codedPhyStatus(): CodedPhyStatus {
         val now = elapsed()
@@ -1812,6 +1972,7 @@ class BluetoothMeshTransport(
                 pace = { paceFor(events.link) }, // set just below; the writer starts only at framed.start()
                 log = { msg -> Log.d(TAG, msg) },
                 landing = landing,
+                onBusy = { boostPoke(events.link) },
             )
         events.link = framed
         crossings.forget(nodeId) // a fresh stream starts clean: the peer may have restarted with an empty SeenSet
@@ -1829,7 +1990,7 @@ class BluetoothMeshTransport(
             phyControls.remove(prev)?.close()
             publishLinkPhys()
             doorbells.remove(prev)?.close() // teardownLink(only = prev) will find it replaced and release nothing
-            tuners.remove(prev)?.close()
+            closeTuning(prev, sharedAcl = true)
             prev.close() // a stale link to the same peer — never leak it; its own end releases nothing now
         }
         // Before framed.start() and the neighbor refresh, so the link-up frames already ring it.
@@ -1880,7 +2041,7 @@ class BluetoothMeshTransport(
         }
         publishLinkPhys()
         doorbells.remove(fl)?.close()
-        tuners.remove(fl)?.close()
+        closeTuning(fl, sharedAcl = false)
         fl.close()
         crossings.forget(nodeId)
         // The peer was here until now: its side-channel flag lingers from the link's end, not from a sighting the
@@ -2248,6 +2409,15 @@ class BluetoothMeshTransport(
                 "alone=${aloneForMs()}ms psm=$currentPsm advert=$presenceAdvert " +
                 "doorbells=${doorbells.size} rings=${rings.get()}" +
                 (if (tuners.isNotEmpty()) " tuners=${tuners.size}" else "") +
+                (
+                    if (boosts.isNotEmpty()) {
+                        " boosts=${boosts.size} boosting=${boosts.values.count {
+                            it.boosting
+                        }} earned=${boosts.values.count { it.earned }}"
+                    } else {
+                        ""
+                    }
+                ) +
                 (if (gattPeers) " gattPayloads=${gattPayloads.payloadCount} gattReads=${gattReads.get()}" else "") +
                 (if (codedOn()) " phy=${codedMode.wire} coded=$codedAdvert phyLinks=${phyControls.size} hunt=$hunting" else "") +
                 (sideChannel?.let { " ${it.diag()} $sideDecision" } ?: ""),
@@ -2290,6 +2460,9 @@ class BluetoothMeshTransport(
         // A Coded start the stack failed internally (ADVERTISE_FAILED_INTERNAL_ERROR) is retried this many times per
         // bring-up, on [codedKeeper]'s doubling wait; [CODED_RETRYING] marks a retry in flight, so its failure is quiet.
         private const val MAX_CODED_START_RETRIES = 5
+
+        // How often a feed recounts this phone's LE connections for the boosted budget ([leLinkCount]).
+        private const val LE_COUNT_MS = 10_000L
         private const val CODED_DARK_INTERNAL = "dark ${AdvertisingSetCallback.ADVERTISE_FAILED_INTERNAL_ERROR}"
         private const val CODED_RETRYING = "retrying"
 

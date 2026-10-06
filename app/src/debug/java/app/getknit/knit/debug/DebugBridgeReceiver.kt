@@ -231,13 +231,19 @@ import java.nio.ByteBuffer
  *   <id prefix>|all` names the links; `--es phy 1m|2m|1m2m`, `--es priority high|balanced|low` and `--ei mtu N` (23..517)
  *   are asked of each, in that order, through a GATT client on the link's own ACL made on first use, then `--ez read
  *   true` reads the PHY and link RSSI back; `--ez close true` lets the clients go. `--ei filePace N` sets the 1M/2M file
- *   budget (as `…debug.PHY`'s, until the process dies) and `--ez resetPace true` restores 4096. An iPhone link is refused
+ *   budget (as `…debug.PHY`'s, until the process dies), `--ei boostPace N` the budget while every feeding link has earned
+ *   its boost, `--ei crowdedPace N` that budget on a phone holding more than four LE connections, and `--ez resetPace
+ *   true` restores all three (4096, 18432, 12288). `--ez boost false` stops the link boost in this
+ *   process — every boost lets go and asks nothing until `--ez boost true` — the A/B switch on one build (a build
+ *   without `BLE_LINK_BOOST` never boosts). An iPhone link is refused
  *   (its doorbell owns the parameters), and no PHY is asked while the Coded experiment runs here (a mask lasts the link's
  *   life, so it would block either side's stepper: set `…debug.PHY --es mode off` on both phones first). The reply:
- *   `filePace`, `fileChunk`, `feeding` (links feeding a file now) and `links[]` (nodeId, address, attached, txPhy, rxPhy,
- *   intervalUs / latency / timeoutMs — reported only on a change after the client attached — paramsStatus, mtu and
- *   mtuAsked — from Android 14 the first ask on an ACL settles on 517 whatever it names — rssi, codedOwned, refused).
- *   The `bt tune <id> …` log lines carry the same, and the HCI snoop is the oracle.
+ *   `filePace`, `fileChunk`, `boostPace`, `crowdedPace`, `leLinks` (this phone's LE connections), `boost`, `feeding`
+ *   (links feeding a file now), `earned` (every one of them earned the boost) and `links[]` (nodeId, address, attached, txPhy, rxPhy, intervalUs / latency / timeoutMs —
+ *   reported only on a change after the client attached — paramsStatus, mtu and mtuAsked — from Android 14 the first
+ *   ask on an ACL settles on 517 whatever it names — rssi, codedOwned, refused, and the link's boost's boosting and
+ *   earned, null before its first file). The `bt tune <id> …` and `bt boost <id> …` log lines carry the same, and the
+ *   HCI snoop is the oracle.
  * - [ACTION_HEAL] — nudges the transport to rescan/re-advertise.
  * - [ACTION_PAUSE] / [ACTION_RESUME] — the notification's Pause and Resume, by their store write alone
  *   (`--ei minutes 15|60`, the two offered spans): `MeshService` follows `SettingsStore.meshPausedUntil`, so
@@ -2315,18 +2321,36 @@ class DebugBridgeReceiver :
         }
         val tune = LinkTuneDiag.tune ?: return reply("error", "Bluetooth transport is not running")
         if (intent.getBooleanExtra("resetPace", false)) {
-            CodedPhyDiag.tuning = CodedPhyDiag.tuning.copy(filePaceBytesPerSec = PhyTuning().filePaceBytesPerSec)
+            val defaults = PhyTuning()
+            CodedPhyDiag.tuning =
+                CodedPhyDiag.tuning.copy(
+                    filePaceBytesPerSec = defaults.filePaceBytesPerSec,
+                    boostPaceBytesPerSec = defaults.boostPaceBytesPerSec,
+                    crowdedBoostPaceBytesPerSec = defaults.crowdedBoostPaceBytesPerSec,
+                )
         }
         if (intent.hasExtra("filePace")) {
             CodedPhyDiag.tuning = CodedPhyDiag.tuning.copy(filePaceBytesPerSec = intent.getIntExtra("filePace", 0))
         }
-        val report = tune(request)
+        if (intent.hasExtra("boostPace")) {
+            CodedPhyDiag.tuning = CodedPhyDiag.tuning.copy(boostPaceBytesPerSec = intent.getIntExtra("boostPace", 0))
+        }
+        if (intent.hasExtra("crowdedPace")) {
+            CodedPhyDiag.tuning = CodedPhyDiag.tuning.copy(crowdedBoostPaceBytesPerSec = intent.getIntExtra("crowdedPace", 0))
+        }
+        if (intent.hasExtra("boost")) LinkTuneDiag.boostOn = intent.getBooleanExtra("boost", true)
+        val report = tune(request) // pokes every boost, so a switch just flipped takes at once
         val tuned = CodedPhyDiag.tuning
         return JSONObject()
             .put("status", "ok")
             .put("filePace", tuned.filePaceBytesPerSec)
             .put("fileChunk", CodedPhyPolicy.pace(LinkPhy.ONE_M, tuned).chunkBytes)
+            .put("boostPace", tuned.boostPaceBytesPerSec)
+            .put("crowdedPace", tuned.crowdedBoostPaceBytesPerSec)
+            .put("leLinks", report.leLinks)
+            .put("boost", BuildConfig.BLE_LINK_BOOST && LinkTuneDiag.boostOn)
             .put("feeding", report.feeding)
+            .put("earned", report.earned)
             .put(
                 "links",
                 JSONArray(
@@ -2346,6 +2370,8 @@ class DebugBridgeReceiver :
                             .put("rssi", it.rssi ?: JSONObject.NULL)
                             .put("codedOwned", it.codedOwned)
                             .put("refused", it.refused ?: JSONObject.NULL)
+                            .put("boosting", it.boosting ?: JSONObject.NULL)
+                            .put("earned", it.earned ?: JSONObject.NULL)
                     },
                 ),
             )

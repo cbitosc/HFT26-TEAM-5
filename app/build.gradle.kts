@@ -123,6 +123,13 @@ val blobQuery = (project.findProperty("blobQuery") as? String)?.toBoolean()
 // stays identical. Flip the release default after the field trial.
 val bleCodedPhy = (project.findProperty("bleCodedPhy") as? String)?.toBoolean()
 
+// The Bluetooth link boost (knit-next#120): a link feeding a file asks for CONNECTION_PRIORITY_HIGH through a GATT
+// client on its own ACL, and the 1M/2M file budget rises while every feeding link reports the short interval — ON in
+// debug, OFF in a shipped artifact, overridable with `-PbleLinkBoost=true|false`. Off, no link opens a client for it
+// and every feed keeps the base budget. Not a code strip, and the defaults live in source so F-Droid's -P-free rebuild
+// stays identical. Flip the release default after the device trial.
+val bleLinkBoost = (project.findProperty("bleLinkBoost") as? String)?.toBoolean()
+
 // The Wear OS status service (a read-only GATT characteristic a bonded watch reads the mesh state from; the
 // watch app is the opt-in `:wear` module) — a prototype: ON in debug, OFF in a shipped artifact, overridable
 // with `-PwearStatus=true|false`. It gates the one seam, the `WearStatusServer` definition in the DI graph
@@ -273,6 +280,8 @@ android {
         buildConfigField("boolean", "BLOB_QUERY", (blobQuery ?: true).toString())
         // The Coded PHY experiment is ON in debug so a lab build can be walk-tested; see `bleCodedPhy` above.
         buildConfigField("boolean", "BLE_CODED_PHY", (bleCodedPhy ?: true).toString())
+        // The Bluetooth link boost is ON in debug so a lab build asks for HIGH while it feeds; see `bleLinkBoost` above.
+        buildConfigField("boolean", "BLE_LINK_BOOST", (bleLinkBoost ?: true).toString())
         // The Wear OS status service is ON in debug so a lab phone serves a paired watch; see `wearStatus` above.
         buildConfigField("boolean", "WEAR_STATUS", (wearStatus ?: true).toString())
         // Fault injection for the model poison-pill's acceptance test (ADR 037):
@@ -377,6 +386,8 @@ android {
             buildConfigField("boolean", "BLOB_QUERY", (blobQuery ?: false).toString())
             // The Coded PHY experiment is not introduced yet: dark in a shipped artifact until its field trial.
             buildConfigField("boolean", "BLE_CODED_PHY", (bleCodedPhy ?: false).toString())
+            // The Bluetooth link boost is not introduced yet: a shipped artifact feeds at the base budget until its trial.
+            buildConfigField("boolean", "BLE_LINK_BOOST", (bleLinkBoost ?: false).toString())
             // The Wear OS status service is a prototype: dark in a shipped artifact.
             buildConfigField("boolean", "WEAR_STATUS", (wearStatus ?: false).toString())
             // Never ship a fault injector, whatever `-PmodelFaultOnLoad` said.

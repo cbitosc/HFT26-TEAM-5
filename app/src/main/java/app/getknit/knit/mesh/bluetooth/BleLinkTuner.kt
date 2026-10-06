@@ -16,15 +16,18 @@ import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Asks one Bluetooth link's controller for a PHY, a connection priority or an ATT MTU, and reads back what the link
- * runs on (#120). The drain trial's lever: a GATT client attached to the link's own ACL is the only handle Android
- * gives on a link's parameters — the L2CAP socket has none — so this follows [BlePhyControl]'s lifecycle: [isLive]
- * re-checked just before `connectGatt` (on a dead ACL the call would dial), a 2 s attach window, no service discovery
- * (its unlock re-sends the central's first parameters, ADR 2026-09.dqvb), and the client closed with the link.
+ * runs on (#120). A GATT client attached to the link's own ACL is the only handle Android gives on a link's parameters
+ * — the L2CAP socket has none — so this follows [BlePhyControl]'s lifecycle: [isLive] re-checked just before
+ * `connectGatt` (on a dead ACL the call would dial), a 2 s attach window, no service discovery (its unlock re-sends the
+ * central's first parameters, ADR 2026-09.dqvb), and the client closed with the link.
  *
- * It has no policy: each [tune] is one ask the debug bridge made, served in order by one coroutine, each step waiting
- * a bounded time for the controller's report. A request the controller leaves unanswered (a priority the link already
- * has reports nothing) is not an error; the status says what was heard. Device-verified only — there is no host GATT
- * stack.
+ * It has no policy. Its asks come from [BleLinkBoost] ([enqueue]) and from the debug bridge ([tune]), one tuner per
+ * link shared by both, served in order by one coroutine. A bridge ask waits a bounded time for each of the controller's
+ * reports, so its reply can carry them; a boost's ask waits for none — the boost hears the outcome through [onParams] —
+ * so a release queued at the screen-off edge goes out at once instead of behind a wait the CPU's sleep would stretch.
+ * A request the controller leaves unanswered (a priority the link already has reports nothing) is not an error; the
+ * status says what was heard. Every parameter update the link reports reaches [onParams], whichever side
+ * asked for it: that is how the boost learns the interval. Device-verified only — there is no host GATT stack.
  */
 @SuppressLint("MissingPermission")
 internal class BleLinkTuner(
@@ -34,9 +37,14 @@ internal class BleLinkTuner(
     private val scope: CoroutineScope,
     private val isLive: () -> Boolean,
     private val now: () -> Long,
+    // Every update the link reports, whoever asked (binder thread), and the loop's end: whether it had attached.
+    private val onParams: (LinkParams, ok: Boolean) -> Unit = { _, _ -> },
+    private val onEnded: (attached: Boolean) -> Unit = {},
 ) {
     private class Ask(
         val request: LinkTuneRequest,
+        // Whether each step waits for the controller's report: the bridge's asks do, the boost's never.
+        val waits: Boolean,
         val done: CompletableDeferred<Unit> = CompletableDeferred(),
     )
 
@@ -54,6 +62,8 @@ internal class BleLinkTuner(
 
     @Volatile private var disconnected = false
 
+    @Volatile private var closed = false
+
     @Volatile private var txPhy: LinkPhy? = null
 
     @Volatile private var rxPhy: LinkPhy? = null
@@ -68,8 +78,8 @@ internal class BleLinkTuner(
 
     @Volatile private var rssi: Int? = null
 
-    /** Whether this tuner can still serve an ask: started, and neither closed nor cut off from the link. */
-    val alive: Boolean get() = job?.isActive == true && !disconnected
+    /** Whether this tuner can still serve an ask: not closed, not cut off from the link, and its loop not over. */
+    val alive: Boolean get() = !closed && !disconnected && job?.isCompleted != true
 
     fun start() {
         job = scope.launch(Dispatchers.IO) { loop() }
@@ -77,12 +87,32 @@ internal class BleLinkTuner(
 
     /** Stop, and let the GATT client go. What was asked stays on the link until the link or the other side moves it. */
     fun close() {
+        closed = true
         job?.cancel()
+    }
+
+    /**
+     * Queues what [request] names and serves it without waiting for any report; the reports come through [onParams].
+     * False once closed.
+     */
+    fun enqueue(request: LinkTuneRequest): Boolean = asks.trySend(Ask(request, waits = false)).isSuccess
+
+    /**
+     * Serves [request] without waiting for its report, then lets the client go: the last ask of a tuner whose link was
+     * replaced over the same ACL. Nothing after it is served, and nothing waits on the elapsed or the monotonic clock
+     * but the attach itself.
+     */
+    fun finish(request: LinkTuneRequest) {
+        if (!enqueue(request) || job == null) {
+            close()
+            return
+        }
+        asks.close() // the loop serves what is queued, then ends through its finally
     }
 
     /** Asks for what [request] names and returns the status once the asks are answered or given up on. */
     suspend fun tune(request: LinkTuneRequest): LinkTuneStatus {
-        val ask = Ask(request)
+        val ask = Ask(request, waits = true)
         if (asks.trySend(ask).isSuccess) {
             // stretches: the bridge's own give-up on one ask; a sleep only returns the status read so far.
             withTimeoutOrNull(TUNE_TIMEOUT_MS) { ask.done.await() }
@@ -106,6 +136,7 @@ internal class BleLinkTuner(
 
     @Suppress("DEPRECATION") // compileSdk 37.1 deprecates connectGatt(Context, …); see BleDoorbell.Client.open
     private suspend fun loop() {
+        var everAttached = false
         try {
             if (!isLive()) return
             val started = now()
@@ -121,9 +152,10 @@ internal class BleLinkTuner(
                 return
             }
             attached = true
+            everAttached = true
             Log.i(TAG, "bt tune $nodeId attached (${device.address}) in ${now() - started}ms")
             for (ask in asks) {
-                if (!disconnected) serve(g, ask.request)
+                if (!disconnected) serve(g, ask.request, ask.waits)
                 ask.done.complete(Unit)
             }
         } finally {
@@ -142,22 +174,25 @@ internal class BleLinkTuner(
                 runCatching { it.close() }
             }
             gatt = null
+            if (!closed) onEnded(everAttached)
         }
     }
 
     private suspend fun serve(
         g: BluetoothGatt,
         request: LinkTuneRequest,
+        waits: Boolean,
     ) {
-        request.phy?.let { askPhy(g, it) }
-        request.priority?.let { askPriority(g, it) }
-        request.mtu?.let { askMtu(g, it) }
+        request.phy?.let { askPhy(g, it, waits) }
+        request.priority?.let { askPriority(g, it, waits) }
+        request.mtu?.let { askMtu(g, it, waits) }
         if (request.read) read(g)
     }
 
     private suspend fun askPhy(
         g: BluetoothGatt,
         phy: TunePhy,
+        waits: Boolean,
     ) {
         val mask =
             when (phy) {
@@ -168,13 +203,14 @@ internal class BleLinkTuner(
         phyReports.tryReceive()
         val asked = runCatching { g.setPreferredPhy(mask, mask, BluetoothDevice.PHY_OPTION_NO_PREFERRED) }.isSuccess
         Log.i(TAG, "bt tune $nodeId ask phy=${phy.name} requested=$asked")
-        // stretches: give-up on one PHY update; a sleep only ends the wait for a report that came or will not.
-        if (asked) withTimeoutOrNull(REPORT_TIMEOUT_MS) { phyReports.receive() }
+        // stretches: the bridge's give-up on one PHY update (a boost's ask never waits); a sleep only delays its reply.
+        if (asked && waits) withTimeoutOrNull(REPORT_TIMEOUT_MS) { phyReports.receive() }
     }
 
     private suspend fun askPriority(
         g: BluetoothGatt,
         priority: TunePriority,
+        waits: Boolean,
     ) {
         val code =
             when (priority) {
@@ -185,20 +221,22 @@ internal class BleLinkTuner(
         paramReports.tryReceive()
         val asked = runCatching { g.requestConnectionPriority(code) }.getOrDefault(false)
         Log.i(TAG, "bt tune $nodeId ask priority=${priority.name} requested=$asked")
-        // stretches: give-up on one parameter update; a link already on the asked values reports nothing.
-        if (asked) withTimeoutOrNull(REPORT_TIMEOUT_MS) { paramReports.receive() }
+        // stretches: the bridge's give-up on one parameter update (a boost's ask never waits); a link already on the asked
+        // values reports nothing, and a sleep only delays the bridge's reply.
+        if (asked && waits) withTimeoutOrNull(REPORT_TIMEOUT_MS) { paramReports.receive() }
     }
 
     private suspend fun askMtu(
         g: BluetoothGatt,
         size: Int,
+        waits: Boolean,
     ) {
         mtuReports.tryReceive()
         mtuAsked = size
         val asked = runCatching { g.requestMtu(size) }.getOrDefault(false)
         Log.i(TAG, "bt tune $nodeId ask mtu=$size requested=$asked")
-        // stretches: give-up on one ATT MTU exchange; a sleep only ends the wait for its answer.
-        if (asked) withTimeoutOrNull(MTU_TIMEOUT_MS) { mtuReports.receive() }
+        // stretches: the bridge's give-up on one ATT MTU exchange (a boost's ask never waits); a sleep only delays its reply.
+        if (asked && waits) withTimeoutOrNull(MTU_TIMEOUT_MS) { mtuReports.receive() }
     }
 
     private suspend fun read(g: BluetoothGatt) {
@@ -275,6 +313,7 @@ internal class BleLinkTuner(
                         "timeout=${params.timeoutMs}ms status=$status",
                 )
                 paramReports.trySend(ok)
+                onParams(params, ok)
             }
 
             override fun onMtuChanged(

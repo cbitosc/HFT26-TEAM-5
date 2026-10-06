@@ -620,6 +620,19 @@ that reports `isLeCodedPhySupported`:
   leaves the link where it is. The stack's queue holds hundreds of KB before a write blocks, so only the receiver's
   `rx … in <ms>ms` line shows the drain: on 2026-10-03 three 1M Pixel pairs drained 4.8–10 KB/s, and at the old
   28 KiB/s a text sent mid-photo waited one to four minutes. No wire change.
+- **A link that feeds a file asks for a short interval** (#120, ADR 2026-10.2da4; `BuildConfig.BLE_LINK_BOOST`, debug
+  on / release off). The drain is the host's share of the controller's LE buffers (the Pixel 9: 3 of 13, split over its
+  4 LE links, idle ones included) times about 2 packets per connection event, so it follows the interval: ~9 KB/s at
+  45 ms, 22.5–29 at 15 ms. `FramedLink` pokes `onBusy` on its (feeding, receiving) edges; the transport makes a
+  `BleLinkBoost` at a link's first file either way, which runs `LinkBoostPolicy`. While a file moves either way, a side
+  whose screen is on asks for `CONNECTION_PRIORITY_HIGH` (and the ATT MTU once: Android 12 sends 27-byte PDUs until
+  one) through the link's one `BleLinkTuner` (a GATT client on the ACL, no discovery, held for the link's life; boost
+  asks never wait for their reports). It asks for BALANCED 15 s after neither direction streamed, or at once when the
+  screen goes off, A2DP starts or the link reads Coded; nothing earns while A2DP streams. A dark side only listens, so a sender in a pocket earns a watching
+  receiver's ask. A link earns the boosted budget only by *reporting* ≤ 15 ms through `onConnectionUpdated`, whoever
+  asked, and loses it with the client that heard it. While every feeding 1M/2M link has, the budget is 18 KiB/s
+  (`PhyTuning.boostPaceBytesPerSec`), or 12 KiB/s (`crowdedBoostPaceBytesPerSec`) past four LE connections (the host's
+  buffer split; `leLinkCount`), split as above; otherwise 4 KiB/s. An iPhone link is never boosted (dqvb).
 - **Diagnostics** draws a PHY chip on each directly-connected row with a handle (`CodedPhyDiag.linkPhys`, testTag
   `ble_phy_chip_<nodeId>`).
 
@@ -627,7 +640,8 @@ Oracles: `bt phy mode=…`, `bt coded advert live|dark <status>`, `via=coded|1m`
 `bt phy <id> link dropped on <PHY> rssi=… (<reason>)`, `bt coded advert fast (…)` / `slow`, `bt coded advert
 refused <status>, retry in …` / `enabled again`, `bt coded advert retry n/5`,
 `bt phy <id> ONE_M→CODED rssi=… (auto)`, `bt phy <id> gave up …`, `file …/… <N>B in <ms>ms @<pace>` (the hand-off) and
-`rx …/… <N>B in <ms>ms` (the drain), `bt file pace budget=… feeding=… share=… chunk=…`, `bt scan coded windows on|off`,
+`rx …/… <N>B in <ms>ms` (the drain), `bt file pace budget=… feeding=… share=… chunk=… earned=… le=…`, `bt boost <id>
+high[ mtu=517]|release|earned interval=…us|unearned interval=…us`, `bt scan coded windows on|off`,
 `bt refused client … codedOnly=`, and once a minute `bt coded heard <id> hits=… rssi=a..b 1m=… eff=… dwell=…
 promotable=… dials=…` per unlinked peer heard on Coded (raise the log ring with `adb logcat -G 16M` before a walk);
 counters `bleCoded*` / `blePhy*`; the `…debug.PHY` reply lists each link's PHY and link RSSI and each peer's

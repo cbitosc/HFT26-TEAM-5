@@ -331,24 +331,34 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   the links; `--es phy 1m|2m|1m2m`, `--es priority high|balanced|low` and `--ei mtu N` (23..517) are asked of each, in
   that order, through a GATT client `BleLinkTuner` attaches to the link's own ACL on first use (no service discovery),
   then `--ez read true` reads the PHY and link RSSI back; `--ez close true` lets the clients go. `--ei filePace N` sets
-  the 1M/2M file budget as `…debug.PHY`'s does (until the process dies; 0 unbounded) and `--ez resetPace true` restores
-  4096; no node reads the budget and the links' last-heard state without making a client. An iPhone link is refused
+  the 1M/2M file budget as `…debug.PHY`'s does (until the process dies; 0 unbounded), `--ei boostPace N` the budget a
+  boosted link earns (ADR 2026-10.2da4), `--ei crowdedPace N` that budget past four LE connections, and `--ez resetPace
+  true` restores all three (4096, 18432, 12288). `--ez boost false` stops the link boost in this process — every boost
+  lets go at once, asks nothing and attaches no new client until `--ez boost true` (a client already attached stays:
+  relink between cells) — the A/B switch on one build (a build without `BLE_LINK_BOOST` never boosts, and its reply
+  says `boost: false`). The client a
+  boost made and the one this action makes are the same `BleLinkTuner`; `close` lets it go and the boost makes another
+  at its next ask. No node reads the budget and the links' last-heard state without making a client. An iPhone link is refused
   (`refused`: its doorbell owns the parameters, ADR 2026-09.dqvb), and no PHY is asked while the Coded experiment runs
   on the asking phone. A 1M or 2M mask lasts the link's life, so it would also block the *peer's* stepper (a foreign
   answer makes it give up, and the mask keeps the link off Coded): set `…debug.PHY --es mode off` on both phones
   before a PHY ask; `codedOwned` says a Coded handle steps the link here. From Android 14 the first `mtu` ask on an ACL
   exchanges 517 whatever it names and a later one exchanges nothing, so read `mtu` (settled) against `mtuAsked`, and
   judge that lever by the snoop's data-length change, not the ATT MTU (which does not bound an L2CAP channel). The
-  reply: `filePace`, `fileChunk`, `feeding` (links feeding a file now) and `links[]` (`nodeId`, `address`, `attached`,
+  reply: `filePace`, `fileChunk`, `boostPace`, `crowdedPace`, `leLinks` (this phone's LE connections), `boost`,
+  `feeding` (links feeding a file now), `earned` (every one of them earned the boost) and `links[]` (`nodeId`,
+  `address`, `attached`,
   `txPhy` / `rxPhy` ONE_M|TWO_M|CODED, `intervalUs` / `latency` / `timeoutMs` — the framework reports them only on a
   change after the client attached, so an ask the link already satisfies leaves them null — `paramsStatus`, `mtu`,
-  `mtuAsked`, `rssi`, `codedOwned`, `refused`). Logcat carries `bt tune <id> attached|ask …|params interval=…us
-  latency=… timeout=…ms status=…|phy tx=… rx=… status=… (read|update)|mtu=… asked=…`; the
+  `mtuAsked`, `rssi`, `codedOwned`, `refused`, and the link's boost's `boosting` / `earned`, null before its first
+  file). Logcat carries `bt tune <id> attached|ask …|params interval=…us latency=… timeout=…ms status=…|phy tx=… rx=…
+  status=… (read|update)|mtu=… asked=…` and `bt boost <id> high|release|earned …|unearned …`; the
   HCI snoop is the oracle, read with `scripts/btsnoop-drain.py summary <snoop> --logcat <dump>` (per-link parameter,
   PHY and data-length timelines with who asked, packets per connection event, the controller's queue, and a verdict
   per file). `scripts/ble-drain-trial.py run` drives a whole cell: budget, relink, ask, quiet wait, a fresh file, texts
-  behind it, and both phones' logcat dumped per rep, then puts the budget back, lets the tuners go and relinks a tuned
-  link on the way out. An ask lasts the link's life: relink (`BLECAP --ei max 0`, then `--ez clear true`) between
+  behind it, and both phones' logcat dumped per rep, then puts the budgets and the boost back, lets the tuners go and
+  relinks a tuned link on the way out; `--boost on|off` runs one half of the boost's A/B (pace then defaults to 4096)
+  and the summary adds `earned` and `releaseAfterS` (feed end to the tuner's served `ask priority=BALANCED`). An ask lasts the link's life: relink (`BLECAP --ei max 0`, then `--ez clear true`) between
   cells.
 - `…debug.FLAGMSG` — injects one inbound message **the text moderator flagged** (the UI collapses it behind a
   tap-to-reveal) as the newest row of `--es conv <id>` (default `nearby`), from `--es from <peerNodeId>`

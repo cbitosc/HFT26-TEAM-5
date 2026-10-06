@@ -99,6 +99,16 @@ data class PhyTuning(
      * receiver's `rx … in <ms>ms` line (#117).
      */
     val filePaceBytesPerSec: Int = CodedPhyPolicy.BLE_PACE_BYTES_PER_SEC,
+    /**
+     * The budget that replaces [filePaceBytesPerSec] while every link feeding a file has earned the short interval it
+     * asked for ([LinkBoostPolicy], #120), on a phone holding at most [boostFullLeLinks] LE connections; ≤ 0 is
+     * unbounded. `…debug.LINKTUNE --ei boostPace` sweeps it.
+     */
+    val boostPaceBytesPerSec: Int = CodedPhyPolicy.BOOST_PACE_BYTES_PER_SEC,
+    /** The earned budget on a phone holding more LE connections than that; `…debug.LINKTUNE --ei crowdedPace`. */
+    val crowdedBoostPaceBytesPerSec: Int = CodedPhyPolicy.CROWDED_BOOST_PACE_BYTES_PER_SEC,
+    /** The most LE connections (the mesh's and every other app's) at which [boostPaceBytesPerSec] holds. */
+    val boostFullLeLinks: Int = CodedPhyPolicy.BOOST_FULL_LE_LINKS,
 ) {
     private companion object {
         // Negative defaults can't be inlined without tripping MagicNumber (as PromotionConfig's floor).
@@ -284,6 +294,26 @@ object CodedPhyPolicy {
      */
     const val BLE_PACE_BYTES_PER_SEC = 4 * 1024
 
+    /**
+     * The budget while every feeding link has earned a short connection interval ([LinkBoostPolicy], #120). A link at
+     * `CONNECTION_PRIORITY_HIGH` settles at 15 ms or less and drained 22.5–29 KB/s from the Pixel 9 (three packets in
+     * flight, about two per event, 2026-10-06); 18 KiB/s is 85% of the slowest, and on that trial a 700 KB photo crossed
+     * in 41–42 s with every text behind it in 3.4 s or less. It holds up to [BOOST_FULL_LE_LINKS] LE connections.
+     */
+    const val BOOST_PACE_BYTES_PER_SEC = 18 * 1024
+
+    /**
+     * The host splits the controller's LE buffers evenly across every LE connection, idle ones and other apps' included,
+     * so a phone holding more of them keeps fewer of each link's packets in flight: the Pixel 9's 13 buffers gave 3 a
+     * link over 4 connections and would give 1 over 7. One packet per 15 ms event drains about 16 KB/s, under the full
+     * budget, so past [BOOST_FULL_LE_LINKS] a boosted link earns this instead (about 75% of that). A guess until the
+     * trial's crowded-phone cell measures it (#120).
+     */
+    const val CROWDED_BOOST_PACE_BYTES_PER_SEC = 12 * 1024
+
+    /** The LE connections the full boosted budget was measured at: the Pixel 9's mesh link, a ring and two others. */
+    const val BOOST_FULL_LE_LINKS = 4
+
     /** The smallest chunk a 1M/2M feed takes, as small as the Coded default's. */
     private const val MIN_FILE_CHUNK_BYTES = 2048
 
@@ -294,20 +324,38 @@ object CodedPhyPolicy {
      * The pace a file is fed to a Bluetooth link at, by the PHY the link was last read on. A link on 1M or 2M takes its
      * share of [PhyTuning.filePaceBytesPerSec]: the budget split evenly among the [feeding] links on 1M or 2M streaming
      * a file right now, this one included (ADR 2026-10.8jwn), in chunks of about [CHUNK_FEED_SECONDS] of that share, so a frame
-     * queued mid-file waits about one chunk on the feed side. A link on Coded S=8 drains far slower, and at the 1M pace
-     * a whole photo reached the stack in seconds and every frame after it waited minutes behind it (#114). So Coded
-     * takes [PhyTuning.codedPaceBytesPerSec] in [PhyTuning.codedChunkBytes] chunks, outside the split. A link not yet
-     * read (or with no PHY handle: the experiment off) is paced as 1M.
+     * queued mid-file waits about one chunk on the feed side. While every one of those links has [earned] a short
+     * connection interval (#120) the budget is [PhyTuning.boostPaceBytesPerSec] instead, or
+     * [PhyTuning.crowdedBoostPaceBytesPerSec] on a phone holding more than [PhyTuning.boostFullLeLinks] LE connections
+     * ([leLinks]), split the same way. A link on
+     * Coded S=8 drains far slower, and at the 1M pace a whole photo reached the stack in seconds and every frame after it
+     * waited minutes behind it (#114). So Coded takes [PhyTuning.codedPaceBytesPerSec] in [PhyTuning.codedChunkBytes]
+     * chunks, outside the split, earned or not. A link not yet read (or with no PHY handle: the experiment off) is paced
+     * as 1M.
      */
     fun pace(
         phy: LinkPhy,
         tuning: PhyTuning,
         feeding: Int = 1,
+        earned: Boolean = false,
+        leLinks: Int = 1,
     ): PaceConfig =
         if (phy == LinkPhy.CODED) {
             PaceConfig(tuning.codedPaceBytesPerSec, tuning.codedChunkBytes.coerceIn(1, LinkFraming.FILE_CHUNK_BYTES))
         } else {
-            filePace(tuning.filePaceBytesPerSec, feeding)
+            filePace(budget(tuning, earned, leLinks), feeding)
+        }
+
+    /** The 1M/2M budget a set of feeds shares: the base, or the boosted one for this phone's LE connection count. */
+    fun budget(
+        tuning: PhyTuning,
+        earned: Boolean,
+        leLinks: Int,
+    ): Int =
+        when {
+            !earned -> tuning.filePaceBytesPerSec
+            leLinks <= tuning.boostFullLeLinks -> tuning.boostPaceBytesPerSec
+            else -> tuning.crowdedBoostPaceBytesPerSec
         }
 
     /** One of [feeding] 1M/2M feeds sharing [budget] B/s, in chunks of [CHUNK_FEED_SECONDS] of its share; unbounded at ≤ 0. */

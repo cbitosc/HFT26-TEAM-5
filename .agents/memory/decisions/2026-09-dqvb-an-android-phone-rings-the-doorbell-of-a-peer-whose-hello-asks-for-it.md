@@ -196,3 +196,10 @@ Pixel 3's rerun (02:15:53), the lookup failed at `discover`. The Pixel 3's link 
 60 s. A link whose lookup fails gets no BALANCED ask until the next lookup, `LOOKUP_RETRY_MS` later, and closing
 that gap is a follow-up outside this amendment. Once in the rerun (02:13:48), discovery finished without the
 doorbell although the peer serves it, and the link was marked `bt doorbell absent`, so it gets no ask at all.
+
+**Amended 2026-10-06 (#120, ADR 2026-10.2da4): an Android↔Android link that carries a file opens a GATT client.**
+"No Android↔Android link opens a GATT client" no longer holds where `BLE_LINK_BOOST` is on (debug now, release after
+its trial). At a link's first file either way, `BleLinkBoost` attaches a `BleLinkTuner` to the link's ACL. It holds
+the client for the link's life, never runs discovery, and, while the screen is on, asks for HIGH, then BALANCED, around
+the files that cross the link. The doorbell's links are untouched: an iPhone link is never boosted, and its doorbell still asks for BALANCED.
+The Moto G, the stack this ADR kept away from discovery, is a cell of the boost's trial.

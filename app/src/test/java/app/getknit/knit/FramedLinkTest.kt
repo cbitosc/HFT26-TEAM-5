@@ -48,6 +48,7 @@ import java.util.concurrent.atomic.AtomicReference
  * from the Wi-Fi Aware transport. Driven over an in-process piped [LinkSocket] (no radios): the test plays the
  * remote peer, writing records the link decodes and reading records the link emits.
  */
+@Suppress("LargeClass") // one link's whole contract over one piped harness: frames, files, digests, resume and busy edges
 class FramedLinkTest {
     @get:Rule
     val tmp = TemporaryFolder()
@@ -101,6 +102,7 @@ class FramedLinkTest {
         fromLinkBuffer: Int = 1 shl 18,
         pace: () -> PaceConfig = { PaceConfig() },
         metrics: MeshMetrics = MeshMetrics(),
+        onBusy: () -> Unit = {},
     ): Harness {
         val toLink = PipedOutputStream()
         val linkInput = PipedInputStream(toLink, 1 shl 18)
@@ -129,6 +131,7 @@ class FramedLinkTest {
                 callbacks = callbacks,
                 now = { 0L },
                 pace = pace,
+                onBusy = onBusy,
             )
         link.start()
         return Harness(link, toLink, fromLink, callbacks)
@@ -751,6 +754,73 @@ class FramedLinkTest {
         val rec = LinkFraming.read(h.fromLink)
         assertEquals("no header went out; the link still carries frames", LinkFraming.Type.FRAME, rec!!.type)
         assertNull(h.callbacks.downs.poll(200, TimeUnit.MILLISECONDS))
+    }
+
+    /**
+     * A harness whose `onBusy` pokes record the link's (feeding, receiving) pair as the poke reads it — the Bluetooth
+     * link boost's view (#120) — so a test can tell the edges apart.
+     */
+    private fun busyHarness(fromLinkBuffer: Int = 1 shl 18): Pair<Harness, LinkedBlockingQueue<Pair<Boolean, Boolean>>> {
+        val pokes = LinkedBlockingQueue<Pair<Boolean, Boolean>>()
+        val linkRef = AtomicReference<FramedLink>()
+        val h =
+            harness(fromLinkBuffer = fromLinkBuffer, onBusy = {
+                linkRef.get()?.let { pokes.add(it.feeding to it.rxInProgress) }
+            })
+        linkRef.set(h.link)
+        return h to pokes
+    }
+
+    @Test
+    fun aQueuedFileIsOneFeedingEdgeAndItsEndIsAnother() {
+        // #120: the boost asks for a short interval on the rising edge and lets go after the falling one, so a second
+        // file queued behind the first must not poke, and a poke must be free to read the link (no lock held).
+        val (h, pokes) = busyHarness(fromLinkBuffer = 16 * 1024)
+        val file = tmp.newFile("edges.bin").apply { writeBytes(ByteArray(40 * 1024)) }
+        assertTrue(h.link.sendFile(file, FileMeta(FileKind.ATTACHMENT, "a".repeat(64), "image/jpeg")))
+        assertEquals("feeding from the enqueue", true to false, pokes.poll(2, TimeUnit.SECONDS))
+        assertTrue(h.link.sendFile(file, FileMeta(FileKind.ATTACHMENT, "b".repeat(64), "image/jpeg")))
+        assertTrue(h.link.busy)
+        readFileBody(h.fromLink.also { assertEquals(LinkFraming.Type.FILE_HEADER, LinkFraming.read(it)!!.type) })
+        readFileBody(h.fromLink.also { assertEquals(LinkFraming.Type.FILE_HEADER, LinkFraming.read(it)!!.type) })
+        assertEquals("idle once the last is out", false to false, pokes.poll(2, TimeUnit.SECONDS))
+        assertNull("nothing between the two files", pokes.poll(200, TimeUnit.MILLISECONDS))
+        assertFalse(h.link.busy)
+    }
+
+    @Test
+    fun aFileWhoseSourceIsGoneStillEndsItsFeedingEdge() {
+        val (h, pokes) = busyHarness()
+        h.link.sendFile(File(tmp.root, "evicted.bin"), FileMeta(FileKind.ATTACHMENT, "3".repeat(64), "image/jpeg"))
+        assertEquals(true to false, pokes.poll(2, TimeUnit.SECONDS))
+        assertEquals("the skipped file ends the feed", false to false, pokes.poll(2, TimeUnit.SECONDS))
+    }
+
+    @Test
+    fun aFileComingInIsAReceivingEdgeFromItsHeaderToItsEnd() {
+        val (h, pokes) = busyHarness()
+        val key = "d".repeat(64)
+        writeRecord(h.toLink, LinkFraming.Type.FILE_HEADER, LinkFraming.encodeFileHeader(hdr("ATTACHMENT", key, size = 300)))
+        assertEquals("receiving from the header", false to true, pokes.poll(2, TimeUnit.SECONDS))
+        writeRecord(h.toLink, LinkFraming.Type.FILE_CHUNK, ByteArray(300))
+        writeRecord(h.toLink, LinkFraming.Type.FRAME, frameBytes(id = "mid01", senderId = "peer0001"))
+        assertNotNull(h.callbacks.inbound.poll(2, TimeUnit.SECONDS))
+        assertNull("a chunk or a frame is no edge", pokes.poll(200, TimeUnit.MILLISECONDS))
+        writeRecord(h.toLink, LinkFraming.Type.FILE_END)
+        assertEquals("idle at the end", false to false, pokes.poll(2, TimeUnit.SECONDS))
+    }
+
+    @Test
+    fun aCloseEndsEveryEdgeAtOnce() {
+        val (h, pokes) = busyHarness(fromLinkBuffer = 16 * 1024)
+        val file = tmp.newFile("closing.bin").apply { writeBytes(ByteArray(80 * 1024)) }
+        writeRecord(h.toLink, LinkFraming.Type.FILE_HEADER, LinkFraming.encodeFileHeader(hdr("ATTACHMENT", "e".repeat(64), size = 900)))
+        assertEquals(false to true, pokes.poll(2, TimeUnit.SECONDS))
+        assertTrue(h.link.sendFile(file, FileMeta(FileKind.ATTACHMENT, "f".repeat(64), "image/jpeg")))
+        assertEquals(true to true, pokes.poll(2, TimeUnit.SECONDS))
+        h.link.close()
+        assertEquals("a closed link carries nothing", false to false, pokes.poll(2, TimeUnit.SECONDS))
+        assertFalse(h.link.busy)
     }
 
     /** Reads FILE_CHUNK records up to the FILE_END and returns their bytes. */

@@ -85,6 +85,18 @@ class TransferPacePolicyTest {
     }
 
     @Test
+    fun aLinkThatLosesItsBoostChargesTheNextChunkAtTheBaseShare() {
+        // #120: an earned 16 KiB chunk at 18 KiB/s owes ~889 ms. The link slows (a put-back, the screen goes off) and the
+        // next chunk, 8 KiB at the base 4 KiB/s, owes its 2 s from there, not the boosted rate's half second.
+        val earned = PaceConfig(bytesPerSec = 18 * 1024, chunkBytes = 16 * 1024)
+        val base = PaceConfig(bytesPerSec = 4096, chunkBytes = 8192)
+        val window = PaceWindow(earned, startedAt = 0)
+        assertEquals(888, window.fed(16 * 1024, now = 0))
+        window.rebase(base, now = 889)
+        assertEquals(2000, window.fed(8192, now = 889))
+    }
+
+    @Test
     fun aStepUpDoesNotPayOffTheSlowStretch() {
         // 60 s on Coded fed 60 KiB on budget. Stepping up to 28 KiB/s starts a fresh window, so the first fast chunk
         // owes its own ~571 ms rather than nothing (an average since the file began would let a burst through).
