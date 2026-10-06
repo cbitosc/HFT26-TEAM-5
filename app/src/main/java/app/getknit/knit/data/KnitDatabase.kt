@@ -52,7 +52,7 @@ import net.zetetic.database.sqlcipher.driver.SQLCipherDriver
  * The `@Database` version, as a top-level constant so the annotation and [KnitDatabase.SCHEMA_VERSION] read
  * one number (an annotation argument cannot name the class's own companion).
  */
-internal const val KNIT_DB_SCHEMA_VERSION = 20
+internal const val KNIT_DB_SCHEMA_VERSION = 21
 
 @Database(
     entities = [
@@ -189,6 +189,11 @@ internal const val KNIT_DB_SCHEMA_VERSION = 20
     //     name of a sealed attachment and the picker's bytes for one of ours, so a forward reuses the identity a file
     //     arrived under and a room copy of a picture held sealed is made locally instead of pulled (ADR
     //     2026-10.mptm). No wire change. Null on existing rows; migrated by KnitMigrations.MIGRATION_19_20.
+    // v21: `ratchet_recv_epochs` and `ratchet_skipped_keys` gain `rootTag` at the end of their keys — the root a
+    //     receive chain or skipped key was derived under, so a reset's restarted epoch numbering never lands a
+    //     new-era frame on an old era's chain (#135, ADR 2026-10.gcrd). Local only, no wire change. Both tables are
+    //     recreated empty (a tag cannot be computed in SQL, and a guessed one would keep a stale row live);
+    //     migrated by KnitMigrations.MIGRATION_20_21.
     version = KNIT_DB_SCHEMA_VERSION,
     // Export the schema JSON to app/schemas/ (location set by the androidx.room Gradle plugin's
     // room { schemaDirectory(...) } in app/build.gradle.kts). Keeps the schema diffable in review and feeds

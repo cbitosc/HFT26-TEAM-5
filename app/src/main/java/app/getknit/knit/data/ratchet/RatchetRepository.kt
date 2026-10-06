@@ -28,19 +28,28 @@ class RatchetRepository(
         epoch: Int,
     ): ByteArray? = dao.localEpochPriv(peerId, epoch)
 
-    override suspend fun recvEpoch(
+    override suspend fun recvEpochs(
         peerId: String,
         epoch: Int,
-    ): RatchetEngine.RecvEpoch? =
-        dao.recvEpoch(peerId, epoch)?.let {
-            RatchetEngine.RecvEpoch(epoch = it.epoch, chainKey = it.chainKey, next = it.next, lastUsedAt = it.lastUsedAt)
+    ): List<RatchetEngine.RecvEpoch> =
+        dao.recvEpochs(peerId, epoch).map {
+            RatchetEngine.RecvEpoch(
+                epoch = it.epoch,
+                rootTag = it.rootTag,
+                chainKey = it.chainKey,
+                next = it.next,
+                lastUsedAt = it.lastUsedAt,
+            )
         }
 
-    override suspend fun skippedKey(
+    override suspend fun skippedKeys(
         peerId: String,
         epoch: Int,
         idx: Int,
-    ): ByteArray? = dao.skippedKey(peerId, epoch, idx)
+    ): List<RatchetEngine.SkippedKey> =
+        dao.skippedKeys(peerId, epoch, idx).map {
+            RatchetEngine.SkippedKey(epoch = it.epoch, rootTag = it.rootTag, idx = it.idx, msgKey = it.msgKey, createdAt = it.createdAt)
+        }
 
     override suspend fun applyOpen(
         peerId: String,
@@ -58,6 +67,7 @@ class RatchetRepository(
                 RatchetRecvEpochEntity(
                     peerId = peerId,
                     epoch = it.epoch,
+                    rootTag = it.rootTag,
                     chainKey = it.chainKey,
                     next = it.next,
                     lastUsedAt = it.lastUsedAt,
@@ -67,11 +77,18 @@ class RatchetRepository(
         if (delta.skippedInserts.isNotEmpty()) {
             dao.insertSkippedKeys(
                 delta.skippedInserts.map {
-                    RatchetSkippedKeyEntity(peerId = peerId, epoch = it.epoch, idx = it.idx, msgKey = it.msgKey, createdAt = it.createdAt)
+                    RatchetSkippedKeyEntity(
+                        peerId = peerId,
+                        epoch = it.epoch,
+                        idx = it.idx,
+                        rootTag = it.rootTag,
+                        msgKey = it.msgKey,
+                        createdAt = it.createdAt,
+                    )
                 },
             )
         }
-        if (delta.consumedSkippedIdx != null) dao.deleteSkippedKey(peerId, headerSe, headerN)
+        delta.consumedSkippedTag?.let { dao.deleteSkippedKey(peerId, headerSe, headerN, rootTag = it) }
     }
 
     override suspend fun commitSend(

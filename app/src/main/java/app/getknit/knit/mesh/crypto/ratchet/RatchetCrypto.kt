@@ -25,6 +25,7 @@ object RatchetCrypto {
     const val EPOCH_SECRET_BYTES = 64
 
     private const val MAC = "HMACSHA256"
+    private const val BYTE_MASK = 0xFFL
     private val ZERO_SALT = ByteArray(KEY_BYTES)
 
     private val LABEL_X3DH = "knit/dm/v2/x3dh".toByteArray()
@@ -34,6 +35,7 @@ object RatchetCrypto {
     private val LABEL_SPK = "knit/dm/v2/spk".toByteArray()
     private val LABEL_EXPORT_ROOT = "knit/dm/v2/export/root".toByteArray()
     private val LABEL_EXPORT_EPOCH = "knit/dm/v2/export/epoch".toByteArray()
+    private val LABEL_ROOT_TAG = "knit/dm/v2/root-tag".toByteArray()
     private val LABEL_NONCE_V3 = "knit/dm/v3/nonce".toByteArray()
     private val LABEL_HEADER_V3 = "knit/dm/v3/hdr".toByteArray()
 
@@ -182,6 +184,18 @@ object RatchetCrypto {
      * register of docs/SPOOL_PROTOCOL.md); the v1 seal is scope-static, so this stays API-only.
      */
     fun exportEpochSeal(epochExport: ByteArray): ByteArray = Hkdf.computeHkdf(MAC, epochExport, ZERO_SALT, LABEL_EXPORT_EPOCH, KEY_BYTES)
+
+    /**
+     * Names the session root a stored receive chain or skipped key was derived under (#135, ADR 2026-10.gcrd).
+     * A reset restarts the resetter's epoch numbering, so `(peer, epoch)` alone lets a chain drained under a kept
+     * `prevRoot` decide a new-era frame of the same number; the tag keeps each root's rows apart. One-way, so a
+     * row never holds the root it came from and a superseded root still vanishes with its drain window. Local
+     * storage only: never on the wire, not part of the reference a port implements.
+     */
+    fun rootTag(sessionRoot: ByteArray): Long =
+        Hkdf.computeHkdf(MAC, sessionRoot, ZERO_SALT, LABEL_ROOT_TAG, Long.SIZE_BYTES).fold(0L) { acc, b ->
+            (acc shl Byte.SIZE_BITS) or (b.toLong() and BYTE_MASK)
+        }
 
     @Suppress("MagicNumber") // big-endian byte-lane shifts; naming 24/16/8 would only obscure them
     private fun u32be(value: Int): ByteArray =

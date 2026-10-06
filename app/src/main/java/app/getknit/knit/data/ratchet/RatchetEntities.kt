@@ -56,33 +56,41 @@ data class RatchetLocalEpochEntity(
 )
 
 /**
- * One inbound epoch chain from [peerId]: the forward-only [chainKey] positioned at index [next].
- * Root-free once derived — which is what lets a superseded session root expire while its epochs keep
- * decrypting late custody re-serves.
+ * One inbound epoch chain from [peerId]: the forward-only [chainKey] positioned at index [next]. The chain
+ * needs no root once derived — which is what lets a superseded session root expire while its epochs keep
+ * decrypting late custody re-serves — but [rootTag] names the root that derived it (`RatchetCrypto.rootTag`,
+ * ADR 2026-10.gcrd): a peer's reset restarts its epoch numbering, so two eras can hold the same [epoch], and
+ * only the matching root's candidate may read this row. The tag sits last in the key so the any-era lookup by
+ * `(peerId, epoch)` runs on the key's index.
  */
 @Entity(
     tableName = "ratchet_recv_epochs",
-    primaryKeys = ["peerId", "epoch"],
+    primaryKeys = ["peerId", "epoch", "rootTag"],
     indices = [Index("lastUsedAt")],
 )
 data class RatchetRecvEpochEntity(
     val peerId: String,
     val epoch: Int,
+    val rootTag: Long,
     val chainKey: ByteArray,
     val next: Int,
     val lastUsedAt: Long,
 )
 
-/** A stored out-of-order message key (single-use; consumed on decrypt, swept after 48 h). */
+/**
+ * A stored out-of-order message key (single-use; consumed on decrypt, swept after 48 h), tagged with the root
+ * that derived it like [RatchetRecvEpochEntity.rootTag].
+ */
 @Entity(
     tableName = "ratchet_skipped_keys",
-    primaryKeys = ["peerId", "epoch", "idx"],
+    primaryKeys = ["peerId", "epoch", "idx", "rootTag"],
     indices = [Index("createdAt")],
 )
 data class RatchetSkippedKeyEntity(
     val peerId: String,
     val epoch: Int,
     val idx: Int,
+    val rootTag: Long,
     val msgKey: ByteArray,
     val createdAt: Long,
 )

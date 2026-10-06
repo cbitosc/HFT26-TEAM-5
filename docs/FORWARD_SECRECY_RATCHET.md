@@ -48,7 +48,7 @@ form in `docs/GROUP_FORWARD_SECRECY.md`, sealed receipts/reactions as ctl values
 | Signed prekey (`SPK`) | rotates every 7 d; privs kept: current + 4 (~35 d) | `identity.key` (`Stored.prekeys`, additive field) | X3DH medium-term DH base; survives DB wipes so in-flight inits stay openable |
 | X3DH ephemeral (`EK`) | one derivation | never stored (pub rides the init until confirm) | binds root freshness |
 | Epoch keypair | until superseded + acked + 48 h (≤16/peer, 30 d hard cap) | `ratchet_local_epochs` | per-epoch DH; **its retention is the PFS window** |
-| Chain / message keys | delete-as-you-go; skipped keys ≤48 h | `ratchet_recv_epochs` / `ratchet_skipped_keys` | per-message AEAD keys |
+| Chain / message keys | delete-as-you-go; skipped keys ≤48 h | `ratchet_recv_epochs` / `ratchet_skipped_keys`, each row tagged with the root that derived it (`rootTag`, §4) | per-message AEAD keys |
 
 Reusing the HPKE X25519 identity key for X3DH is safe by domain separation: every v2 derivation is
 labeled `knit/dm/v2/...` (HKDF-SHA256), disjoint from RFC 9180's internal labels. This is the same
@@ -154,9 +154,13 @@ frame's arrival can be load-bearing. Each frame fully describes how to derive it
 **Numbering is monotone across an *adopted* replacement** (§7): the receiving side keeps its own
 `se` counter running, so a reused `(peer, se)` can only follow a device wipe — which also discards the
 old epoch privs — or a locally-originated **reset**, which re-initiates from scratch and does restart
-`se` at 1. Either way the peer purges its stale rows for that numbering, so there is no collision on its
-side. On ours, a reset's re-minted epoch *replaces* the dead era's key of the same number (ADR 027); the
-dead-era keys numbered above it survive, which is how the peer's in-flight frames still drain (§7).
+`se` at 1. On the peer's side two eras then hold the same numbers, and the receive state keeps them apart by
+root: every stored chain and skipped key carries `rootTag` (eight bytes of `HKDF(root, "knit/dm/v2/root-tag")`,
+local storage only), and each root candidate reads only its own (ADR 2026-10.gcrd, #135). Purging at the
+replacement was not enough on its own — the peer's old-era frames still drain under `prevRoot` afterwards, and
+each stores its chain again under its old number. On ours, a reset's re-minted epoch *replaces* the dead era's key
+of the same number (ADR 027); the dead-era keys numbered above it survive, which is how the peer's in-flight frames
+still drain (§7).
 
 **Adopting the peer's newest epoch as our next DH base is jump-damped.** Once we have an anchor
 (`peerBaseEpoch >= 1`), an `se` more than `MAX_EPOCH_JUMP` beyond it is not adopted: the frame still
@@ -174,10 +178,10 @@ successful open records are claims about the era we hold *now*: adopting the pee
 base, raising `highestPeAcked`, and — for an initiator — confirming the session (which drops the init from
 our frames). A frame drained under any other root says nothing about that era: under a kept `prevRoot`, a
 race's other root, or a late race loser's (§7). Such frames open and deliver, and their chain is stored,
-but they record none of the three. The receive rows make the rule exact without a flag: every root change
-on our side purges them, so each row was derived by exactly one fresh derivation, and that derivation's
-root already decided. The live-chain and skipped-key rungs therefore never record any of the three — in
-era it would repeat what the first frame of the epoch recorded, out of era it would be wrong. The era is
+but they record none of the three. The receive rows make the rule exact without a flag: each row is tagged
+with the root whose fresh derivation stored it, which already decided then, and only that root's candidate reads
+it. The live-chain and skipped-key rungs therefore never record any of the three — in era it would repeat what the
+first frame of the epoch recorded, out of era it would be wrong. The era is
 the root, never the number of our epoch a frame names: a peer can seal under the new root against a key
 of ours from the old era, and that frame is this era's.
 
@@ -233,11 +237,13 @@ in-memory, 10 min, reset per mesh session). Two consequences are baked in:
   `env.id` is already in `messages` (ack still runs — the vaccine-purge semantics are untouched).
   Without it, "delete the message key after use" would turn every custody re-serve into a
   `DECRYPT_FAILED`. It also spares v1 an HPKE unwrap per re-serve.
-- **The open ladder** (engine, pure): stored skipped key → live chain of a known recv epoch
-  (deriving-and-storing keys across any index gap, ≤200/epoch) → fresh epoch derivation, trying the
-  active root, then the draining `prevRoot`, then — for an unanchored race winner — a late race loser's
-  root (§7). Only the last rung under the active root moves the session's era (§4). Typed failures map
-  to drop reasons:
+- **The open ladder** (engine, pure), over the root candidates — the active root, then the draining
+  `prevRoot`, then, for an unanchored race winner, a late race loser's root (§7) — each reading only the
+  stored state tagged with its own root (§4): stored skipped key → live chain of a known recv epoch
+  (deriving-and-storing keys across any index gap, ≤200/epoch) → fresh epoch derivation for a candidate
+  holding neither. Only the last rung under the active root moves the session's era (§4). When nothing
+  opens, `DUPLICATE` outranks the rest (a re-serve also fails every other root's derivation, and must stay
+  benign), but never stops the ladder early (ADR 2026-10.gcrd). Typed failures map to drop reasons:
   `RATCHET_NO_SESSION` / `RATCHET_EPOCH_GONE` / `DUPLICATE` (benign) / `BAD_HEADER` / `AEAD_FAIL`.
   All are delivery-local; the frame still relays and custodies (the no-throw contract of
   `onDeliver` holds — nothing in the v2 path throws out).
@@ -272,9 +278,10 @@ skipped-key path absorbs.
 - **Replacement.** A genuinely new init (`init.at > establishedAt`, unknown eph) from a confirmed
   peer means they lost state (wipe/reinstall): adopt the new root, archive the old to `prevRoot`,
   and **purge the peer's recv epochs + skipped keys** — their numbering restarts at 1. Old-era
-  frames whose epoch numbers don't collide with new rows drain via `prevRoot`; colliding ones fail
-  benignly (`DUPLICATE`/`AEAD_FAIL`) — anything delivered pre-wipe is exists-gated anyway, and the
-  reset re-seal (below) covers the undelivered. One carve-out (found by the randomized soak): a
+  frames drain via `prevRoot` on chains tagged with it, whatever numbers the new era has reached, and
+  the new era's frames never read them (§4, ADR 2026-10.gcrd); a frame whose root we no longer hold
+  fails benignly — anything delivered pre-wipe is exists-gated anyway, and the reset re-seal (below)
+  covers the undelivered. One carve-out (found by the randomized soak): a
   **confirmed initiator with no recorded peer-init anchor** (`peerInitEphPub == null` — we won a race
   without ever processing the loser's init) treats an init that *loses* the nodeId tiebreak as a
   stale race remnant, never a replacement — adopting it would defect to the losing root while the

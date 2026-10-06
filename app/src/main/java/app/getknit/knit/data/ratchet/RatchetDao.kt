@@ -62,11 +62,13 @@ interface RatchetDao {
 
     // --- inbound epoch chains ---
 
+    // Every era's chain for the number: a reset restarts the peer's numbering, and each root reads only its own
+    // (`rootTag`, ADR 2026-10.gcrd). At most a live root, a draining one and a late race loser's.
     @Query("SELECT * FROM ratchet_recv_epochs WHERE peerId = :peerId AND epoch = :epoch")
-    suspend fun recvEpoch(
+    suspend fun recvEpochs(
         peerId: String,
         epoch: Int,
-    ): RatchetRecvEpochEntity?
+    ): List<RatchetRecvEpochEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertRecvEpoch(row: RatchetRecvEpochEntity)
@@ -79,21 +81,24 @@ interface RatchetDao {
 
     // --- skipped message keys ---
 
-    @Query("SELECT msgKey FROM ratchet_skipped_keys WHERE peerId = :peerId AND epoch = :epoch AND idx = :idx")
-    suspend fun skippedKey(
+    /** Every era's stored key for `(epoch, idx)`, as [recvEpochs]. */
+    @Query("SELECT * FROM ratchet_skipped_keys WHERE peerId = :peerId AND epoch = :epoch AND idx = :idx")
+    suspend fun skippedKeys(
         peerId: String,
         epoch: Int,
         idx: Int,
-    ): ByteArray?
+    ): List<RatchetSkippedKeyEntity>
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertSkippedKeys(rows: List<RatchetSkippedKeyEntity>)
 
-    @Query("DELETE FROM ratchet_skipped_keys WHERE peerId = :peerId AND epoch = :epoch AND idx = :idx")
+    // One root's key only: another tag's key at the same (epoch, idx) belongs to another era's frame.
+    @Query("DELETE FROM ratchet_skipped_keys WHERE peerId = :peerId AND epoch = :epoch AND idx = :idx AND rootTag = :rootTag")
     suspend fun deleteSkippedKey(
         peerId: String,
         epoch: Int,
         idx: Int,
+        rootTag: Long,
     )
 
     @Query("DELETE FROM ratchet_skipped_keys WHERE createdAt < :cutoff")
@@ -104,8 +109,8 @@ interface RatchetDao {
 
     /** Global-cap pressure valve: drop the [n] oldest skipped keys (they were the least likely to arrive). */
     @Query(
-        "DELETE FROM ratchet_skipped_keys WHERE (peerId, epoch, idx) IN " +
-            "(SELECT peerId, epoch, idx FROM ratchet_skipped_keys ORDER BY createdAt ASC LIMIT :n)",
+        "DELETE FROM ratchet_skipped_keys WHERE (peerId, epoch, idx, rootTag) IN " +
+            "(SELECT peerId, epoch, idx, rootTag FROM ratchet_skipped_keys ORDER BY createdAt ASC LIMIT :n)",
     )
     suspend fun evictOldestSkippedKeys(n: Int)
 

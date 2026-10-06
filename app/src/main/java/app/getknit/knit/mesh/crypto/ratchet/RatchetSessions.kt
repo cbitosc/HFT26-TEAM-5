@@ -132,8 +132,8 @@ class RatchetSessions(
             selfNodeId = selfNodeId,
             peerId = peerId,
             session = store.session(peerId),
-            recvEpoch = store.recvEpoch(peerId, header.se),
-            skippedMsgKey = store.skippedKey(peerId, header.se, header.n),
+            recvEpochs = store.recvEpochs(peerId, header.se),
+            skippedMsgKeys = store.skippedKeys(peerId, header.se, header.n),
             ownBasePriv = if (header.pe >= 1) store.localEpochPriv(peerId, header.pe) else null,
             ownIkPriv = dhIdentityPriv(),
             peerIkPub = peerIkPub,
@@ -341,9 +341,10 @@ class RatchetSessions(
      * A marker seals v2 like every reset: the flag is not bound into a v2 frame's AEAD, and it goes on the
      * header only while an init rides there (the only place a receiver reads it).
      *
-     * A re-root purges **our own** receive state too ([RatchetStore.purgePeerRecvState]) — the half this used
-     * to leave behind. Abandoning a root era is symmetric: the peer drops its stale rows when it adopts this
-     * init, and we must drop ours, or its post-replacement epochs meet a surviving chain index from the dead era.
+     * A re-root purges **our own** receive state too ([RatchetStore.purgePeerRecvState]). Abandoning a root era
+     * is symmetric: the peer drops its stale rows when it adopts this init, and we drop ours. Since ADR 2026-10.gcrd
+     * that is hygiene: every stored chain is tagged with the root that derived it, so a dead era's row never decides
+     * a frame of another.
      */
     suspend fun sealResetDm(
         peerId: String,
@@ -455,11 +456,10 @@ class RatchetSessions(
                 lastResetSentAt = now,
             )
         val sealed = engine.seal(session, plaintext, aad, peerSpk.pub, now) ?: return ResetSeal.NoPrekey
-        // Abandon our receive side along with the root. The peer purges its stale rows when it adopts
-        // this init; nothing was doing the same for ours, so a recv epoch from the dead era survived and
-        // the peer's post-replacement frames — whose epoch numbers may reuse the old ones — were judged
-        // against its stale chain index and dropped as DUPLICATE. That is unrecoverable by construction:
-        // a duplicate is benign, so it drives no reset, and the pair deadlocks in the one direction.
+        // Abandon our receive side along with the root. Before the root tag (ADR 2026-10.gcrd) a dead era's recv
+        // epoch that survived here judged the peer's post-replacement frames of its number against a stale chain
+        // index and dropped them as DUPLICATE, which drives no reset; now the tag keeps eras apart and this is
+        // hygiene.
         store.purgePeerRecvState(peerId)
         store.commitSend(sealed.session, initiation.epoch)
         synchronized(lastResetSentAt) { lastResetSentAt[peerId] = now }

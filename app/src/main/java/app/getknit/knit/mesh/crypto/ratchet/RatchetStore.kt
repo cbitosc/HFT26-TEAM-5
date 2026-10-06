@@ -26,21 +26,27 @@ interface RatchetStore {
         epoch: Int,
     ): ByteArray?
 
-    suspend fun recvEpoch(
+    /**
+     * Every stored receive chain for [peerId]'s [epoch], whatever root derived it: a reset restarts the peer's
+     * numbering, so eras can share a number, and the engine matches each row to its root by
+     * [RatchetEngine.RecvEpoch.rootTag] (ADR 2026-10.gcrd).
+     */
+    suspend fun recvEpochs(
         peerId: String,
         epoch: Int,
-    ): RatchetEngine.RecvEpoch?
+    ): List<RatchetEngine.RecvEpoch>
 
-    suspend fun skippedKey(
+    /** Every stored out-of-order key for `(epoch, idx)`, any era, as [recvEpochs]. */
+    suspend fun skippedKeys(
         peerId: String,
         epoch: Int,
         idx: Int,
-    ): ByteArray?
+    ): List<RatchetEngine.SkippedKey>
 
     /**
      * Persists everything a successful open changed: the session snapshot, the recv-epoch upsert, the
      * skipped-key inserts/consumption, and — on a session replacement — the purge of the peer's stale
-     * receive state. [headerSe]/[headerN] locate the consumed skipped key (the delta only flags it).
+     * receive state. [headerSe]/[headerN] locate the consumed skipped key; the delta names its root's tag.
      */
     suspend fun applyOpen(
         peerId: String,
@@ -59,10 +65,9 @@ interface RatchetStore {
      * Drops our **receive-side** state for [peerId] — recv epochs and skipped keys — leaving the session
      * row and our own epoch privs alone. The mirror of [RatchetEngine.OpenDelta.purgePeerRecvState], for
      * the case where *we* abandon a root era instead of adopting the peer's: after sealing a reset our recv
-     * rows describe chains under a root neither side will use again, and the peer's post-replacement epochs
-     * can reuse their numbers. A surviving row then decides a fresh frame against a stale chain index and
-     * judges it a duplicate (or opens it to the wrong key), which is a deadlock the ratchet cannot escape —
-     * a duplicate is benign by definition, so it drives no recovery.
+     * rows describe chains under a root neither side will use again. Hygiene since ADR 2026-10.gcrd: the root
+     * tag already keeps such a row off any other root's frames (before it, a surviving row judged the peer's
+     * reused numbers against a stale chain index — a DUPLICATE that drove no recovery).
      */
     suspend fun purgePeerRecvState(peerId: String)
 

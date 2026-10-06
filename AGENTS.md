@@ -477,6 +477,14 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   the mesh has no clone tolerance — and the copy says so. The database copy goes
   through a raw single-connection driver on purpose (`ATTACH` is read-only to SQLite and lands on a pool
   reader; the SQLCipher layer rewrites `BEGIN` to `EXCLUSIVE`) — don't move it onto the Room connection.
+- **When touching `RatchetEngine.open`'s ladder (`Ladder`, `RootCandidate`), `RecvEpoch` / `SkippedKey`, the keys of
+  `ratchet_recv_epochs` / `ratchet_skipped_keys`, or `RatchetCrypto.rootTag`:** READ ADR 2026-10.gcrd. A receive
+  chain and a skipped key carry the tag of the root that derived it, and each root candidate reads only its own: a
+  reset restarts the resetter's numbering, and an old-era frame drained under `prevRoot` after the replacement's
+  purge used to plant a chain the new era's frames of that number were judged against (#135). When nothing opens,
+  DUPLICATE outranks the rest but never stops the ladder early; a purging resolution still reads nothing stored.
+  Regression: `RatchetEngineTest`'s #135 cases, `RatchetSessionsResetTest`, `RatchetSoakTest`'s reset,
+  `SessionLabTest.oldEraDmsReadAfterTheReset…`.
 - **When touching `RatchetSessions.sealResetDm`, `InboundPipeline.sendSessionReset` / `maybeRequestReset`,
   `MeshManager.seedSendFloorOpen`, or anything else that sends a DM session reset:** READ ADR 2026-09.qerd and
   `docs/FORWARD_SECRECY_RATCHET.md` §7. A reset the peer would refuse — a second root inside its one-minute

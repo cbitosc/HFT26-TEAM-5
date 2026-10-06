@@ -4351,7 +4351,7 @@ class InboundPipelineTest {
             assertEquals("ratchet hello", rig.msgMap["v2-1"]?.body)
             val session = rig.ratchetStore.session(alice.nodeId)
             assertTrue(session != null && session.confirmed && !session.weAreInitiator)
-            assertEquals(1, rig.ratchetStore.recvEpoch(alice.nodeId, 1)?.next)
+            assertEquals(listOf(1), rig.ratchetStore.recvEpochs(alice.nodeId, 1).map { it.next })
             // The DM ack flooded back as usual.
             assertTrue(rig.originated.any { it.type == FrameType.RECEIPT })
             // The confirmed session is a scope-table input landing — reported once, to the spool plane.
@@ -4379,7 +4379,7 @@ class InboundPipelineTest {
             assertEquals("second", rig.msgMap["v2-m1"]?.body)
             assertEquals("first", rig.msgMap["v2-m0"]?.body)
             // The out-of-order key was stored, consumed, and removed.
-            assertEquals(null, rig.ratchetStore.skippedKey(alice.nodeId, 1, 0))
+            assertTrue(rig.ratchetStore.skippedKeys(alice.nodeId, 1, 0).isEmpty())
         }
 
     @Test
@@ -4490,7 +4490,7 @@ class InboundPipelineTest {
             val good = author.dm("ok-1", "hello")
             rig.deliver(alice, good)
             val se = checkNotNull(WireCodec.decodePayload<ChatContent>(good.payload)?.enc?.r).se
-            assertNotNull("precondition: a recv epoch exists", rig.ratchetStore.recvEpoch(alice.nodeId, se))
+            assertTrue("precondition: a recv epoch exists", rig.ratchetStore.recvEpochs(alice.nodeId, se).isNotEmpty())
 
             // Now drive the reset heuristic, which seals a reset and abandons that root era.
             listOf("sb1", "sb2", "sb3").forEach { id ->
@@ -4517,7 +4517,7 @@ class InboundPipelineTest {
             // The dead era's recv rows must be gone. Left behind, they judge alice's post-replacement
             // epochs — whose numbers may reuse these — against a stale chain index, dropping fresh frames
             // as DUPLICATE. That is terminal: a duplicate is benign, so it triggers no further recovery.
-            assertNull(rig.ratchetStore.recvEpoch(alice.nodeId, se))
+            assertTrue(rig.ratchetStore.recvEpochs(alice.nodeId, se).isEmpty())
         }
 
     @Test
@@ -4787,7 +4787,7 @@ class InboundPipelineTest {
             assertFalse(rig.msgMap.containsKey("v2-ctl"))
             assertTrue(rig.originated.none { it.type == FrameType.RECEIPT })
             // The session still advanced — the control frame's chain step is not a hole.
-            assertEquals(1, rig.ratchetStore.recvEpoch(alice.nodeId, 1)?.next)
+            assertEquals(listOf(1), rig.ratchetStore.recvEpochs(alice.nodeId, 1).map { it.next })
         }
 
     // --- session reset ---

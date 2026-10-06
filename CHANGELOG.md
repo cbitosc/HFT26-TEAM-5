@@ -40,6 +40,9 @@ document:
 
 ### Fixed
 
+- When a contact's phone set up encryption with yours again, after a reinstall for example, their direct
+  messages could stop opening hours later until the two phones started over. Those messages and their delivery
+  ticks now arrive as normal.
 - A direct message sent over LoRa while the Nearby room is busy no longer waits behind room posts until the
   room goes quiet. When your board runs short of airtime, direct messages now go out ahead of room posts and
   delivery ticks.

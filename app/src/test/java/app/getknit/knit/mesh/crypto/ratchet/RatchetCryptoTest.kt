@@ -229,6 +229,17 @@ class RatchetCryptoTest {
         assertFalse(RatchetCrypto.exportRoot(root).contentEquals(RatchetCrypto.messageKey(root)))
     }
 
+    /** The receive-state tag (ADR 2026-10.gcrd): eight HKDF bytes, big-endian, under its own label. Local only. */
+    @Test
+    fun theRootTagIsTheReferenceHkdfReadBigEndianAndSeparatesRoots() {
+        val root = deterministicBytes(5)
+        val expected =
+            referenceHkdf(root, ByteArray(32), "knit/dm/v2/root-tag".toByteArray(), 8)
+                .fold(0L) { acc, b -> (acc shl 8) or (b.toLong() and 0xFF) }
+        assertEquals(expected, RatchetCrypto.rootTag(root))
+        assertFalse(RatchetCrypto.rootTag(root) == RatchetCrypto.rootTag(deterministicBytes(6)))
+    }
+
     private companion object {
         fun hex(value: String): ByteArray = value.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
 

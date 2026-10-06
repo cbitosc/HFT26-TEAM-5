@@ -488,6 +488,44 @@ object KnitMigrations {
             }
         }
 
+    /**
+     * v20 → v21: `ratchet_recv_epochs` and `ratchet_skipped_keys` gain `rootTag`, last in their keys — the root a
+     * receive chain or skipped key was derived under, so an old era's chain drained under a kept `prevRoot` never
+     * decides a new-era frame that reuses its epoch number after a reset (#135, ADR 2026-10.gcrd).
+     *
+     * The first table rebuild in this file, and it keeps no rows. A tag is an HKDF of the session root, which SQL
+     * cannot compute, and an existing row's root is not knowable anyway: a chain opened under `prevRoot` or a race
+     * loser's root is stored like one of the active root's, and those are exactly the stale rows #135 is about —
+     * stamping them with the active root's tag would keep them live for up to two days. Both tables are transient
+     * by design (never in a backup, swept 48 h after last use). Sessions and our epoch privs stay, so every frame
+     * still opens by deriving its epoch afresh; what goes is the memory of indices already consumed, so a re-served
+     * frame with no message row (a receipt, say) opens once more — what every replacement's purge has always done.
+     * The SQL must stay byte-equivalent to what Room generates for `app/schemas/**/21.json`.
+     */
+    val MIGRATION_20_21 =
+        object : Migration(20, 21) {
+            override suspend fun migrate(connection: SQLiteConnection) {
+                connection.execSQL("DROP TABLE IF EXISTS `ratchet_recv_epochs`")
+                connection.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `ratchet_recv_epochs` (`peerId` TEXT NOT NULL, `epoch` INTEGER NOT NULL, " +
+                        "`rootTag` INTEGER NOT NULL, `chainKey` BLOB NOT NULL, `next` INTEGER NOT NULL, " +
+                        "`lastUsedAt` INTEGER NOT NULL, PRIMARY KEY(`peerId`, `epoch`, `rootTag`))",
+                )
+                connection.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_ratchet_recv_epochs_lastUsedAt` ON `ratchet_recv_epochs` (`lastUsedAt`)",
+                )
+                connection.execSQL("DROP TABLE IF EXISTS `ratchet_skipped_keys`")
+                connection.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `ratchet_skipped_keys` (`peerId` TEXT NOT NULL, `epoch` INTEGER NOT NULL, " +
+                        "`idx` INTEGER NOT NULL, `rootTag` INTEGER NOT NULL, `msgKey` BLOB NOT NULL, " +
+                        "`createdAt` INTEGER NOT NULL, PRIMARY KEY(`peerId`, `epoch`, `idx`, `rootTag`))",
+                )
+                connection.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_ratchet_skipped_keys_createdAt` ON `ratchet_skipped_keys` (`createdAt`)",
+                )
+            }
+        }
+
     /** All migrations, applied by Room in order. */
     val ALL: Array<Migration> =
         arrayOf(
@@ -510,5 +548,6 @@ object KnitMigrations {
             MIGRATION_17_18,
             MIGRATION_18_19,
             MIGRATION_19_20,
+            MIGRATION_20_21,
         )
 }

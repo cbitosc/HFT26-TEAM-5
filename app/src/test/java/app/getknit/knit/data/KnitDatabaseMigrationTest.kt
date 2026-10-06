@@ -47,7 +47,7 @@ class KnitDatabaseMigrationTest {
         )
 
     @Test
-    fun `the current schema (v20) creates and opens from the exported JSON`() =
+    fun `the current schema (v21) creates and opens from the exported JSON`() =
         runTest {
             helper.createDatabase(CURRENT_VERSION).close()
         }
@@ -748,12 +748,64 @@ class KnitDatabaseMigrationTest {
             }
         }
 
+    @Test
+    fun `migrate 20 to 21 recreates the ratchet receive tables empty, keyed by root tag`() =
+        runTest {
+            // A tag is an HKDF of the session root, which SQL cannot compute, and a stale row's root is the one thing
+            // #135 says is unknowable: the receive state starts over, while the session and our epoch privs stay so
+            // every frame still opens by deriving its epoch afresh (ADR 2026-10.gcrd).
+            helper.createDatabase(20).use { c ->
+                c.execSQL(
+                    "INSERT INTO ratchet_sessions (peerId, confirmed, weAreInitiator, root, prevRootWeAreInitiator, prevRootExpiresAt, " +
+                        "establishedAt, initPkid, peerBaseEpoch, sendEpoch, sendCount, sendEpochStartedAt, sendEpochBaseEpoch, " +
+                        "highestPeAcked, lastResetSentAt, updatedAt) VALUES ('p1',1,0,x'01',0,0,5,0,4,3,0,5,4,3,0,5)",
+                )
+                c.execSQL("INSERT INTO ratchet_local_epochs (peerId, epoch, priv, pub, createdAt) VALUES ('p1',3,x'02',x'03',5)")
+                c.execSQL("INSERT INTO ratchet_recv_epochs (peerId, epoch, chainKey, next, lastUsedAt) VALUES ('p1',4,x'04',1,5)")
+                c.execSQL("INSERT INTO ratchet_skipped_keys (peerId, epoch, idx, msgKey, createdAt) VALUES ('p1',4,0,x'05',5)")
+            }
+            helper.runMigrationsAndValidate(21, listOf(KnitMigrations.MIGRATION_20_21)).use { c ->
+                for ((table, kept) in listOf(
+                    "ratchet_sessions" to 1L,
+                    "ratchet_local_epochs" to 1L,
+                    "ratchet_recv_epochs" to 0L,
+                    "ratchet_skipped_keys" to 0L,
+                )) {
+                    c.prepare("SELECT COUNT(*) FROM $table").use { s ->
+                        assertTrue(s.step())
+                        assertEquals(table, kept, s.getLong(0))
+                    }
+                }
+                // Two roots' chains for one epoch number, and their keys for one index, now sit side by side.
+                c.execSQL(
+                    "INSERT INTO ratchet_recv_epochs (peerId, epoch, rootTag, chainKey, next, lastUsedAt) VALUES ('p1',4,1,x'04',1,5)",
+                )
+                c.execSQL(
+                    "INSERT INTO ratchet_recv_epochs (peerId, epoch, rootTag, chainKey, next, lastUsedAt) VALUES ('p1',4,2,x'06',3,6)",
+                )
+                c.execSQL(
+                    "INSERT INTO ratchet_skipped_keys (peerId, epoch, idx, rootTag, msgKey, createdAt) VALUES ('p1',4,0,1,x'05',5)",
+                )
+                c.execSQL(
+                    "INSERT INTO ratchet_skipped_keys (peerId, epoch, idx, rootTag, msgKey, createdAt) VALUES ('p1',4,0,2,x'07',6)",
+                )
+                c.prepare("SELECT COUNT(*) FROM ratchet_recv_epochs WHERE peerId = 'p1' AND epoch = 4").use { s ->
+                    assertTrue(s.step())
+                    assertEquals(2L, s.getLong(0))
+                }
+                c.prepare("SELECT COUNT(*) FROM ratchet_skipped_keys WHERE peerId = 'p1' AND epoch = 4 AND idx = 0").use { s ->
+                    assertTrue(s.step())
+                    assertEquals(2L, s.getLong(0))
+                }
+            }
+        }
+
     private companion object {
         /**
          * KnitDatabase `@Database(version = …)` — bump alongside the DB (its retention is CLASS, so the version
          * can't be read reflectively). A missing schemas/<db>/<version>.json fails the smoke test.
          */
-        const val CURRENT_VERSION = 20
+        const val CURRENT_VERSION = 21
 
         /** The v16 column list with an attachment — MIGRATION_16_17's test seeds rows through it. */
         const val INSERT_V16 =

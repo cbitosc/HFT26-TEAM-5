@@ -283,6 +283,73 @@ class RatchetSessionsResetTest {
             assertOpened(b.open(reset.envelope, T + 2_000))
         }
 
+    // --- #135: an old-era frame drained after a reset never decides the resetter's new era ---
+
+    /**
+     * Drives [from] to send epoch [se] and returns that epoch's n=0, which [to] must open; [to] answers every
+     * epoch below it, so the healing rule moves [from] one epoch per turnaround.
+     */
+    private suspend fun advanceTo(
+        from: Side,
+        to: Side,
+        se: Int,
+        start: Long,
+    ): EncEnvelope {
+        var t = start
+        while (true) {
+            val env = from.seal("epoch at $t", t)
+            assertOpened(to.open(env, t))
+            t++
+            if (checkNotNull(env.r).se == se) return env
+            assertOpened(from.open(to.seal("answer at $t", t), t))
+            t++
+        }
+    }
+
+    /**
+     * #135 as the P3→P7 pair hit it. After A's reset, custody re-served an old-era frame of A's epoch 4 that B
+     * holds no message row for (a receipt), so it reached the ratchet, opened under the kept `prevRoot`, and stored
+     * its chain. A's restarted numbering then reached 4: its frames must open, not land on the old era's chain
+     * index (DUPLICATE) or its key (AEAD_FAIL).
+     */
+    @Test
+    fun anOldEraFrameDrainedAfterAResetNeverDecidesTheNewEpochOfTheSameNumber() =
+        runTest {
+            val (a, b) = established()
+            val old4 = advanceTo(a, b, se = 4, start = T + 10)
+            assertOpened(a.open(b.seal("answer", T + 100), T + 100))
+
+            assertOpened(b.open(sealed(a.reset(T1)).envelope, T1))
+            assertOpened(b.open(old4, T1 + 1_000)) // the re-serve, under prevRoot
+            assertOpened(a.open(b.seal("answer the reset", T1 + 2_000), T1 + 2_000))
+
+            val new4 = advanceTo(a, b, se = 4, start = T1 + 3_000)
+            assertEquals(0, checkNotNull(new4.r).n)
+            assertOpened(b.open(a.seal("new era, epoch 4, n=1", T1 + 4_000), T1 + 4_000))
+        }
+
+    /**
+     * #135 as the P9→P8 pair hit it: the re-served old-era frames sat mid-epoch, so opening them under `prevRoot`
+     * banked skipped keys for the indices below. The new era's n=0 then met a stale skipped key, a rung that
+     * returned its own AEAD failure without trying anything else.
+     */
+    @Test
+    fun aStaleSkippedKeyFromADrainedOldEraNeverDecidesTheNewEpoch() =
+        runTest {
+            val (a, b) = established()
+            advanceTo(a, b, se = 2, start = T + 10)
+            val mid = (1..3).map { a.seal("old era, epoch 2, n=$it", T + 50 + it) }
+            mid.forEach { assertOpened(b.open(it, T + 60)) }
+            assertOpened(a.open(b.seal("answer", T + 100), T + 100))
+
+            assertOpened(b.open(sealed(a.reset(T1)).envelope, T1))
+            mid.drop(1).forEach { assertOpened(b.open(it, T1 + 1_000)) } // n=2 and n=3 re-served: keys banked for 0 and 1
+            assertOpened(a.open(b.seal("answer the reset", T1 + 2_000), T1 + 2_000))
+
+            advanceTo(a, b, se = 2, start = T1 + 3_000)
+            assertOpened(b.open(a.seal("new era, epoch 2, n=1", T1 + 4_000), T1 + 4_000))
+        }
+
     private companion object {
         const val T = 100_000_000L
         const val T1 = T + 600_000L

@@ -91,33 +91,72 @@ class RatchetRepositoryTest : RoomDbTest() {
                 delta =
                     RatchetEngine.OpenDelta(
                         session = session(peer),
-                        recvEpoch = RatchetEngine.RecvEpoch(epoch = 1, chainKey = ByteArray(32) { 8 }, next = 3, lastUsedAt = NOW),
-                        skippedInserts =
-                            listOf(
-                                RatchetEngine.SkippedKey(epoch = 1, idx = 0, msgKey = ByteArray(32) { 10 }, createdAt = NOW),
-                                RatchetEngine.SkippedKey(epoch = 1, idx = 1, msgKey = ByteArray(32) { 11 }, createdAt = NOW),
-                            ),
+                        recvEpoch = recvEpoch(next = 3),
+                        skippedInserts = listOf(skippedKey(idx = 0, fill = 10), skippedKey(idx = 1, fill = 11)),
                     ),
                 headerSe = 1,
                 headerN = 2,
             )
-            assertEquals(3, repo.recvEpoch(peer, 1)?.next)
-            assertArrayEquals(ByteArray(32) { 10 }, repo.skippedKey(peer, 1, 0))
+            val stored = repo.recvEpochs(peer, 1).single()
+            assertEquals(3, stored.next)
+            assertEquals(TAG, stored.rootTag)
+            assertArrayEquals(ByteArray(32) { 10 }, repo.skippedKeys(peer, 1, 0).single().msgKey)
+            assertEquals(TAG, repo.skippedKeys(peer, 1, 0).single().rootTag)
 
             // Consuming skipped key (1, 0) deletes exactly that row.
+            repo.applyOpen(
+                peerId = peer,
+                delta = RatchetEngine.OpenDelta(session = session(peer), recvEpoch = recvEpoch(next = 3), consumedSkippedTag = TAG),
+                headerSe = 1,
+                headerN = 0,
+            )
+            assertTrue(repo.skippedKeys(peer, 1, 0).isEmpty())
+            assertEquals(1, repo.skippedKeys(peer, 1, 1).size)
+        }
+
+    /**
+     * #135 (ADR 2026-10.gcrd): a reset restarts the peer's numbering, so two roots' chains can share an epoch number
+     * and a skipped index. Both rows are kept side by side, each lookup returns both, and consuming one root's key
+     * leaves the other root's alone.
+     */
+    @Test
+    fun twoRootsKeepTheirOwnChainAndKeysForOneEpochNumber() =
+        runTest {
+            val peer = "peer0000"
             repo.applyOpen(
                 peerId = peer,
                 delta =
                     RatchetEngine.OpenDelta(
                         session = session(peer),
-                        recvEpoch = RatchetEngine.RecvEpoch(epoch = 1, chainKey = ByteArray(32) { 8 }, next = 3, lastUsedAt = NOW),
-                        consumedSkippedIdx = 0,
+                        recvEpoch = recvEpoch(next = 4, tag = OLD_TAG),
+                        skippedInserts = listOf(skippedKey(idx = 0, fill = 20, tag = OLD_TAG)),
                     ),
+                headerSe = 1,
+                headerN = 3,
+            )
+            repo.applyOpen(
+                peerId = peer,
+                delta =
+                    RatchetEngine.OpenDelta(
+                        session = session(peer),
+                        recvEpoch = recvEpoch(next = 2),
+                        skippedInserts = listOf(skippedKey(idx = 0, fill = 10)),
+                    ),
+                headerSe = 1,
+                headerN = 1,
+            )
+            assertEquals(mapOf(OLD_TAG to 4, TAG to 2), repo.recvEpochs(peer, 1).associate { it.rootTag to it.next })
+            assertEquals(setOf(OLD_TAG, TAG), repo.skippedKeys(peer, 1, 0).map { it.rootTag }.toSet())
+
+            repo.applyOpen(
+                peerId = peer,
+                delta = RatchetEngine.OpenDelta(session = session(peer), recvEpoch = recvEpoch(next = 2), consumedSkippedTag = TAG),
                 headerSe = 1,
                 headerN = 0,
             )
-            assertNull(repo.skippedKey(peer, 1, 0))
-            assertNotNull(repo.skippedKey(peer, 1, 1))
+            val left = repo.skippedKeys(peer, 1, 0).single()
+            assertEquals(OLD_TAG, left.rootTag)
+            assertArrayEquals(ByteArray(32) { 20 }, left.msgKey)
         }
 
     @Test
@@ -130,8 +169,8 @@ class RatchetRepositoryTest : RoomDbTest() {
                 delta =
                     RatchetEngine.OpenDelta(
                         session = session(peer),
-                        recvEpoch = RatchetEngine.RecvEpoch(epoch = 1, chainKey = ByteArray(32), next = 1, lastUsedAt = NOW),
-                        skippedInserts = listOf(RatchetEngine.SkippedKey(epoch = 1, idx = 5, msgKey = ByteArray(32), createdAt = NOW)),
+                        recvEpoch = recvEpoch(next = 1, tag = OLD_TAG),
+                        skippedInserts = listOf(skippedKey(idx = 5, fill = 0, tag = OLD_TAG)),
                     ),
                 headerSe = 1,
                 headerN = 0,
@@ -142,7 +181,7 @@ class RatchetRepositoryTest : RoomDbTest() {
                 delta =
                     RatchetEngine.OpenDelta(
                         session = session(peer),
-                        recvEpoch = RatchetEngine.RecvEpoch(epoch = 1, chainKey = ByteArray(32) { 9 }, next = 1, lastUsedAt = NOW),
+                        recvEpoch = recvEpoch(next = 1),
                         purgePeerRecvState = true,
                     ),
                 headerSe = 1,
@@ -150,8 +189,8 @@ class RatchetRepositoryTest : RoomDbTest() {
             )
             // The purge dropped the old skipped key; the new-era recv row (written after the purge) and
             // our own epoch privs survive.
-            assertNull(repo.skippedKey(peer, 1, 5))
-            assertNotNull(repo.recvEpoch(peer, 1))
+            assertTrue(repo.skippedKeys(peer, 1, 5).isEmpty())
+            assertEquals(listOf(TAG), repo.recvEpochs(peer, 1).map { it.rootTag })
             assertNotNull(repo.localEpochPriv(peer, 1))
         }
 
@@ -162,20 +201,38 @@ class RatchetRepositoryTest : RoomDbTest() {
             repo.upsertSession(session(peer))
             db.ratchetDao().insertSkippedKeys(
                 listOf(
-                    RatchetSkippedKeyEntity(peer, epoch = 1, idx = 0, msgKey = ByteArray(32), createdAt = NOW - STALE),
-                    RatchetSkippedKeyEntity(peer, epoch = 1, idx = 1, msgKey = ByteArray(32), createdAt = NOW),
+                    RatchetSkippedKeyEntity(peer, epoch = 1, idx = 0, rootTag = TAG, msgKey = ByteArray(32), createdAt = NOW - STALE),
+                    RatchetSkippedKeyEntity(peer, epoch = 1, idx = 1, rootTag = TAG, msgKey = ByteArray(32), createdAt = NOW),
                 ),
             )
             db.ratchetDao().upsertRecvEpoch(
                 app.getknit.knit.data.ratchet
-                    .RatchetRecvEpochEntity(peer, epoch = 1, chainKey = ByteArray(32), next = 1, lastUsedAt = NOW - STALE),
+                    .RatchetRecvEpochEntity(peer, epoch = 1, rootTag = TAG, chainKey = ByteArray(32), next = 1, lastUsedAt = NOW - STALE),
             )
 
             repo.sweep(NOW)
 
-            assertNull(repo.skippedKey(peer, 1, 0)) // past the 48 h TTL
-            assertNotNull(repo.skippedKey(peer, 1, 1)) // fresh
-            assertNull(repo.recvEpoch(peer, 1)) // past the 48 h TTL
+            assertTrue(repo.skippedKeys(peer, 1, 0).isEmpty()) // past the 48 h TTL
+            assertEquals(1, repo.skippedKeys(peer, 1, 1).size) // fresh
+            assertTrue(repo.recvEpochs(peer, 1).isEmpty()) // past the 48 h TTL
+        }
+
+    /** The global cap's eviction names a row by its whole key, root tag included: two roots' keys at one index both go. */
+    @Test
+    fun theSkippedKeyCapEvictsByTheWholeKey() =
+        runTest {
+            val peer = "peer0000"
+            repo.upsertSession(session(peer))
+            db.ratchetDao().insertSkippedKeys(
+                listOf(
+                    RatchetSkippedKeyEntity(peer, epoch = 1, idx = 0, rootTag = OLD_TAG, msgKey = ByteArray(32), createdAt = NOW - 2),
+                    RatchetSkippedKeyEntity(peer, epoch = 1, idx = 0, rootTag = TAG, msgKey = ByteArray(32), createdAt = NOW - 1),
+                    RatchetSkippedKeyEntity(peer, epoch = 1, idx = 1, rootTag = TAG, msgKey = ByteArray(32), createdAt = NOW),
+                ),
+            )
+            db.ratchetDao().evictOldestSkippedKeys(2)
+            assertTrue(repo.skippedKeys(peer, 1, 0).isEmpty())
+            assertEquals(1, repo.skippedKeys(peer, 1, 1).size)
         }
 
     @Test
@@ -264,7 +321,20 @@ class RatchetRepositoryTest : RoomDbTest() {
             assertNull(repo.localEpochPriv(peer, 1))
         }
 
+    private fun recvEpoch(
+        next: Int,
+        tag: Long = TAG,
+    ) = RatchetEngine.RecvEpoch(epoch = 1, rootTag = tag, chainKey = ByteArray(32) { 8 }, next = next, lastUsedAt = NOW)
+
+    private fun skippedKey(
+        idx: Int,
+        fill: Int,
+        tag: Long = TAG,
+    ) = RatchetEngine.SkippedKey(epoch = 1, rootTag = tag, idx = idx, msgKey = ByteArray(32) { fill.toByte() }, createdAt = NOW)
+
     private companion object {
+        const val TAG = 0x7EA2D2A5L
+        const val OLD_TAG = -0x1051E503L
         const val NOW = 1_700_000_000_000L
         const val STALE = 49 * 60 * 60_000L // just past the 48 h retention windows
     }

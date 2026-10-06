@@ -170,12 +170,12 @@ class SessionLabTest {
         assertNull("alice's reset went out", alice.resetSession(bob))
         val reset = (alice.custodyIds() - custodied).single()
 
-        // The pipes first, the holds, then the link-up: nothing either sends the other crosses before its hold.
-        alice.transport.connect(bob.transport, publish = false)
-        alice.transport.hold(bob.transport)
-        bob.transport.hold(alice.transport)
-        alice.transport.publishNeighbors()
-        bob.transport.publishNeighbors()
+        // The holds go on while the pipes exist and neither end lists the link (`arm`): nothing either sends the other
+        // crosses before its hold, not even a re-offer timer's digest firing between a connect and a hold.
+        lab.link(alice, bob) {
+            alice.transport.hold(bob.transport)
+            bob.transport.hold(alice.transport)
+        }
         // Bob's digest serve walks custody newest first, so his DMs are released oldest first: the first one derives
         // the epoch under the kept `prevRoot`, and the rest of that epoch opens on the live chain it stored.
         lab.await(apart) {
@@ -209,6 +209,68 @@ class SessionLabTest {
 
         lab.assertConverged(listOf(alice, bob), atLeast = 2 + apart) { it.dmWith(if (it === alice) bob else alice) }
     }
+
+    /**
+     * #135 (ADR 2026-10.gcrd). Alice's DMs written while Bob was away ride her old era's epoch; she resets, which
+     * restarts her numbering. Bob adopts the reset *first* (pinned: the reset leads her served batch) and only then
+     * reads those DMs, under the root the reset retired — so his stored chain for that epoch number belongs to the old
+     * era. Alice's new era then climbs back to the same number, and everything she seals there has to reach Bob:
+     * judged against the old era's chain it read as DUPLICATE or failed its AEAD, and Bob reset back to recover.
+     */
+    @Test
+    fun oldEraDmsReadAfterTheResetNeverStrandTheNewEraAtTheirEpochNumber() =
+        runBlocking {
+            val alice = lab.node("alice").apply { setDisplayName("Alice") }
+            val bob = lab.node("bob").apply { setDisplayName("Bob") }
+            lab.link(alice, bob)
+            lab.awaitAcquainted(alice, bob)
+            assertTrue(alice.sendDm(bob, "hello"))
+            lab.await(1) { bob.decrypted(bob.dmWith(alice)).count { it.second == "hello" } }
+            assertTrue(bob.sendDm(alice, "hi"))
+            lab.assertConverged(listOf(alice, bob), atLeast = 2) { it.dmWith(if (it === alice) bob else alice) }
+
+            lab.unlink(alice, bob)
+            val apart = (1..3).map { "sent while apart $it" }
+            apart.forEach { assertTrue(alice.sendDm(bob, it)) }
+            val apartIds = apart.map { alice.ownMessageId(alice.dmWith(bob), it) }
+            val oldEpoch = checkNotNull(alice.session(bob)).sendEpoch
+            assertTrue("precondition: the apart DMs sit past the epoch a reset restarts at", oldEpoch >= 2)
+            val custodied = alice.custodyIds()
+            assertNull("alice's reset went out", alice.resetSession(bob))
+            val reset = (alice.custodyIds() - custodied).single()
+
+            // The hold goes on while the pipes exist and neither end lists the link (`arm`): nothing Alice serves Bob
+            // crosses before it.
+            lab.link(alice, bob) { alice.transport.hold(bob.transport) }
+            lab.await(1 + apartIds.size) {
+                alice.transport
+                    .held(bob.transport)
+                    .mapNotNull { WireCodec.decodeEnvelope(it.signed)?.id }
+                    .filter { it == reset || it in apartIds }
+                    .distinct()
+                    .size
+            }
+            alice.transport.release(bob.transport) { batch ->
+                batch.sortedByDescending { WireCodec.decodeEnvelope(it.signed)?.id == reset } // the reset first
+            }
+            lab.await(apart.size) { bob.decrypted(bob.dmWith(alice)).count { it.second in apart } }
+            assertEquals("bob read the apart DMs after adopting", alice.session(bob)?.rootHash, bob.session(alice)?.rootHash)
+
+            // Turnarounds until Alice's restarted numbering has sealed past the old era's epoch, each DM awaited by text.
+            var turn = 0
+            while (checkNotNull(alice.session(bob)).sendEpoch <= oldEpoch) {
+                val fromAlice = "alice, new era $turn"
+                assertTrue(alice.sendDm(bob, fromAlice))
+                lab.await(1) { bob.decrypted(bob.dmWith(alice)).count { it.second == fromAlice } }
+                val fromBob = "bob, new era $turn"
+                assertTrue(bob.sendDm(alice, fromBob))
+                lab.await(1) { alice.decrypted(alice.dmWith(bob)).count { it.second == fromBob } }
+                turn++
+                assertTrue("alice's new era never passed epoch $oldEpoch", turn <= MAX_TURNS)
+            }
+            lab.assertConverged(listOf(alice, bob), atLeast = 5 + 2 * turn) { it.dmWith(if (it === alice) bob else alice) }
+            assertEquals("bob never reset back", 0L, bob.session(alice)?.lastResetSentAt)
+        }
 
     @Test
     fun aTickSealedAfterAResetStillReachesAPeerWhoHasNotSeenTheReset() = runBlocking { tickAfterReset(apart = 1) }
@@ -331,4 +393,9 @@ class SessionLabTest {
 
     /** A point-to-point (`relay = false`) chat frame [nodeId] sent: the live-link form of a delivery tick. */
     private fun WireEnvelope.isLiveTickFrom(nodeId: String): Boolean = !relay && isChatFrom(nodeId)
+
+    private companion object {
+        /** A turnaround moves each side's epoch by one, so this bounds the climb past a handful of old-era epochs. */
+        const val MAX_TURNS = 12
+    }
 }

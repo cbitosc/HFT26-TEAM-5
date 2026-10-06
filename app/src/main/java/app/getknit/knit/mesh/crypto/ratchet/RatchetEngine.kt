@@ -13,18 +13,23 @@ import app.getknit.knit.mesh.crypto.AesGcm
  *   processed in any order, and a wholly-evicted epoch loses only itself.
  * - **Own send-epoch numbers are monotone across the roots a peer hands us** (both-initiate races, inbound
  *   replacements), but **not across our own reset**: `RatchetSessions.sealResetDm` initiates afresh and
- *   restarts at 1, and the re-minted epoch replaces the dead era's key of the same number (ADR 027). So
- *   `(peer, se)` is reused only when a session was replaced, and every root change on our side purges the
- *   stale receive state ([OpenDelta.purgePeerRecvState], and `sealResetDm` for its own).
+ *   restarts at 1, and the re-minted epoch replaces the dead era's key of the same number (ADR 027). So a
+ *   peer's `se` is reused only when a session was replaced, and two eras can hold the same number at once.
+ * - **Receive state is keyed by the root that derived it** ([RecvEpoch.rootTag], [SkippedKey.rootTag];
+ *   ADR 2026-10.gcrd). Each root candidate reads only its own rows, so an old era's chain — drained under a kept
+ *   `prevRoot` after the replacement purged everything — never decides a new-era frame of the same number
+ *   (#135). The stored purges remain ([OpenDelta.purgePeerRecvState], and `sealResetDm` for its own), as
+ *   hygiene; a purging open still reads nothing stored (see `Ladder.climb`).
  * - **A receive chain, once derived, never needs the root again** — `chainKey` alone advances it, which
- *   is what lets a superseded root ([SessionState.prevRoot]) drain for a bounded window and then vanish.
+ *   is what lets a superseded root ([SessionState.prevRoot]) drain for a bounded window and then vanish. The
+ *   row keeps only a one-way tag of it.
  * - **A frame moves the session's era only when it derives a fresh epoch under the active root.** Adopting
  *   the peer's epoch as our DH base, recording which of our epochs it has sealed against, and confirming the
  *   session are all claims about the era we hold now, and a frame drained under any other root (a kept
  *   `prevRoot`, a race's other root, a late race remnant) says nothing about it. Every stored receive row
- *   was derived by exactly one fresh derivation, whose root already decided — the root change that would
- *   make a row stale purges it — so the live-chain and skipped-key rungs never apply them: in era it would
- *   repeat what the epoch's first frame recorded, out of era it would be wrong.
+ *   was derived by one fresh derivation under the root its tag names, which already decided then, so the
+ *   live-chain and skipped-key rungs never apply them: in era it would repeat what the epoch's first frame
+ *   recorded, out of era it would be wrong.
  *
  * [SessionState] and [RecvEpoch] are data classes for `copy` ergonomics; their [ByteArray] fields make
  * generated equality reference-based, which nothing here relies on.
@@ -67,17 +72,22 @@ class RatchetEngine(
         val createdAt: Long,
     )
 
-    /** One inbound epoch chain (mirrors a `ratchet_recv_epochs` row). */
+    /**
+     * One inbound epoch chain (mirrors a `ratchet_recv_epochs` row). [rootTag] is [RatchetCrypto.rootTag] of the
+     * root it was derived under: only that root's candidate reads it.
+     */
     data class RecvEpoch(
         val epoch: Int,
+        val rootTag: Long,
         val chainKey: ByteArray,
         val next: Int,
         val lastUsedAt: Long,
     )
 
-    /** A stored out-of-order message key (mirrors a `ratchet_skipped_keys` row). */
+    /** A stored out-of-order message key (mirrors a `ratchet_skipped_keys` row), tagged like [RecvEpoch]. */
     class SkippedKey(
         val epoch: Int,
+        val rootTag: Long,
         val idx: Int,
         val msgKey: ByteArray,
         val createdAt: Long,
@@ -117,15 +127,17 @@ class RatchetEngine(
 
     /**
      * Everything [open] needs that lives in storage; the caller resolves rows, the engine does math.
-     * [ownBasePriv] is our local-epoch priv for the header's `pe` (when `pe >= 1`); [spkPrivForInit] is
+     * [recvEpochs] are every stored chain for the header's `se` and [skippedMsgKeys] every stored key for its
+     * `(se, n)`, whatever root derived them — the engine matches each to its candidate by tag and ignores the
+     * rest. [ownBasePriv] is our local-epoch priv for the header's `pe` (when `pe >= 1`); [spkPrivForInit] is
      * our signed-prekey priv for the init's `pkid` (when an init is attached).
      */
     class OpenContext(
         val selfNodeId: String,
         val peerId: String,
         val session: SessionState?,
-        val recvEpoch: RecvEpoch?,
-        val skippedMsgKey: ByteArray?,
+        val recvEpochs: List<RecvEpoch>,
+        val skippedMsgKeys: List<SkippedKey>,
         val ownBasePriv: ByteArray?,
         val ownIkPriv: ByteArray,
         val peerIkPub: ByteArray,
@@ -185,7 +197,8 @@ class RatchetEngine(
         /** Upsert; null when only a skipped key was consumed for an epoch whose row is already gone. */
         val recvEpoch: RecvEpoch?,
         val skippedInserts: List<SkippedKey> = emptyList(),
-        val consumedSkippedIdx: Int? = null,
+        /** The tag of the skipped key this open consumed, at the header's `(se, n)`; only that root's key goes. */
+        val consumedSkippedTag: Long? = null,
         /** True when a replacement init was adopted: delete ALL recv epochs + skipped keys for this peer first. */
         val purgePeerRecvState: Boolean = false,
     )
@@ -298,14 +311,15 @@ class RatchetEngine(
     }
 
     /**
-     * Opens one inbound v2 frame. The ladder: a stored skipped key, then the live chain of a known
-     * receive epoch (deriving-and-storing keys across any index gap), then a brand-new epoch derivation
-     * — under the active root first, the draining [SessionState.prevRoot] second, and, for an unanchored race
-     * winner, a late race loser's root last. An attached init may establish, idempotently re-confirm,
-     * race-tiebreak, or replace the session; every mutation rides the returned [OpenDelta], and nothing is
-     * committed on failure. Only the fresh derivation, and only under the active root, moves the session's
-     * era (see the class invariants). A null [nonce] is the v3 form (derived nonce, header bound into the AAD
-     * — see [seal]); the ladder is otherwise identical.
+     * Opens one inbound v2 frame. The ladder runs over the resolved root candidates — the active root first, the
+     * draining [SessionState.prevRoot] second, and, for an unanchored race winner, a late race loser's root last —
+     * and each candidate reads only the stored state its own root derived ([RecvEpoch.rootTag], ADR 2026-10.gcrd):
+     * a stored skipped key, then the live chain of a known receive epoch (deriving-and-storing keys across any
+     * index gap), then, for a candidate holding neither, a brand-new epoch derivation. An attached init may
+     * establish, idempotently re-confirm, race-tiebreak, or replace the session; every mutation rides the returned
+     * [OpenDelta], and nothing is committed on failure. Only the fresh derivation, and only under the active root,
+     * moves the session's era (see the class invariants). A null [nonce] is the v3 form (derived nonce, header
+     * bound into the AAD — see [seal]); the ladder is otherwise identical.
      */
     fun open(
         ctx: OpenContext,
@@ -317,24 +331,7 @@ class RatchetEngine(
     ): OpenOutcome {
         if (!headerSane(header)) return OpenOutcome.Failed.BAD_HEADER
         val resolved = resolveSession(ctx, header, now) ?: return sessionFailure(ctx, header)
-        if (!resolved.purge && ctx.skippedMsgKey != null) {
-            return decryptWith(ctx.skippedMsgKey, header, nonce, ct, aad) { plain ->
-                OpenOutcome.Opened(
-                    plain,
-                    OpenDelta(
-                        session = touch(resolved.session, header, ctx, now, eraEffects = false),
-                        recvEpoch = ctx.recvEpoch?.copy(lastUsedAt = now),
-                        consumedSkippedIdx = header.n,
-                    ),
-                )
-            }
-        }
-        val epoch = if (resolved.purge) null else ctx.recvEpoch
-        return when {
-            epoch == null -> openNewEpoch(ctx, resolved, header, nonce, ct, aad, now)
-            header.n < epoch.next -> OpenOutcome.Failed.DUPLICATE
-            else -> finishOpen(ctx, resolved, epoch.chainKey, epoch.next, header, nonce, ct, aad, now, eraEffects = false)
-        }
+        return Ladder(ctx, resolved, header, nonce, ct, aad, now).climb()
     }
 
     // ---- internals ----------------------------------------------------------------------------------
@@ -367,7 +364,132 @@ class RatchetEngine(
         val root: ByteArray,
         val senderIsInitiator: Boolean,
         val active: Boolean,
-    )
+    ) {
+        /** The [RatchetCrypto.rootTag] its stored receive state carries. */
+        val tag: Long = RatchetCrypto.rootTag(root)
+    }
+
+    /**
+     * One frame's way down the ladder. Three passes over the candidates, each candidate leaving the ladder at the
+     * first pass that holds something of its own: its stored skipped key for `(se, n)`, else its live chain for
+     * `se`, else a fresh derivation. Only one root can open a frame, so the order changes the cost and never the
+     * result; this one lets an old era's frame drain on its own stored chain before any DH is paid for it.
+     */
+    private inner class Ladder(
+        private val ctx: OpenContext,
+        private val resolved: ResolvedSession,
+        private val header: FrameHeader,
+        private val nonce: ByteArray?,
+        private val ct: ByteArray,
+        private val aad: ByteArray,
+        private val now: Long,
+    ) {
+        private var consumed = false
+        private var aeadFailed = false
+        private var badHeader = false
+        private var epochGone = false
+
+        fun climb(): OpenOutcome {
+            // A resolution that purges reads nothing stored: every row describes the era it just left, and the
+            // resolving frame must reach the fresh derivation that records the new era. A stored rung would skip
+            // that — a late race remnant's read banks a skipped key under the very root a flagged reset then asks
+            // us to adopt, and opening the reset on it would leave the replacement without its DH base.
+            val rows = if (resolved.purge) emptyList() else ctx.recvEpochs
+            val keys = if (resolved.purge) emptyList() else ctx.skippedMsgKeys
+            val left = resolved.rootCandidates.distinctBy { it.tag }.toMutableList()
+            for (candidate in left.toList()) {
+                val key = keys.firstOrNull { it.rootTag == candidate.tag } ?: continue
+                left -= candidate
+                openSkipped(candidate, key, rows.firstOrNull { it.rootTag == candidate.tag })?.let { return it }
+            }
+            for (candidate in left.toList()) {
+                val row = rows.firstOrNull { it.rootTag == candidate.tag } ?: continue
+                left -= candidate
+                openLive(candidate, row)?.let { return it }
+            }
+            return openFresh(left) ?: verdict()
+        }
+
+        /** The candidate's stored key for `(se, n)`; a failure means the frame is not this root's. */
+        private fun openSkipped(
+            candidate: RootCandidate,
+            key: SkippedKey,
+            row: RecvEpoch?,
+        ): OpenOutcome.Opened? {
+            val outcome =
+                decryptWith(key.msgKey, header, nonce, ct, aad) { plain ->
+                    OpenOutcome.Opened(
+                        plain,
+                        OpenDelta(
+                            session = touch(resolved.session, header, ctx, now, eraEffects = false),
+                            recvEpoch = row?.copy(lastUsedAt = now),
+                            consumedSkippedTag = candidate.tag,
+                        ),
+                    )
+                }
+            if (outcome !is OpenOutcome.Opened) aeadFailed = true
+            return outcome as? OpenOutcome.Opened
+        }
+
+        /** The candidate's live chain for `se`: an index below its cursor is consumed under this root. */
+        private fun openLive(
+            candidate: RootCandidate,
+            row: RecvEpoch,
+        ): OpenOutcome.Opened? {
+            if (header.n < row.next) {
+                consumed = true
+                return null
+            }
+            val outcome = finishOpen(ctx, resolved, candidate.tag, row.chainKey, row.next, header, nonce, ct, aad, now, eraEffects = false)
+            if (outcome !is OpenOutcome.Opened) aeadFailed = true
+            return outcome as? OpenOutcome.Opened
+        }
+
+        /** A brand-new epoch derivation under each candidate that holds nothing stored for this frame. */
+        private fun openFresh(candidates: List<RootCandidate>): OpenOutcome.Opened? {
+            if (candidates.isEmpty()) return null
+            val basePriv = if (header.pe == 0) ctx.spkPrivForInit else ctx.ownBasePriv
+            if (basePriv == null) {
+                epochGone = true
+                return null
+            }
+            val shared = runCatching { RatchetCrypto.dh(basePriv, header.ek) }.getOrNull()
+            if (shared == null) {
+                badHeader = true
+                return null
+            }
+            for (candidate in candidates) {
+                val keys =
+                    RatchetCrypto.deriveEpoch(
+                        sessionRoot = candidate.root,
+                        dhShared = shared,
+                        senderIsInitiator = candidate.senderIsInitiator,
+                        senderEpoch = header.se,
+                        baseEpoch = header.pe,
+                    )
+                val outcome = finishOpen(ctx, resolved, candidate.tag, keys.chainKey, 0, header, nonce, ct, aad, now, candidate.active)
+                if (outcome is OpenOutcome.Opened) return outcome
+                aeadFailed = true
+            }
+            return null
+        }
+
+        /**
+         * Nothing opened. DUPLICATE outranks the rest: it is the benign verdict, and a genuine re-serve of a consumed
+         * frame also fails under every other candidate (a fresh derivation under a root that never sealed it is an
+         * AEAD failure by construction), which must not walk the reset heuristic. It must not stop the ladder,
+         * though — a consumed index under one root is exactly what an old era's drained chain shows the new era's
+         * frame of the same number (#135). Below it, the order a single candidate always produced.
+         */
+        private fun verdict(): OpenOutcome.Failed =
+            when {
+                consumed -> OpenOutcome.Failed.DUPLICATE
+                aeadFailed -> OpenOutcome.Failed.AEAD_FAIL
+                badHeader -> OpenOutcome.Failed.BAD_HEADER
+                epochGone -> OpenOutcome.Failed.EPOCH_GONE
+                else -> OpenOutcome.Failed.AEAD_FAIL
+            }
+    }
 
     private fun sessionFailure(
         ctx: OpenContext,
@@ -446,9 +568,9 @@ class RatchetEngine(
         // Refused is not unread: the remnant's own frame is the loser's opening DM, and it is still a real
         // message (#83) — see [remnantCandidates].
         if (isRemnantOf(ctx, session)) return ResolvedSession(session, candidates + remnantCandidates(ctx, header, init))
-        // Replacement (peer reset / re-init after losing state): their epoch numbering restarts at 1,
-        // so our recv rows for the old numbering must go; the old root drains via prevRoot for any
-        // still-in-flight old frames.
+        // Replacement (peer reset / re-init after losing state): their epoch numbering restarts at 1. The
+        // rows for the old numbering go (hygiene — the tag already keeps them off the new root's frames), and
+        // the old root drains via prevRoot for any still-in-flight old frames, on rows tagged with it.
         val newRoot = respond(ctx, init)
         return ResolvedSession(
             session =
@@ -519,10 +641,10 @@ class RatchetEngine(
      * has the lexicographically smaller nodeId. The loser's root drains as [SessionState.prevRoot].
      *
      * The side that adopts the winner's root purges its receive state with it: those rows describe chains
-     * under the era being abandoned. Send-epoch numbering continuing monotonically is *not* enough on its
-     * own — that holds for an ordinary race, but two peers resetting each other race with inits whose
-     * sender restarted its numbering, so the winner's fresh epochs collide with the loser's surviving rows.
-     * The side that keeps its own root changes no era and keeps its rows.
+     * under the era being abandoned. Two peers resetting each other race with inits whose sender restarted its
+     * numbering, so the winner's fresh epochs share numbers with the loser's surviving rows; the root tag keeps
+     * them apart (ADR 2026-10.gcrd) and the purge drops what nothing will read. The side that keeps its own root
+     * changes no era and keeps its rows.
      *
      * Each side's candidates put the root it now holds first and the other one read-only: the winner still
      * reads the loser's pre-adoption frames, but their epoch never becomes its DH base — it stays on the
@@ -558,11 +680,10 @@ class RatchetEngine(
                         RootCandidate(session.root, senderIsInitiator = false, active = false),
                     ),
                 // We just swapped roots, so every recv row we hold describes a chain under the era we are
-                // abandoning — exactly the replacement case, and it must purge for the same reason. The
-                // numbering argument below does not save us: it holds for an ordinary race, but a race
-                // whose inits are RESET requests is one where the winner restarted its epoch numbering
-                // (`sealResetDm`), so its fresh epochs land straight on our stale rows and are judged
-                // against a consumed chain index — a DUPLICATE, which triggers nothing and never heals.
+                // abandoning — the replacement case. Before the root tag, a race of RESET requests (whose winner
+                // restarted its numbering, `sealResetDm`) landed the winner's fresh epochs on our stale rows as a
+                // DUPLICATE that never healed; now the tag keeps them apart, and the purge is what makes this
+                // resolving frame read nothing stored (see `Ladder.climb`).
                 purge = true,
             )
         } else {
@@ -594,39 +715,12 @@ class RatchetEngine(
             peerEkPub = init.eph,
         )
 
-    private fun openNewEpoch(
-        ctx: OpenContext,
-        resolved: ResolvedSession,
-        header: FrameHeader,
-        nonce: ByteArray?,
-        ct: ByteArray,
-        aad: ByteArray,
-        now: Long,
-    ): OpenOutcome {
-        val basePriv = if (header.pe == 0) ctx.spkPrivForInit else ctx.ownBasePriv
-        basePriv ?: return OpenOutcome.Failed.EPOCH_GONE
-        val shared =
-            runCatching { RatchetCrypto.dh(basePriv, header.ek) }.getOrNull()
-                ?: return OpenOutcome.Failed.BAD_HEADER
-        for (candidate in resolved.rootCandidates) {
-            val keys =
-                RatchetCrypto.deriveEpoch(
-                    sessionRoot = candidate.root,
-                    dhShared = shared,
-                    senderIsInitiator = candidate.senderIsInitiator,
-                    senderEpoch = header.se,
-                    baseEpoch = header.pe,
-                )
-            val outcome = finishOpen(ctx, resolved, keys.chainKey, 0, header, nonce, ct, aad, now, candidate.active)
-            if (outcome !is OpenOutcome.Failed) return outcome
-        }
-        return OpenOutcome.Failed.AEAD_FAIL
-    }
-
+    /** Advances a chain positioned at [next] to the header's index and opens it; what it stores carries [rootTag]. */
     @Suppress("LongParameterList") // internal plumbing between the two open paths; a param object would just rename it
     private fun finishOpen(
         ctx: OpenContext,
         resolved: ResolvedSession,
+        rootTag: Long,
         chainKeyAtNext: ByteArray,
         next: Int,
         header: FrameHeader,
@@ -639,7 +733,8 @@ class RatchetEngine(
         var chainKey = chainKeyAtNext
         val skipped = mutableListOf<SkippedKey>()
         for (idx in next until header.n) {
-            skipped += SkippedKey(epoch = header.se, idx = idx, msgKey = RatchetCrypto.messageKey(chainKey), createdAt = now)
+            skipped +=
+                SkippedKey(epoch = header.se, rootTag = rootTag, idx = idx, msgKey = RatchetCrypto.messageKey(chainKey), createdAt = now)
             chainKey = RatchetCrypto.nextChainKey(chainKey)
         }
         val msgKey = RatchetCrypto.messageKey(chainKey)
@@ -649,7 +744,8 @@ class RatchetEngine(
                 plain,
                 OpenDelta(
                     session = touch(resolved.session, header, ctx, now, eraEffects),
-                    recvEpoch = RecvEpoch(epoch = header.se, chainKey = nextChain, next = header.n + 1, lastUsedAt = now),
+                    recvEpoch =
+                        RecvEpoch(epoch = header.se, rootTag = rootTag, chainKey = nextChain, next = header.n + 1, lastUsedAt = now),
                     skippedInserts = skipped,
                     purgePeerRecvState = resolved.purge,
                 ),

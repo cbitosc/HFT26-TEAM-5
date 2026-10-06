@@ -15,6 +15,7 @@ import org.junit.Test
  * scenario the mesh forces — reordering, holes, duplicate re-serves, both-initiate races, wipe-and-reset
  * — is a plain-JVM case here.
  */
+@Suppress("LargeClass") // one engine's contract over one two-sided harness; splitting it would scatter the Side fake
 class RatchetEngineTest {
     private val engine = RatchetEngine()
 
@@ -34,8 +35,15 @@ class RatchetEngineTest {
         var spkResolvable = true
         var session: RatchetEngine.SessionState? = null
         val localEpochs = mutableMapOf<Int, RatchetEngine.LocalEpoch>()
-        val recvEpochs = mutableMapOf<Int, RatchetEngine.RecvEpoch>()
-        val skipped = mutableMapOf<Pair<Int, Int>, ByteArray>()
+
+        /** Keyed `(se, rootTag)`, as `ratchet_recv_epochs`. */
+        val recvEpochs = mutableMapOf<Pair<Int, Long>, RatchetEngine.RecvEpoch>()
+
+        /** Keyed `(se, n, rootTag)`, as `ratchet_skipped_keys`. */
+        val skipped = mutableMapOf<Triple<Int, Int, Long>, RatchetEngine.SkippedKey>()
+
+        /** The epoch numbers we hold a receive chain for, whatever root derived them. */
+        val recvNumbers: Set<Int> get() = recvEpochs.keys.mapTo(mutableSetOf()) { it.first }
         lateinit var peer: Side
         var lastDelta: RatchetEngine.OpenDelta? = null
 
@@ -68,8 +76,8 @@ class RatchetEngineTest {
                     selfNodeId = nodeId,
                     peerId = peer.nodeId,
                     session = session,
-                    recvEpoch = recvEpochs[frame.header.se],
-                    skippedMsgKey = skipped[frame.header.se to frame.header.n],
+                    recvEpochs = recvEpochs.values.filter { it.epoch == frame.header.se },
+                    skippedMsgKeys = skipped.values.filter { it.epoch == frame.header.se && it.idx == frame.header.n },
                     ownBasePriv = localEpochs[frame.header.pe]?.priv,
                     ownIkPriv = ik.priv,
                     peerIkPub = peer.ik.pub,
@@ -94,9 +102,9 @@ class RatchetEngineTest {
                 skipped.clear()
             }
             session = delta.session
-            delta.recvEpoch?.let { recvEpochs[it.epoch] = it }
-            delta.skippedInserts.forEach { skipped[it.epoch to it.idx] = it.msgKey }
-            if (delta.consumedSkippedIdx != null) skipped.remove(header.se to header.n)
+            delta.recvEpoch?.let { recvEpochs[it.epoch to it.rootTag] = it }
+            delta.skippedInserts.forEach { skipped[Triple(it.epoch, it.idx, it.rootTag)] = it }
+            delta.consumedSkippedTag?.let { skipped.remove(Triple(header.se, header.n, it)) }
         }
 
         /**
@@ -486,7 +494,7 @@ class RatchetEngineTest {
         a.initiate(NOW)
         assertEquals("one", text(b.open(a.seal("one", NOW), NOW)))
         assertEquals("two", text(b.open(a.seal("two", NOW), NOW)))
-        assertEquals(setOf(1), b.recvEpochs.keys)
+        assertEquals(setOf(1), b.recvNumbers)
 
         // Both sides now re-initiate at each other — two peers resetting each other, which is what the
         // recovery path produces once every undecryptable outcome can request one.
@@ -499,7 +507,7 @@ class RatchetEngineTest {
         // duplicate — benign per frame, and a permanent one-way deadlock in aggregate.
         assertEquals("after the race", text(b.open(fromA, NOW + 1)))
         assertTrue("adopting the winner's root must drop the loser's recv state", checkNotNull(b.lastDelta).purgePeerRecvState)
-        assertEquals("only the freshly-derived epoch survives", setOf(fromA.header.se), b.recvEpochs.keys)
+        assertEquals("only the freshly-derived epoch survives", setOf(fromA.header.se), b.recvNumbers)
     }
 
     @Test
@@ -710,7 +718,7 @@ class RatchetEngineTest {
         assertEquals("after the wipe", text(b.open(reborn, NOW + 10_000)))
         assertTrue(checkNotNull(b.lastDelta).purgePeerRecvState)
         assertEquals(NOW + 10_000, checkNotNull(b.session).establishedAt)
-        assertEquals(setOf(1), b.recvEpochs.keys)
+        assertEquals(setOf(1), b.recvNumbers)
 
         // B's next send reaches the reborn A; B's own epoch numbering never reset.
         val toReborn = b.seal("welcome back", NOW + 10_000)
@@ -746,12 +754,115 @@ class RatchetEngineTest {
         a.initiate(NOW + 10_000)
         b.open(a.seal("new era, epoch 1", NOW + 10_000), NOW + 10_000)
 
-        // Both eras used se=1 and the new era owns the recv row now, so the old frames cannot decrypt:
-        // an index below the new chain's cursor reads as a duplicate, one at/above it fails the AEAD.
+        // B never held the old era's root (none of its frames reached B before the wipe), so nothing can open
+        // them: an index below the new chain's cursor reads as a duplicate, one at/above it fails the AEAD.
         // Benign by design — anything delivered pre-wipe is skipped by the exists-gate upstream, and
         // the reset path re-seals undelivered traffic; this asserts the failure is contained, not silent.
+        // (Had B held it as prevRoot, both would drain — see the #135 cases below.)
         assertTrue(b.open(old0, NOW + 10_000) === OpenOutcome.Failed.DUPLICATE)
         assertTrue(b.open(old1, NOW + 10_000) === OpenOutcome.Failed.AEAD_FAIL)
+    }
+
+    // --- #135: receive state is keyed by the root that derived it (ADR 2026-10.gcrd) ---
+
+    private class AfterReset(
+        val a: Side,
+        val b: Side,
+        /** A's old-era epoch 2, n=0 — read by B before the reset. */
+        val turnaround: Frame,
+        /** A's old-era epoch 2, n=1 — still on its way when the reset lands. */
+        val late: Frame,
+    )
+
+    /** B read A's epochs 1 and 2 under the first root, then adopted A's reset: numbering restarted, the root kept as prevRoot. */
+    private fun resetAfterEpochTwo(): AfterReset {
+        val (a, b) = pair()
+        a.initiate(NOW)
+        b.open(a.seal("hello", NOW), NOW)
+        a.open(b.seal("hi", NOW), NOW)
+        val turnaround = a.seal("turnaround", NOW)
+        val late = a.seal("late", NOW)
+        assertEquals(2, turnaround.header.se)
+        assertEquals(2, late.header.se)
+        assertEquals("turnaround", text(b.open(turnaround, NOW)))
+        assertEquals("reset", text(b.open(a.reset(NOW + 1_000), NOW + 2_000, resetRequested = true)))
+        assertNotNull(checkNotNull(b.session).prevRoot)
+        return AfterReset(a, b, turnaround, late)
+    }
+
+    /** B answers the reset, which moves A's restarted numbering to epoch 2; returns that epoch's n=0, unopened. */
+    private fun newEraEpochTwo(
+        r: AfterReset,
+        now: Long,
+    ): Frame {
+        assertEquals("answer", text(r.a.open(r.b.seal("answer", now), now)))
+        return r.a.seal("new era, epoch 2", now).also { assertEquals(2, it.header.se) }
+    }
+
+    private fun tagsAt(
+        side: Side,
+        se: Int,
+    ): Set<Long> =
+        side.recvEpochs.keys
+            .filter { it.first == se }
+            .mapTo(mutableSetOf()) { it.second }
+
+    /**
+     * The P3→P7 shape: custody re-served A's old epoch-2 frame after the reset's purge (a receipt has no message row
+     * to stop it), so it opened again under prevRoot and stored a chain at number 2 with its index consumed. A's new
+     * epoch 2 must open fresh under the active root — not read DUPLICATE off the old era's cursor.
+     */
+    @Test
+    fun aChainReDrainedUnderPrevRootNeverDecidesTheNewEraFrameOfItsNumber() {
+        val r = resetAfterEpochTwo()
+        val b = r.b
+        assertEquals("turnaround", text(b.open(r.turnaround, NOW + 3_000)))
+        val newTwo = newEraEpochTwo(r, NOW + 4_000)
+
+        assertEquals("new era, epoch 2", text(b.open(newTwo, NOW + 4_000)))
+        val session = checkNotNull(b.session)
+        assertEquals("a fresh epoch under the active root moved the era", 2, session.peerBaseEpoch)
+        assertEquals(
+            "both eras keep a chain for number 2, one per root",
+            setOf(RatchetCrypto.rootTag(session.root), RatchetCrypto.rootTag(checkNotNull(session.prevRoot))),
+            tagsAt(b, 2),
+        )
+        // A genuine re-serve of either is still a duplicate — never an AEAD_FAIL from the other root's attempt.
+        assertTrue(b.open(newTwo, NOW + 5_000) === OpenOutcome.Failed.DUPLICATE)
+        assertTrue(b.open(r.turnaround, NOW + 5_000) === OpenOutcome.Failed.DUPLICATE)
+    }
+
+    /**
+     * The P9→P8 shape: the drained old-era frame sat mid-epoch, so opening it banked a skipped key for the index below
+     * under the old root. A's new epoch 2 n=0 must not meet that key; the old era's own n=0 still opens on it.
+     */
+    @Test
+    fun aSkippedKeyBankedUnderPrevRootNeverDecidesTheNewEraFrameAtItsIndex() {
+        val r = resetAfterEpochTwo()
+        val b = r.b
+        assertEquals("late", text(b.open(r.late, NOW + 3_000))) // banks (2, 0) under the old root
+        val newTwo = newEraEpochTwo(r, NOW + 4_000)
+
+        assertEquals("new era, epoch 2", text(b.open(newTwo, NOW + 4_000)))
+        assertEquals("the old era's key is untouched", "turnaround", text(b.open(r.turnaround, NOW + 5_000)))
+    }
+
+    /**
+     * The other order: the new era owns number 2 before the old era's late frame lands. That frame drains under prevRoot
+     * on a fresh derivation — it no longer fails against the new chain — and moves nothing.
+     */
+    @Test
+    fun anOldEraFrameOnANumberTheNewEraOwnsStillDrainsUnderPrevRoot() {
+        val r = resetAfterEpochTwo()
+        val b = r.b
+        assertEquals("new era, epoch 2", text(b.open(newEraEpochTwo(r, NOW + 3_000), NOW + 3_000)))
+        val before = checkNotNull(b.session)
+
+        assertEquals("late", text(b.open(r.late, NOW + 4_000)))
+        val after = checkNotNull(b.session)
+        assertArrayEquals(before.root, after.root)
+        assertEquals(before.peerBaseEpoch, after.peerBaseEpoch)
+        assertArrayEquals(before.peerBasePub, after.peerBasePub)
     }
 
     // --- a reset's kept prevRoot (#87) ---
