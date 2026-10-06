@@ -79,6 +79,8 @@ document:
   details was lost on the way. Your phone now sends those details again until the other phone connects.
 - An animated sticker or reaction image saved from another app went out as a still picture, and so did a GIF
   picked from some file managers. Both now arrive animated.
+- A voice message could show a flat waveform and no length if its audio reached your phone before the message
+  did, which happens most often in groups. It now shows its length and waveform in either order.
 
 ## [2.8.0](https://github.com/getknit/knit/releases/tag/v2.8.0) — 2026-10-03T03:55:42Z
 

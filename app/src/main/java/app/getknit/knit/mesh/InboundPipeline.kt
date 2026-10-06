@@ -215,18 +215,14 @@ class InboundPipeline(
 
     /**
      * A pulled blob just landed (the [BlobExchange] `onObtained` hook): attribute it to whoever advertised
-     * it — a peer's avatar, a group's photo — screen its decrypted bytes if it's an E2E attachment we now
-     * hold the key for, describe it if it's a voice note or an animated image, and record a sealed one's
-     * plaintext name so a forward reuses it (ADR 2026-10.mptm). The six are order-independent and each is a no-op
-     * when the hash isn't theirs. This is the wrapper [MeshManager] wires as `blobExchange`'s onObtained callback.
+     * it — a peer's avatar, a group's photo — and, if a stored message names it, run [describeHeldAttachment]
+     * with the key and MIME that row gives it. The three are order-independent and each is a no-op when the hash
+     * isn't theirs. This is the wrapper [MeshManager] wires as `blobExchange`'s onObtained callback.
      */
     suspend fun onObtained(hash: String) {
         adoptAdvertisedAvatar(hash)
         settleArrivedGroupPhoto(hash)
-        screenObtainedAttachment(hash)
-        deriveObtainedVoiceMeta(hash)
-        deriveObtainedAnimation(hash)
-        identities.notePlain(hash)
+        describeHeldAttachment(hash, messages.attachmentKeyForHash(hash), messages.attachmentMimeForHash(hash))
     }
 
     /**
@@ -2000,7 +1996,7 @@ class InboundPipeline(
      * budget ([CARRIER_BLOB_BUDGET_BYTES]) bounds this altruistic footprint: over budget we skip the pull (the
      * frame stays carried, only the image is absent) and the [resumePendingFetches]/neighbor-join retry backfills
      * as older custody frames expire. The carrier holds ciphertext it can't decrypt or screen (a fresh key never
-     * arrives for it, so [screenObtainedAttachment] is a no-op); the addressed recipient screens on decrypt.
+     * arrives for it, so [describeHeldAttachment] is a no-op); the addressed recipient screens on decrypt.
      * A no-op for our own sends and delivered messages — [blobStore] already holds the blob. A room post (or a
      * key-less forward) of a picture we hold sealed from a conversation with its author is copied from our own store
      * instead, exactly as [deliverChat] would (ADR 2026-10.mptm) — a carried room frame can be custodied before it
@@ -2675,16 +2671,13 @@ class InboundPipeline(
             ).withReply(content.replyTo),
         )
         // Start pulling the referenced blob unless we already hold it (the UI observes the blobs table
-        // and flips the attachment from "loading" to shown once the bytes land). If we already hold it
-        // (e.g. cached earlier while relaying), screen its decrypted bytes now that the key is in hand;
-        // otherwise it's screened on arrival ([screenObtainedAttachment]) once the key has been stored.
+        // and flips the attachment from "loading" to shown once the bytes land, and onObtained describes it).
+        // If we already hold it (carried while its frame was parked for a key, fetched off a spool first, or
+        // a forward of a file we have), no onObtained is coming, so the row is described here, now that it and
+        // the key are in hand — the same hooks through the same helper, so neither order can miss one (#132).
         if (hash != null) {
             if (blobStore.has(hash)) {
-                screenHeldAttachment(hash, sealed?.attachmentKey, content.attachmentMime)
-                // Already held (cached while relaying, or a forward of a file we have), so no onObtained is
-                // coming to read its frames or learn its plaintext name.
-                deriveObtainedAnimation(hash)
-                identities.notePlain(hash)
+                describeHeldAttachment(hash, sealed?.attachmentKey, content.attachmentMime)
             } else if (sealed?.attachmentKey != null || !copyFromOwnStore(hash, env.senderId)) {
                 blobExchange.want(hash, author = env.senderId, via = via)
                 // Arm the fast plane toward the author — the guaranteed holder — so the pull can ride a NAN
@@ -2976,7 +2969,7 @@ class InboundPipeline(
      * ([app.getknit.knit.mesh.protocol.AttachmentName]), so it is safe to draw.
      *
      * Only the MIME can speak for a GIF here: the notification fires before the blob is pulled, so the frames
-     * that make an animated WebP a GIF ([deriveObtainedAnimation]) are not in hand yet, and it reads as a photo.
+     * that make an animated WebP a GIF ([deriveAnimation]) are not in hand yet, and it reads as a photo.
      */
     private fun attachmentPreview(
         content: ChatContent,
@@ -3423,17 +3416,27 @@ class InboundPipeline(
     }
 
     /**
-     * A blob just landed via [BlobExchange]. If it's an E2E attachment we hold the key for (stored when
-     * the message was delivered, which is what triggered the pull), screen its *decrypted* bytes. The
-     * screen in [MeshBlobStore.ingest] only ever sees the stored ciphertext for an encrypted
-     * attachment — it can't decode it — so this is where receive-side image moderation actually runs for
-     * DM/group attachments. A no-op for avatars and for relayed blobs we have no key for.
+     * A held attachment and a message row naming it have just met, in whichever order they arrived: the bytes
+     * after the row ([onObtained]) or the row after the bytes (`deliverChat`'s already-held branch). Everything
+     * this phone derives from an attachment's bytes for its row runs here, so a hook added for one order cannot
+     * be missed by the other (#132 was the voice note's, missing from the second). [key] and [mime] are the
+     * row's — the frame's own on delivery, any stored row's on arrival.
      *
-     * The key is also what tells [MeshBlobStore.ingest] a voice note is genuinely sealed and so worth
-     * skipping; a key-less blob is plaintext and is screened there whatever mime claims it is.
+     * Screening is here because [MeshBlobStore.ingest] only ever sees the stored ciphertext of an encrypted
+     * attachment, so this is where receive-side image moderation actually runs for DM/group attachments. The key
+     * is also what tells [MeshBlobStore.ingest] a voice note is genuinely sealed and so worth skipping; a key-less
+     * blob is plaintext and is screened there whatever mime claims it is. Each hook is a no-op for a hash that is
+     * not its kind, and for a blob no row claims (a relayed attachment, an avatar): [mime] is then null.
      */
-    private suspend fun screenObtainedAttachment(hash: String) {
-        screenHeldAttachment(hash, messages.attachmentKeyForHash(hash), messages.attachmentMimeForHash(hash))
+    private suspend fun describeHeldAttachment(
+        hash: String,
+        key: String?,
+        mime: String?,
+    ) {
+        screenHeldAttachment(hash, key, mime)
+        deriveVoiceMeta(hash, key, mime)
+        deriveAnimation(hash, key, mime)
+        identities.notePlain(hash)
     }
 
     /**
@@ -3482,22 +3485,26 @@ class InboundPipeline(
     }
 
     /**
-     * A blob just landed: if a stored message names it as a **voice note**, derive its playing time and
-     * waveform from the audio and record them on every row that references it. This is the receiving half of
-     * a deliberate symmetry — the sender derives the same two values from the same bytes at ingest, using the
-     * same [VoiceAudio] implementation, so the two ends agree by construction and neither value ever has to
-     * ride the wire (see `docs/WIRE_COMPAT.md`).
+     * If the row names a held blob as a **voice note** ([mime]), derive its playing time and waveform from the
+     * audio and record them on every row that references it. This is the receiving half of a deliberate
+     * symmetry — the sender derives the same two values from the same bytes at ingest, using the same
+     * [VoiceAudio] implementation, so the two ends agree by construction and neither value ever has to ride the
+     * wire (see `docs/WIRE_COMPAT.md`).
      *
-     * Decrypts exactly as [screenHeldAttachment] does when the attachment is E2E; a plaintext blob is
-     * described as-is. A no-op for anything that isn't audio, and for a blob no message row claims (a relayed
-     * attachment, or an avatar). Never throws — a waveform we couldn't compute is a flat bubble, not a
-     * dropped delivery, and `rules/mesh.md` requires inbound handlers to stay silent on failure.
+     * Decrypts with [key] exactly as [screenHeldAttachment] does when the attachment is E2E; a plaintext blob is
+     * described as-is. A no-op for anything that isn't audio, and once every row naming it has its duration —
+     * a re-served frame brings its held blob back here each time, and the description is a full decode. Never
+     * throws — a waveform we couldn't compute is a flat bubble, not a dropped delivery, and `rules/mesh.md`
+     * requires inbound handlers to stay silent on failure.
      */
-    private suspend fun deriveObtainedVoiceMeta(hash: String) {
+    private suspend fun deriveVoiceMeta(
+        hash: String,
+        key: String?,
+        mime: String?,
+    ) {
         runCatching {
-            if (!VoiceAudio.isVoice(messages.attachmentMimeForHash(hash))) return
+            if (!VoiceAudio.isVoice(mime) || !messages.voiceMetaWanted(hash)) return
             val stored = blobs.bytes(hash) ?: return
-            val key = messages.attachmentKeyForHash(hash)
             val audio = if (key == null) stored else AttachmentCrypto.open(stored, b64d(key)) ?: return
             val described = VoiceAudio.describe(audio)
             if (described.isEmpty) return
@@ -3506,17 +3513,20 @@ class InboundPipeline(
     }
 
     /**
-     * A blob just landed: if a stored message names it as an image whose container can animate, count its
-     * frames and mark every row that references it — the recipient's half of the "GIF" label, read off the
-     * same bytes the sender read at ingest ([AnimatedImage]), so it costs no wire field. Decrypts as
-     * [deriveObtainedVoiceMeta] does; a no-op for a still image, anything else, and a blob no row claims.
-     * Never throws: a GIF we could not read is labelled a photo, not a dropped delivery.
+     * If the row names a held blob as an image whose container can animate ([mime]), count its frames and mark
+     * every row that references it — the recipient's half of the "GIF" label, read off the same bytes the sender
+     * read at ingest ([AnimatedImage]), so it costs no wire field. Decrypts with [key] as [deriveVoiceMeta] does;
+     * a no-op for a still image, anything else, and a blob no row claims. Never throws: a GIF we could not read
+     * is labelled a photo, not a dropped delivery.
      */
-    private suspend fun deriveObtainedAnimation(hash: String) {
+    private suspend fun deriveAnimation(
+        hash: String,
+        key: String?,
+        mime: String?,
+    ) {
         runCatching {
-            if (messages.attachmentMimeForHash(hash) !in AnimatedImage.ANIMATABLE_MIMES) return
+            if (mime !in AnimatedImage.ANIMATABLE_MIMES) return
             val stored = blobs.bytes(hash) ?: return
-            val key = messages.attachmentKeyForHash(hash)
             val image = if (key == null) stored else AttachmentCrypto.open(stored, b64d(key)) ?: return
             if (AnimatedImage.isAnimated(image)) messages.markAttachmentAnimated(hash)
         }.onFailure { Log.w(TAG, "animation check failed: ${it.javaClass.simpleName}") }

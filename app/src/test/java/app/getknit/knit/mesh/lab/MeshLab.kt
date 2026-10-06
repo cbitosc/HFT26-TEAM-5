@@ -26,6 +26,7 @@ import app.getknit.knit.data.MessageReceiptRepository
 import app.getknit.knit.data.MessageRepository
 import app.getknit.knit.data.PeerRepository
 import app.getknit.knit.data.ReactionRepository
+import app.getknit.knit.data.VoiceAudio
 import app.getknit.knit.data.backup.BackupTables
 import app.getknit.knit.data.commons.CommonsRepository
 import app.getknit.knit.data.crypto.IdentityKeyStore
@@ -1462,6 +1463,34 @@ class LabNode internal constructor(
     }
 
     /**
+     * Sends [bytes] as a voice note — to [to], into [groupId], or into the room when both are null — the frame the
+     * composer sends when a recording stops. The sender describes its own copy at ingest, as `AttachmentStore` does;
+     * the duration is header arithmetic, so an `adts` fixture times on the host, while the waveform needs the
+     * platform decoder Robolectric does not have and stays null. Nothing about either rides the wire.
+     */
+    suspend fun sendVoice(
+        bytes: ByteArray,
+        to: LabNode? = null,
+        groupId: String? = null,
+    ): Boolean {
+        val hash = sha256Hex(bytes)
+        blobs.insert(hash, VoiceAudio.MIME, bytes)
+        val attachment =
+            AttachmentStore.Ingested(hash = hash, mime = VoiceAudio.MIME, voice = VoiceAudio.describe(bytes), sizeBytes = bytes.size)
+        val group = groupId?.let { checkNotNull(groups.find(it)) { "$name holds no group $it" }.toGroupInfo() }
+        return spaced {
+            manager.sendChat(
+                text = "",
+                attachment = attachment,
+                mentions = emptyList(),
+                recipientId = to?.nodeId,
+                group = group,
+                replyTo = null,
+            )
+        }
+    }
+
+    /**
      * Sends [bytes] the way the composer sends a picture saved out of a chat and picked again (ADR 2026-10.mptm) —
      * to [to], into [groupId], or into the room when both are null — through the real picker door, so it goes out
      * as the identity this node already holds it under. The scenario owns that it does: a pick nothing here
@@ -1893,6 +1922,15 @@ class LabNode internal constructor(
         val hash = row(conversationId, messageId)?.attachmentHash ?: return true
         return blobs.exists(hash)
     }
+
+    /** Whether the blob [hash] is held here, whether or not a row names it — a carried attachment's included. */
+    suspend fun holdsBlob(hash: String): Boolean = blobs.exists(hash)
+
+    /** The playing time this node's row for the voice note [messageId] shows, or null: undescribed, or no row. */
+    suspend fun voiceDurationOf(
+        conversationId: String,
+        messageId: String,
+    ): Int? = row(conversationId, messageId)?.voiceDurationMs
 
     /** Whether screening here flagged the blob [hash] — an avatar or a group photo, which no message row names. */
     suspend fun imageFlagged(hash: String): Boolean = db.blobVerdictDao().find(hash)?.flagged == true

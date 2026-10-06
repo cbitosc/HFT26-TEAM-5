@@ -188,6 +188,14 @@ interface MessageDao {
     )
 
     /**
+     * Whether a message naming [hash] still lacks its voice-note duration — [setVoiceMeta]'s want. The inbound
+     * pipeline asks it before decoding, because a held blob meets its row again on every re-serve of the frame,
+     * and describing the audio is a full decode.
+     */
+    @Query("SELECT EXISTS(SELECT 1 FROM messages WHERE attachmentHash = :hash AND voiceDurationMs IS NULL)")
+    suspend fun voiceMetaWanted(hash: String): Boolean
+
+    /**
      * Records that the attachment [hash] is animated on every message naming it — keyed by hash for
      * [setVoiceMeta]'s reason. Only rows not already marked are touched, so a re-landed blob writes nothing
      * and wakes no observer of the table.

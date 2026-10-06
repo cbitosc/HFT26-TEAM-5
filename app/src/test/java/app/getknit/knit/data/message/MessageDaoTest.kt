@@ -650,6 +650,21 @@ class MessageDaoTest : RoomDbTest() {
             assertEquals(2, dao.countMine(ME))
         }
 
+    @Test
+    fun `voiceMetaWanted holds until every row naming the hash has its duration`() =
+        runTest {
+            // The inbound pipeline's gate before decoding a held voice note again (#132): a re-sent note's second
+            // row still wants it, and setVoiceMeta, keyed by hash, answers both rows at once.
+            dao.upsert(msg("v1", attachmentHash = "note"))
+            dao.upsert(msg("v2", attachmentHash = "note", sentAt = 2L))
+            assertTrue(dao.voiceMetaWanted("note"))
+
+            dao.setVoiceMeta("note", 4_000, "AAEC")
+
+            assertFalse(dao.voiceMetaWanted("note"))
+            assertFalse("no row names it", dao.voiceMetaWanted("nobody-claims-this"))
+        }
+
     private fun msg(
         id: String,
         recipientId: String? = null,

@@ -1,14 +1,20 @@
 package app.getknit.knit.mesh.lab
 
+import app.getknit.knit.data.VoiceAudio
+import app.getknit.knit.data.adts
 import app.getknit.knit.data.message.Conversations
 import app.getknit.knit.data.message.DeliveryPlane
 import app.getknit.knit.mesh.BlobExchange
 import app.getknit.knit.mesh.lora.FakeMeshtasticAir
+import app.getknit.knit.mesh.protocol.FrameType
+import app.getknit.knit.mesh.protocol.WireCodec
+import app.getknit.knit.mesh.protocol.WireEnvelope
 import app.getknit.knit.mesh.sha256Hex
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -405,6 +411,55 @@ class AttachmentLabTest {
                 )
             }
         }
+
+    /**
+     * #132: a group voice note whose bytes reach a member before its message does. Bob hears the group frame
+     * ahead of its sender-key seed, so he can carry it but not open it, and custody pulls its blob in the
+     * meantime. When the seed arrives the frame opens on a blob already held, so no obtained hook follows the row,
+     * and the delivery has to read the note's duration itself. Before the fix, Bob's bubble stayed flat with no
+     * length for good.
+     *
+     * Alice's sealed DMs to Bob (the seed, Bob's key-request answer, ticks) are the air's to lose while the blob
+     * comes in. The group frame and the blob exchange pass, and the files are never held. The re-link's digest
+     * exchange then repairs the seed from Alice's custody.
+     */
+    @Test
+    fun aGroupVoiceNoteWhoseBytesOutrunItsSeedIsDescribedWhenItOpens() =
+        runBlocking {
+            val alice = lab.node("alice").apply { setDisplayName("Alice") }
+            val bob = lab.node("bob").apply { setDisplayName("Bob") }
+            lab.link(alice, bob)
+            lab.awaitAcquainted(alice, bob)
+
+            alice.transport.hold(bob.transport)
+            val groupId = alice.createGroup(bob)
+            val note = adts(frames = 216)
+            assertTrue(alice.sendVoice(note, groupId = groupId))
+            val noteId = alice.ownMessageId(groupId, "")
+            val hash = checkNotNull(alice.attachmentHash(groupId, noteId))
+            lab.await(1) { alice.transport.held(bob.transport).count { it.isGroupFrame() } }
+            alice.transport.lossy(bob.transport) { it.isSealedDmTo(bob) }
+            // The group frame alone: the seed parked beside it is lost with the rest of the batch.
+            val released = alice.transport.release(bob.transport) { batch -> batch.filter { it.isGroupFrame() } }
+            assertEquals(1, released.size)
+
+            lab.await(1) { if (bob.holdsBlob(hash)) 1 else 0 }
+            assertNull("the note opened before its bytes landed: the fixture lost its order", bob.attachmentHash(groupId, noteId))
+
+            alice.transport.lossy(bob.transport) // a clean link again, and the re-link's digest exchange serves the seed
+            lab.unlink(alice, bob)
+            lab.link(alice, bob)
+            assertTrue(
+                "Bob's row for the voice note never learned its duration: ${bob.rowsIn(groupId)}",
+                lab.tryAwait(1) { if (bob.voiceDurationOf(groupId, noteId) == VoiceAudio.durationMs(note)) 1 else 0 },
+            )
+            lab.assertConverged(listOf(alice, bob), atLeast = 1) { groupId }
+        }
+
+    private fun WireEnvelope.isGroupFrame(): Boolean = WireCodec.decodeEnvelope(signed)?.group != null
+
+    private fun WireEnvelope.isSealedDmTo(node: LabNode): Boolean =
+        WireCodec.decodeEnvelope(signed)?.let { it.type == FrameType.CHAT && it.group == null && it.recipientId == node.nodeId } == true
 
     private companion object {
         /** Past `BlobExchange.FETCH_TTL_MS` (30 min), well inside the 48 h a lab clock jump may span. */

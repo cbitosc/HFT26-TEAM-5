@@ -2485,8 +2485,10 @@ class InboundPipelineTest {
             val note = adts(frames = 216)
             coEvery { rig.messages.attachmentMimeForHash("note") } returns VoiceAudio.MIME
             coEvery { rig.messages.attachmentKeyForHash("note") } returns null
+            coEvery { rig.messages.voiceMetaWanted("note") } returns true
             coEvery { rig.blobs.bytes("note") } returns note
             coEvery { rig.messages.attachmentMimeForHash("photo") } returns "image/jpeg"
+            coEvery { rig.messages.voiceMetaWanted("photo") } returns true
             coEvery { rig.blobs.bytes("photo") } returns note
 
             rig.pipeline.onObtained("note")
@@ -2496,6 +2498,75 @@ class InboundPipelineTest {
             coVerify(exactly = 1) { rig.messages.setVoiceMeta("note", VoiceAudio.durationMs(note)!!, null) }
             coVerify(exactly = 0) { rig.messages.setVoiceMeta("photo", any(), any()) }
             coVerify(exactly = 0) { rig.messages.setVoiceMeta("nobody-claims-this", any(), any()) }
+        }
+
+    @Test
+    fun aVoiceNoteWhoseBytesLandedFirstIsDescribedWhenItsRowArrives() =
+        runTest {
+            // #132: the bytes came first — carried while the frame waited for a key, or fetched off a spool ahead of
+            // it — so no onObtained follows the row, and the delivery itself has to describe the voice note.
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.pin(alice)
+            val note = adts(frames = 216)
+            coEvery { rig.blobStore.has("room-note") } returns true
+            coEvery { rig.blobs.bytes("room-note") } returns note
+            coEvery { rig.messages.voiceMetaWanted("room-note") } returns true
+
+            rig.deliver(alice, rig.attachmentChat(alice, id = "v1", attachmentHash = "room-note", mime = VoiceAudio.MIME))
+
+            coVerify(exactly = 0) { rig.blobExchange.want("room-note", any(), any(), any()) }
+            coVerify(exactly = 1) { rig.messages.setVoiceMeta("room-note", VoiceAudio.durationMs(note)!!, null) }
+        }
+
+    @Test
+    fun aSealedVoiceNoteWhoseCiphertextLandedFirstIsOpenedWithTheFramesKey() =
+        runTest {
+            // The likeliest route into #132: a DM parked for its sender's key while custody pulled its ciphertext.
+            // The key rides only inside the seal, so the delivery describes it with the frame's own key.
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.pin(alice)
+            val note = adts(frames = 216)
+            val seal = AttachmentCrypto.seal(note)
+            coEvery { rig.blobStore.has("dm-note") } returns true
+            coEvery { rig.blobs.bytes("dm-note") } returns seal.blob
+            coEvery { rig.messages.voiceMetaWanted("dm-note") } returns true
+            val header = MessageCrypto.header("v2", alice.nodeId, 5L, rig.self.nodeId)
+            val sealed =
+                MessageContent(body = "", attachmentHash = "dm-note", attachmentMime = VoiceAudio.MIME, attachmentKey = b64(seal.key))
+            val enc = alice.crypto.seal(sealed.encode(), header, mapOf(rig.self.nodeId to rig.self.bundle))!!
+            val env =
+                RelayEnvelope(
+                    type = FrameType.CHAT,
+                    id = "v2",
+                    senderId = alice.nodeId,
+                    sentAt = 5L,
+                    recipientId = rig.self.nodeId,
+                    payload = WireCodec.encodePayload(ChatContent(enc = enc, attachmentHash = "dm-note")),
+                )
+
+            rig.deliver(alice, env)
+
+            coVerify(exactly = 1) { rig.messages.setVoiceMeta("dm-note", VoiceAudio.durationMs(note)!!, null) }
+        }
+
+    @Test
+    fun aReservedVoiceNoteAlreadyDescribedIsNotDecodedAgain() =
+        runTest {
+            // A held blob meets its row again on every re-serve of the frame. Once each row has its duration, the
+            // audio is not read again: on a phone the description is a full decode.
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.pin(alice)
+            coEvery { rig.blobStore.has("room-note") } returns true
+            coEvery { rig.blobs.bytes("room-note") } returns adts(frames = 216)
+            coEvery { rig.messages.voiceMetaWanted("room-note") } returns false
+
+            rig.deliver(alice, rig.attachmentChat(alice, id = "v3", attachmentHash = "room-note", mime = VoiceAudio.MIME))
+
+            coVerify { rig.messages.voiceMetaWanted("room-note") }
+            coVerify(exactly = 0) { rig.messages.setVoiceMeta(any(), any(), any()) }
         }
 
     @Test
@@ -4157,7 +4228,7 @@ class InboundPipelineTest {
         }
 
     @Test
-    fun screenObtainedAttachmentIsANoOpWithoutAKey() =
+    fun anObtainedBlobIsNotScreenedWithoutAKey() =
         runTest {
             val rig = Rig(backgroundScope)
             // No attachment key held (the harness default) → screening is skipped, no bitmap decode.
