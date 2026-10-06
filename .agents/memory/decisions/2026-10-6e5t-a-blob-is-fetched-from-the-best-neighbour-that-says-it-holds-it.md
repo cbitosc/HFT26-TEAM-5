@@ -179,3 +179,50 @@ The device oracle, tag `MeshManager`:
   `blob confirm`, `blob fallback`, `blob pull`, `blob cycle <h8>… after <n> dead` (a cycle opened after a dead one);
 - holder: `blob has → …`;
 - each (asker, hash) owes one `file ATTACHMENT/<hash>`, on the holder the `blob fetch` line named.
+
+## Amendment 2026-10-06 — an ask to a holder stands until its link goes (#140)
+
+**What was observed.** On 2026-10-06 the lab Pixels ran `fix/ble-file-drain-120` with the query on. The P3 took five
+photos twice each, side by side from the P9 (the author) and the P7. The P3's own outgoing frames were backed up:
+its queries reached the three holders 13, 29 and 44 s late. Every answer missed the 5 s wait, so the author was asked
+blind. Its HAVE landed inside the grace, but its header did not. The blind fetch ended without marking it failed, the
+P7's late HAVE stepped the want with no fetch outstanding, and `askHolder` asked the P7, because a holder asked inside
+its floor is not `askable`. Nothing on the wire withdraws an ask, so both served. Step 2's "or silence, and the next
+holder is asked" has the same shape: a silent confirm on a backed-up link reads lag as a no.
+
+**What changed.** No wire change.
+
+- **A blind first pick that said it holds the blob is confirmed, not widened.** When its grace runs out, the fetch is
+  re-tiered as a holder's and queried once more (step 2), and the round counts as widened, so a fallback asks the next
+  holder rather than a second first pick. A pick that never answered widens exactly as f7gg did.
+- **Silence holds; only a no moves on.** A holder whose confirm is silent, or that is still sending after
+  `MAX_CONFIRMS`, is *held* to its floor: our last ask of it plus `SERVE_MEMO_MS`. The hold ends early when its link
+  goes or the bytes arrive, and at the floor the next holder is asked. A NONE, FETCHING or unknown answer still moves
+  on at once. While the hold stands, `fetch` stays set, so no cycle opens under it. A stream from the held holder
+  restarts what is left of the hold from the stream's end, as any grace does, since our copy may sit behind that
+  stream (#121). The hold can then outlast the floor it logged.
+- **A backstop in `askHolder`.** A holder asked inside its floor whose answer is older than the ask holds the choice,
+  however the fetch came to be empty.
+- **A departure steps the want.** `MeshManager.watchNeighbors` hands departed links to `BlobExchange.unlinked`, which
+  steps the blobs whose ask or hold was on one. The next holder is asked at once, not at the next tick.
+- **Waits sized by the round trip.** Each matched answer's `in <ms>` is kept per neighbour and forgotten when that
+  neighbour links again. The wait for its answer, and the wait for a confirm, become that round trip plus
+  `QUERY_WAIT_MS`. An ask's grace gains the round trip. Both are capped at `QUERY_WAIT_CAP_MS` (30 s), and the lab's
+  longer `waitMs` still wins.
+
+**What it costs.** A holder whose ask really died, on a link that stays up, keeps the blob waiting up to 45 s from
+the ask rather than about 15 s. A neighbour that answered slowly once is waited on longer until its next answer
+measures a shorter trip.
+
+The device oracle adds `blob hold <h8>… on <node> (<why>), floor <ms> ms` on the asker and
+`blob fallback <h8>… <node> (floor) → next` when a hold runs out.
+
+Kept true by `BlobHolderQueryTest`, which covers:
+
+- the trace, held until the link goes;
+- the hold running out at its floor;
+- a silent confirm on a holder fetch;
+- the round-trip wait and its cap.
+
+It is also covered by `BlobHaveLabTest.aSecondHolderThatAnswersLateIsNotAskedWhileTheFirstOnesCopyIsOnItsWay`, the
+trace end to end with the asker's frames held on both links.

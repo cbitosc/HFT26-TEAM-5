@@ -2426,7 +2426,12 @@ class MeshManager(
                 // an offer lost to a torn-down link self-heals — see ForwardSync.onNeighborAdded. A persistent
                 // link (Bluetooth) only joins once, so reofferToNeighborsPeriodically re-runs these hooks on a
                 // timer for currently-linked neighbors — the anti-entropy a non-flapping link needs.)
+                val departed = known - currentIds
                 known = currentIds
+                // The one departure step: a blob whose ask or hold sat on a link that went asks its next holder now,
+                // not at the next tick (#140) — an ask stands on a live link until its floor, never on one that is gone.
+                // Ahead of [linksActedOn], which `mesh/lab` reads as "the departure has been acted on".
+                blobExchange.unlinked(departed)
                 linksActedOn = currentIds
                 // A newcomer may be the holder of bytes whose want the sweep already reclaimed — re-arm from
                 // the database first, so the re-ask below has the full missing set to ask it for.

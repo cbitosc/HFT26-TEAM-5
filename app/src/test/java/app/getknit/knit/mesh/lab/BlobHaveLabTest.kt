@@ -2,6 +2,8 @@ package app.getknit.knit.mesh.lab
 
 import app.getknit.knit.data.message.Conversations
 import app.getknit.knit.mesh.protocol.BlobHasItem
+import app.getknit.knit.mesh.protocol.FrameType
+import app.getknit.knit.mesh.protocol.WireCodec
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -151,6 +153,97 @@ class BlobHaveLabTest {
             lab.link(carol, bob)
             lab.assertConverged(listOf(dave, bob, carol), atLeast = 1) { Conversations.NEARBY }
             assertTrue(picture.contentEquals(carol.attachmentPlain(Conversations.NEARBY, id)))
+        }
+
+    /** How many frames of [type] this node has parked for [to]. */
+    private fun LabNode.heldOf(
+        to: LabNode,
+        type: String,
+    ) = transport.held(to.transport).count { WireCodec.decodeEnvelope(it.signed)?.type == type }
+
+    /**
+     * Work item #140, the 2026-10-06 trace: Alice posts three pictures and Bob pulls them, so both hold them. Carol links
+     * to both with her own frames backed up on both links, so both answers miss her wait and she asks the author blind.
+     * Her backlog toward Alice clears first: Alice says she holds them, and her copies sit on the link past the grace.
+     * Carol confirms her rather than widen. Only then does Bob's late HAVE land, and he is not asked: each picture
+     * crosses once, from Alice.
+     */
+    @Test
+    fun aSecondHolderThatAnswersLateIsNotAskedWhileTheFirstOnesCopyIsOnItsWay() =
+        runBlocking {
+            val alice = lab.node("alice", querying).apply { setDisplayName("Alice") }
+            val bob = lab.node("bob", querying).apply { setDisplayName("Bob") }
+            val carol = lab.node("carol", querying).apply { setDisplayName("Carol") }
+            lab.link(alice, bob)
+            lab.awaitAcquainted(alice, bob)
+            awaitLinkUpHooks(alice to bob, bob to alice)
+
+            val pictures = List(3) { Random(20 + it).nextBytes(4_096) }
+            val ids =
+                pictures.mapIndexed { i, picture ->
+                    assertTrue(alice.sendImage(picture, "late $i"))
+                    alice.ownMessageId(Conversations.NEARBY, "late $i")
+                }
+            val hashes = ids.map { checkNotNull(alice.attachmentHash(Conversations.NEARBY, it)) }
+            lab.await(hashes.size) { hashes.count { bob.blobs.exists(it) } }
+
+            // Carol's link-up batch crosses; nothing of Alice's or Bob's reaches her until it has, and from then on
+            // nothing more of hers crosses: her own outgoing frames are the backlog.
+            lab.link(carol, alice) { alice.transport.hold(carol.transport) }
+            lab.link(carol, bob) { bob.transport.hold(carol.transport) }
+            awaitLinkUpHooks(carol to alice, carol to bob)
+            carol.transport.hold(alice.transport)
+            carol.transport.hold(bob.transport)
+            // Alice's copies will be fed but not yet seen arriving: the trace's serve, its header not across yet.
+            alice.transport.stackFiles(carol.transport)
+            alice.transport.release(carol.transport)
+            bob.transport.release(carol.transport)
+            lab.await(ids.size) { ids.count { carol.attachmentHash(Conversations.NEARBY, it) != null } }
+            lab.await(1) { minOf(carol.heldOf(alice, FrameType.BLOB_HAVE), carol.heldOf(bob, FrameType.BLOB_HAVE)) }
+
+            // Both still silent past the wait: the author is asked blind, and those asks queue behind the queries.
+            lab.clock.advance(MeshLab.QUERY_WAIT_MS)
+            carol.reoffer()
+            lab.await(hashes.size) { carol.heldOf(alice, FrameType.BLOB_REQ) }
+            assertTrue("Bob is not asked", carol.heldOf(bob, FrameType.BLOB_REQ) == 0)
+
+            // The backlog toward Alice clears: she says she holds them, and serves them into the link unseen.
+            carol.transport.release(alice.transport)
+            lab.await(hashes.size) { hashes.count { BlobHasItem.HAVE in answers(alice, carol, it) } }
+            lab.await(hashes.size) { alice.transport.heldFiles(carol.transport).count { it in hashes } }
+            // Handled, steps included: each blob's HAVE from Alice is in hand and its step done, so the grace step runs alone.
+            val handled = {
+                carol.metrics
+                    .files()
+                    .let { it.blobAnswersTaken + it.blobAnswersIgnored }
+                    .toInt()
+            }
+            val answerFrames = { holder: LabNode -> holder.transport.blobAnswers.count { it.to == carol.nodeId } }
+            lab.await(answerFrames(alice)) { handled() }
+
+            // Past the grace with no header in: Carol confirms Alice, who is sending them, and waits on.
+            lab.clock.advance(MeshLab.FIRST_ASK_GRACE_MS)
+            carol.reoffer()
+            // In that step, not a later cycle's: a blind fetch that widened instead would sit on Alice's floor alone.
+            assertTrue("Carol confirms Alice rather than widen", carol.metrics.files().blobConfirms >= hashes.size)
+
+            // Right behind it the backlog toward Bob clears: his answers, late, say he holds all three. The confirm's
+            // answer may land on either side of them; the fetch on Alice stands across both.
+            carol.transport.release(bob.transport)
+            lab.await(hashes.size) { hashes.count { BlobHasItem.SENDING in answers(alice, carol, it) } }
+            lab.await(hashes.size) { hashes.count { BlobHasItem.HAVE in answers(bob, carol, it) } }
+            // Handled, steps included (`AnswerTaken` counts after them): an ask Bob's answers would buy has gone out.
+            lab.await(answerFrames(alice) + answerFrames(bob)) { handled() }
+            hashes.forEach { assertEquals("Alice alone is asked for $it", listOf(alice.nodeId), carol.asksFor(it)) }
+
+            alice.transport.releaseFiles(carol.transport)
+            lab.await(hashes.size) { hashes.count { carol.blobs.exists(it) } }
+            hashes.forEach {
+                assertEquals("one copy of $it, from Alice", 1, alice.filesTo(carol, it))
+                assertEquals("none from Bob", 0, bob.filesTo(carol, it))
+            }
+            lab.assertConverged(listOf(alice, bob, carol), atLeast = ids.size) { Conversations.NEARBY }
+            ids.forEachIndexed { i, id -> assertTrue(pictures[i].contentEquals(carol.attachmentPlain(Conversations.NEARBY, id))) }
         }
 
     /**

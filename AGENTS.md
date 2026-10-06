@@ -380,8 +380,9 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   `decide` / `wantAll`, `FrameType.BLOB_HAVE` / `BLOB_HAS` / `isUnsignedPointToPoint`, `BlobHaveContent` /
   `BlobHasContent`, `Protocol.CAP_BLOB_HAVE`, `BlobStore.servable`, `MeshTransport.feedingLoad` / `slowLinkTo`, or
   `BuildConfig.BLOB_QUERY`:** READ ADR 2026-10.6e5t — a neighbour whose link carries the bit is queried first, the
-  best holder by plane and load asked alone, a silent one confirmed then passed over; the rest keep f7gg's round. A
-  query is not an ask (it serves, pulls and stamps nothing), HAVE is the serve predicate read without materialising,
+  best holder by plane and load asked alone, a silent one confirmed then held to its ask's floor (the amendment of
+  2026-10-06, #140: only a no, a gone link or the floor moves on; waits stretch to the neighbour's measured round
+  trip); the rest keep f7gg's round. A query is not an ask (it serves, pulls and stamps nothing), HAVE is the serve predicate read without materialising,
   SENDING peeks the memo, an unknown state is never HAVE (PARTIAL is reserved for a range ask), every build answers
   and only the asking is dark in release. Wire change: the iOS port owes the responder as a companion change.
   Lab: `BlobHaveLabTest`; unit: `BlobHolderQueryTest`. **Before touching `FramedLink.rxFile`, `ArrivingFile`,

@@ -48,6 +48,12 @@ import kotlin.coroutines.cancellation.CancellationException
  * the next best is asked. Answers live for one cycle ([CYCLE_MS]); the next cycle queries everyone again, since
  * phones move. A query is not an ask: it serves nothing, pulls nothing, and stamps no memo.
  *
+ * An ask to a neighbour that said it holds the blob stands until its link goes, its serve memo's floor
+ * ([SERVE_MEMO_MS]) runs out, or it says it no longer holds it — never on silence alone (work item #140). Nothing on
+ * the wire withdraws an ask and every holder serves a fresh one, so a second holder asked while the first one's copy
+ * sits in a backed-up link costs a whole second copy. Silence is what a backlog of our own looks like, so each wait
+ * on a neighbour's answer is also stretched to the round trip its last answer took ([queryWaitFor]).
+ *
  * Every neighbour without the bit — the iOS port today, an older Android build, every neighbour while
  * [HolderQuery.enabled] is off — and a queried one still silent past the wait gets the round of ADR 2026-10.f7gg,
  * unchanged: one blind ask of the likeliest holder (author, then the Wi-Fi Aware plane, then the hop the frame came
@@ -152,6 +158,14 @@ class BlobExchange(
             override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Bucket>): Boolean = size > MAX_ANSWER_BUCKETS
         }
 
+    // Neighbour -> how long its latest answer took to come back (#140): our own outgoing backlog on that link, which
+    // is what a wait for its answer, or for an ask's header, is stretched by ([queryWaitFor], [rttOf]). Forgotten when
+    // the neighbour links again — a new link, a new queue. Guarded by [lock].
+    private val answerRtt =
+        object : LinkedHashMap<String, Long>(16, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Long>): Boolean = size > MAX_ANSWER_BUCKETS
+        }
+
     /**
      * Asks for [hash] unless we already hold it or its bytes are streaming in or landing on a link or going into the
      * store right now. A repeat want moves the same fetch on, never a second one. An arriving hash is not even marked:
@@ -230,6 +244,7 @@ class BlobExchange(
         if (nodeIds.isEmpty()) return
         val ids = nodeIds.toSet()
         synchronized(lock) {
+            answerRtt.keys.removeAll(ids)
             fetching.values.forEach { want ->
                 want.pullers.removeAll(ids)
                 want.blindAsked.removeAll(ids)
@@ -244,6 +259,20 @@ class BlobExchange(
                 if (want.fetch?.peer in ids) want.fetch = null
             }
         }
+    }
+
+    /**
+     * Neighbours whose links went down: every blob whose ask or hold is on one of them takes its next step now, so the
+     * next holder is asked at once rather than at the next want, answer, timer or tick (#140). Nothing else moves.
+     */
+    suspend fun unlinked(nodeIds: Collection<String>) {
+        if (nodeIds.isEmpty()) return
+        val ids = nodeIds.toSet()
+        val affected = synchronized(lock) { fetching.filterValues { it.fetch?.peer in ids }.keys.toList() }
+        if (affected.isEmpty()) return
+        val linked = linkedNow()
+        affected.forEach { step(it, linked) }
+        flushQueries()
     }
 
     /**
@@ -298,7 +327,7 @@ class BlobExchange(
         w.fetch?.let { f ->
             // Queries go out mid-fetch too (a newcomer, a fetching neighbour's recheck): fresh answers for the fallback.
             owedQueries(w, capableOf(linked.filter { it.id !in w.pullers }), t, p)
-            fetchWait(w, f, linked.firstOrNull { it.id == f.peer }, t, p)?.let { return p.waitFor(it) }
+            fetchWait(w, f, linked.firstOrNull { it.id == f.peer }, kept, t, p)?.let { return p.waitFor(it) }
         }
         // A cycle closes only with no ask outstanding, so an ask's grace always runs out inside the cycle it began in.
         if (w.cycleDue(t)) openCycle(w, t)
@@ -364,12 +393,15 @@ class BlobExchange(
      * streams anything to us, our copy may be queued behind it, so the grace counts from the first quiet look — never
      * from the last look during the stream, which once asked past a header 2 s from landing. A queried holder whose
      * grace is up is queried once more: still sending, it gets another grace; answering it holds the blob to a query
-     * sent after our ask, our ask never reached it and it is asked again, once; otherwise the next holder is tried.
+     * sent after our ask, our ask never reached it and it is asked again, once; silent, or still sending after
+     * [MAX_CONFIRMS], it is held to its floor ([hold]); otherwise the next holder is tried. A blind first ask whose pick
+     * said it holds the blob is confirmed the same way rather than widened (#140): it is a holder with our ask on it.
      */
     private fun fetchWait(
         w: Want,
         f: Fetch,
         c: Candidate?,
+        kept: Long,
         t: Long,
         p: Plan,
     ): Long? {
@@ -380,11 +412,65 @@ class BlobExchange(
         }
         val quiet = f.quietSince ?: t.also { f.quietSince = it }
         (quiet + f.graceMs - t).takeIf { it > 0 }?.let { return it }
+        return graceUp(w, f, c, kept, t, p)
+    }
+
+    /** [fetchWait] once [f]'s grace is up and [c] streams nothing to us: confirm, hold, or end it — see there. */
+    private fun graceUp(
+        w: Want,
+        f: Fetch,
+        c: Candidate,
+        kept: Long,
+        t: Long,
+        p: Plan,
+    ): Long? {
+        val queryable = c.capable && holderQuery.enabled
         return when {
-            f.tier == Tier.Blind -> w.over(f, null)
-            !c.capable || !holderQuery.enabled || f.confirms >= MAX_CONFIRMS -> w.over(f, "grace")
-            else -> confirmWait(w, f, c, t, p)
+            f.tier == Tier.Pending -> {
+                w.over(f, "floor")
+            }
+
+            f.tier == Tier.Blind && !(queryable && w.answers[c.id]?.state in HELD) -> {
+                w.over(f, null)
+            }
+
+            f.tier == Tier.Blind -> {
+                // The round is spent on it: a fallback from here asks the next holder, not a second first pick.
+                w.blindWidened = true
+                f.tier = tierOf(w, c, kept)
+                confirmWait(w, f, c, t, p)
+            }
+
+            !queryable -> {
+                w.over(f, "grace")
+            }
+
+            f.confirms >= MAX_CONFIRMS -> {
+                hold(w, c, "sending", t) ?: w.over(f, "grace")
+            }
+
+            else -> {
+                confirmWait(w, f, c, t, p)
+            }
         }
+    }
+
+    /**
+     * Holds [w]'s fetch on [c] until our last ask's serve-memo floor, when it was asked inside it: nothing withdraws an
+     * ask, so asking the next holder now buys a second copy whenever the first one's is only late (#140). The hold ends
+     * early when [c]'s link goes ([fetchWait]'s "link gone") or the bytes arrive; at the floor the next holder is asked.
+     * Null when there is no floor left to hold on.
+     */
+    private fun hold(
+        w: Want,
+        c: Candidate,
+        why: String,
+        t: Long,
+    ): Long? {
+        val floor = w.askedAt[c.id]?.let { it + SERVE_MEMO_MS - t }?.takeIf { it > 0 } ?: return null
+        w.fetch = Fetch(c.id, w.hash8, Tier.Pending, t, floor)
+        log("blob hold ${w.hash8}… on ${c.id} ($why), floor $floor ms")
+        return floor
     }
 
     /** [fetchWait] once [f]'s grace is up: query its holder again, or read what it answered — see there. */
@@ -404,12 +490,13 @@ class BlobExchange(
                 p.query += c.id
                 p.events += BlobEvent.Confirm
                 log("blob confirm ${f.hash8}… → ${c.id}")
-                return holderQuery.waitMs
+                return queryWaitFor(c.id)
             }
         val a = w.answers[c.id]
+        val wait = queryWaitFor(c.id)
         return when {
-            a == null && t - sent < holderQuery.waitMs -> {
-                sent + holderQuery.waitMs - t
+            a == null && t - sent < wait -> {
+                sent + wait - t
             }
 
             a?.state == BlobHasItem.SENDING -> {
@@ -424,8 +511,13 @@ class BlobExchange(
                 null
             }
 
+            // Silence on a link that is still up is a late answer, not a no: hold on the ask we made (#140).
+            a == null -> {
+                hold(w, c, "confirm silent", t) ?: w.over(f, "confirm silent")
+            }
+
             else -> {
-                w.over(f, "confirm ${a?.let { stateLabel(it.state) } ?: "silent"}")
+                w.over(f, "confirm ${stateLabel(a.state)}")
             }
         }
     }
@@ -433,7 +525,8 @@ class BlobExchange(
     /**
      * Asks the best capable neighbour that said it holds the blob, or waits on one already sending it — true when [w]
      * is decided for this step (asked, or waiting for answers still due, a holder's memo floor, or a blind widening's
-     * grace). The choice waits for every answer unless the best so far rides a live Wi-Fi Aware link.
+     * grace). The choice waits for every answer unless the best so far rides a live Wi-Fi Aware link, and never asks
+     * past a holder whose ask of ours still stands inside its floor (#140): that one's copy may only be late.
      */
     private fun askHolder(
         w: Want,
@@ -450,11 +543,12 @@ class BlobExchange(
             p.waitFor(f.graceMs)
             return true
         }
-        val answering = capable.filter { it.id !in w.answers && t - w.queried.getValue(it.id) < holderQuery.waitMs }
+        val answering = capable.filter { it.id !in w.answers && t - w.queried.getValue(it.id) < queryWaitFor(it.id) }
         val widenGate = w.blindWidenedAt?.let { it + firstAskGraceMs - t }?.takeIf { it > 0 }
-        val best = holders.filter { askable(w, it, t) }.minWithOrNull(byTier(w, kept))
-        val answersIn = best != null && (answering.isEmpty() || tierOf(w, best, kept) == Tier.FastLink)
-        if (best != null && widenGate == null && answersIn) {
+        val (askableHolders, asked) = holders.partition { askable(w, it, t) }
+        // A holder our ask of still stands inside its floor holds the choice: its copy may only be late (#140).
+        val best = askableHolders.minWithOrNull(byTier(w, kept))?.takeIf { asked.isEmpty() }
+        if (best != null && widenGate == null && answersIn(w, best, kept, answering)) {
             val tier = tierOf(w, best, kept)
             w.fetch = Fetch(best.id, w.hash8, tier, t, graceFor(w, best, kept))
             w.askedAt[best.id] = t
@@ -466,7 +560,7 @@ class BlobExchange(
         }
         if (holders.isEmpty() && answering.isEmpty()) return false
         val floors = holders.mapNotNull { c -> w.askedAt[c.id]?.let { it + SERVE_MEMO_MS - t } }
-        val answersDue = answering.map { w.queried.getValue(it.id) + holderQuery.waitMs - t }
+        val answersDue = answering.map { w.queried.getValue(it.id) + queryWaitFor(it.id) - t }
         (floors + answersDue + listOfNotNull(widenGate)).filter { it > 0 }.minOrNull()?.let { p.waitFor(it) }
         return true
     }
@@ -490,7 +584,8 @@ class BlobExchange(
         if (!w.blindWidened) {
             val pick = blind.minWith(compareBy<Candidate>({ rankOf(w, it) }, { it.id }))
             // A holder that can raise the Wi-Fi Aware link waits for it before it falls back to Bluetooth.
-            val grace = firstAskGraceMs + if (pick.route == BulkRoute.Reachable) CompositeMeshTransport.BULK_GRACE_MS else 0L
+            val grace =
+                firstAskGraceMs + rttOf(pick.id) + if (pick.route == BulkRoute.Reachable) CompositeMeshTransport.BULK_GRACE_MS else 0L
             w.blindAsked += pick.id
             w.askedAt[pick.id] = t
             w.fetch = Fetch(pick.id, w.hash8, Tier.Blind, t, grace)
@@ -542,6 +637,14 @@ class BlobExchange(
         // tripped the holder's budget (the bluetooth-reviewer's finding).
     }
 
+    /** Whether the choice of [best] may be made: every answer is in, or [best] rides a live Wi-Fi Aware link. */
+    private fun answersIn(
+        w: Want,
+        best: Candidate,
+        kept: Long,
+        answering: List<Candidate>,
+    ): Boolean = answering.isEmpty() || tierOf(w, best, kept) == Tier.FastLink
+
     /** Whether [c] may be asked now: never before, or its answer is newer than our last ask, or the memo has lapsed. */
     private fun askable(
         w: Want,
@@ -577,7 +680,10 @@ class BlobExchange(
         kept: Long,
     ): Comparator<Candidate> = compareBy({ tierOf(w, it, kept).ordinal }, { w.answers[it.id]?.load ?: 0 }, { it.id })
 
-    /** An ask's grace: the plain one, plus the composite's link wait when the holder may raise Wi-Fi Aware for it. */
+    /**
+     * An ask's grace: the plain one, plus the round trip [c]'s link last took ([rttOf]), plus the composite's link wait
+     * when the holder may raise Wi-Fi Aware for it.
+     */
     private fun graceFor(
         w: Want,
         c: Candidate,
@@ -585,8 +691,21 @@ class BlobExchange(
     ): Long {
         val left = w.answers[c.id]?.size?.let { it - kept }
         val linkWait = c.route == BulkRoute.Reachable && (left == null || left >= CompositeMeshTransport.BULK_MIN_BYTES)
-        return firstAskGraceMs + if (linkWait) CompositeMeshTransport.BULK_GRACE_MS else 0L
+        return firstAskGraceMs + rttOf(c.id) + if (linkWait) CompositeMeshTransport.BULK_GRACE_MS else 0L
     }
+
+    /**
+     * How long an answer from [id] may take before it reads as silence: [HolderQuery.waitMs], or the round trip its last
+     * answer took plus that wait when longer, at most [QUERY_WAIT_CAP_MS] (#140). An asker whose own frames are queued
+     * on a link would otherwise read its lag as the neighbour's silence. Under [lock].
+     */
+    private fun queryWaitFor(id: String): Long {
+        val rtt = answerRtt[id] ?: return holderQuery.waitMs
+        return maxOf(holderQuery.waitMs, minOf(rtt + holderQuery.waitMs, QUERY_WAIT_CAP_MS))
+    }
+
+    /** The round trip [id]'s last answer took, at most [QUERY_WAIT_CAP_MS]; 0 when none came back yet. Under [lock]. */
+    private fun rttOf(id: String): Long = answerRtt[id]?.let { minOf(it, QUERY_WAIT_CAP_MS) } ?: 0L
 
     /**
      * How likely [c] is to hold [want]'s blob when it cannot say, best first: its author (the one holder we can name), a
@@ -798,13 +917,14 @@ class BlobExchange(
             onEvent(BlobEvent.AnswerIgnored)
             return
         }
-        onEvent(BlobEvent.AnswerTaken)
         val idPart = content.re?.let { " #${it.take(LOG_ID_CHARS)}" } ?: ""
         val inMs = latency?.let { " in $it ms" } ?: ""
         log("blob answer ← $from$idPart$inMs: ${touched.joinToString { itemLabel(it) }} load=${content.load ?: 0}")
         val linked = linkedNow()
         touched.forEach { step(it.hash, linked) }
         flushQueries()
+        // Counted once the answer's steps have run, so a count read means what they decided has been sent too.
+        onEvent(BlobEvent.AnswerTaken)
     }
 
     /** [onHaveAnswer]'s bookkeeping, under [lock]: the items that count, and how long their query took to answer. */
@@ -814,6 +934,7 @@ class BlobExchange(
         t: Long,
     ): Pair<List<BlobHasItem>, Long?> {
         val sent = content.re?.let { sentQueries[it] }?.takeIf { it.peer == from }
+        sent?.let { answerRtt[from] = (t - it.at).coerceAtLeast(0) }
         val touched =
             content.items.take(MAX_QUERY_HASHES).filter { item ->
                 val w = fetching[item.hash] ?: return@filter false
@@ -1188,12 +1309,13 @@ class BlobExchange(
     /**
      * The one ask outstanding for a blob — to [peer], on [tier]'s plane — or a wait on a holder already sending it. Its
      * grace counts from [quietSince], the first look that found [peer] streaming nothing to us; [confirmAt] is when it
-     * was queried again once that grace ran out.
+     * was queried again once that grace ran out. A blind first ask whose pick said it holds the blob is re-tiered as a
+     * holder's ([fetchWait]); a [Tier.Pending] one is a hold on an ask already made, its grace running to the floor.
      */
     private class Fetch(
         val peer: String,
         val hash8: String,
-        val tier: Tier,
+        var tier: Tier,
         at: Long,
         val graceMs: Long,
     ) {
@@ -1264,6 +1386,7 @@ class BlobExchange(
         SlowLink("slow link"),
         Sending("sending"),
         Blind("blind"),
+        Pending("held"),
     }
 
     /** What put a neighbour first in a blind round ([rankOf]), best first; the [label] is the log's. */
@@ -1304,6 +1427,11 @@ class BlobExchange(
         // still counts. The 2026-10-05 trial's `blob answer … in <ms> ms` lines: p50 0.25 s, p90 2.0 s, 12 of 197
         // past 3 s and 4 past 5 s, every slow one from a holder feeding two files; at 3 s, three were asked blind.
         const val QUERY_WAIT_MS = 5_000L
+
+        // The most a neighbour's measured round trip stretches the wait for its answer, or adds to an ask's grace (#140).
+        // The 2026-10-06 trace had queries reach neighbours 13, 29 and 44 s late from an asker whose own frames were
+        // queued; past this a neighbour reads as silent anyway, and an ask to a holder still stands to its floor.
+        const val QUERY_WAIT_CAP_MS = 30_000L
 
         // While the holder we wait on streams another file to us, how often we look for that stream's end.
         const val STREAM_POLL_MS = 2_000L

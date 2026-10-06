@@ -18,6 +18,7 @@ import app.getknit.knit.mesh.sha256Hex
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
@@ -566,6 +567,181 @@ class BlobHolderQueryTest {
             a.now += BlobExchange.QUERY_WAIT_MS
             a.exchange.reask()
             assertEquals("a bit that answers nothing degrades to today's round", listOf("a"), s.asksFrom(hash))
+        }
+
+    /** Answers, as [holder], the latest query this node sent it, with [state] for [hash]: a late answer, by hand. */
+    private suspend fun Node.answerFor(
+        holder: Node,
+        hash: String,
+        state: Int = BlobHasItem.HAVE,
+        load: Int = 0,
+    ) {
+        val query = holder.heard.last { it.first == FrameType.BLOB_HAVE && it.second == id }.third
+        exchange.onHaveAnswer(BlobHasContent(listOf(BlobHasItem(hash, state, 2_000)), load = load, re = query.id), holder.id)
+    }
+
+    /** #140's shape, held: [a]'s blind ask stands on the author [u], whose late HAVE said it holds [hash]; [b] answers late. */
+    private inner class HeldOnTheAuthor(
+        val a: Node,
+        val u: Node,
+        val b: Node,
+        val hash: String,
+    )
+
+    /**
+     * The 2026-10-06 trace: the asker's own frames are queued, so the author [HeldOnTheAuthor.u] and the holder
+     * [HeldOnTheAuthor.b] both miss the wait, the author is asked blind, says HAVE inside the grace, and brings no header
+     * by its end. Its confirm is silent too, and the ask is held to its floor while b's late HAVE lands.
+     */
+    private suspend fun TestScope.heldOnTheAuthor(): HeldOnTheAuthor {
+        val a = Node("a", backgroundScope)
+        val u = Node("u", backgroundScope, answers = false).apply { transport.advertises = Protocol.CAP_BLOB_HAVE }
+        val b = Node("b", backgroundScope, answers = false).apply { transport.advertises = Protocol.CAP_BLOB_HAVE }
+        a.transport.connect(u.transport)
+        a.transport.connect(b.transport)
+        val hash = b.store.seed(picture()) // the author's copy is late on the link: modelled as never arriving
+
+        a.exchange.want(hash, author = "u")
+        a.now = BlobExchange.QUERY_WAIT_MS
+        a.exchange.reask()
+        assertEquals("both silent past the wait: the author is asked blind", listOf("a"), u.asksFrom(hash))
+
+        a.now = 7_000
+        a.answerFor(u, hash) // HAVE, to the query sent before the ask: 7 s on the way
+        a.now = BlobExchange.QUERY_WAIT_MS + BlobExchange.FIRST_ASK_GRACE_MS
+        a.exchange.reask()
+        assertEquals("its grace up, the author that said it holds it is confirmed", 2, u.queriesFrom("a").size)
+        assertEquals("not widened: nobody else is asked blind", 1, a.events.count { it == BlobExchange.BlobEvent.BlindAsk })
+
+        a.now = 12_000
+        a.answerFor(b, hash) // b's late HAVE, 12 s on the way
+        assertTrue("the author's ask still stands: b is not asked", b.asksFrom(hash).isEmpty())
+
+        a.now = 22_000 // past the confirm's wait, stretched to the author's 7 s round trip
+        a.exchange.reask()
+        assertTrue("a silent confirm holds the ask to its floor", b.asksFrom(hash).isEmpty())
+        assertEquals(0, a.events.count { it == BlobExchange.BlobEvent.Fallback })
+        return HeldOnTheAuthor(a, u, b, hash)
+    }
+
+    @Test
+    fun aLateHaveFromASecondHolderWaitsOnTheAskStandingOnTheFirstUntilItsLinkGoes() =
+        runTest(UnconfinedTestDispatcher()) {
+            val held = heldOnTheAuthor()
+            val (a, u, b) = Triple(held.a, held.u, held.b)
+            val hash = held.hash
+
+            a.transport.disconnect(u.transport)
+            a.exchange.unlinked(listOf("u"))
+            assertEquals("the author's link gone, the next holder is asked at once", listOf("a"), b.asksFrom(hash))
+            assertTrue(a.store.has(hash))
+            assertEquals(1, a.events.count { it == BlobExchange.BlobEvent.Fallback })
+        }
+
+    @Test
+    fun aHeldAskEndsAtItsFloorAndTheNextCycleAsksTheHolderThatAnswers() =
+        runTest(UnconfinedTestDispatcher()) {
+            val held = heldOnTheAuthor()
+            val (a, b, hash) = Triple(held.a, held.b, held.hash)
+
+            a.now = BlobExchange.QUERY_WAIT_MS + BlobExchange.SERVE_MEMO_MS - 1
+            a.exchange.reask()
+            assertTrue("inside the floor, still held", b.asksFrom(hash).isEmpty())
+            a.now += 1
+            a.exchange.reask() // the floor: the hold ends, and the cycle that has stood since 0 opens again
+            assertEquals(1, a.events.count { it == BlobExchange.BlobEvent.Fallback })
+            a.answerFor(b, hash)
+            assertTrue("the author's answer to the new cycle is still due", b.asksFrom(hash).isEmpty())
+            a.now += 7_000 + BlobExchange.QUERY_WAIT_MS // its wait, stretched by its 7 s round trip
+            a.exchange.reask()
+            assertEquals("the holder that answered the new cycle is asked", listOf("a"), b.asksFrom(hash))
+            assertTrue(a.store.has(hash))
+        }
+
+    @Test
+    fun aHolderWhoseConfirmIsSilentIsHeldToItsFloorNotPassedOver() =
+        runTest(UnconfinedTestDispatcher()) {
+            val a = Node("a", backgroundScope)
+            val b = Node("b", backgroundScope, answers = false).apply { transport.advertises = Protocol.CAP_BLOB_HAVE }
+            val c = Node("c", backgroundScope)
+            a.transport.connect(b.transport)
+            a.transport.connect(c.transport)
+            val bytes = picture()
+            val hash = sha256Hex(bytes)
+            c.store.seed(bytes)
+            c.transport.feeding = 1 // so b, unloaded, is the better choice
+
+            a.exchange.want(hash)
+            a.now = 1_000
+            a.answerFor(b, hash) // b says it holds it, 1 s on the way; its copy never comes
+            assertEquals("b, the better holder, is asked", listOf("a"), b.asksFrom(hash))
+
+            a.now = 1_000 + BlobExchange.FIRST_ASK_GRACE_MS + 1_000 // the grace, stretched by b's round trip
+            a.exchange.reask()
+            assertEquals("its grace up, b is confirmed", 2, b.queriesFrom("a").size)
+            a.now += BlobExchange.QUERY_WAIT_MS + 1_000
+            a.exchange.reask()
+            assertTrue("silence on a live link is a late answer: c is not asked", c.asksFrom(hash).isEmpty())
+            assertEquals(0, a.events.count { it == BlobExchange.BlobEvent.Fallback })
+
+            a.now = 1_000 + BlobExchange.SERVE_MEMO_MS
+            a.exchange.reask() // b's floor; the cycle opens again and queries both
+            a.now += BlobExchange.QUERY_WAIT_MS + 1_000
+            a.exchange.reask() // b still silent past its wait
+            assertEquals("past b's floor, the next holder is asked", listOf("a"), c.asksFrom(hash))
+            assertTrue(a.store.has(hash))
+        }
+
+    @Test
+    fun theWaitForAnAnswerStretchesToTheNeighboursLastRoundTrip() =
+        runTest(UnconfinedTestDispatcher()) {
+            val a = Node("a", backgroundScope)
+            val s = Node("s", backgroundScope, answers = false).apply { transport.advertises = Protocol.CAP_BLOB_HAVE }
+            a.transport.connect(s.transport)
+            val first = s.store.seed(picture(2_000))
+            val second = s.store.seed(picture(2_100))
+            val third = s.store.seed(picture(2_200))
+
+            a.exchange.want(first)
+            a.now = 20_000
+            a.answerFor(s, first) // a 20 s round trip: our frames to s are queued
+            assertTrue(a.store.has(first))
+
+            a.exchange.want(second)
+            a.now += 15_000
+            a.exchange.reask()
+            assertTrue("15 s is inside s's lag: not silence, no blind ask", s.asksFrom(second).isEmpty())
+            a.now += 10_000
+            a.exchange.reask()
+            assertEquals("past the round trip plus the wait, it is", listOf("a"), s.asksFrom(second))
+
+            a.exchange.linked(listOf("s")) // a new link, a new queue: the lag is forgotten
+            a.exchange.want(third)
+            a.now += BlobExchange.QUERY_WAIT_MS
+            a.exchange.reask()
+            assertEquals(listOf("a"), s.asksFrom(third))
+        }
+
+    @Test
+    fun aRoundTripStretchesTheWaitOnlyUpToItsCap() =
+        runTest(UnconfinedTestDispatcher()) {
+            val a = Node("a", backgroundScope)
+            val s = Node("s", backgroundScope, answers = false).apply { transport.advertises = Protocol.CAP_BLOB_HAVE }
+            a.transport.connect(s.transport)
+            val first = s.store.seed(picture(2_000))
+            val second = s.store.seed(picture(2_100))
+
+            a.exchange.want(first)
+            a.now = 60_000
+            a.answerFor(s, first)
+
+            a.exchange.want(second)
+            a.now += BlobExchange.QUERY_WAIT_CAP_MS - 1
+            a.exchange.reask()
+            assertTrue(s.asksFrom(second).isEmpty())
+            a.now += 1
+            a.exchange.reask()
+            assertEquals("a 60 s round trip waits the cap, no longer", listOf("a"), s.asksFrom(second))
         }
 
     @Test
