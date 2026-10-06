@@ -29,10 +29,11 @@ import java.io.File
 
 /**
  * The image and file doors, with real codecs (native graphics). The property a user relies on without ever
- * seeing it: **a photo leaves the phone with none of its metadata** — no GPS position, no camera make — because
- * the pipeline decodes and re-encodes rather than passing the source bytes on, and it is upright, because the
- * EXIF orientation is applied before the tag is dropped. A JPEG offered as an opaque file takes the same door,
- * since screening skips by MIME. Then the size and emptiness refusals, and the opaque store for a real non-image.
+ * seeing it: **a photo leaves the phone with none of its metadata** — no GPS position, no camera make — whether
+ * the pipeline re-encodes it or, for a picture already bounded, upright and no sharper than the re-encode, strips
+ * its metadata and keeps its pixels (ADR 2026-10.unqn), and it is upright, because a picture tagged otherwise is
+ * re-encoded with the EXIF orientation applied. A JPEG offered as an opaque file takes the same door, since
+ * screening skips by MIME. Then the size and emptiness refusals, and the opaque store for a real non-image.
  */
 @RunWith(AndroidJUnit4::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
@@ -300,6 +301,148 @@ class AttachmentStoreIngestTest {
             assertNull(result.ingested.reuse)
             assertEquals(sha256Hex(photo), result.ingested.sourceHash)
             assertTrue(result.ingested.hash != sha256Hex(photo))
+        }
+
+    // --- A picture already clean and bounded keeps its pixels (ADR 2026-10.unqn) ---
+
+    /** A photo-like [width]×[height] picture: a gradient, so the entropy-coded data is not trivial. */
+    private fun picture(
+        width: Int,
+        height: Int,
+        alpha: Boolean = false,
+    ): Bitmap {
+        val pixels =
+            IntArray(width * height) {
+                val x =
+                    it % width
+                val y = it / width
+                Color.argb(if (alpha) (x + y) % 256 else 255, x % 256, y % 256, (x * y) % 256)
+            }
+        return Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888)
+    }
+
+    /** [bitmap] written as [format] at [quality], then — unless [tag] is false — given a GPS position, a camera and [orientation]. */
+    private fun encoded(
+        bitmap: Bitmap,
+        format: Bitmap.CompressFormat = Bitmap.CompressFormat.JPEG,
+        quality: Int = 85,
+        tag: Boolean = true,
+        orientation: Int = ExifInterface.ORIENTATION_NORMAL,
+    ): ByteArray {
+        val file = File(dir, "picture-${System.nanoTime()}")
+        file.outputStream().use { bitmap.compress(format, quality, it) }
+        if (tag) {
+            ExifInterface(file.absolutePath).apply {
+                setLatLong(37.4219983, -122.084)
+                setAttribute(ExifInterface.TAG_MAKE, "Google")
+                setAttribute(ExifInterface.TAG_MODEL, "Pixel 8")
+                setAttribute(ExifInterface.TAG_ORIENTATION, orientation.toString())
+                saveAttributes()
+            }
+        }
+        return file.readBytes().also { if (tag) assertTrue(ExifInterface(ByteArrayInputStream(it)).latLong != null) }
+    }
+
+    /** A JPEG's marker segments ahead of its first scan, and where that scan starts. */
+    private fun headerOf(jpeg: ByteArray): Pair<List<Int>, Int> {
+        val markers = ArrayList<Int>()
+        var at = 2
+        while (true) {
+            val marker = jpeg[at + 1].toInt() and 0xFF
+            if (marker == 0xDA) return markers to at
+            markers += marker
+            at += 2 + (((jpeg[at + 2].toInt() and 0xFF) shl 8) or (jpeg[at + 3].toInt() and 0xFF))
+        }
+    }
+
+    /** From the first scan to the end: the entropy-coded pixels, which a strip must not touch. */
+    private fun scanOf(jpeg: ByteArray): ByteArray = jpeg.copyOfRange(headerOf(jpeg).second, jpeg.size)
+
+    private fun sizeOf(bytes: ByteArray): Pair<Int, Int>? = declaredSize(bytes)
+
+    @Test
+    fun aCleanBoundedJpegKeepsItsPixelsByteForByteAndLosesItsMetadata() =
+        runTest {
+            val photo = encoded(picture(1000, 800))
+
+            val result = success(store.ingest(fileUri("photo.jpg", photo)))
+
+            val (mime, bytes) = stored.getValue(result.ingested.hash)
+            assertEquals("image/jpeg", mime)
+            assertNoMetadata(bytes)
+            assertFalse("APP1 survived", 0xE1 in headerOf(bytes).first)
+            assertArrayEquals("the pixels were re-encoded", scanOf(photo).copyOf(scanOf(bytes).size), scanOf(bytes))
+            assertEquals(1000 to 800, sizeOf(bytes))
+            assertEquals(sha256Hex(photo), result.ingested.sourceHash)
+            coVerify(exactly = 1) { screening.isImageExplicit(bytes) }
+        }
+
+    @Test
+    fun aJpegWithNothingToStripGoesOutAsItIs() =
+        runTest {
+            val photo = encoded(picture(1000, 800), tag = false)
+
+            val result = success(store.ingest(photo, "image/jpeg"))
+
+            assertArrayEquals(photo, stored.getValue(result.ingested.hash).second)
+            assertEquals(sha256Hex(photo), result.ingested.hash)
+        }
+
+    @Test
+    fun aBoundedJpegTaggedAsRotatedIsStillReencodedUpright() =
+        runTest {
+            val photo = encoded(picture(1000, 800), orientation = ExifInterface.ORIENTATION_ROTATE_90)
+
+            val bytes = stored.getValue(success(store.ingest(photo, "image/jpeg")).ingested.hash).second
+
+            assertNoMetadata(bytes)
+            assertEquals(800 to 1000, sizeOf(bytes))
+        }
+
+    @Test
+    fun anUprightJpegOverTheBoundIsStillDownscaled() =
+        runTest {
+            val photo = encoded(picture(2000, 1000))
+
+            val bytes = stored.getValue(success(store.ingest(photo, "image/jpeg")).ingested.hash).second
+
+            assertNoMetadata(bytes)
+            assertEquals(MAX_DIMENSION to 640, sizeOf(bytes))
+        }
+
+    @Test
+    fun aJpegSharperThanTheReencodeTakesOneGenerationAndNoMore() =
+        runTest {
+            val original = encoded(picture(1000, 800), quality = 100)
+
+            val first = success(store.ingestPicked(original, "image/jpeg")).ingested
+            val firstBytes = stored.getValue(first.hash).second
+            assertFalse(
+                "a q100 original passed through at its own weight",
+                scanOf(firstBytes).contentEquals(scanOf(original).copyOf(scanOf(firstBytes).size)),
+            )
+            assertTrue(firstBytes.size < original.size)
+
+            // The re-encode saved and picked again, by a phone that holds no identity for it: the chain stops here.
+            val again = success(store.ingestPicked(firstBytes, "image/jpeg")).ingested
+            assertEquals(first.hash, again.hash)
+            assertNull(again.sourceHash)
+            assertArrayEquals(firstBytes, stored.getValue(again.hash).second)
+        }
+
+    @Test
+    fun aTransparentWebpLosesItsMetadataAndKeepsItsHashWhenPickedAgain() =
+        runTest {
+            val sticker = encoded(picture(400, 300, alpha = true), format = lossyWebpFormat())
+
+            val first = success(store.ingest(fileUri("sticker.webp", sticker)))
+            val (mime, bytes) = stored.getValue(first.ingested.hash)
+            assertEquals("image/webp", mime)
+            assertNoMetadata(bytes)
+            assertEquals(400 to 300, sizeOf(bytes))
+
+            val again = success(store.ingest(fileUri("saved.webp", bytes)))
+            assertEquals(first.ingested.hash, again.ingested.hash)
         }
 
     /** [AttachmentStore]'s private bounds, restated: a change there should be a deliberate change here. */

@@ -395,6 +395,11 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   stranger's post reaches: that would be a confirmation oracle. The plaintext name is recorded at send, on arrival
   and on save, never by a bulk decrypt, and `identityFor` must skip a sealed row without one. Carriers see equality
   on purpose; convergent encryption was rejected. Lab: `AttachmentReuseLabTest`.
+  **Before touching `data/ImageStrip` or `AttachmentStore.passThrough`:** READ ADR 2026-10.unqn — a picture already
+  bounded, upright and no sharper than the q85 re-encode goes out as its own bytes with the metadata stripped, so the
+  "no GPS leaves the phone" invariant rests on the strip's allow-list: anything it does not fully understand answers
+  null (the long way), and a segment is kept only if a decoder needs it. Tests: `ImageStripTest`,
+  `AttachmentStoreIngestTest`.
 - **When touching a presence dot or an online / offline label** (Profile Details, Diagnostics' node
   sections, the Contacts dot): the four evidence tiers live in `ui/Reach.kt` — `Direct` is
   `MeshController.neighbors` (a short-range radio saw the peer's own radio), `Indirect` is

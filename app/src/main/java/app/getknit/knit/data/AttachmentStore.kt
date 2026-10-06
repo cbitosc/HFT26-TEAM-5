@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.net.Uri
 import android.provider.OpenableColumns
+import androidx.exifinterface.media.ExifInterface
 import app.getknit.knit.data.webp.WebpTranscode
 import app.getknit.knit.mesh.protocol.AttachmentName
 import app.getknit.knit.mesh.protocol.LinkCard
@@ -20,12 +21,15 @@ import java.security.MessageDigest
  * [app.getknit.knit.data.blob.BlobEntity]). The content hash both keys the blob and is the key carried
  * in the wire frame, so any holder can serve the bytes and identical images dedupe.
  *
- * Photos are decoded, EXIF-rotated, downscaled, and re-encoded to JPEG. GIFs keep their animation but
- * are re-encoded to a smaller **animated WebP** via [app.getknit.knit.data.webp.WebpTranscode] (VP8
- * beats GIF's LZW even at the same size, and Coil plays animated WebP like a GIF) so they transmit
- * faster; a GIF that somehow can't be shrunk falls back to its original bytes. The bytes never touch
- * disk — they go straight into the encrypted database. That invariant is why the in-app camera hands
- * its capture over as a [ByteArray] rather than staging a plaintext JPEG in `cacheDir`.
+ * Photos are decoded, EXIF-rotated, downscaled, and re-encoded to JPEG — unless one is already bounded,
+ * upright and no sharper than that re-encode would make it, in which case it goes out as its own bytes with
+ * only the metadata taken out ([ImageStrip], ADR 2026-10.unqn), so a picture saved and sent on loses nothing
+ * to a second encode. GIFs keep their animation but are re-encoded to a smaller **animated WebP** via
+ * [app.getknit.knit.data.webp.WebpTranscode] (VP8 beats GIF's LZW even at the same size, and Coil plays
+ * animated WebP like a GIF) so they transmit faster; a GIF that somehow can't be shrunk falls back to its
+ * original bytes. The bytes never touch disk — they go straight into the encrypted database. That invariant is
+ * why the in-app camera hands its capture over as a [ByteArray] rather than staging a plaintext JPEG in
+ * `cacheDir`.
  *
  * Before staging, the image is screened for explicit content via [ImageScreeningService]. Sending an
  * explicit image is *allowed but discouraged*: a flagged image is still ingested, and [ingest] reports the
@@ -141,6 +145,7 @@ class AttachmentStore(
             readBounded(uri)?.let { raw -> return@withContext ingestPicked(raw, sourceMime) }
             ingest(
                 sourceMime = sourceMime,
+                held = null,
                 readRaw = { context.contentResolver.openInputStream(uri)?.use { it.readBytes() } },
                 decodeOriented = { decodeOrientedBounded(context, uri, MAX_DIMENSION) },
             )
@@ -160,6 +165,7 @@ class AttachmentStore(
             val result =
                 ingest(
                     sourceMime = sourceMime,
+                    held = raw,
                     readRaw = { raw },
                     decodeOriented = { decodeOrientedBounded(raw, MAX_DIMENSION) },
                 )
@@ -212,6 +218,7 @@ class AttachmentStore(
         withContext(Dispatchers.IO) {
             ingest(
                 sourceMime = sourceMime,
+                held = bytes,
                 readRaw = { bytes },
                 decodeOriented = { decodeOrientedBounded(bytes, MAX_DIMENSION) },
             )
@@ -361,10 +368,13 @@ class AttachmentStore(
     /**
      * The one ingest pipeline, over whichever source the caller has: [readRaw] yields the untouched
      * source bytes (the GIF path re-encodes those directly) and [decodeOriented] yields an
-     * EXIF-corrected, sub-sampled bitmap (every other format). Both are called at most once.
+     * EXIF-corrected, sub-sampled bitmap (every other format). Both are called at most once. [held] is
+     * the source when the caller already has it in memory, which is when a still can skip the decode
+     * ([passThrough]); null for a source too large to read whole, which no pass-through would take.
      */
     private suspend fun ingest(
         sourceMime: String?,
+        held: ByteArray?,
         readRaw: () -> ByteArray?,
         decodeOriented: () -> Bitmap?,
     ): IngestResult {
@@ -377,26 +387,8 @@ class AttachmentStore(
                 val webp = WebpTranscode.shrink(raw, GIF_MAX_DIMENSION, GIF_MAX_FPS, GIF_WEBP_QUALITY)
                 if (webp != null) "image/webp" to webp else "image/gif" to raw
             } else {
-                val bitmap = decodeOriented() ?: return IngestResult.Failed(IngestResult.Reason.Unreadable)
-                val scaled = downscale(bitmap, MAX_DIMENSION)
-                // JPEG has no alpha channel, so a transparent PNG would flatten its transparent regions to
-                // black. When the source carries transparency, re-encode as lossy WebP instead — it keeps
-                // the alpha channel and still compresses well; opaque photos stay JPEG (smallest).
-                if (scaled.hasAlpha()) {
-                    val webp =
-                        ByteArrayOutputStream().use { out ->
-                            scaled.compress(lossyWebpFormat(), WEBP_QUALITY, out)
-                            out.toByteArray()
-                        }
-                    "image/webp" to webp
-                } else {
-                    val jpeg =
-                        ByteArrayOutputStream().use { out ->
-                            scaled.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, out)
-                            out.toByteArray()
-                        }
-                    "image/jpeg" to jpeg
-                }
+                held?.let(::passThrough)
+                    ?: reencoded(decodeOriented() ?: return IngestResult.Failed(IngestResult.Reason.Unreadable))
             }
         failureFor(bytes)?.let { return it }
         // Screen the exact bytes we store and transmit (decoded at the receiver's bound), so the
@@ -409,12 +401,75 @@ class AttachmentStore(
         return IngestResult.Success(Ingested(hash, mime, animated = AnimatedImage.isAnimated(bytes)), flagged)
     }
 
+    /** [bitmap] bounded to [MAX_DIMENSION] and encoded afresh — the long way, and one generation of loss. */
+    private fun reencoded(bitmap: Bitmap): Pair<String, ByteArray> {
+        val scaled = downscale(bitmap, MAX_DIMENSION)
+        // JPEG has no alpha channel, so a transparent PNG would flatten its transparent regions to
+        // black. When the source carries transparency, re-encode as lossy WebP instead — it keeps
+        // the alpha channel and still compresses well; opaque photos stay JPEG (smallest).
+        return if (scaled.hasAlpha()) {
+            val webp =
+                ByteArrayOutputStream().use { out ->
+                    scaled.compress(lossyWebpFormat(), WEBP_QUALITY, out)
+                    out.toByteArray()
+                }
+            "image/webp" to webp
+        } else {
+            val jpeg =
+                ByteArrayOutputStream().use { out ->
+                    scaled.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, out)
+                    out.toByteArray()
+                }
+            "image/jpeg" to jpeg
+        }
+    }
+
+    /**
+     * [raw] as its own pixels with its metadata gone ([ImageStrip]), when that is what [reencoded] would have
+     * arrived at anyway minus the generation it costs (ADR 2026-10.unqn): a JPEG or still lossy WebP no larger than
+     * [MAX_DIMENSION] on its long edge, upright (an orientation tag other than normal needs pixels moved), and no
+     * sharper than the re-encode — a JPEG whose tables say at most [JPEG_QUALITY], a WebP within
+     * [WEBP_MAX_BYTES_PER_PIXEL] — so a camera original still takes one re-encode and our own output never takes
+     * another. Then it must decode at the size it declares, so nothing goes out untouched that the long way would
+     * have refused. Null sends it the long way.
+     */
+    private fun passThrough(raw: ByteArray): Pair<String, ByteArray>? {
+        // The header and the tag first: a camera original fails here without being copied.
+        val declared = declaredSize(raw) ?: return null
+        if (maxOf(declared.first, declared.second) > MAX_DIMENSION || exifOrientation(raw) !in UPRIGHT) return null
+        val stripped = ImageStrip.of(raw) ?: return null
+        val (width, height) = stripped.width to stripped.height
+        val sharp =
+            when (val quality = stripped.quality) {
+                null -> stripped.bytes.size > width.toLong() * height * WEBP_MAX_BYTES_PER_PIXEL
+                else -> quality > JPEG_QUALITY + QUALITY_SLACK
+            }
+        val clean = maxOf(width, height) <= MAX_DIMENSION && !sharp && decodesAt(stripped.bytes, width, height)
+        return if (clean) stripped.mime to stripped.bytes else null
+    }
+
     private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 
     private companion object {
         const val MAX_DIMENSION = 1280
         const val JPEG_QUALITY = 85
         const val WEBP_QUALITY = 85
+
+        /**
+         * How far over [JPEG_QUALITY] a JPEG's estimated quality may sit and still pass through untouched: the
+         * estimate reads back integer-rounded tables, so our own q85 output can read a point either side.
+         */
+        const val QUALITY_SLACK = 2
+
+        /**
+         * The heaviest still WebP that passes through untouched, per pixel: half a byte (4 bits) sits well above
+         * what [WEBP_QUALITY] lossy plus an alpha plane comes to, so our own output always qualifies, and a WebP
+         * this heavy is worth the one re-encode.
+         */
+        const val WEBP_MAX_BYTES_PER_PIXEL = 0.5
+
+        /** The orientation tags a picture can pass through under: none, or one saying it is already upright. */
+        val UPRIGHT = setOf(ExifInterface.ORIENTATION_UNDEFINED, ExifInterface.ORIENTATION_NORMAL)
 
         // GIFs are re-encoded to animated WebP (not re-photographed), so a tighter dimension + frame-rate
         // cap keeps them legibly animated while cutting the bytes that go over BLE; WEBP quality trades

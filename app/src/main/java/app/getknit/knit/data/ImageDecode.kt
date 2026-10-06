@@ -69,6 +69,15 @@ private fun decodeOrientedBounded(
     return rotatedForExif(bitmap, orientation)
 }
 
+/**
+ * [bytes]' EXIF orientation tag ([ExifInterface.ORIENTATION_UNDEFINED] when they carry none), or null when their
+ * metadata will not parse — an orientation nobody can read is not one a caller may assume is upright.
+ */
+internal fun exifOrientation(bytes: ByteArray): Int? =
+    runCatching {
+        ExifInterface(ByteArrayInputStream(bytes)).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_UNDEFINED)
+    }.getOrNull()
+
 /** Rotates [bitmap] upright per its EXIF [orientation]; returns it unchanged when no rotation applies. */
 @Suppress("MagicNumber") // rotation degrees (90/180/270) mirror the named ORIENTATION_ROTATE_* constants
 private fun rotatedForExif(bitmap: Bitmap, orientation: Int): Bitmap {
@@ -121,6 +130,32 @@ internal fun decodeBoundedFromBytes(
             }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)?.let { downscale(it, maxDim) }
     }.getOrNull()
+
+/** [bytes]' width and height as their header declares them, or null when it will not read. Nothing is decoded. */
+internal fun declaredSize(bytes: ByteArray): Pair<Int, Int>? =
+    runCatching {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        (bounds.outWidth to bounds.outHeight).takeIf { (w, h) -> w > 0 && h > 0 }
+    }.getOrNull()
+
+/**
+ * Whether [bytes] decode, at exactly the [width] × [height] their header declares — the check a picture passes
+ * before it leaves untouched (`AttachmentStore.passThrough`). Read at an eighth of the pixels: the decoder still
+ * walks the whole stream, and nothing is held.
+ */
+internal fun decodesAt(
+    bytes: ByteArray,
+    width: Int,
+    height: Int,
+): Boolean =
+    declaredSize(bytes) == (width to height) &&
+        runCatching {
+            val options = BitmapFactory.Options().apply { inSampleSize = PASS_THROUGH_CHECK_SAMPLE }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)?.also { it.recycle() } != null
+        }.getOrDefault(false)
+
+private const val PASS_THROUGH_CHECK_SAMPLE = 8
 
 /** Scales [src] down so neither side exceeds [max], preserving aspect ratio; returns [src] if already within bounds. */
 internal fun downscale(

@@ -457,7 +457,8 @@ opaque SHA-256-addressed bytes with a MIME string beside them, which is why voic
 - **`AttachmentStore`** — `ingest(uri)` returns `IngestResult.Success(Ingested(hash, mime), flagged)`
   or `IngestResult.Failed(reason)`: GIFs are transcoded to animated WebP (`data/webp/WebpTranscode`, animation
   preserved); other images are EXIF-oriented, downscaled to `MAX_DIMENSION = 1280`, and re-encoded
-  JPEG q85; inputs are rejected if empty or `> MAX_BYTES` (8 MiB). `ingestVoice(bytes)` and `ingestFile(uri)`
+  JPEG q85 — unless one is already bounded, upright and no sharper than that, when it goes out as its own bytes
+  with the metadata stripped losslessly (`data/ImageStrip`, ADR 2026-10.unqn); inputs are rejected if empty or `> MAX_BYTES` (8 MiB). `ingestVoice(bytes)` and `ingestFile(uri)`
   share the tail and skip the head — nothing to decode or re-compress, and no classifier that could read
   them — with one deliberate exception: `ingestFile` sniffs the bytes' own signature and hands anything that
   is really an image back to `ingest`, so a mislabelled JPEG cannot use the MIME-keyed screening skip as a

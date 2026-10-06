@@ -39,6 +39,8 @@ document:
 - Forwarding a photo, GIF or file to someone who already has it no longer sends it again, and a forwarded GIF
   keeps its animation. A file passed from chat to chat now costs nearby phones one copy instead of one per
   message.
+- A photo saved from a chat or another app no longer gets a little blurrier each time it's sent on. Knit still
+  removes its location and camera details before the photo leaves your phone.
 
 ### Fixed
 
