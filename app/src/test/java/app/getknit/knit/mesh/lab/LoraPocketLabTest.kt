@@ -188,9 +188,15 @@ class LoraPocketLabTest {
             val activeFanned = active.loraTx("fanout:chat")
 
             assertTrue(passive.sendRoom("from the passive board's phone"))
+            val post = passive.ownMessageId(Conversations.NEARBY, "from the passive board's phone")
             assertTrue("carol never heard it", lab.tryAwait(1) { carol.roomPosts()[passive.nodeId]?.size ?: 0 })
-            assertTrue("the active board carried it", lab.tryAwait(activeFanned + 1) { active.loraTx("fanout:chat") })
+            // Live or as backfill, and either is the active board carrying it. Carol's OFFER can land after the post
+            // is in the active board's custody but before its re-fan: the bridge then serves it first, records its
+            // signature, and the fan-out is deduped on it (ADR 2026-09.y8pu) — one transmission either way.
+            val carried = lab.tryAwait(1) { if (active.loraTx("fanout:chat") > activeFanned || active.loraTx("bridge:$post") > 0) 1 else 0 }
+            assertTrue("the active board carried it: ${active.loraLog}", carried)
             assertEquals("the passive board fanned nothing", 0, passive.loraTx("fanout:chat"))
+            assertEquals("the passive board served nothing of it", 0, passive.loraTx("bridge:$post"))
             lab.assertConverged(listOf(alice, amber), atLeast = 1) { Conversations.NEARBY }
         }
 
