@@ -16,6 +16,7 @@ import app.getknit.knit.mesh.protocol.ReceiptContent
 import app.getknit.knit.mesh.protocol.RelayEnvelope
 import app.getknit.knit.mesh.protocol.WireCodec
 import app.getknit.knit.mesh.protocol.WireEnvelope
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -445,13 +446,14 @@ class LoraMeshTransportTest {
         onPublicPost: suspend (MeshPost) -> Unit = {},
         onBoardBound: suspend (BoardBinding) -> Unit = {},
         state: LoraPlaneState = LoraPlaneState.None,
+        selfId: suspend () -> String = { selfNode },
         now: () -> Long,
     ): Rig {
         val link = FakeMeshtasticLink(nodeNum, air, channelName, firmware, publicKey)
         val metrics = MeshMetrics()
         val transport =
             LoraMeshTransport(
-                selfId = { selfNode },
+                selfId = selfId,
                 link = link,
                 config = config,
                 selfProfile = profileSource(selfNode),
@@ -2591,6 +2593,66 @@ class LoraMeshTransportTest {
             advanceTimeBy(10_000)
             runCurrent()
             assertTrue("a room post still rides", a.link.sent.size > beforeRoom)
+            a.transport.stop()
+        }
+
+    /**
+     * The recipient gate's "or to us" half, before the transport knows who "us" is. [LoraMeshTransport.start]
+     * resolves the self id on a coroutine of its own, and a DM a pocket-mate hands us over the link is re-fanned
+     * on relay the moment it lands: if that comes first, the enqueuing gate reads it as addressed to a stranger.
+     * The pacer waits for the id, so the send-time gate refuses it instead. #141: the lab's linked-DM scenario
+     * under a chaos stall of that one launch, the board airing a DM and a ✓✓ that were both addressed to itself.
+     */
+    @Test
+    fun aDmToUsQueuedBeforeTheSelfIdIsKnownNeverRides() =
+        runTest {
+            val air = FakeMeshtasticAir()
+            val self = CompletableDeferred<String>()
+            val a = rig(air, 1u, "alice", backgroundScope, selfId = { self.await() }) { testScheduler.currentTime }
+            a.transport.start()
+            runCurrent()
+            advanceTimeBy(1)
+            runCurrent()
+
+            a.transport.longRangeFanout(frame(FrameType.CHAT, "bob", recipientId = "alice", body = "sealed"))
+            advanceTimeBy(10_000)
+            runCurrent()
+            assertEquals("nothing leaves before the id is known", 0, a.link.sent.size)
+
+            self.complete("alice")
+            advanceTimeBy(10_000)
+            runCurrent()
+            assertTrue("the beacon queued meanwhile still goes", a.link.sent.isNotEmpty())
+            assertEquals("the DM addressed to us stayed off the air", 0L, a.metrics.lora().loraDmSent)
+            assertEquals(mapOf(StaleAtSend.LINKED.name to 1L), a.metrics.lora().loraStaleAtSendByReason)
+            a.transport.stop()
+        }
+
+    /**
+     * The park above must not become a silence: the production id is read off the Keystore-backed identity,
+     * which can refuse (ADR 2026-10.47rw), and a read that throws is retried rather than leaving the pacer
+     * parked for the life of the process.
+     */
+    @Test
+    fun aSelfIdReadThatThrowsIsRetriedAndThePlaneComesBack() =
+        runTest {
+            val air = FakeMeshtasticAir()
+            var reads = 0
+            val selfId: suspend () -> String = {
+                reads++
+                if (reads == 1) error("keystore busy") else "alice"
+            }
+            val a = rig(air, 1u, "alice", backgroundScope, selfId = selfId) { testScheduler.currentTime }
+            a.transport.start()
+            runCurrent()
+            advanceTimeBy(1)
+            runCurrent()
+            assertEquals("nothing leaves while the id is unread", 0, a.link.sent.size)
+
+            advanceTimeBy(LoraMeshTransport.SELF_ID_RETRY_MIN_MS + 1)
+            runCurrent()
+            assertEquals(2, reads)
+            assertTrue("the beacon goes once the retry lands", a.link.sent.isNotEmpty())
             a.transport.stop()
         }
 

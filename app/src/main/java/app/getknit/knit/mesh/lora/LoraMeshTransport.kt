@@ -24,6 +24,7 @@ import app.getknit.knit.mesh.protocol.ReceiptContent
 import app.getknit.knit.mesh.protocol.RelayEnvelope
 import app.getknit.knit.mesh.protocol.WireCodec
 import app.getknit.knit.mesh.protocol.WireEnvelope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
@@ -233,8 +234,10 @@ internal class LoraMeshTransport(
     // board negotiates. It used to be MAX_PAYLOAD — every one of those frames then came back TOO_LARGE.
     private var maxPayload: Int = PRE_READY_PAYLOAD
 
-    @Volatile
-    private var selfIdCached: String? = null
+    // Our own node id, resolved off [selfId] (a suspend read) by [start]. Until it lands, every gate that asks
+    // "is this frame addressed to us?" answers no, so [pacerLoop] takes nothing before it does (#141).
+    private val selfIdKnown = MutableStateFlow<String?>(null)
+    private val selfIdCached: String? get() = selfIdKnown.value
 
     // Our gateway role, recomputed whenever an OFFER or a foreign-reachable update could change it. ACTIVE
     // until proven otherwise, so a lone board bridges from the first packet rather than after a gossip round.
@@ -336,10 +339,7 @@ internal class LoraMeshTransport(
         // window it spent it in.
         jobs += scope.launch { restoreState() }
         jobs += scope.launch { stateSaveLoop() }
-        scope.launch {
-            selfIdCached = selfId()
-            recomputeRole()
-        }
+        jobs += scope.launch { resolveSelfId() }
         jobs += scope.launch { config.collect(::onConfig) }
         jobs += scope.launch { link.state.collect(::onLinkState) }
         jobs += scope.launch { link.packets.collect(::onLoraPacket) }
@@ -413,6 +413,30 @@ internal class LoraMeshTransport(
      */
     private suspend fun awaitConfigured() {
         configured.first { it }
+    }
+
+    /**
+     * Reads our own node id into [selfIdKnown] (everything that transmits waits on it), retrying a read that
+     * throws: the production source is the identity's Keystore-backed key, which can refuse (ADR 2026-10.47rw),
+     * and a refused read must cost the plane a delay, not leave the pacer parked for the life of the process.
+     */
+    private suspend fun resolveSelfId() {
+        var wait = SELF_ID_RETRY_MIN_MS
+        while (true) {
+            val read = runCatching { selfId() }
+            read.exceptionOrNull()?.let { e ->
+                if (e is CancellationException) throw e
+                log("lora self id unavailable (${e.javaClass.simpleName}); retrying in ${wait}ms")
+            }
+            val id = read.getOrNull()
+            if (id != null) {
+                selfIdKnown.value = id
+                recomputeRole()
+                return
+            }
+            delay(wait)
+            wait = (wait * 2).coerceAtMost(SELF_ID_RETRY_MAX_MS)
+        }
     }
 
     /**
@@ -785,6 +809,9 @@ internal class LoraMeshTransport(
         // The floor is only a floor once it has been read back: session-up is the very moment a restart used
         // to beacon into, whatever the last process had already put on the air.
         awaitRestored()
+        // And the beacon's supersede key is our id: queued under a null one, it and a fan-out of the same
+        // publish would never replace each other, and both would air inside the floor.
+        selfIdKnown.first { it != null }
         if (!profileGapElapsed(clock(), minGapMs)) return // check before the (potentially costly) profile build
         val wire = selfProfile() ?: return
         sendSelfProfile(wire, minGapMs)
@@ -1280,6 +1307,15 @@ internal class LoraMeshTransport(
         // Nothing may be taken off the queue until the ledger says what the last process spent: this is the
         // one place all outbound air passes through, so it is the one that has to wait.
         awaitRestored()
+        // ...nor until we know who we are. [selfId] resolves on a coroutine of its own, and until it has, the
+        // enqueuing gates read every DM-form frame addressed to us as uncovered: a DM a pocket-mate handed us
+        // over the link, re-fanned on relay, was queued for the air. [staleReason] asks the same question again
+        // on the way out, so waiting here is what lets it answer with the id it was missing (#141: the lab's
+        // linked-DM gate, under a chaos stall of that one launch, aired a DM and a ✓✓ addressed to itself).
+        selfIdKnown.first { it != null }
+        // The id is published before [resolveSelfId] gets to recompute the role from it, and an OFFER heard
+        // while it was null recomputed nothing: settle the role here, or the first take reads the default ACTIVE.
+        recomputeRole()
         while (scope.isActive) {
             // Nothing leaves while the board is between sessions, so take nothing: a frame off the queue has
             // no owner but the pacer, and every take during an outage is one more round-trip through
@@ -1931,6 +1967,10 @@ internal class LoraMeshTransport(
          * still impossible (the board down, its queue full, the hour's airtime spent).
          */
         const val IDLE_TICK_MS = 1_000L
+
+        /** [resolveSelfId]'s backoff after a read that threw: doubling from the first to the second. */
+        const val SELF_ID_RETRY_MIN_MS = 1_000L
+        const val SELF_ID_RETRY_MAX_MS = 60_000L
 
         /** The ATT write header: one opcode byte and a two-byte handle, so a write carries `mtu - 3` bytes. */
         const val ATT_HEADER_BYTES = 3

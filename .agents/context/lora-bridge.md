@@ -411,6 +411,9 @@ for.
   window is the smaller error.
 - **Nothing transmits until it is back** (`awaitRestored`, on the pacer, `gossipLoop` and `beaconProfile`).
   It releases on failure and behind a 5 s timeout: a store that never answers costs a window, not the plane.
+  The pacer also waits for the self id (`selfIdKnown`, resolved on its own coroutine at `start`): until it lands,
+  the recipient gate reads a DM addressed to us as uncovered and queues the relay's re-fan, and only the
+  send-time re-ask (`staleReason`) holding the id keeps it off the air (#141).
 - **A booking carries its recorded cost, not its size** — a board swapped between two processes has a
   different preset, and the air was spent at the old one.
 - **The gossip Trickle interval is NOT persisted, and that was tried.** Carrying the back-off stalls the ADR
