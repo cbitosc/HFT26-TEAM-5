@@ -56,7 +56,10 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -267,6 +270,10 @@ class BluetoothMeshTransport(
     // link's doorbell goes with it; [rings] counts the writes, for the debug state line.
     private val doorbells = ConcurrentHashMap<FramedLink, BleDoorbell>()
     private val rings = AtomicInteger()
+
+    // The drain trial's per-link tuners (#120), made by `…debug.LINKTUNE` on a debug build only and keyed by link like
+    // [doorbells]: a GATT client on the link's ACL that asks for a PHY, a priority or an MTU when the bridge says so.
+    private val tuners = ConcurrentHashMap<FramedLink, BleLinkTuner>()
 
     // Which frames already crossed which link, either way: the router's flood copy and the fast path's link
     // copy are the same frame twice for the same stream, and a relayed frame's fast copy would go straight
@@ -494,6 +501,7 @@ class BluetoothMeshTransport(
             phyJob = scope.launch { phyMode.distinctUntilChanged().collect { applyPhyMode(it) } }
             CodedPhyDiag.status = ::codedPhyStatus
             CodedPhyDiag.setTxPower = ::setCodedTxPower
+            if (BuildConfig.DEBUG) LinkTuneDiag.tune = ::tuneLinks
             sideChannel?.let {
                 it.bind(sideListener)
                 sideJob = scope.launch { sideScanLoop(it) }
@@ -516,6 +524,7 @@ class BluetoothMeshTransport(
         paceJob?.cancel()
         CodedPhyDiag.status = null
         CodedPhyDiag.setTxPower = null
+        LinkTuneDiag.tune = null
         CodedPhyDiag.publishLinkPhys(emptyMap())
         sideJob?.cancel()
         cancelGattRead()
@@ -1044,6 +1053,73 @@ class BluetoothMeshTransport(
                 onPhyKnown = ::publishLinkPhys,
             )
         if (phyControls.putIfAbsent(link, control) == null) control.start()
+    }
+
+    /**
+     * `…debug.LINKTUNE` (#120, debug builds only): asks each link [req] names for what it names, through a tuner made
+     * on first use, or lets their tuners go. An iPhone link is left alone — its doorbell owns the parameters (ADR
+     * 2026-09.dqvb) — and no PHY is asked while the Coded experiment runs here: a stepper on either side reads a
+     * foreign answer as a refusal and gives up, and a 1M or 2M mask lasts the link's life, so it would also block the
+     * peer's step to Coded. The peer's own mode is not visible from here; the trial sets both phones' mode off.
+     */
+    private suspend fun tuneLinks(req: LinkTuneRequest): LinkTuneReport {
+        val named = links.values.filter { req.node == "all" || it.nodeId.startsWith(req.node) }
+        // Side by side, so `all` answers within the bridge's 30 s however many links it names.
+        val statuses =
+            coroutineScope {
+                named
+                    .map { link ->
+                        async {
+                            val address = linkDevices[link]?.address
+                            when {
+                                req.close -> {
+                                    tuners.remove(link)?.close()
+                                    LinkTuneStatus(link.nodeId, address, attached = false)
+                                }
+
+                                !req.asks -> {
+                                    tuners[link]?.status() ?: LinkTuneStatus(link.nodeId, address, attached = false)
+                                }
+
+                                DoorbellPolicy.serves(link.peer.capabilities) -> {
+                                    LinkTuneStatus(link.nodeId, address, attached = false, refused = "iPhone link: the doorbell owns it")
+                                }
+
+                                else -> {
+                                    tuneLink(link, req)
+                                        ?: LinkTuneStatus(link.nodeId, address, attached = false, refused = "no device")
+                                }
+                            }
+                        }
+                    }.awaitAll()
+            }
+        val feeding = links.values.count { it.txInProgress && linkPhy[it] != LinkPhy.CODED }
+        return LinkTuneReport(feeding, statuses)
+    }
+
+    private suspend fun tuneLink(
+        link: FramedLink,
+        req: LinkTuneRequest,
+    ): LinkTuneStatus? {
+        val device = linkDevices[link] ?: return null
+        val nodeId = link.nodeId
+        val tuner =
+            tuners[link]?.takeIf { it.alive } ?: BleLinkTuner(
+                context = appContext,
+                device = device,
+                nodeId = nodeId,
+                scope = scope,
+                isLive = { links[nodeId] === link },
+                now = SystemClock::elapsedRealtime,
+            ).also { fresh ->
+                tuners.put(link, fresh)?.close()
+                if (links[nodeId] !== link) tuners.remove(link)?.close() // torn down meanwhile: its teardown missed this
+                fresh.start()
+            }
+        val codedRuns = codedOn()
+        val status = tuner.tune(if (codedRuns) req.copy(phy = null) else req)
+        val refused = if (codedRuns && req.phy != null) "the Coded experiment runs: …debug.PHY --es mode off on both" else null
+        return status.copy(codedOwned = phyControls.containsKey(link), refused = refused)
     }
 
     private fun codedPhyStatus(): CodedPhyStatus {
@@ -1753,6 +1829,7 @@ class BluetoothMeshTransport(
             phyControls.remove(prev)?.close()
             publishLinkPhys()
             doorbells.remove(prev)?.close() // teardownLink(only = prev) will find it replaced and release nothing
+            tuners.remove(prev)?.close()
             prev.close() // a stale link to the same peer — never leak it; its own end releases nothing now
         }
         // Before framed.start() and the neighbor refresh, so the link-up frames already ring it.
@@ -1803,6 +1880,7 @@ class BluetoothMeshTransport(
         }
         publishLinkPhys()
         doorbells.remove(fl)?.close()
+        tuners.remove(fl)?.close()
         fl.close()
         crossings.forget(nodeId)
         // The peer was here until now: its side-channel flag lingers from the link's end, not from a sighting the
@@ -2169,6 +2247,7 @@ class BluetoothMeshTransport(
                 "inFlight=${inFlightSnapshot()} backoff=[$backoffStr] a2dp=${audioMonitor.state.value} " +
                 "alone=${aloneForMs()}ms psm=$currentPsm advert=$presenceAdvert " +
                 "doorbells=${doorbells.size} rings=${rings.get()}" +
+                (if (tuners.isNotEmpty()) " tuners=${tuners.size}" else "") +
                 (if (gattPeers) " gattPayloads=${gattPayloads.payloadCount} gattReads=${gattReads.get()}" else "") +
                 (if (codedOn()) " phy=${codedMode.wire} coded=$codedAdvert phyLinks=${phyControls.size} hunt=$hunting" else "") +
                 (sideChannel?.let { " ${it.diag()} $sideDecision" } ?: ""),

@@ -52,8 +52,12 @@ import app.getknit.knit.mesh.bluetooth.CodedPhyDiag
 import app.getknit.knit.mesh.bluetooth.CodedPhyMode
 import app.getknit.knit.mesh.bluetooth.CodedPhyPolicy
 import app.getknit.knit.mesh.bluetooth.LinkPhy
+import app.getknit.knit.mesh.bluetooth.LinkTuneDiag
+import app.getknit.knit.mesh.bluetooth.LinkTuneRequest
 import app.getknit.knit.mesh.bluetooth.PhyTuning
 import app.getknit.knit.mesh.bluetooth.PromotionConfig
+import app.getknit.knit.mesh.bluetooth.TunePhy
+import app.getknit.knit.mesh.bluetooth.TunePriority
 import app.getknit.knit.mesh.crypto.AttachmentCrypto
 import app.getknit.knit.mesh.crypto.b64d
 import app.getknit.knit.mesh.indirectPeers
@@ -223,6 +227,17 @@ import java.nio.ByteBuffer
  *   oneMSeenAgoMs, codedSeenAgoMs, each PHY's own rssi1m / rssiCoded, and codedLagMs — the 1M listening its Coded hits
  *   outlast its 1M ones by; over 8000 is Coded alone), then `hunting` (whether the last scan window hunted) and
  *   `hunted` (the peers lost at range it is hunting).
+ * - [ACTION_LINKTUNE] — the **Bluetooth drain trial's lever** (#120; any debug build, no Coded flag needed). `--es node
+ *   <id prefix>|all` names the links; `--es phy 1m|2m|1m2m`, `--es priority high|balanced|low` and `--ei mtu N` (23..517)
+ *   are asked of each, in that order, through a GATT client on the link's own ACL made on first use, then `--ez read
+ *   true` reads the PHY and link RSSI back; `--ez close true` lets the clients go. `--ei filePace N` sets the 1M/2M file
+ *   budget (as `…debug.PHY`'s, until the process dies) and `--ez resetPace true` restores 4096. An iPhone link is refused
+ *   (its doorbell owns the parameters), and no PHY is asked while the Coded experiment runs here (a mask lasts the link's
+ *   life, so it would block either side's stepper: set `…debug.PHY --es mode off` on both phones first). The reply:
+ *   `filePace`, `fileChunk`, `feeding` (links feeding a file now) and `links[]` (nodeId, address, attached, txPhy, rxPhy,
+ *   intervalUs / latency / timeoutMs — reported only on a change after the client attached — paramsStatus, mtu and
+ *   mtuAsked — from Android 14 the first ask on an ACL settles on 517 whatever it names — rssi, codedOwned, refused).
+ *   The `bt tune <id> …` log lines carry the same, and the HCI snoop is the oracle.
  * - [ACTION_HEAL] — nudges the transport to rescan/re-advertise.
  * - [ACTION_PAUSE] / [ACTION_RESUME] — the notification's Pause and Resume, by their store write alone
  *   (`--ei minutes 15|60`, the two offered spans): `MeshService` follows `SettingsStore.meshPausedUntil`, so
@@ -440,6 +455,10 @@ class DebugBridgeReceiver :
 
                         ACTION_PHY -> {
                             handlePhy(intent)
+                        }
+
+                        ACTION_LINKTUNE -> {
+                            handleLinkTune(intent)
                         }
 
                         ACTION_NANICM -> {
@@ -2250,6 +2269,88 @@ class DebugBridgeReceiver :
             .put("hunted", JSONArray(status.hunted.sorted()))
     }
 
+    /**
+     * [ACTION_LINKTUNE]: sets the 1M/2M file budget, asks the links `node` names for a PHY, a priority or an MTU
+     * through their tuners (#120), then reports them. Needs no Coded flag, so a release-shaped debug build can run the
+     * drain trial.
+     */
+    @Suppress("CyclomaticComplexMethod") // one parse per extra, each with its own refusal
+    private suspend fun handleLinkTune(intent: Intent): JSONObject {
+        val priority =
+            intent.getStringExtra("priority")?.let { raw ->
+                when (raw.lowercase()) {
+                    "high" -> TunePriority.HIGH
+                    "balanced" -> TunePriority.BALANCED
+                    "low" -> TunePriority.LOW_POWER
+                    else -> return reply("error", "priority must be high|balanced|low")
+                }
+            }
+        val phy =
+            intent.getStringExtra("phy")?.let { raw ->
+                when (raw.lowercase()) {
+                    "1m" -> TunePhy.ONE_M
+                    "2m" -> TunePhy.TWO_M
+                    "1m2m" -> TunePhy.ONE_M_2M
+                    else -> return reply("error", "phy must be 1m|2m|1m2m")
+                }
+            }
+        val mtu =
+            if (intent.hasExtra("mtu")) {
+                intent.getIntExtra("mtu", 0).takeIf { it in MIN_ATT_MTU..MAX_ATT_MTU }
+                    ?: return reply("error", "mtu must be $MIN_ATT_MTU..$MAX_ATT_MTU")
+            } else {
+                null
+            }
+        val request =
+            LinkTuneRequest(
+                node = intent.getStringExtra("node") ?: "all",
+                priority = priority,
+                phy = phy,
+                mtu = mtu,
+                read = intent.getBooleanExtra("read", false),
+                close = intent.getBooleanExtra("close", false),
+            )
+        if ((request.asks || request.close) && !intent.hasExtra("node")) {
+            return reply("error", "name the links: --es node <id prefix>|all")
+        }
+        val tune = LinkTuneDiag.tune ?: return reply("error", "Bluetooth transport is not running")
+        if (intent.getBooleanExtra("resetPace", false)) {
+            CodedPhyDiag.tuning = CodedPhyDiag.tuning.copy(filePaceBytesPerSec = PhyTuning().filePaceBytesPerSec)
+        }
+        if (intent.hasExtra("filePace")) {
+            CodedPhyDiag.tuning = CodedPhyDiag.tuning.copy(filePaceBytesPerSec = intent.getIntExtra("filePace", 0))
+        }
+        val report = tune(request)
+        val tuned = CodedPhyDiag.tuning
+        return JSONObject()
+            .put("status", "ok")
+            .put("filePace", tuned.filePaceBytesPerSec)
+            .put("fileChunk", CodedPhyPolicy.pace(LinkPhy.ONE_M, tuned).chunkBytes)
+            .put("feeding", report.feeding)
+            .put(
+                "links",
+                JSONArray(
+                    report.links.map {
+                        JSONObject()
+                            .put("nodeId", it.nodeId)
+                            .put("address", it.address ?: JSONObject.NULL)
+                            .put("attached", it.attached)
+                            .put("txPhy", it.txPhy?.name ?: JSONObject.NULL)
+                            .put("rxPhy", it.rxPhy?.name ?: JSONObject.NULL)
+                            .put("intervalUs", it.params?.intervalUs ?: JSONObject.NULL)
+                            .put("latency", it.params?.latency ?: JSONObject.NULL)
+                            .put("timeoutMs", it.params?.timeoutMs ?: JSONObject.NULL)
+                            .put("paramsStatus", it.paramsStatus ?: JSONObject.NULL)
+                            .put("mtu", it.mtu ?: JSONObject.NULL)
+                            .put("mtuAsked", it.mtuAsked ?: JSONObject.NULL)
+                            .put("rssi", it.rssi ?: JSONObject.NULL)
+                            .put("codedOwned", it.codedOwned)
+                            .put("refused", it.refused ?: JSONObject.NULL)
+                    },
+                ),
+            )
+    }
+
     private fun handleNanMsg(intent: Intent): JSONObject {
         if (!NanFaultInjector.bound) return reply("error", "Wi-Fi Aware transport is not running")
         val what =
@@ -2351,6 +2452,7 @@ class DebugBridgeReceiver :
         const val ACTION_BLECAP = "app.getknit.knit.debug.BLECAP"
         const val ACTION_NANOFF = "app.getknit.knit.debug.NANOFF"
         const val ACTION_PHY = "app.getknit.knit.debug.PHY"
+        const val ACTION_LINKTUNE = "app.getknit.knit.debug.LINKTUNE"
         const val ACTION_REQNOTIF = "app.getknit.knit.debug.REQNOTIF"
         const val ACTION_MSGNOTIF = "app.getknit.knit.debug.MSGNOTIF"
         const val ACTION_FLAGMSG = "app.getknit.knit.debug.FLAGMSG"
@@ -2412,6 +2514,10 @@ class DebugBridgeReceiver :
 
         // How long `…debug.PHY` waits after storing a mode before reading the status back: the transport collects it.
         const val PHY_SETTLE_MS = 300L
+
+        // The ATT MTU range a `…debug.LINKTUNE` ask may name: the spec's default up to Android's own ceiling.
+        const val MIN_ATT_MTU = 23
+        const val MAX_ATT_MTU = 517
 
         // How long `…debug.NANOFF` waits after a flip before reading the Wi-Fi Aware row back: the transport collects it.
         const val NANOFF_SETTLE_MS = 300L

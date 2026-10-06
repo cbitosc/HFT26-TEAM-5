@@ -326,6 +326,30 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   range…` then `bt scan → hunt (lost=[…] inUse=…)` / `bt scan hunt held (… a2dp)` / `bt scan hunt over` on the dialing side — raise the buffer first (`adb logcat -G 16M`; the default 256 KiB holds ~40 min).
   Negative control: on a phone without Coded (the Pixel 3) `supported` is false, `advert` stays `off` and no link
   gets a PHY handle; `mode off` restores the legacy scan and lets every handle go, leaving each link on its PHY.
+- `…debug.LINKTUNE` — the **Bluetooth drain trial's lever** (#120; any debug build, no Coded flag needed, so a build
+  with `-PbleSidePlane=false -PbleCodedPhy=false -PbleGattPeers=false` can run it). `--es node <id prefix>|all` names
+  the links; `--es phy 1m|2m|1m2m`, `--es priority high|balanced|low` and `--ei mtu N` (23..517) are asked of each, in
+  that order, through a GATT client `BleLinkTuner` attaches to the link's own ACL on first use (no service discovery),
+  then `--ez read true` reads the PHY and link RSSI back; `--ez close true` lets the clients go. `--ei filePace N` sets
+  the 1M/2M file budget as `…debug.PHY`'s does (until the process dies; 0 unbounded) and `--ez resetPace true` restores
+  4096; no node reads the budget and the links' last-heard state without making a client. An iPhone link is refused
+  (`refused`: its doorbell owns the parameters, ADR 2026-09.dqvb), and no PHY is asked while the Coded experiment runs
+  on the asking phone. A 1M or 2M mask lasts the link's life, so it would also block the *peer's* stepper (a foreign
+  answer makes it give up, and the mask keeps the link off Coded): set `…debug.PHY --es mode off` on both phones
+  before a PHY ask; `codedOwned` says a Coded handle steps the link here. From Android 14 the first `mtu` ask on an ACL
+  exchanges 517 whatever it names and a later one exchanges nothing, so read `mtu` (settled) against `mtuAsked`, and
+  judge that lever by the snoop's data-length change, not the ATT MTU (which does not bound an L2CAP channel). The
+  reply: `filePace`, `fileChunk`, `feeding` (links feeding a file now) and `links[]` (`nodeId`, `address`, `attached`,
+  `txPhy` / `rxPhy` ONE_M|TWO_M|CODED, `intervalUs` / `latency` / `timeoutMs` — the framework reports them only on a
+  change after the client attached, so an ask the link already satisfies leaves them null — `paramsStatus`, `mtu`,
+  `mtuAsked`, `rssi`, `codedOwned`, `refused`). Logcat carries `bt tune <id> attached|ask …|params interval=…us
+  latency=… timeout=…ms status=…|phy tx=… rx=… status=… (read|update)|mtu=… asked=…`; the
+  HCI snoop is the oracle, read with `scripts/btsnoop-drain.py summary <snoop> --logcat <dump>` (per-link parameter,
+  PHY and data-length timelines with who asked, packets per connection event, the controller's queue, and a verdict
+  per file). `scripts/ble-drain-trial.py run` drives a whole cell: budget, relink, ask, quiet wait, a fresh file, texts
+  behind it, and both phones' logcat dumped per rep, then puts the budget back, lets the tuners go and relinks a tuned
+  link on the way out. An ask lasts the link's life: relink (`BLECAP --ei max 0`, then `--ez clear true`) between
+  cells.
 - `…debug.FLAGMSG` — injects one inbound message **the text moderator flagged** (the UI collapses it behind a
   tap-to-reveal) as the newest row of `--es conv <id>` (default `nearby`), from `--es from <peerNodeId>`
   (default a synthetic sender) with body `--es text <body>`. The radio-less build never receives a real

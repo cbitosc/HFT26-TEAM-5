@@ -95,7 +95,8 @@ Extras and reply fields: the action's bullet in `.agents/context/debug-bridge.md
   non-image), `SAVEATT` (Save into app storage, to pick it again), `REACT`,
   `TYPING`, `MKGROUP`, `LEAVE`, `PURGE` (clean soak traffic off every phone).
 - **Mesh state:** `STATE`, `STORE`, `HEAL`, `PAUSE`, `RESUME`, `BLECAP`, `NANOFF` (Wi-Fi Aware off, Bluetooth
-  alone), `PHY` (the Coded PHY experiment).
+  alone), `PHY` (the Coded PHY experiment), `LINKTUNE` (ask a Bluetooth link for a PHY, priority or MTU; the 1M/2M
+  file budget on any debug build — the #120 drain trial).
 - **Planes:** `SPOOL`, `COMMONS`, `LORA`, `LORATX`, `LORAPROV`, `XFER`.
 - **Identity, crypto, data:** `INTRO` (contact cards), `RATCHET`, `BACKUP`.
 - **Fault injection and trials:** `NANFAIL`, `NANSTORM`, `NANREFUSE`, `NANICM`, `NANDIAL`, `NANINIT`,

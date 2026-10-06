@@ -210,7 +210,7 @@ Sourced; cite these by their ADR, and treat anything not here or in an ADR as a 
   client holds the ACL. 32 GATT client registrations per device across all apps; 8 LE connections per host, the
   mesh's L2CAP links among them, and an app can neither see nor reserve one (dqvb, wetm).
 - `onConnectionUpdated` is hidden through compileSdk 37.1 (keep `@Keep`, no `override`); the 37.2 stub makes it
-  public, so that bump needs `override`. Discovery's unlock re-sends the central's first parameters, which can land
+  public, so that bump needs `override` at both declarations (`BleDoorbell.Client`, `LinkParamsCallback`). Discovery's unlock re-sends the central's first parameters, which can land
   after an ask; a colliding update fails with `0x2A`, and its interval/latency/timeout are not the link's (dqvb
   amendments).
 - `requestMtu` right after `STATE_CONNECTED` on a bonded device races SMP; Read Blob reads past MTU 23 without an

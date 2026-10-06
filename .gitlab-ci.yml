@@ -364,6 +364,15 @@ verify:lab-lint:
     - python3 -m unittest scripts/test_lab_lint.py
     - python3 scripts/lab-lint.py
 
+# The Bluetooth drain trial's snoop analyser (scripts/btsnoop-drain.py, #120) reads HCI snoops with the standard library;
+# its tests need nothing but Python. Mirrors GitHub's `btsnoop-drain` job.
+verify:btsnoop-drain:
+  image: python:3.13-alpine
+  stage: verify
+  needs: []
+  script:
+    - python3 -m unittest scripts/test_btsnoop_drain.py
+
 # --------------- verify (advisory) -------
 # detekt/ktlint run as Gradle plugins now (was: a downloaded detekt-cli jar). Both are advisory
 # (allow_failure) to mirror the prior detekt job and keep the pass/fail test signal clean; locally they

@@ -78,6 +78,9 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   feeding a file at once (`txInProgress`), in chunks of two seconds of the share; Coded keeps its own pace outside the
   split (yvn6's #114 amendment). The stack's queue hides the drain from the sender, so tune against the receiver's
   `rx … in <ms>ms` line — never the sender's `file … in`, which reads size ÷ pace. No wire change.
+  **Before touching `BleLinkTuner`, `LinkTuneDiag`, `LinkParamsCallback` or `…debug.LINKTUNE`, or measuring a drain:**
+  READ work item #120. The tuner is the drain trial's lever, debug builds only and without policy; the trial is
+  `scripts/ble-drain-trial.py`, and the oracle is both phones' HCI snoops read by `scripts/btsnoop-drain.py`.
 - **When touching `mesh/lora/` or `mesh/bluetooth/meshtastic/` (the LoRa/Meshtastic bridge):** READ
   `.agents/context/lora-bridge.md` — a Meshtastic board over BLE GATT extends the **Nearby room and 1:1
   DMs** over LoRa as a fast-plane-only `MeshTransport` child, shipped visible since 2.5.0 behind
