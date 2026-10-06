@@ -850,11 +850,22 @@ ways.
 ## Two emulators meshing over real Bluetooth (`ble-pair-test.sh`)
 
 `scripts/ble-pair-test.sh all` boots two emulators, one on each nRF52840 dongle through the bridge above, installs,
-runs `blepair/BlePairInstrumentedTest` on both at once, and tears down. (`up [a|b]` / `install` / `run` / `down`
-run the steps one at a time.) The class covers a link, a DM with its ✓✓, a Nearby post, a photo, and a cut link
-that comes back and carries a DM. Each side asserts what it sees itself. The first green run (2026-10-05) took
-about a minute: linked in 15.7 s, photos in 5.3–5.5 s each way, relinked 15.6 s after the cut. Each run writes
-`build/ble-pair/<stamp>/`: per side, the instrumentation output, logcat and that side's bridge log and btsnoop.
+runs the `blepair/` classes on both at once, and tears down. (`up [a|b]` / `install` / `run` / `down` run the steps
+one at a time; `KNIT_PAIR_CLASSES=<fqcn>[#method],…` runs a subset.) The classes run in one order on both sides,
+each on the shared `BlePairTest` base:
+
+- `BlePairMessagingTest`: the link, a DM with its ✓✓, a Nearby post, a quoted reply, a reaction, typing, a DM at
+  `TextLimits.MESSAGE` in more than ASCII.
+- `BlePairAttachmentTest`: a photo, and a file through the file door under its own name.
+- `BlePairProfileTest`: a new display name, and a profile photo the peer fetches and holds.
+- `BlePairGroupTest`: one side starts a group the way Contacts does, and both post in it.
+- `BlePairLinkTest`, last: a cut the stack heals by its own dial, and messages written while out of range that
+  wait in the outbox and land on return.
+
+Each side asserts what it sees itself. The first full green run (2026-10-05, 14 of 14) took about two minutes:
+linked in 17 s, typing in 40 ms, photos in 5.4 s each way, a name change in under 0.1 s, a profile photo in 12 s,
+relinked 14.6 s after the cut. Each run writes `build/ble-pair/<stamp>/`: per side, the instrumentation output,
+logcat and that side's bridge log and btsnoop.
 
 - **Isolation is the bridge's job, not the app's.** `--isolate` moves Knit's 16-bit UUIDs (0xFE30 presence, 0xFE38
   side pages) to 0xFE20/0xFE28 on the way to the air and back on the way in. It drops every report except a
@@ -873,9 +884,28 @@ about a minute: linked in 15.7 s, photos in 5.3–5.5 s each way, relinked 15.6 
   `run` refuses a pair with one node id.
 - **`am instrument` kills the app when its last test returns,** taking its mesh with it. The first run's cut test
   failed this way: one side finished, and the ✓✓ it still owed the other died with it. So every test ends in a
-  rendezvous (a DM each way), and the class lingers 10 s before it returns. A new test keeps that shape: both sides
+  rendezvous (a DM each way), and each class lingers 5 s before it returns. A new test keeps that shape: both sides
   run the same steps, the run tag goes in every body, and one side alone does anything one-sided (the cut goes to
   the smaller id, which never dials). The cut reaches the bridge through `adb reverse` of the bridge's control port.
-- **The class skips without `knitBlePeer`,** so `connectedDebugAndroidTest` and Firebase Test Lab pass straight
-  over it.
+- **The classes skip without `knitBlePeer`,** so `connectedDebugAndroidTest` and Firebase Test Lab pass straight
+  over them. **Once the pair loses each other** (no link, or a rendezvous that never comes back), every later test
+  skips, naming the test it happened in: a dead link otherwise sits out a 3-minute timeout per test.
+- **"Out of range" is two bridge faults, not one.** The dialer's bridge deafens *and* refuses every dial (`refuse
+  0x2043 0x0c`). `deafen` only hides adverts from the host: the controller's initiator still hears them, and a dial
+  from the dialer's cached sighting relinked 11 s into a 40 s "outage" on the first run.
+- **Between runs the apps keep meshing.** The system restarts the sticky `MeshService` after `am instrument` kills
+  the process, so a pair left up relinks by itself; `run` starts clean anyway.
+- **Link setup on this rig comes and goes; the tests wait up to 5 min for it.** On 2026-10-05 a GD dial from one
+  emulator to the other connected in under a second for the first hour. Later, the same dials from one side failed
+  run after run, timing out at Knit's 12 s watchdog with no connection attempt (no 0x3e). They aimed at the
+  address the peer was airing, and the peer's adverts were heard as often as in the green runs. Nothing single
+  explained it. It survived bridge restarts (HCI Reset), a replug of the dongle and a swap of the dongles between
+  the emulators, then cleared on its own; 1M-only dials and holding the peer's scanner off changed nothing
+  reliable. `scripts/dongle-dial.py` (both bridges down) dials dongle to dongle with Bumble's own host: 6 of 6 each
+  way in about 1 s during the worst of it, so the dongles were fine and the fault lies between what GD's dial asks
+  (accept list, 1M + 2M + Coded, RPAs) and Zephyr's initiator. The tell, before blaming the app: tally each side's
+  dials from its capture (`btmon -r build/hci-bridge/latest-<d>/hci.btsnoop`, an Extended Create Connection then
+  an Enhanced Connection Complete with `Success` or `0x02`). The host's own Bluetooth streaming audio to a speaker
+  beside the dongles was going during the worst stretch too; turning it off alone did not help.
+- **`ctl dial-phys 0x01`** limits a dial's initiating PHYs (an experiment knob: 1M-only dials relinked no better).
 

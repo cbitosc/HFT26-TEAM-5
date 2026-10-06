@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Two emulators meshing over real Bluetooth, with each other and nobody else, and BlePairInstrumentedTest run on
-# both at once.
+# Two emulators meshing over real Bluetooth, with each other and nobody else, and the blepair instrumented classes
+# (BlePairMessagingTest, …Attachment…, …Profile…, …Group…, …Link…) run on both at once.
 #
 # Each emulator's host stack drives one of knit-ios's nRF52840 dongles through scripts/hci-bridge.py (the route
 # scripts/emulator-hci-bridge.sh sets up), and both bridges run --isolate: Knit's advert UUIDs go out where only the
@@ -18,8 +18,8 @@
 #   scripts/ble-pair-test.sh down               # both emulators down, both dongles back to BlueZ
 #   scripts/ble-pair-test.sh all [-e K V]…      # up, install, run, down (down whatever the verdict)
 #
-# `run` passes any `-e KEY VALUE` on to `am instrument` on both sides (`-e method <name>` runs one test, for
-# instance). Each run writes build/ble-pair/<stamp>/ — per side the instrumentation output, logcat, and links to
+# `run` passes any `-e KEY VALUE` on to `am instrument` on both sides. KNIT_PAIR_CLASSES=<fqcn>[,<fqcn>…] (or
+# `<fqcn>#<method>`) runs a subset, the same on both sides. Each run writes build/ble-pair/<stamp>/ — per side the instrumentation output, logcat, and links to
 # that side's bridge log and btsnoop — and prints the test's own `BlePair` lines (link and relink times).
 # Env: KNIT_PAIR_NO_BUILD=1 installs the APKs already built instead of building first;
 #      KNIT_PAIR_KEEP=1 keeps both identities and their history for a `run` instead of starting clean;
@@ -53,7 +53,10 @@ export KNIT_HCI_AVD=${KNIT_HCI_AVD:-Knit_BLE_Pair}
 export KNIT_HCI_NICE=${KNIT_HCI_NICE:-10}
 export KNIT_HCI_BOOT_S=${KNIT_HCI_BOOT_S:-600}
 IMAGE="system-images;android-34;aosp_atd;x86_64"
-CLASS=app.getknit.knit.blepair.BlePairInstrumentedTest
+# The classes, in the order both sides run them (the same list on both is what keeps them in step); the link faults
+# go last, so a failure there leaves nothing after it waiting on a link.
+P=app.getknit.knit.blepair
+CLASSES=${KNIT_PAIR_CLASSES:-$P.BlePairMessagingTest,$P.BlePairAttachmentTest,$P.BlePairProfileTest,$P.BlePairGroupTest,$P.BlePairLinkTest}
 OUT="$ROOT/build/ble-pair"
 # Side → console port and bridge control port (the control port is emulator-hci-bridge.sh's table; the console
 # port is moved out of adb's scan range, above).
@@ -153,7 +156,7 @@ cmd_run() {
   for side in "${SIDES[@]}"; do
     on "$side" logcat -c || true
     ln -sfn "$(readlink -f "$ROOT/build/hci-bridge/latest-$side")" "$dir/bridge-$side"
-    timeout 1800 "$ADB" -s "$(serial_of "$side")" shell am instrument -w -e class "$CLASS" \
+    timeout 1800 "$ADB" -s "$(serial_of "$side")" shell am instrument -w -e class "$CLASSES" \
       -e knitBlePeer "${ids[$(other "$side")]}" -e knitBleRun "$stamp" -e knitBleBridge "$(control_of "$side")" \
       "$@" "$(runner_of "$side")" >"$dir/$side.instrument.txt" 2>&1 &
     pids+=($!)
@@ -163,7 +166,7 @@ cmd_run() {
   for side in "${SIDES[@]}"; do
     on "$side" logcat -d >"$dir/$side.logcat.txt" 2>&1 || true
     say "side $side ($(serial_of "$side"), ${ids[$side]})"
-    grep -h ' BlePair' "$dir/$side.logcat.txt" | sed 's/^/  /' || true
+    grep -hE ' I BlePair *:' "$dir/$side.logcat.txt" | sed 's/^/  /' || true
     if grep -q '^OK (' "$dir/$side.instrument.txt"; then
       grep '^OK (' "$dir/$side.instrument.txt" | sed 's/^/  /'
     else

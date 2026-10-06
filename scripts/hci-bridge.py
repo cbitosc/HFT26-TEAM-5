@@ -88,6 +88,8 @@ OP_DISCONNECT = 0x0406
 OP_READ_LOCAL_EXTENDED_FEATURES = 0x1004
 OP_SCAN_PARAMS, OP_SCAN_ENABLE = 0x2041, 0x2042  # LE Set Extended Scan Parameters / Enable
 DIALS = {0x200D, 0x2043}  # LE Create Connection, LE Extended Create Connection
+OP_EXT_CREATE_CONNECTION = 0x2043
+DIAL_PHY_BLOCK = 16  # an Extended Create Connection's per-PHY parameters (scan interval/window … max CE length)
 SCAN_OFF = bytes([CMD, OP_SCAN_ENABLE & 0xFF, OP_SCAN_ENABLE >> 8, 6, 0, 0, 0, 0, 0, 0])
 # LMP feature bits (page 0) the AOSP stack refuses to start without, which an LE-only controller lacks. Claimed in the
 # shimmed page 0 only; nothing BR/EDR ever reaches the controller to use them.
@@ -278,6 +280,7 @@ class Bridge:
         self.links: dict[int, Link] = {}
         self.refusals: list[Refusal] = []
         self.deaf_until = 0.0
+        self.dial_phys: int | None = None  # `ctl dial-phys`: the initiating PHYs a dial keeps, None for as asked
         self.host_cmds_in_flight = 0
         # Commands of the bridge's own: queued until the host's commands drain, then answered to a callback and
         # never to the host. FIFO per opcode, as the controller answers them.
@@ -315,6 +318,8 @@ class Bridge:
                 return
             if self.isolate and op in AD_COMMANDS:
                 packet = self.isolate_out(op, packet)
+            if op == OP_EXT_CREATE_CONNECTION and self.dial_phys is not None:
+                packet = self.restrict_dial(packet)
             if op == 0x0C03:  # Reset: the host starts over, and so does what we know
                 say("host reset the controller")
                 self.links.clear()
@@ -382,6 +387,25 @@ class Bridge:
             self.inject(params, lambda p: p[3] and say(f"arbiter: scan parameters refused ({status_name(p[3])})"))
         enable = bytes([CMD, OP_SCAN_ENABLE & 0xFF, OP_SCAN_ENABLE >> 8, len(self.scan_enable)]) + self.scan_enable
         self.inject(enable, scan_back)
+
+    def restrict_dial(self, packet: bytes) -> bytes:
+        """An Extended Create Connection initiating only on the PHYs in [dial_phys], their parameter blocks kept and the
+        rest dropped. A dial left with none of them goes as the host asked."""
+        p = packet[4:]
+        if len(p) < 10:
+            return packet
+        asked, blocks = p[9], p[10:]
+        kept, out, i = 0, b"", 0
+        for bit in range(3):  # 1M, 2M, Coded, the order the blocks follow
+            if asked & (1 << bit):
+                if self.dial_phys & (1 << bit):
+                    kept |= 1 << bit
+                    out += blocks[i:i + DIAL_PHY_BLOCK]
+                i += DIAL_PHY_BLOCK
+        if not kept or kept == asked:
+            return packet
+        params = p[:9] + bytes([kept]) + out
+        return bytes([CMD, packet[1], packet[2], len(params)]) + params
 
     def isolate_out(self, op: int, packet: bytes) -> bytes:
         """An advert on its way to the air, with Knit's UUIDs moved where only an isolating bridge looks."""
@@ -661,6 +685,7 @@ class Bridge:
                     "deafS": max(0.0, round(self.deaf_until - time.time(), 1)),
                     "isolate": {"partners": {k: round(time.time() - t, 1) for k, t in self.partners.items()}}
                     if self.isolate else None,
+                    "dialPhys": None if self.dial_phys is None else f"0x{self.dial_phys:02x}",
                     "hostCommandsInFlight": self.host_cmds_in_flight, "counts": self.counts}
         if cmd == "links":
             return {"links": [lk.view() for lk in self.links.values()]}
@@ -677,6 +702,11 @@ class Bridge:
             self.deaf_until = time.time() + float(req["seconds"])
             say(f"FAULT deaf for {req['seconds']}s")
             return {"deafS": float(req["seconds"])}
+        if cmd == "dial-phys":
+            mask = req.get("mask")
+            self.dial_phys = None if mask in (None, "off") else int(str(mask), 0)
+            say(f"dials initiate on {'the PHYs the host asks' if self.dial_phys is None else f'0x{self.dial_phys:02x}'}")
+            return {"dialPhys": mask}
         if cmd == "clear":
             self.refusals.clear()
             self.deaf_until = 0.0
@@ -750,6 +780,8 @@ def ctl(args) -> None:
         req = {"cmd": "cut", "handle": args.rest[0] if args.rest else "all", "reason": args.reason}
     elif a == "deafen":
         req = {"cmd": "deafen", "seconds": float(args.rest[0])}
+    elif a == "dial-phys":
+        req = {"cmd": "dial-phys", "mask": args.rest[0] if args.rest else "off"}
     else:
         sys.exit(f"unknown action {a}")
     with socket.create_connection(("127.0.0.1", args.control), timeout=5) as s:
@@ -798,7 +830,7 @@ def main() -> None:
     s.add_argument("--no-shim", action="store_true",
                    help="pass the controller through as it is: no BR/EDR shim, no scan arbiter")
     c = sub.add_parser("ctl")
-    c.add_argument("action", choices=["status", "links", "clear", "refuse", "cut", "deafen"])
+    c.add_argument("action", choices=["status", "links", "clear", "refuse", "cut", "deafen", "dial-phys"])
     c.add_argument("rest", nargs="*")
     c.add_argument("--control", type=int, default=8878)
     c.add_argument("--count", type=int, default=1, help="refuse: how many (0 = until cleared)")
