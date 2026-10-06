@@ -2308,6 +2308,57 @@ class ChatViewModelTest {
             )
         }
 
+    /**
+     * Retry is drawn only for a file the chat found it can still read, and a Retry that finds the file gone
+     * after all says so and takes the button away.
+     */
+    @Test
+    fun retryIsOfferedOnlyForAFileThatCanStillBeReadAndAGoneFileTakesItAway() =
+        runTest {
+            stubDm("bob")
+            mesh.neighbors.value = setOf(Peer("bob"))
+            coEvery { peers.find("bob") } returns peer("bob", "Bob", capabilities = Protocol.LOCAL_CAPABILITIES)
+
+            fun failed(
+                id: String,
+                source: String,
+            ) = TransferRecord(
+                id = id,
+                outgoing = true,
+                name = "clip.mp4",
+                size = 2_000L,
+                mime = "video/mp4",
+                phase = TransferPhase.Failed,
+                sourceUri = source,
+            ).toEntity(peerId = "bob", selfId = "me", sentAt = if (id == "moved") 5L else 6L)
+            coEvery { transfers.sourceReadable("content://docs/kept") } returns true
+            coEvery { transfers.sourceReadable("content://docs/moved") } returns false
+            val vm = vm("bob")
+            collectState(vm)
+            val events = mutableListOf<Int>()
+            backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.events.collect { events += it } }
+
+            fun retryable(id: String) =
+                checkNotNull(
+                    vm.state.value.rows
+                        .single { it.transfer?.id == id }
+                        .transfer,
+                ).retryable
+
+            messagesFlow.value = listOf(failed("moved", "content://docs/moved"), failed("kept", "content://docs/kept"))
+            advanceUntilIdle()
+            assertFalse("a file that can no longer be read offers no Retry", retryable("moved"))
+            assertTrue(retryable("kept"))
+            coVerify(exactly = 1) { transfers.sourceReadable("content://docs/kept") }
+
+            // Gone between the check and the tap: the refusal is said and the button goes.
+            coEvery { transfers.retry("kept") } returns OfferOutcome.Refused(TransferRefusal.Unreadable)
+            vm.retryTransfer("kept")
+            advanceUntilIdle()
+            assertEquals(R.string.chat_transfer_unreadable, events.last())
+            assertFalse(retryable("kept"))
+        }
+
     @Test
     fun answeringATransferGoesToTheManagerAndARefusalIsSaid() =
         runTest {

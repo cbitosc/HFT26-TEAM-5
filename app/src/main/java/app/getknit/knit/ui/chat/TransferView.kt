@@ -14,7 +14,8 @@ import app.getknit.knit.transfer.TransferState
  * A direct-transfer row as the card draws it: the persisted [TransferRecord]'s facts overlaid with the
  * manager's live state when there is one. [interrupted] is the one thing neither holds on its own — a record
  * that never reached a terminal phase and has no live state behind it, which is what a process death
- * mid-transfer leaves.
+ * mid-transfer leaves. [retryable] means the sender's card offers Retry: [TransferRecord.retryable], and a file
+ * the chat has checked it can still read.
  */
 data class TransferView(
     val id: String,
@@ -27,6 +28,7 @@ data class TransferView(
     val savedUri: String?,
     val reason: Int?,
     val interrupted: Boolean,
+    val retryable: Boolean = false,
 ) {
     /** An archive or executable: nothing on the device can look inside it, and the card says so before Accept. */
     val risky: Boolean get() = FileTypes.isRisky(mime, name)
@@ -35,10 +37,15 @@ data class TransferView(
     val installable: Boolean get() = FileTypes.isInstallable(mime, name)
 }
 
-/** The card for a [MessageEntity.KIND_FILE_TRANSFER] row, or null when its body is not a record this build reads. */
+/**
+ * The card for a [MessageEntity.KIND_FILE_TRANSFER] row, or null when its body is not a record this build reads.
+ * [sourceReadable] answers, by transfer id, whether the file a Retry would send was found readable. It is false
+ * until the chat has looked, so the button never appears and then vanishes.
+ */
 fun transferViewFor(
     row: MessageEntity,
     live: Map<String, TransferState>,
+    sourceReadable: (transferId: String) -> Boolean = { false },
 ): TransferView? {
     val record = TransferRecord.decode(row.body) ?: return null
     val state = live[record.id]
@@ -53,6 +60,7 @@ fun transferViewFor(
         savedUri = state?.savedUri ?: record.savedUri,
         reason = state?.reason ?: record.reason,
         interrupted = state == null && !record.phase.terminal,
+        retryable = record.retryable(live = state != null) && sourceReadable(record.id),
     )
 }
 

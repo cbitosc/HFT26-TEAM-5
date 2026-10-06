@@ -6,6 +6,7 @@ import app.getknit.knit.data.message.TransferPhase
 import app.getknit.knit.data.message.TransferRecord
 import app.getknit.knit.mesh.protocol.TransferPayload
 import io.mockk.coEvery
+import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -13,6 +14,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.After
@@ -96,6 +98,10 @@ class TransferManagerTest {
         val rows = Collections.synchronizedList(mutableListOf<MessageEntity>())
         val messages = mockk<MessageRepository>()
         coEvery { messages.save(any()) } answers { rows += firstArg<MessageEntity>() }
+        every { messages.observeMessage(any()) } answers {
+            val rowId = firstArg<String>()
+            flowOf(synchronized(rows) { rows.lastOrNull { it.id == rowId } })
+        }
         lateinit var side: Side
         val manager =
             TransferManager(
@@ -306,6 +312,114 @@ class TransferManagerTest {
             assertEquals(TransferPayload.REASON_TIMEOUT, a.record(id)!!.reason)
             await("alice releases the radio") { a.wifi.released.isNotEmpty() }
             assertTrue(b.log.events.none { it == "join" })
+        }
+
+    /**
+     * The 2026-10-05 shape: the receiver could not open the first READY (a ratchet collision, #135), and the
+     * pair's session healed while the receiver was still waiting. A READY sent again under the healed session
+     * gets the file across. Without the re-send this is [aLostReadyFailsTheReceiverAndCancelsTheSender].
+     */
+    @Test
+    fun aFirstReadyThatNeverLandsIsSentAgainAndTheFileStillCrosses() =
+        runBlocking {
+            val (a, b) = pair(timingsA = fast.copy(readyResendMs = 100))
+            a.withClip()
+            var readies = 0
+            a.signals.drop = { it.phase == TransferPayload.PHASE_READY && ++readies == 1 }
+            val id = offer(a)
+            awaitIncoming(b, id)
+            assertNull(b.manager.accept(id))
+            awaitPhase(b, id, TransferPhase.Done)
+            awaitPhase(a, id, TransferPhase.Done)
+            assertArrayEquals(
+                payload,
+                b.files.sinks
+                    .single()
+                    .buffer
+                    .toByteArray(),
+            )
+            val sent = a.signals.sent.filter { it.phase == TransferPayload.PHASE_READY }
+            assertTrue("READY was sent again, saw ${sent.size}", sent.size >= 2)
+            // Every copy names the same group, port and key: a receiver that caught any one of them joins.
+            assertEquals(1, sent.map { listOf(it.ssid, it.passphrase, it.port, it.key) }.distinct().size)
+            assertEquals(1, b.log.events.count { it == "join" })
+        }
+
+    /** The re-send stops once the receiver has connected: nothing more goes out while the bytes cross, or after. */
+    @Test
+    fun readyIsNoLongerSentOnceTheReceiverConnects() =
+        runBlocking {
+            val (a, b) = pair(timingsA = fast.copy(readyResendMs = 100, readyWaitMs = 5_000))
+            a.withClip()
+            val id = offer(a)
+            awaitIncoming(b, id)
+            assertNull(b.manager.accept(id))
+            awaitPhase(a, id, TransferPhase.Done)
+            val readies = a.signals.sent.count { it.phase == TransferPayload.PHASE_READY }
+            delay(500)
+            assertEquals(readies, a.signals.sent.count { it.phase == TransferPayload.PHASE_READY })
+        }
+
+    /**
+     * Retry offers the same file again as a new transfer, without the picker. The old card stops offering it,
+     * and a Retry on that old card, a finished file or the receiver's own row has nothing to start.
+     */
+    @Test
+    fun aFailedSendIsRetriedAsANewOfferOfTheSameFile() =
+        runBlocking {
+            val (a, b) = pair()
+            a.withClip()
+            a.signals.drop = { it.phase == TransferPayload.PHASE_READY }
+            val first = offer(a)
+            awaitIncoming(b, first)
+            assertNull(b.manager.accept(first))
+            awaitPhase(a, first, TransferPhase.Failed)
+            awaitPhase(b, first, TransferPhase.Failed)
+            assertEquals("uri:clip", a.record(first)!!.sourceUri)
+            assertTrue(a.record(first)!!.retryable(live = false))
+            assertNull("the receiver's row never names a source", b.record(first)!!.sourceUri)
+            assertEquals(OfferOutcome.Refused(TransferRefusal.Gone), b.manager.retry(first))
+
+            a.signals.drop = { false }
+            val second = (a.manager.retry(first) as OfferOutcome.Started).id
+            assertTrue(second != first)
+            assertTrue(a.record(first)!!.retried)
+            assertEquals(TransferPhase.Failed, a.record(first)!!.phase)
+            assertFalse(a.record(first)!!.retryable(live = false))
+            assertEquals(OfferOutcome.Refused(TransferRefusal.Gone), a.manager.retry(first))
+            assertEquals("uri:clip", a.record(second)!!.sourceUri)
+            // The old row keeps its place in the thread: rewritten, never moved.
+            val firstRows = a.rows.filter { it.id == TransferRecord.rowId(first) }
+            assertEquals(1, firstRows.map { it.sentAt }.distinct().size)
+
+            awaitIncoming(b, second)
+            assertNull(b.manager.accept(second))
+            awaitPhase(a, second, TransferPhase.Done)
+            awaitPhase(b, second, TransferPhase.Done)
+            assertArrayEquals(
+                payload,
+                b.files.sinks
+                    .single()
+                    .buffer
+                    .toByteArray(),
+            )
+            assertEquals(OfferOutcome.Refused(TransferRefusal.Gone), a.manager.retry(second))
+        }
+
+    /** A source that is gone refuses exactly as a fresh pick would, and leaves the old card offering Retry. */
+    @Test
+    fun aRetryWhoseFileIsGoneIsRefusedAndKeepsItsCard() =
+        runBlocking {
+            val (a, b) = pair()
+            a.withClip()
+            val id = offer(a)
+            awaitIncoming(b, id)
+            a.manager.cancel(id)
+            awaitPhase(a, id, TransferPhase.Cancelled)
+            a.files.sources.clear()
+            assertEquals(OfferOutcome.Refused(TransferRefusal.Unreadable), a.manager.retry(id))
+            assertFalse(a.record(id)!!.retried)
+            assertTrue(a.record(id)!!.retryable(live = false))
         }
 
     @Test

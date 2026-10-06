@@ -11,10 +11,12 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -81,6 +83,19 @@ data class TransferTimings(
      * it, since a frame the fast plane has already accepted is not re-queued for another plane.
      */
     val readyGraceMs: Long = 500L,
+    /**
+     * How often the host sends READY again while it waits for the receiver's connection, for as long as the
+     * receiver could still be waiting for it ([readyWaitMs]). The receiver ignores every READY after the first.
+     *
+     * One READY is a single point of failure, and the grace above covers only one way of losing it. On
+     * 2026-10-05 a Pixel 8 could not open the Pixel 9's READY at all: it was the first frame of a ratchet epoch
+     * whose number collided with keys a previous session had left behind (#135). The pair's session reset 17 s
+     * later and healed the ratchet, but nothing sent READY again. A reset re-seals only stored DMs, and a
+     * `CTL_TRANSFER` is never stored. The receiver timed out with the group already up and waiting for it. A
+     * repeat goes out under whatever session the pair holds by then, and over Bluetooth while hosting has Wi-Fi
+     * Aware paused.
+     */
+    val readyResendMs: Long = 5_000L,
     val tcpConnectMs: Int = 5_000,
     val tcpConnectTries: Int = 5,
     val tcpConnectRetryMs: Long = 1_000L,
@@ -216,6 +231,33 @@ class TransferManager(
                 source.size > MAX_TRANSFER_BYTES -> TransferRefusal.TooLarge
                 else -> null
             }
+
+    /**
+     * Offers again the file an outgoing transfer [id] was reading, once it ended short of Done: the card's
+     * Retry, with no second trip through the picker. It goes out as a new transfer with its own id and row, and
+     * the old row is marked [TransferRecord.retried] once the new offer is out so its card stops offering it.
+     * The source is read again from scratch, so a file that has moved or lost its grant refuses as
+     * [TransferRefusal.Unreadable] exactly as a fresh pick would.
+     */
+    suspend fun retry(id: String): OfferOutcome {
+        val row = messages.observeMessage(TransferRecord.rowId(id)).first()
+        val record = row?.let { TransferRecord.decode(it.body) }
+        if (row == null || record == null || !record.retryable(live = live.containsKey(id))) {
+            return OfferOutcome.Refused(TransferRefusal.Gone)
+        }
+        val outcome = offer(row.conversationId, checkNotNull(record.sourceUri))
+        if (outcome is OfferOutcome.Started) {
+            messages.save(record.copy(retried = true).toEntity(peerId = row.conversationId, selfId = me(), sentAt = row.sentAt))
+            log("xfer $id retried as ${outcome.id}")
+        }
+        return outcome
+    }
+
+    /**
+     * Whether the file at [uri] can still be read, which is what a Retry would send. The chat asks before it draws
+     * the button, so a file that was moved, deleted or lost its grant hides Retry instead of failing on the tap.
+     */
+    suspend fun sourceReadable(uri: String): Boolean = files.openSource(uri) != null
 
     /** Ends a transfer from this side, whatever phase it is in. */
     suspend fun cancel(id: String) {
@@ -386,24 +428,25 @@ class TransferManager(
             )
             return
         }
-        val creds = checkNotNull(l.credentials)
-        val sent =
-            signals.sendTransferSignal(
-                senderId,
-                TransferPayload(
-                    id = id,
-                    phase = TransferPayload.PHASE_READY,
-                    ssid = creds.ssid,
-                    passphrase = creds.passphrase,
-                    port = l.port,
-                    key = Base64.getEncoder().encodeToString(checkNotNull(l.key)),
-                ),
-            )
+        val sent = signals.sendTransferSignal(senderId, readyPayload(l))
         if (!sent) {
             fail(l, TransferPayload.REASON_CONNECTION, tellPeer = false)
             return
         }
         l.job = scope.launch { hostAndSend(l) }
+    }
+
+    /** The credentials, port and stream key [l]'s receiver joins with. The same payload every time it is sent. */
+    private fun readyPayload(l: Live): TransferPayload {
+        val creds = checkNotNull(l.credentials)
+        return TransferPayload(
+            id = l.state.id,
+            phase = TransferPayload.PHASE_READY,
+            ssid = creds.ssid,
+            passphrase = creds.passphrase,
+            port = l.port,
+            key = Base64.getEncoder().encodeToString(checkNotNull(l.key)),
+        )
     }
 
     private suspend fun onReady(
@@ -459,6 +502,9 @@ class TransferManager(
 
     private suspend fun hostAndSend(l: Live) {
         var failure: Int? = null
+        // The receiver's READY wait started when it sent ACCEPT, just before this job started. A repeat
+        // sent after that wait has run out reaches a receiver that has already failed.
+        val readyUntil = clock() + timings.readyWaitMs
         try {
             // Let the READY actually leave before the radio is taken away — see readyGraceMs. It waits here, on
             // the role's own job, so the accept that started it hands the inbound collector back at once, and
@@ -476,7 +522,15 @@ class TransferManager(
                     }
                 l.listener = listener
                 listener.bind(SOCKET_BUFFER_BYTES)
-                val socket = listener.accept(checkNotNull(l.key), l.state.id) ?: throw TransferTimeout()
+                val socket =
+                    coroutineScope {
+                        val resend = launch { resendReady(l, readyUntil) }
+                        try {
+                            listener.accept(checkNotNull(l.key), l.state.id)
+                        } finally {
+                            resend.cancel()
+                        }
+                    } ?: throw TransferTimeout()
                 l.socket = socket
                 transition(l, TransferPhase.Transferring)
                 val source = files.openSource(checkNotNull(l.sourceUri)) ?: throw IOException("source is gone")
@@ -503,6 +557,24 @@ class TransferManager(
             failure = TransferPayload.REASON_CONNECTION
         } finally {
             finish(l, failure)
+        }
+    }
+
+    /**
+     * Sends READY again every [TransferTimings.readyResendMs] until [until], while the host waits for the
+     * receiver's connection. The caller cancels it once the receiver connects or the listener gives up.
+     */
+    private suspend fun resendReady(
+        l: Live,
+        until: Long,
+    ) {
+        var sent = 0
+        while (true) {
+            delay(timings.readyResendMs)
+            if (clock() >= until) return
+            sent += 1
+            val ok = signals.sendTransferSignal(l.state.peerId, readyPayload(l))
+            log("xfer ${l.state.id} READY again (#$sent${if (ok) "" else ", not sealed"})")
         }
     }
 
@@ -695,6 +767,7 @@ class TransferManager(
                 phase = s.phase,
                 savedUri = s.savedUri,
                 reason = s.reason,
+                sourceUri = l.sourceUri,
             )
         messages.save(record.toEntity(peerId = s.peerId, selfId = me(), sentAt = l.offeredAt))
     }

@@ -254,6 +254,7 @@
     <string name="chat_transfer_accept">Accept</string>
     <string name="chat_transfer_decline">Decline</string>
     <string name="chat_transfer_cancel">Cancel</string>
+    <string name="chat_transfer_retry">Retry</string>
     <string name="chat_transfer_open">Open</string>
     <string name="chat_transfer_connecting">Connecting over Wi-Fi…</string>
     <string name="chat_transfer_sending">Sending…</string>

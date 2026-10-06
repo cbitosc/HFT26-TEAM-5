@@ -207,6 +207,7 @@ carries; never renumber an old one.
 | [2026-09.zkma](decisions/2026-09-zkma-the-bridge-offer-and-its-backfill-draw-from-one-ranked-list.md) | The bridge offer and its backfill draw from one ranked list | lora, bridge, custody |
 | [2026-09.zu5t](decisions/2026-09-zu5t-content-capture-is-off.md) | Content capture is off | privacy, ui, performance |
 | [2026-10.47rw](decisions/2026-10-47rw-a-keystore-refusal-is-not-proof-a-secret-is-gone.md) | A Keystore refusal is not proof a secret is gone | crypto, storage, reliability |
+| [2026-10.5hzt](decisions/2026-10-5hzt-a-transfer-s-ready-is-sent-until-the-receiver-connects.md) | A transfer's READY is sent until the receiver connects, and a send that ended short is retried from its card | transfer, ui |
 | [2026-10.6e5t](decisions/2026-10-6e5t-a-blob-is-fetched-from-the-best-neighbour-that-says-it-holds-it.md) | A blob is fetched from the best neighbour that says it holds it | mesh, wire, blobs |
 | [2026-10.8jwn](decisions/2026-10-8jwn-a-bluetooth-file-feed-splits-one-pace-budget-across-the-links-it-feeds.md) | A Bluetooth file feed splits one pace budget across the links it feeds | ble, mesh |
 | [2026-10.9utz](decisions/2026-10-9utz-the-ble-presence-set-is-enabled-again-after-every-connection.md) | The BLE presence set is enabled again after every connection | ble, mesh |

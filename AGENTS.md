@@ -155,8 +155,9 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
 - **When touching `transfer/`, `MeshTransport.pause`/`resume`, or anything that hands the Wi-Fi radio to a
   second role:** READ `.agents/context/direct-transfer.md` — a large file goes to one nearby contact over a
   Wi-Fi Direct group the two phones raise, never over the mesh and never custodied (ADR 2026-09.wtmz, the
-  seal 2026-09.37ce, the surfaces 2026-09.7uqe). `TransferManager`/`TransferStream` are pure behind the
-  `DirectWifi`/`TransferFiles`/`TransferSignals` seams, and `AndroidDirectWifi` is the one
+  seal 2026-09.37ce, the surfaces 2026-09.7uqe, READY re-sent and the sender's Retry 2026-10.5hzt).
+  `TransferManager`/`TransferStream` are pure behind the `DirectWifi`/`TransferFiles`/`TransferSignals` seams,
+  and `AndroidDirectWifi` is the one
   `android.net.wifi.p2p` importer. Wi-Fi Aware does **not** yield to our own P2P on Android 12+, so it must
   be paused explicitly — that is what `pause`/`resume` are for.
 - **When touching `location/`, the chat overflow's "Send location" item, or anything that reads the device's

@@ -6,7 +6,8 @@ themselves and then tear down (`MAX_TRANSFER_BYTES` = 8 GiB, against the 8 MiB a
 them, and the chat keeps a small record of what happened.
 
 Decisions: ADR 2026-09.wtmz (the carrier and the protocol), ADR 2026-09.37ce (the seal), ADR 2026-09.7uqe
-(the surfaces). Read those before changing behaviour — this file is the map, they are the reasoning.
+(the surfaces), ADR 2026-10.5hzt (READY sent until the receiver connects; the sender's Retry). Read those
+before changing behaviour — this file is the map, they are the reasoning.
 
 ## Shape
 
@@ -36,6 +37,14 @@ Decisions: ADR 2026-09.wtmz (the carrier and the protocol), ADR 2026-09.37ce (th
   went out 17 ms before `mesh.pause()` closed the Aware socket mid-fragment, and BLE could not recover it
   because the fast plane had already accepted the frame. `TransferTimings.readyGraceMs` is the drain. Expect
   this shape anywhere the app hands the radio away right after a send.
+- **One READY is a single point of failure, so the host keeps sending it.** On 2026-10-05 the receiver could not
+  open the first READY (a ratchet collision, #135). The session reset 17 s later, but a reset re-seals only
+  stored DMs and a `CTL_TRANSFER` is never stored. The host now re-sends READY every `readyResendMs` while it
+  waits for the connection, and the receiver ignores the copies. Never make the receiver repeat ACCEPT instead:
+  the host answers that with CANCEL.
+- **Retry reads the record's `sourceUri`, and the chat checks it before drawing the button.** The picker's grant is
+  taken as persistable in `AndroidTransferFiles.openSource`, so it outlives a reboot. It is never released, and
+  Retry depends on it.
 - **The receiver may hold no IPv4 address at all.** IP provisioning mode is the *client's* choice (API 34,
   not 33 — lint is right and AOSP's `@RequiresApi` is wrong) and the host is never told which was used, so
   the host binds every address on the group interface. Interface names differ per phone, so re-pin a

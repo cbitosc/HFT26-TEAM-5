@@ -564,6 +564,7 @@ fun ChatScreen(
         onAcceptTransfer = viewModel::acceptTransfer,
         onDeclineTransfer = viewModel::declineTransfer,
         onCancelTransfer = viewModel::cancelTransfer,
+        onRetryTransfer = viewModel::retryTransfer,
         onClearAttachment = viewModel::clearAttachment,
         onReceiveImage = viewModel::attach,
         onTyping = viewModel::onUserTyping,
@@ -709,6 +710,7 @@ internal fun ChatScreenContent(
     onAcceptTransfer: (id: String) -> Unit = {},
     onDeclineTransfer: (id: String) -> Unit = {},
     onCancelTransfer: (id: String) -> Unit = {},
+    onRetryTransfer: (id: String) -> Unit = {},
     onClearAttachment: () -> Unit,
     onReceiveImage: (Uri) -> Unit,
     onTyping: (String) -> Unit,
@@ -1339,6 +1341,7 @@ internal fun ChatScreenContent(
                                         onDecline = { onDeclineTransfer(transfer.id) },
                                         onCancel = { onCancelTransfer(transfer.id) },
                                         modifier = itemMotion,
+                                        onRetry = { onRetryTransfer(transfer.id) },
                                     )
                                 } else if (notice != null) {
                                     SystemNotice(text = notice, modifier = itemMotion)

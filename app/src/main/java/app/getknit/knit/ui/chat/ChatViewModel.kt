@@ -33,6 +33,7 @@ import app.getknit.knit.data.message.DeliveryPlane
 import app.getknit.knit.data.message.GroupFace
 import app.getknit.knit.data.message.MentionStore
 import app.getknit.knit.data.message.MessageEntity
+import app.getknit.knit.data.message.TransferRecord
 import app.getknit.knit.data.message.groupFaces
 import app.getknit.knit.data.message.groupTitle
 import app.getknit.knit.data.message.meshRoomChannel
@@ -85,6 +86,7 @@ import app.getknit.knit.moderation.ImageScreeningService
 import app.getknit.knit.notifications.Notifier
 import app.getknit.knit.transfer.OfferOutcome
 import app.getknit.knit.transfer.TransferManager
+import app.getknit.knit.transfer.TransferRefusal
 import app.getknit.knit.transfer.TransferState
 import app.getknit.knit.ui.voice.VoicePlayer
 import app.getknit.knit.ui.voice.VoiceRecorder
@@ -673,6 +675,14 @@ class ChatViewModel(
                 if (wanted.isEmpty()) flowOf(emptyMap()) else meshManager.arrivals.map { all -> all.filterKeys(wanted::contains) }
             }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
+    /**
+     * Transfer id → whether the file that row's Retry would send can still be read. Each sender's row that could
+     * offer Retry is checked once, off the main thread (`watchRetrySources`), and a Retry that finds its file gone
+     * after all is recorded false. A moved or deleted file, or a lost grant, then hides the button instead of
+     * failing on the tap. A row nobody has checked draws no Retry.
+     */
+    private val retrySources = MutableStateFlow<Map<String, Boolean>>(emptyMap())
+
     // Held blob sizes + moderation-flagged hashes plus the content-filtering setting, and the decoded
     // link-preview cards, combined upstream so the main bundle stays at the typed 5-flow combine overload.
     // The setting only gates receive-side *hiding* (the chat blur + toxic-text collapse below), so toggling
@@ -684,14 +694,15 @@ class ChatViewModel(
             imageScreening.observeFlaggedHashes(),
             settings.contentFilteringEnabled,
             linkCards.cards,
-            transfers.states,
-        ) { sizes, flagged, hideSensitive, cards, live ->
-            BlobState(sizes, flagged.toSet(), hideSensitive, cards, live)
+            combine(transfers.states, retrySources) { live, readable -> live to readable },
+        ) { sizes, flagged, hideSensitive, cards, (live, readable) ->
+            BlobState(sizes, flagged.toSet(), hideSensitive, cards, live, readable)
         }
 
     init {
         viewModelScope.launch { myNodeId.value = identity.nodeId() }
         watchDraftForLinks()
+        watchRetrySources()
         // Decode every link-preview card in this thread whose blob has landed, once; the store dedups and the
         // rows pick the result up through blobState. The pair list is distinct so a size change elsewhere in
         // the table does not re-walk the thread.
@@ -742,6 +753,8 @@ class ChatViewModel(
         val linkCards: Map<String, LinkCard>,
         // transfer id -> its live state, for the direct-transfer cards in this thread.
         val transfers: Map<String, TransferState>,
+        // transfer id -> whether the file its Retry would send can still be read ([retrySources]).
+        val retrySources: Map<String, Boolean>,
         val group: GroupEntity?,
         // messageId -> how many current roster members have acked it. Empty outside a group.
         val deliveredCounts: Map<String, Int>,
@@ -755,6 +768,7 @@ class ChatViewModel(
         val hideSensitive: Boolean,
         val linkCards: Map<String, LinkCard>,
         val transfers: Map<String, TransferState>,
+        val retrySources: Map<String, Boolean>,
     )
 
     // The group row paired with "how many members have acked each message", re-subscribed whenever the
@@ -801,6 +815,7 @@ class ChatViewModel(
                 blob.hideSensitive,
                 blob.linkCards,
                 blob.transfers,
+                blob.retrySources,
                 group,
                 delivered,
             )
@@ -934,6 +949,7 @@ class ChatViewModel(
             val hideSensitive = bundle.hideSensitiveContent
             val cards = bundle.linkCards
             val liveTransfers = bundle.transfers
+            val retrySources = bundle.retrySources
             val group = bundle.group
             val deliveredCounts = bundle.deliveredCounts
             val isGroup = group != null
@@ -1047,7 +1063,14 @@ class ChatViewModel(
                         reactions = tallies,
                         replyTo = m.replyRef(),
                         origin = origin,
-                        transfer = if (m.kind == MessageEntity.KIND_FILE_TRANSFER) transferViewFor(m, liveTransfers) else null,
+                        transfer =
+                            if (m.kind ==
+                                MessageEntity.KIND_FILE_TRANSFER
+                            ) {
+                                transferViewFor(m, liveTransfers) { retrySources[it] == true }
+                            } else {
+                                null
+                            },
                     )
                 }
             // Autocomplete candidates: everyone we've received a message from, plus a group's roster (so
@@ -2012,6 +2035,49 @@ class ChatViewModel(
 
     fun cancelTransfer(id: String) {
         viewModelScope.launch { transfers.cancel(id) }
+    }
+
+    /**
+     * Offers the file of a transfer that ended short again, from its card. The thread's refusals come first,
+     * as they do for the overflow item. The disclosure does not, because this phone has sent the file before.
+     */
+    fun retryTransfer(id: String) {
+        viewModelScope.launch {
+            refusalForTransfer()?.let {
+                _events.tryEmit(it)
+                return@launch
+            }
+            val outcome = transfers.retry(id)
+            if (outcome !is OfferOutcome.Refused) return@launch
+            _events.tryEmit(transferRefusalMessage(outcome.refusal))
+            if (outcome.refusal == TransferRefusal.Unreadable) retrySources.update { it + (id to false) }
+        }
+    }
+
+    /**
+     * Checks, once per row, whether the file a sender's Retry would send can still be read ([retrySources]). Rows
+     * are taken from the window as they become eligible, so a transfer that fails while the chat is open is
+     * checked then.
+     */
+    private fun watchRetrySources() {
+        viewModelScope.launch {
+            windowed
+                .filterNotNull()
+                .map { window ->
+                    window.messages
+                        .filter { it.kind == MessageEntity.KIND_FILE_TRANSFER }
+                        .mapNotNull { row -> TransferRecord.decode(row.body)?.takeIf { it.retryable(live = false) } }
+                        .associate { it.id to checkNotNull(it.sourceUri) }
+                }.distinctUntilChanged()
+                .collect { candidates ->
+                    candidates.forEach { (id, uri) ->
+                        if (id !in retrySources.value) {
+                            val readable = transfers.sourceReadable(uri)
+                            retrySources.update { it + (id to readable) }
+                        }
+                    }
+                }
+        }
     }
 
     /**

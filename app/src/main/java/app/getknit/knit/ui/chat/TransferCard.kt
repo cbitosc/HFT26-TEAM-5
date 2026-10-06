@@ -38,7 +38,8 @@ import app.getknit.knit.mesh.protocol.TransferPayload
 /**
  * The chat card for a direct Wi-Fi file transfer ([TransferView]): the file's icon, name and size, where the
  * transfer stands, a progress bar while the bytes move, and the one or two answers the phase allows —
- * Accept/Decline on an incoming offer, Cancel while it runs, Open once a file has been received. Drawn in
+ * Accept/Decline on an incoming offer, Cancel while it runs, Open once a file has been received, Retry on
+ * the sender's side once it ended short of that (the same file again, no picker). Drawn in
  * the [FileAttachmentBubble] idiom and aligned like a bubble, on the side of whoever offered the file.
  */
 @Composable
@@ -49,6 +50,7 @@ fun TransferCard(
     onDecline: () -> Unit,
     onCancel: () -> Unit,
     modifier: Modifier = Modifier,
+    onRetry: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val size = Formatter.formatShortFileSize(context, view.size)
@@ -100,7 +102,7 @@ fun TransferCard(
                         modifier = Modifier.padding(top = 6.dp),
                     )
                 }
-                TransferActions(view, onAccept, onDecline, onCancel) { uri ->
+                TransferActions(view, onAccept, onDecline, onCancel, onRetry) { uri ->
                     if (!openSavedFile(context, uri, view.mime)) {
                         Toast.makeText(context, R.string.chat_transfer_no_app, Toast.LENGTH_SHORT).show()
                     }
@@ -116,6 +118,7 @@ private fun TransferActions(
     onAccept: () -> Unit,
     onDecline: () -> Unit,
     onCancel: () -> Unit,
+    onRetry: () -> Unit,
     onOpen: (uri: String) -> Unit,
 ) {
     val answerable = !view.interrupted && !view.phase.terminal
@@ -133,6 +136,12 @@ private fun TransferActions(
             answerable -> {
                 TextButton(onClick = onCancel, modifier = Modifier.testTag("transfer_cancel")) {
                     Text(stringResource(R.string.chat_transfer_cancel))
+                }
+            }
+
+            view.retryable -> {
+                TextButton(onClick = onRetry, modifier = Modifier.testTag("transfer_retry")) {
+                    Text(stringResource(R.string.chat_transfer_retry))
                 }
             }
 

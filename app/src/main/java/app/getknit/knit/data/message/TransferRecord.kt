@@ -1,5 +1,6 @@
 package app.getknit.knit.data.message
 
+import app.getknit.knit.mesh.protocol.TransferPayload
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
@@ -31,6 +32,11 @@ enum class TransferPhase {
  * Stored as a small JSON object, the [PeerRename] convention, so the row needs no new column. Deliberately
  * never carries the Wi-Fi credentials or the stream key: those live in memory for one transfer and die with it.
  *
+ * The sender's record also keeps [sourceUri], the picked document the file was read from, so the card can offer
+ * Retry without a second trip through the picker ([retryable]). It is this phone's own handle on the file and
+ * means nothing anywhere else. [retried] marks a record whose Retry already started a newer transfer, so the old
+ * card stops offering it.
+ *
  * Progress is not here either — the row is rewritten only on a phase change, and the card reads live bytes
  * from the manager's state. A non-terminal record with no live state (the process died mid-transfer) is
  * what the card draws as interrupted.
@@ -45,8 +51,24 @@ data class TransferRecord(
     val phase: TransferPhase,
     val savedUri: String? = null,
     val reason: Int? = null,
+    val sourceUri: String? = null,
+    val retried: Boolean = false,
 ) {
     fun encode(): String = json.encodeToString(this)
+
+    /**
+     * Whether the sender's card offers Retry. [live] says the manager still holds this transfer, which means it
+     * is still running. Retry covers every way an outgoing transfer can end short: a failure for any reason, an
+     * offer that expired or was cancelled, a busy peer, and a record a process death left mid-phase. It is not
+     * offered for a finished file or an offer the other person turned down themselves.
+     */
+    fun retryable(live: Boolean): Boolean =
+        outgoing &&
+            sourceUri != null &&
+            !retried &&
+            !live &&
+            phase != TransferPhase.Done &&
+            !(phase == TransferPhase.Declined && reason == TransferPayload.REASON_USER)
 
     /**
      * The chat row for this record in the DM with [peerId]: a status-notice-shaped row (`received = true`, no

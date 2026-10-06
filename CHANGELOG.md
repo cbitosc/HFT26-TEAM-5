@@ -28,6 +28,8 @@ document:
 - A photo, voice message or file on its way from a nearby phone now shows how much has arrived, with a ring
   that fills as the rest comes in. On a slow Bluetooth connection, you can tell a transfer that's still moving
   from one that's stuck.
+- When a file you sent directly doesn't get through, its card now has a Retry button that offers the same file
+  again without the file picker. The button shows only while Knit can still open the file.
 
 ### Changed
 
@@ -71,6 +73,8 @@ document:
 - With content filtering on, an explicit group photo or contact photo could still appear if it came through an
   Internet relay, or after that contact next updated their profile. Knit now hides it, as it does any other
   photo the filter catches.
+- A direct file send could fail with "no connection was made in time" when the message carrying its Wi-Fi
+  details was lost on the way. Your phone now sends those details again until the other phone connects.
 
 ## [2.8.0](https://github.com/getknit/knit/releases/tag/v2.8.0) — 2026-10-03T03:55:42Z
 
