@@ -12,6 +12,9 @@ import app.getknit.knit.data.forward.ForwardRepository
 import app.getknit.knit.data.relay.RelayStatusRepository
 import app.getknit.knit.data.settings.LoraPlaneStateStore
 import app.getknit.knit.data.settings.SettingsStore
+import app.getknit.knit.fieldlog.FieldJournal
+import app.getknit.knit.fieldlog.FieldLog
+import app.getknit.knit.fieldlog.FieldLogExport
 import app.getknit.knit.identity.Identity
 import app.getknit.knit.mesh.BlobExchange
 import app.getknit.knit.mesh.BridgeFrameSource
@@ -48,6 +51,7 @@ import app.getknit.knit.mesh.lora.LoraStatusRepository
 import app.getknit.knit.mesh.lora.MeshtasticGattDialer
 import app.getknit.knit.mesh.lora.MeshtasticLink
 import app.getknit.knit.mesh.lora.MeshtasticSession
+import app.getknit.knit.mesh.lora.fieldSample
 import app.getknit.knit.mesh.meshExceptionHandler
 import app.getknit.knit.mesh.power.AppVisibility
 import app.getknit.knit.mesh.power.PowerMonitor
@@ -99,6 +103,21 @@ val meshModule =
         // Lets the Meshtastic board GATT dial pause the mesh BLE scan for its connect window (shared singleton).
         single { BleConnectArbiter() }
         single { PowerMonitor(androidContext(), get()) }
+        // The field log (ADR 2026-10.a239): how this phone's radios behaved, kept under noBackupFilesDir and handed
+        // over only by the user from Diagnostics. MeshManager drives its session half; the radios record into it.
+        single {
+            FieldLog(
+                journal = FieldJournal(File(androidContext().noBackupFilesDir, FieldJournal.DIR)),
+                metrics = get<MeshMetrics>()::snapshot,
+                power = get<PowerStateSource>().state,
+                enabled = get<SettingsStore>().fieldLogEnabled,
+                versionCode = BuildConfig.VERSION_CODE.toLong(),
+            ).also { log ->
+                // Resolved at each sample, never here: the plane's status is built from the transport, which this precedes.
+                if (BuildConfig.LORA_PLANE) log.sampler("lora") { get<LoraPlaneStatus>().status.value.fieldSample() }
+            }
+        }
+        single { FieldLogExport(androidContext(), get(), get(), get()) }
         // Bridges the mesh blob-exchange to the encrypted DB; materializes transfer temp files under cacheDir.
         single { MeshBlobStore(get(), get(), get(), File(androidContext().cacheDir, "blobtx")) }
         // The prefixes of attachments a link drop cut off, one store for both radios and BlobExchange (#116):
@@ -144,6 +163,7 @@ val meshModule =
                                     phyMode = phyMode,
                                     appVisible = get<AppVisibility>().visible,
                                     partials = get(),
+                                    field = get<FieldLog>(),
                                 ),
                             )
                         }
@@ -153,7 +173,19 @@ val meshModule =
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && WifiAwareTransport.isSupported(ctx)) {
                             // SettingsStore is both journals (the attach give-up and the initiator hold, ADR 055 / 2026-09.m8kc).
                             val settings = get<SettingsStore>()
-                            val nan = WifiAwareTransport(ctx, get(), get(), get(), get(), get(), settings, settings, get())
+                            val nan =
+                                WifiAwareTransport(
+                                    ctx,
+                                    get(),
+                                    get(),
+                                    get(),
+                                    get(),
+                                    get(),
+                                    settings,
+                                    settings,
+                                    get(),
+                                    field = get<FieldLog>(),
+                                )
                             // Debug builds can switch the plane off live (Diagnostics / the bridge's NANOFF); release
                             // hands the composite the bare transport.
                             add(
@@ -312,6 +344,7 @@ val meshModule =
                 identities = get(),
                 // Ask the best holder of a blob rather than the likeliest (ADR 2026-10.6e5t); dark in release.
                 blobHolderQuery = BlobExchange.HolderQuery(enabled = BuildConfig.BLOB_QUERY),
+                fieldLog = get(),
             )
         }
         // UI ViewModels, MeshService, and the notification/debug entry points bind this narrow facade (not

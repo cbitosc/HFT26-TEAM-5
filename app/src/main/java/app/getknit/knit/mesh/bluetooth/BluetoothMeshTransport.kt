@@ -20,6 +20,9 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.core.content.ContextCompat
 import app.getknit.knit.BuildConfig
+import app.getknit.knit.fieldlog.BtDownReason
+import app.getknit.knit.fieldlog.FieldEvent
+import app.getknit.knit.fieldlog.FieldRecorder
 import app.getknit.knit.identity.Identity
 import app.getknit.knit.mesh.ArrivingFile
 import app.getknit.knit.mesh.BleSideDrop
@@ -148,6 +151,8 @@ class BluetoothMeshTransport(
     // Where a link keeps an attachment cut mid-stream and resumes it from (#116, ADR 2026-10.wtyc): one store
     // shared with the Wi-Fi Aware plane and BlobExchange, so any holder on either radio can finish the transfer.
     private val partials: PartialBlobs,
+    // The field log (ADR 2026-10.a239): each link's up, down and failed dial, as edges this transport already logs.
+    private val field: FieldRecorder = FieldRecorder.NONE,
 ) : MeshTransport {
     private val appContext = context.applicationContext
     private val bluetoothManager = appContext.getSystemService(BluetoothManager::class.java)
@@ -516,6 +521,7 @@ class BluetoothMeshTransport(
             phyJob = scope.launch { phyMode.distinctUntilChanged().collect { applyPhyMode(it) } }
             CodedPhyDiag.status = ::codedPhyStatus
             CodedPhyDiag.setTxPower = ::setCodedTxPower
+            field.sampler(FIELD_SAMPLER, ::fieldSample)
             if (BuildConfig.DEBUG) LinkTuneDiag.tune = ::tuneLinks
             sideChannel?.let {
                 it.bind(sideListener)
@@ -551,6 +557,7 @@ class BluetoothMeshTransport(
         paceJob?.cancel()
         CodedPhyDiag.status = null
         CodedPhyDiag.setTxPower = null
+        field.sampler(FIELD_SAMPLER, null)
         LinkTuneDiag.tune = null
         CodedPhyDiag.publishLinkPhys(emptyMap())
         sideJob?.cancel()
@@ -1304,7 +1311,10 @@ class BluetoothMeshTransport(
                 isLive = { links[nodeId] === link },
                 mode = { codedMode },
                 tuning = { CodedPhyDiag.tuning },
-                onStep = metrics::onBlePhyStep,
+                onStep = { toCoded ->
+                    metrics.onBlePhyStep(toCoded)
+                    field.record(FieldEvent.BtPhy(nodeId, toCoded, phyControls[link]?.status()?.linkRssi))
+                },
                 onGiveUp = metrics::onBlePhyGiveUp,
                 now = SystemClock::elapsedRealtime,
                 onPhyKnown = ::publishLinkPhys,
@@ -1391,6 +1401,46 @@ class BluetoothMeshTransport(
         link: FramedLink,
         status: LinkTuneStatus,
     ): LinkTuneStatus = boosts[link]?.let { status.copy(boosting = it.boosting, earned = it.earned) } ?: status
+
+    /**
+     * The field log's Bluetooth sample (ADR 2026-10.a239): the plane, each live link as its handles last heard it, and
+     * the strongest few sighted peers. A read of what the transport already holds — it asks no link handle for
+     * anything; the LE connection count may refresh its cache with one `getConnectedDevices` ([leLinkCount]).
+     */
+    private fun fieldSample(): List<FieldEvent> {
+        val now = elapsed()
+        val sighted = presence.snapshots(now)
+        val live =
+            // A link registered but not yet started has no age; it shows at the next sample.
+            links.values.filter { it.linkStartedAt > 0 }.map { link ->
+                val phy = phyControls[link]?.status()
+                val tune = tuners[link]?.status()
+                FieldEvent.BtLink(
+                    peer = link.nodeId,
+                    ageMs = now - link.linkStartedAt,
+                    feeding = link.txInProgress,
+                    receiving = link.rxInProgress,
+                    phy = phy?.phy ?: tune?.txPhy ?: linkPhy[link],
+                    rssi = phy?.linkRssi ?: tune?.rssi,
+                    intervalUs = tune?.params?.intervalUs,
+                    mtu = tune?.mtu,
+                    earned = boosts[link]?.earned,
+                )
+            }
+        val peers =
+            sighted.sortedByDescending { it.smoothedRssi }.take(FIELD_SAMPLE_PEERS).map {
+                FieldEvent.BtPeer(
+                    peer = it.nodeId,
+                    linked = links.containsKey(it.nodeId),
+                    rssi = it.smoothedRssi.toInt(),
+                    rssi1m = it.rssi1m?.toInt(),
+                    rssiCoded = it.rssiCoded?.toInt(),
+                    codedLagMs = it.codedLagMs,
+                )
+            }
+        val plane = FieldEvent.BtScan(links.size, leLinkCount(), sighted.size, hunting, codedMode)
+        return listOf(plane) + live + peers
+    }
 
     private fun codedPhyStatus(): CodedPhyStatus {
         val now = elapsed()
@@ -1997,7 +2047,7 @@ class BluetoothMeshTransport(
             Log.i(TAG, "bt connect ok $nodeId durMs=${elapsed() - startedAt}")
             // The reply's full-width capabilities, as an accepted link takes the dialer's: the advert carries only
             // their low byte, which never holds CAP_DOORBELL, so a dialed iPhone would never be rung (A3, ADR 2026-09.dqvb).
-            registerLink(nodeId, reply, link, device = device)
+            registerLink(nodeId, reply, link, device = device, dialMs = elapsed() - startedAt)
         }
     }
 
@@ -2066,6 +2116,8 @@ class BluetoothMeshTransport(
         // The peer's device, for its doorbell and its address. [advert] is the peer's HELLO either way — the dialer's
         // on an accepted link, the reply on a dialed one — so its capabilities are full width and carry CAP_DOORBELL.
         device: BluetoothDevice? = null,
+        // How long our dial took, for the field log; null for a link the peer dialed.
+        dialMs: Long? = null,
     ) {
         val events = LinkEvents()
         val framed =
@@ -2105,6 +2157,9 @@ class BluetoothMeshTransport(
             doorbells.remove(prev)?.close() // teardownLink(only = prev) will find it replaced and release nothing
             closeTuning(prev, sharedAcl = true)
             prev.close() // a stale link to the same peer — never leak it; its own end releases nothing now
+            if (prev.linkStartedAt > 0) {
+                field.record(FieldEvent.BtDown(nodeId, BtDownReason.REPLACED, elapsed() - prev.linkStartedAt, links.size - 1))
+            }
         }
         // Before framed.start() and the neighbor refresh, so the link-up frames already ring it.
         if (device != null && DoorbellPolicy.serves(advert.capabilities)) {
@@ -2133,6 +2188,7 @@ class BluetoothMeshTransport(
         publishReachable() // a live link ⇒ reachable, even for an inbound peer we never scan-sighted
         wake() // inFlight cleared + link count changed → resume connectLoop and re-evaluate scan demand
         advertEdge()
+        field.record(FieldEvent.BtUp(nodeId, dialMs = dialMs, sighted = sighted, links = links.size))
         Log.i(TAG, "bt link up: $nodeId (${links.size} live)")
     }
 
@@ -2149,11 +2205,24 @@ class BluetoothMeshTransport(
         linkDevices.remove(fl)
         linkPhy.remove(fl)
         lastPace.remove(fl)
-        phyControls.remove(fl)?.let { control ->
-            notePhyDrop(control.status(), reason)
-            control.close()
-        }
+        val dropStatus =
+            phyControls.remove(fl)?.let { control ->
+                control.status().also { notePhyDrop(it, reason) }.also { control.close() }
+            }
         publishLinkPhys()
+        // A link torn down before it started never recorded its up: leave its down out too.
+        if (fl.linkStartedAt > 0) {
+            field.record(
+                FieldEvent.BtDown(
+                    nodeId,
+                    BtDownReason.of(reason),
+                    lifetimeMs = elapsed() - fl.linkStartedAt,
+                    links = links.size,
+                    phy = dropStatus?.phy,
+                    rssi = dropStatus?.linkRssi,
+                ),
+            )
+        }
         doorbells.remove(fl)?.close()
         closeTuning(fl, sharedAcl = false)
         fl.close()
@@ -2209,6 +2278,7 @@ class BluetoothMeshTransport(
                 if (nodeId in links.keys) 0 to elapsed() else bumpBackoffLocked(nodeId)
             }
         metrics.onBtConnectFailed(reason)
+        field.record(FieldEvent.BtFail(nodeId, reason, durationMs = elapsed() - startedAt, streak = streak))
         wake()
         // Log the real exception (previously swallowed) + A2DP state, so the intermittent failure is diagnosable.
         Log.w(
@@ -2540,6 +2610,12 @@ class BluetoothMeshTransport(
 
     companion object {
         const val TAG = "BluetoothMeshTransport"
+
+        /** This plane's name among the field log's samplers. */
+        private const val FIELD_SAMPLER = "bluetooth"
+
+        /** The strongest sighted peers a field-log sample keeps: enough for a walk's partner and its neighbours. */
+        private const val FIELD_SAMPLE_PEERS = 4
 
         /**
          * Whether this device has a Bluetooth adapter + BLE. The one probe of the adapter, kept here because

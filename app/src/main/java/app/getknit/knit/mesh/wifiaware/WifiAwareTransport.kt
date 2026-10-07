@@ -36,6 +36,8 @@ import app.getknit.knit.BuildConfig
 import app.getknit.knit.data.settings.NanAttachJournal
 import app.getknit.knit.data.settings.NanInitiatorJournal
 import app.getknit.knit.data.settings.NanInitiatorLatch
+import app.getknit.knit.fieldlog.FieldEvent
+import app.getknit.knit.fieldlog.FieldRecorder
 import app.getknit.knit.identity.Identity
 import app.getknit.knit.mesh.ArrivingFile
 import app.getknit.knit.mesh.DigestTracker
@@ -141,6 +143,8 @@ class WifiAwareTransport(
     // Where a link keeps an attachment cut mid-stream and resumes it from (#116, ADR 2026-10.wtyc), shared with
     // the Bluetooth plane: a transfer the NDP lost can finish over BLE, and the other way round.
     private val partials: PartialBlobs,
+    // The field log (ADR 2026-10.a239): each data path's up and down, and each session cycle.
+    private val field: FieldRecorder = FieldRecorder.NONE,
 ) : MeshTransport {
     private val appContext = context.applicationContext
     private val awareManager = appContext.getSystemService(Context.WIFI_AWARE_SERVICE) as WifiAwareManager?
@@ -1738,6 +1742,7 @@ class WifiAwareTransport(
             // Two callers: the discovery-loop pinned-responder branch (initiator NDI freed) and checkWedge's
             // Tier-1 responder self-heal (a wedged responder refreshed) — each logs its own reason first.
             Log.w(TAG, "session cycle: tearing down for a fresh session, settling")
+            field.record(FieldEvent.NanCycle)
             stopResponder()
             // A PeerHandle is only valid on the discovery session it was learned on, so closing subscribe
             // invalidates every entry in [discovered] — drop them with it, exactly as [rearmSubscribe] and
@@ -2772,6 +2777,7 @@ class WifiAwareTransport(
         conn.reaperJob = scope.launch { superviseLink(conn) }
         noteReachable(Peer(peerNodeId, advert.protoVersion, advert.capabilities))
         refreshNeighbors()
+        field.record(FieldEvent.NanUp(peerNodeId, initiator = callback != null, links = peers.size))
         Log.i(TAG, "link up: $peerNodeId")
     }
 
@@ -2914,6 +2920,14 @@ class WifiAwareTransport(
         }
         noteLinkEnded()
         refreshNeighbors()
+        field.record(
+            FieldEvent.NanDown(
+                peerNodeId,
+                initiator = conn.isInitiator,
+                lifetimeMs = SystemClock.elapsedRealtime() - conn.link.linkStartedAt,
+                clean = backoffMs == 0L,
+            ),
+        )
         Log.i(TAG, "link down: $peerNodeId")
         // A served client just left. The serve itself never wedges (re-audit E1: 30+ consecutive serves), but
         // from its first serve on the responder request keeps the NDI assigned even at 0 NDPs, blocking this

@@ -115,8 +115,10 @@ internal fun shareFileName(
     appVersion: String,
     at: Long,
     zone: ZoneId = ZoneId.systemDefault(),
+    stem: String = "knit-crash",
+    extension: String = "txt",
 ): String {
     val stamp = Instant.ofEpochMilli(at).atZone(zone).format(FILE_STAMP)
     val version = appVersion.substringBefore(' ').replace(UNSAFE_NAME_CHARS, "-").ifBlank { "unknown" }
-    return "knit-crash-$version-$stamp.txt"
+    return "$stem-$version-$stamp.$extension"
 }

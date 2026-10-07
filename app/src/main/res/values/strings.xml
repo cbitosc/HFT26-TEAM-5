@@ -977,6 +977,34 @@
     <string name="crash_delete_body">This removes every saved crash report from this phone. It can\'t be undone.</string>
     <string name="crash_delete_confirm">Delete all</string>
     <string name="crash_deleted">Crash details deleted</string>
+    <!-- The field log (ADR 2026-10.a239): a record of how the radios behaved, kept on the phone, shared only by the user. -->
+    <string name="field_log_section">Field data</string>
+    <string name="field_log_row_label">Field log</string>
+    <string name="field_log_row_supporting">How your radios have behaved over the last three days</string>
+    <string name="field_log_open_action">Open field log</string>
+    <string name="field_log_title">Field log</string>
+    <string name="field_log_explainer">When this is on, Knit keeps a short record of how this phone\'s radios behaved over the last three days: when links to other phones came and went, how strong they were, how fast files moved, and how long messages took. Sharing it with the Knit project helps tune Knit for the places people actually use it. It stays on this phone unless you share the file yourself.</string>
+    <string name="field_log_privacy_note">The file holds no names, messages, contacts, phone ids or locations. Other phones appear as short codes like p3f9a01c2, and those codes change when you clear the log.</string>
+    <string name="field_log_switch">Keep a field log</string>
+    <string name="field_log_switch_note">Turning this off also deletes what\'s kept.</string>
+    <plurals name="field_log_summary">
+        <item quantity="one">%1$d entry, %2$s</item>
+        <item quantity="other">%1$d entries, %2$s</item>
+    </plurals>
+    <plurals name="field_log_more">
+        <item quantity="one">…and %1$d more line in the file</item>
+        <item quantity="other">…and %1$d more lines in the file</item>
+    </plurals>
+    <string name="field_log_action_share">Share as a file</string>
+    <string name="field_log_share_chooser_title">Send field log</string>
+    <string name="field_log_preview_header">What\'s in the file</string>
+    <string name="field_log_empty">Nothing recorded yet. Entries appear once the mesh has been running for a minute.</string>
+    <string name="field_log_off">The field log is off. Turn it on to start recording.</string>
+    <string name="field_log_action_clear">Clear</string>
+    <string name="field_log_clear_title">Clear the field log?</string>
+    <string name="field_log_clear_body">This deletes everything the field log has kept on this phone. Recording starts over, with new codes for other phones.</string>
+    <string name="field_log_clear_confirm">Clear</string>
+    <string name="field_log_cleared">Field log cleared</string>
 
     <!-- Diagnostics: the on-device model poison-pill (ADR 037). Plain language on purpose — "toxicity
          classifier" means nothing to the person reading it, and the honest part is which chats lost what. -->

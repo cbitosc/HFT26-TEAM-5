@@ -2,6 +2,7 @@ package app.getknit.knit.data.message
 
 import app.getknit.knit.data.RoomDbTest
 import app.getknit.knit.data.blob.BlobEntity
+import app.getknit.knit.data.receipt.MessageReceiptEntity
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
@@ -663,6 +664,24 @@ class MessageDaoTest : RoomDbTest() {
 
             assertFalse(dao.voiceMetaWanted("note"))
             assertFalse("no row names it", dao.voiceMetaWanted("nobody-claims-this"))
+        }
+
+    @Test
+    fun `the field log's latency reads take others' arrivals and receipts for our own, inside the window`() =
+        runTest {
+            // Someone else's, arrived inside the window over Bluetooth: 1.5 s on the way.
+            dao.upsert(msg("in", sender = "peer", sentAt = 10_000L).copy(arrivedAt = 11_500L, receivedVia = DeliveryPlane.Bluetooth.code))
+            // Someone else's, arrived before the window: left out.
+            dao.upsert(msg("old", sender = "peer", sentAt = 1_000L).copy(arrivedAt = 2_000L))
+            // Our own: never an arrival, but its receipt is a round trip.
+            dao.upsert(msg("mine", sender = "me", sentAt = 20_000L))
+            db.messageReceiptDao().insertIfAbsent(
+                MessageReceiptEntity("mine", "peer", notedAt = 23_000L, via = DeliveryPlane.LoRa.code),
+            )
+
+            assertEquals(listOf(PlaneDelay(DeliveryPlane.Bluetooth.code, 1_500L)), dao.inboundDelays("me", since = 5_000L))
+            assertEquals(listOf(PlaneDelay(DeliveryPlane.LoRa.code, 3_000L)), dao.receiptDelays("me", since = 5_000L))
+            assertEquals(emptyList<PlaneDelay>(), dao.receiptDelays("me", since = 30_000L))
         }
 
     private fun msg(

@@ -27,6 +27,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.RestartAlt
+import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -100,6 +101,7 @@ import java.io.File
 fun DiagnosticsScreen(
     onBack: () -> Unit,
     onOpenCrashLog: () -> Unit,
+    onOpenFieldLog: () -> Unit,
     viewModel: DiagnosticsViewModel = koinViewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
@@ -155,6 +157,7 @@ fun DiagnosticsScreen(
         onRestartMesh = viewModel::restartMesh,
         onScan = viewModel::rescan,
         onOpenCrashLog = onOpenCrashLog,
+        onOpenFieldLog = onOpenFieldLog,
         onResetModeration = { confirmingModerationReset = true },
         onReleaseInitiatorHold = viewModel::releaseInitiatorHold,
         bleLinkCapOffered = viewModel.bleLinkCapOffered,
@@ -198,6 +201,8 @@ internal fun DiagnosticsScreenContent(
     onScan: () -> Unit,
     onOpenCrashLog: () -> Unit,
     onResetModeration: () -> Unit,
+    // The field log's screen (ADR 2026-10.a239). Defaulted: previews and screen tests that never open it.
+    onOpenFieldLog: () -> Unit = {},
     // Diagnostics' "Try again" for a Wi-Fi Aware plane holding its initiator role (ADR 2026-09.m8kc). Defaulted:
     // the section only renders when a transport row says so, and most callers describe phones that never do.
     onReleaseInitiatorHold: () -> Unit = {},
@@ -283,6 +288,11 @@ internal fun DiagnosticsScreenContent(
             if (blePhyMode != null && state.transports.any { it is TransportRow.Live && it.kind == TransportKind.Bluetooth }) {
                 item { BlePhyModeRow(mode = blePhyMode, onSet = onSetBlePhyMode) }
             }
+
+            // Always offered, above the metrics: a user asked to "send the field log from Diagnostics" finds it
+            // without scrolling past forty metric rows, and the controls and radio rows keep their place above it.
+            item { SectionHeader(stringResource(R.string.field_log_section)) }
+            item { FieldLogRow(onClick = onOpenFieldLog) }
 
             item { SectionHeader(stringResource(R.string.diagnostics_metrics)) }
             item { MetricsSection(state.metrics) }
@@ -1149,6 +1159,41 @@ private fun CrashRow(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Icon(
+            Icons.AutoMirrored.Filled.KeyboardArrowRight,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/** The way into the field log (ADR 2026-10.a239); shaped like [CrashRow] next door. */
+@Composable
+private fun FieldLogRow(onClick: () -> Unit) {
+    val label = stringResource(R.string.field_log_open_action)
+    Row(
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .heightIn(min = 48.dp)
+                .clickable(onClickLabel = label, role = Role.Button, onClick = onClick)
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            Icons.Filled.Sensors,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(text = stringResource(R.string.field_log_row_label), style = MaterialTheme.typography.bodyMedium)
+            Text(
+                text = stringResource(R.string.field_log_row_supporting),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
         Icon(

@@ -331,6 +331,8 @@ internal fun ConfirmDialog(
 fun launchCrashShareChooser(
     context: Context,
     uri: Uri,
+    // The field log's share reuses this with its own title (ADR 2026-10.a239).
+    title: Int = R.string.crash_share_chooser_title,
 ) {
     val send =
         Intent(Intent.ACTION_SEND).apply {
@@ -341,7 +343,7 @@ fun launchCrashShareChooser(
         }
     val chooser =
         Intent
-            .createChooser(send, context.getString(R.string.crash_share_chooser_title))
+            .createChooser(send, context.getString(title))
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     runCatching { context.startActivity(chooser) }
 }

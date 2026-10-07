@@ -55,6 +55,7 @@ import app.getknit.knit.ui.chatlist.ChatListScreen
 import app.getknit.knit.ui.contacts.ContactsScreen
 import app.getknit.knit.ui.diagnostics.CrashLogScreen
 import app.getknit.knit.ui.diagnostics.DiagnosticsScreen
+import app.getknit.knit.ui.diagnostics.FieldLogScreen
 import app.getknit.knit.ui.donate.DonateScreen
 import app.getknit.knit.ui.group.GroupDetailsScreen
 import app.getknit.knit.ui.lora.LoraRadioScreen
@@ -91,6 +92,7 @@ private object Routes {
     const val DIAGNOSTICS = "diagnostics"
     const val YOUR_MESH = "yourMesh"
     const val CRASH_LOG = "crash"
+    const val FIELD_LOG = "fieldlog"
     const val BLOCKED_USERS = "blocked"
     const val MESSAGE_REQUESTS = "requests"
     const val DONATE = "donate"
@@ -572,10 +574,14 @@ fun KnitApp(startRoute: String? = null) {
             DiagnosticsScreen(
                 onBack = { navController.popBackStack() },
                 onOpenCrashLog = { navController.navigate(Routes.CRASH_LOG) },
+                onOpenFieldLog = { navController.navigate(Routes.FIELD_LOG) },
             )
         }
         composable(Routes.CRASH_LOG) {
             CrashLogScreen(onBack = { navController.popBackStack() })
+        }
+        composable(Routes.FIELD_LOG) {
+            FieldLogScreen(onBack = { navController.popBackStack() })
         }
         composable(Routes.YOUR_MESH) {
             YourMeshScreen(

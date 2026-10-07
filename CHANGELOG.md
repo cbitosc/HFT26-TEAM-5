@@ -30,6 +30,8 @@ document:
   from one that's stuck.
 - When a file you sent directly doesn't get through, its card now has a Retry button that offers the same file
   again without the file picker. The button shows only while Knit can still open the file.
+- You can turn on a field log in Diagnostics: three days of how your phone's radios behaved, with no names,
+  messages or ids in it. Share it as a file to help tune Knit; it never leaves your phone unless you do.
 
 ### Changed
 

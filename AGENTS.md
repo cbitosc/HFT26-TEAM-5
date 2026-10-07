@@ -265,6 +265,14 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   that arrives from someone else, over the radios or a spool, goes through `ingest` before its obtained hook runs,
   and a key-less one is always screened there, before it is stored, so "held" means "screened" (#109). A held avatar is adopted only if screening has not refused
   it: a refused avatar's bytes can stay, pinned in custody by the sealed profile that names them.
+- **When touching `fieldlog/`, a `FieldEvent`, a `field.record(…)` / `field.sampler(…)` call in a transport,
+  `ui/diagnostics/FieldLog*`, or `MessageDao.inboundDelays` / `receiptDelays`:** READ ADR 2026-10.a239 and
+  `docs/FIELD_LOG.md`. Every build can keep a bounded record of how the radios behaved (4 MiB, 72 h, in
+  `noBackupFilesDir`) — off until the user switches it on — and only the user shares it from Diagnostics; no
+  upload path, ever. `FieldWriter` has
+  no string field (a peer is a salted pseudonym), so redaction holds by construction; never add one. A new event
+  is a golden line in `FieldEventSchemaTest`, a row in the doc and a kind in `scripts/fieldlog.py`; a sampler
+  runs on the log's tick and only reads.
 - **When touching `legal/`, `ui/about/`, `app/src/main/assets/legal/`, `THIRD-PARTY-NOTICES.md`, or a shipped
   dependency:** READ ADR 2026-09.6eb6. The in-app Open-source licenses list is `legal/ThirdPartyNotices.kt`,
   pinned to the notices table by `ThirdPartyNoticesSyncTest` and to `app/gradle.lockfile`'s

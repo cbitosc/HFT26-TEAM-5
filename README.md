@@ -403,8 +403,10 @@ message, so the people you send to never contact the site. Both are off on a fre
 therefore makes no network calls at all. (`ACCESS_NETWORK_STATE` is declared for the preview fetch alone —
 it is how the app checks that the default network actually reaches the Internet before opening a socket,
 so a phone that is only on the mesh never tries.) Knit bundles no analytics or telemetry, and a crash is
-kept on the phone for you to copy into a bug report, never uploaded — you can confirm all of it from the
-source and the deliberately GMS-free dependency list.
+kept on the phone for you to copy into a bug report, never uploaded. The same goes for the field log, which is off
+unless you turn it on in Diagnostics: a three-day record of how your radios behaved, with no names, messages
+or ids in it, that you can share if you want to help tune Knit. You can confirm all of it from the source and the deliberately
+GMS-free dependency list.
 
 **Why does the app declare the location permission?**
 For two things, and it only ever asks for the permission when it needs one of them. On Android 10–12,

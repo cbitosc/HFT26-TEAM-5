@@ -28,6 +28,7 @@ import app.getknit.knit.data.peer.PeerEntity
 import app.getknit.knit.data.reaction.ReactionEntity
 import app.getknit.knit.data.settings.LoraBoard
 import app.getknit.knit.data.settings.SettingsStore
+import app.getknit.knit.fieldlog.FieldLog
 import app.getknit.knit.identity.Identity
 import app.getknit.knit.isValidReactionEmoji
 import app.getknit.knit.location.GeoUri
@@ -228,6 +229,9 @@ class MeshManager(
     // attachment's plaintext name and makes a room copy from a sealed one this phone holds. Stateless over [messages]
     // and [blobs], so the default is what every test wants; production hands in the Koin single.
     private val identities: AttachmentIdentities = AttachmentIdentities(messages, blobs),
+    // The field log (ADR 2026-10.a239): each session's start, stop, power and radio status, and the counters'
+    // quarter-hourly movement. Null — every test — keeps none.
+    private val fieldLog: FieldLog? = null,
 ) : MeshController,
     TransferSignals,
     ProfileFrameSource,
@@ -718,6 +722,7 @@ class MeshManager(
         pruneForwardStorePeriodically(session)
         reofferToNeighborsPeriodically(session)
         logMetricsPeriodically(session)
+        fieldLog?.start(session, transportStatuses)
         session.launch { introSync.prime() }
         scopeSync?.start(session)
         watchRoute(session)
@@ -767,6 +772,7 @@ class MeshManager(
         // The session's last metrics tick may be a minute away; bank what it credited before it dies.
         scope.launch { ledger.flush() }
         scope.launch { flushSeenStamps() }
+        fieldLog?.let { log -> scope.launch { log.stop() } }
         session?.cancel()
         sessionScope = null
         // A stopped (or paused) mesh hears nothing, so it stops claiming anyone is reachable through it — and,

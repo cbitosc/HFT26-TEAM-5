@@ -138,6 +138,13 @@ class SettingsStore(
         dataStore.data.map { BuildConfig.INTERNET_PLANE && (it[KEY_LINK_PREVIEWS] ?: false) }
 
     /**
+     * Whether this phone keeps a field log (ADR 2026-10.a239): a bounded record of how its radios behaved,
+     * kept on the phone and handed over only by the user. **Off by default**: recording is the user's choice, made
+     * on the Field log screen, even though nothing leaves the phone unless they share it.
+     */
+    val fieldLogEnabled: Flow<Boolean> = dataStore.data.map { it[KEY_FIELD_LOG] ?: false }
+
+    /**
      * Whether this device's profile declares its user "open to chat". Defaults to off. A profile field like
      * [displayName]/[status]: a change bumps [profileVersion] and republishes the profile on both paths
      * (`MeshManager.watchProfileChanges`), and while on, the presence cue (`presence/OpenToChatWatch`) nudges
@@ -622,6 +629,8 @@ class SettingsStore(
 
     suspend fun setLinkPreviewsEnabled(value: Boolean) = dataStore.edit { it[KEY_LINK_PREVIEWS] = value }
 
+    suspend fun setFieldLogEnabled(value: Boolean) = dataStore.edit { it[KEY_FIELD_LOG] = value }
+
     suspend fun setOpenToChat(value: Boolean) = dataStore.edit { it[KEY_OPEN_TO_CHAT] = value }
 
     suspend fun setDynamicColor(value: Boolean) = dataStore.edit { it[KEY_DYNAMIC_COLOR] = value }
@@ -947,6 +956,7 @@ class SettingsStore(
         val KEY_INTRO_GRACE = stringSetPreferencesKey("intro_grace")
         val KEY_CONTENT_FILTERING = booleanPreferencesKey("content_filtering_enabled")
         val KEY_LINK_PREVIEWS = booleanPreferencesKey("link_previews_enabled")
+        val KEY_FIELD_LOG = booleanPreferencesKey("field_log_enabled")
         val KEY_OPEN_TO_CHAT = booleanPreferencesKey("open_to_chat")
         val KEY_DYNAMIC_COLOR = booleanPreferencesKey("dynamic_color")
         val KEY_THEME_MODE = stringPreferencesKey("theme_mode")

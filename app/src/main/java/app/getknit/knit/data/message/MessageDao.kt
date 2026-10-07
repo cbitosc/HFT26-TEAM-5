@@ -617,7 +617,40 @@ interface MessageDao {
         keepFrom: Set<String>,
         limit: Int,
     )
+
+    /**
+     * How long each message from someone else took to get here, since [since] (our arrival clock): the field
+     * log's `latency IN` summary (ADR 2026-10.a239). The plane and the delay only — no row leaves the export,
+     * which reduces these to percentiles. The author's clock is in `sentAt`, so its skew is in the delay.
+     */
+    @Query(
+        "SELECT receivedVia AS plane, arrivedAt - sentAt AS ms FROM messages " +
+            "WHERE senderId != :me AND arrivedAt IS NOT NULL AND arrivedAt >= :since",
+    )
+    suspend fun inboundDelays(
+        me: String,
+        since: Long,
+    ): List<PlaneDelay>
+
+    /**
+     * How long each receipt for one of our messages took to come back, since [since]: both ends on our clock
+     * (`MessageReceiptEntity.notedAt` is when the receipt reached us). The field log's `latency ACK` summary.
+     */
+    @Query(
+        "SELECT r.via AS plane, r.notedAt - m.sentAt AS ms FROM message_receipts r " +
+            "JOIN messages m ON m.id = r.messageId WHERE m.senderId = :me AND r.notedAt >= :since",
+    )
+    suspend fun receiptDelays(
+        me: String,
+        since: Long,
+    ): List<PlaneDelay>
 }
+
+/** One delivery's plane ([DeliveryPlane.code]) and how long it took, for the field log's latency summary. */
+data class PlaneDelay(
+    val plane: Int,
+    val ms: Long,
+)
 
 /** Room projection for [MessageDao.conversationActivity]: a thread's id, newest message time, and row count. */
 data class ConversationActivity(

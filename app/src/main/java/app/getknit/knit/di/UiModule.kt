@@ -24,6 +24,7 @@ import app.getknit.knit.ui.chatlist.ChatListViewModel
 import app.getknit.knit.ui.contacts.ContactsViewModel
 import app.getknit.knit.ui.diagnostics.CrashLogViewModel
 import app.getknit.knit.ui.diagnostics.DiagnosticsViewModel
+import app.getknit.knit.ui.diagnostics.FieldLogViewModel
 import app.getknit.knit.ui.group.GroupDetailsViewModel
 import app.getknit.knit.ui.lora.LoraRadioViewModel
 import app.getknit.knit.ui.onboarding.OnboardingViewModel
@@ -116,6 +117,7 @@ val uiModule =
             )
         }
         viewModel { CrashLogViewModel(get()) }
+        viewModel { FieldLogViewModel(get(), get(), get()) }
         // Your mesh: the plain-words companion to Diagnostics. Reads the concrete ForwardRepository for its
         // "carrying now" count — a UI projection deliberately kept off the ForwardStore seam.
         viewModel { YourMeshViewModel(get(), get(), get(), get<ForwardRepository>(), get()) }

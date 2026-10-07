@@ -9,6 +9,8 @@ import app.getknit.knit.ui.diagnostics.CrashRowPreview
 import app.getknit.knit.ui.diagnostics.DiagnosticsRowsPreview
 import app.getknit.knit.ui.diagnostics.DiagnosticsScreenEmptyDegradedPreview
 import app.getknit.knit.ui.diagnostics.DiagnosticsScreenPopulatedPreview
+import app.getknit.knit.ui.diagnostics.FieldLogScreenOffPreview
+import app.getknit.knit.ui.diagnostics.FieldLogScreenPreview
 import app.getknit.knit.ui.diagnostics.MeshControlsSectionDegradedPreview
 import app.getknit.knit.ui.diagnostics.MeshControlsSectionHealthyPreview
 import app.getknit.knit.ui.diagnostics.MeshControlsSectionUnavailableBleOnlyPreview
@@ -130,3 +132,13 @@ fun BleLinkCapRow() = BleLinkCapRowPreview()
 @ComponentShots
 @Composable
 fun BlePhyModeRow() = BlePhyModeRowPreview()
+
+@PreviewTest
+@ScreenShots
+@Composable
+fun FieldLogScreen() = FieldLogScreenPreview()
+
+@PreviewTest
+@ScreenShots
+@Composable
+fun FieldLogScreenOff() = FieldLogScreenOffPreview()
