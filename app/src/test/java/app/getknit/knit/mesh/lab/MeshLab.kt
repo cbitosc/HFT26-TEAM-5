@@ -1883,6 +1883,23 @@ class LabNode internal constructor(
     /** How many `lora tx <label>…` lines this boot logged — what the board actually put on the air. */
     fun loraTx(label: String): Int = loraLog.count { it.startsWith("lora tx $label") }
 
+    /**
+     * 1 once this node's board has put frame [id] on the air, live or as the bridge's backfill, else 0 — a
+     * `tryAwait` count. Live is a `lora tx <live>` line past the [liveBefore] a scenario read before the frame
+     * existed (the fan-out's label names the type, never the id); backfill is `lora tx bridge:<id>`.
+     *
+     * Either one is the board carrying it, and a scenario cannot pin which. Custody comes first on both roads
+     * to the fan-out (`MeshManager.originateSigned`, `InboundPipeline.onDeliver`), so a far gateway's OFFER that
+     * lands in between makes the bridge serve the frame, take its signature slot, and the fan-out is then deduped
+     * on it (ADR 2026-09.y8pu) — still one transmission (#141, Findings 4 and 5). Assert `loraTx` on the live label
+     * alone only where no far board can be heard while the frame is fanned.
+     */
+    fun loraAired(
+        id: String,
+        live: String,
+        liveBefore: Int = 0,
+    ): Int = if (loraTx(live) > liveBefore || loraTx("bridge:$id") > 0) 1 else 0
+
     /** Who reacted with what on [messageId], as (reactor, emoji). A retraction is a tombstone and is not listed. */
     suspend fun reactions(messageId: String): Set<Pair<String, String>> =
         reactionStore

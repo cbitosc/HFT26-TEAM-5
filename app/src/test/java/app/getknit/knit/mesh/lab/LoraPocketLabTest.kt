@@ -76,12 +76,17 @@ class LoraPocketLabTest {
             val dave = lab.node("dave", quick).apply { setDisplayName("Dave") }
             meetThenSplit(listOf(alice, bob, carol, dave), keep = listOf(alice to bob, carol to dave))
 
+            val aliceFanned = alice.loraTx("fanout:chat")
             assertTrue(bob.sendRoom("from pocket a"))
             val post = bob.ownMessageId(Conversations.NEARBY, "from pocket a")
             assertTrue("dave never heard bob's post", lab.tryAwait(1) { dave.roomPosts()[bob.nodeId]?.size ?: 0 })
             // Waited, not read: the board logs its `lora tx` line after the air already holds the packet, so Dave can
-            // have the post first.
-            assertTrue("alice's board carried it", lab.tryAwait(1) { alice.loraTx("fanout:chat") })
+            // have the post first. Live or as backfill (`loraAired`): Carol's OFFER can reach Alice's board between
+            // her custody of the relayed post and its re-fan, and the bridge then airs it instead.
+            assertTrue(
+                "alice's board carried it: ${alice.loraLog}",
+                lab.tryAwait(1) { alice.loraAired(post, "fanout:chat", aliceFanned) },
+            )
             assertTrue("carol's board heard it", carol.metrics.lora().loraReceived >= 1)
             assertEquals("bob has no board", 0L, bob.metrics.lora().loraSent)
 
@@ -157,8 +162,12 @@ class LoraPocketLabTest {
             lab.unlink(alice, carol)
 
             air.lossy = { _, _ -> true }
+            val fanned = alice.loraTx("fanout:chat")
             assertTrue(alice.sendRoom("into an empty sky"))
-            assertTrue("the fan-out never left", lab.tryAwait(1) { alice.loraTx("fanout:chat") })
+            val post = alice.ownMessageId(Conversations.NEARBY, "into an empty sky")
+            // Into the empty sky either way: an OFFER Carol aired before the loss began can still have the bridge serve
+            // the post between custody and fan-out (`loraAired`), and that copy is lost exactly as the fan-out's is.
+            assertTrue("the post never left: ${alice.loraLog}", lab.tryAwait(1) { alice.loraAired(post, "fanout:chat", fanned) })
             air.lossy = { _, _ -> false }
 
             assertTrue("the backfill never repaired it", lab.tryAwait(1) { carol.roomPosts()[alice.nodeId]?.size ?: 0 })
@@ -190,11 +199,12 @@ class LoraPocketLabTest {
             assertTrue(passive.sendRoom("from the passive board's phone"))
             val post = passive.ownMessageId(Conversations.NEARBY, "from the passive board's phone")
             assertTrue("carol never heard it", lab.tryAwait(1) { carol.roomPosts()[passive.nodeId]?.size ?: 0 })
-            // Live or as backfill, and either is the active board carrying it. Carol's OFFER can land after the post
-            // is in the active board's custody but before its re-fan: the bridge then serves it first, records its
-            // signature, and the fan-out is deduped on it (ADR 2026-09.y8pu) — one transmission either way.
-            val carried = lab.tryAwait(1) { if (active.loraTx("fanout:chat") > activeFanned || active.loraTx("bridge:$post") > 0) 1 else 0 }
-            assertTrue("the active board carried it: ${active.loraLog}", carried)
+            // Live or as backfill (`loraAired`): Carol's OFFER can land between the active board's custody of the post
+            // and its re-fan, and the bridge then airs it instead — one transmission either way.
+            assertTrue(
+                "the active board carried it: ${active.loraLog}",
+                lab.tryAwait(1) { active.loraAired(post, "fanout:chat", activeFanned) },
+            )
             assertEquals("the passive board fanned nothing", 0, passive.loraTx("fanout:chat"))
             assertEquals("the passive board served nothing of it", 0, passive.loraTx("bridge:$post"))
             lab.assertConverged(listOf(alice, amber), atLeast = 1) { Conversations.NEARBY }
@@ -220,8 +230,11 @@ class LoraPocketLabTest {
             lab.unlink(alice, bob)
 
             air.lossy = { _, _ -> true }
+            val farBefore = alice.loraTx("far:chat")
             assertTrue(alice.sendDm(bob, "while your board was off"))
-            assertTrue("the DM never left", lab.tryAwait(1) { alice.loraTx("far:chat") })
+            val dm = alice.ownMessageId(alice.dmWith(bob), "while your board was off")
+            // As the empty-sky post above: an OFFER Bob's board aired before the loss can have the bridge air it instead.
+            assertTrue("the DM never left: ${alice.loraLog}", lab.tryAwait(1) { alice.loraAired(dm, "far:chat", farBefore) })
             air.lossy = { _, _ -> false }
 
             assertTrue("the bridge never carried it", lab.tryAwait(3) { bob.decrypted(bob.dmWith(alice)).size })

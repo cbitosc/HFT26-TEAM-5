@@ -59,6 +59,7 @@ class RoomTickPlanesLabTest {
 
             // Nothing else goes bob → alice, so the ride hold runs out and the targeted path carries the tick.
             assertEquals(DeliveryPlane.LoRa, lab.awaitReceipt(alice, post, bob))
+            // The live label alone, not `loraAired`: a `relay = false` tick is never custodied, so no bridge can air it.
             assertEquals("one targeted send, not a flood", 1, bob.loraTx("send:chat"))
             assertEquals("a relay = false tick is never custodied", 0, bob.custodiedChatsTo(alice))
 
