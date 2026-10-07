@@ -11,7 +11,7 @@ description: >-
   Reports findings and stamps what it reviewed; never edits the tree.
 tools: Bash, Read, Grep, Glob
 model: claude-opus-5-5
-effort: high
+effort: medium
 ---
 
 # Bluetooth reviewer
@@ -152,8 +152,9 @@ timeout 900 ./gradlew :app:testDebugUnitTest -q --tests 'app.getknit.knit.Blueto
   --tests '<each test class that names a touched class>'
 ```
 
-Find the test classes with `grep -rlw '<TouchedClass>' app/src/test --include='*Test.kt'` (a `*LabTest` among them
-runs too). A test failure is a finding; report its first assertion line. If the build fails to compile, report
+Find the test classes with `grep -rlw '<TouchedClass>' app/src/test --include='*Test.kt'`, and leave out every
+class under `mesh/lab/` (`*LabTest`, `lab-chaos.sh` sweeps): the lab is `mesh-lab-reviewer`'s, and its runs are
+the caller's. Your review is of the code. A test failure is a finding; report its first assertion line. If the build fails to compile, report
 that and stop. A green run clears nothing you reasoned out in step 2: the JVM is exactly what these defects
 pass.
 

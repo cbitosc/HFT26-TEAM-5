@@ -1159,6 +1159,13 @@ class WifiAwareTransport(
 
     override fun fileArrivingFrom(nodeId: String): Boolean = peers[nodeId]?.link?.rxInProgress ?: false
 
+    override fun fileArrivingEtaMs(nodeId: String): Long? = peers[nodeId]?.link?.rxEtaMs()
+
+    override fun cancelQueuedFile(
+        nodeId: String,
+        key: String,
+    ): Boolean = peers[nodeId]?.link?.cancelQueued(key) ?: false
+
     override fun fileInFlightTo(
         nodeId: String,
         key: String,

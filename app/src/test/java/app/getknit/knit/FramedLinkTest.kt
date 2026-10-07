@@ -10,6 +10,7 @@ import app.getknit.knit.mesh.Peer
 import app.getknit.knit.mesh.ReceivedDigest
 import app.getknit.knit.mesh.ReceivedFile
 import app.getknit.knit.mesh.link.DigestWire
+import app.getknit.knit.mesh.link.FeedMeter
 import app.getknit.knit.mesh.link.FramedLink
 import app.getknit.knit.mesh.link.LinkCallbacks
 import app.getknit.knit.mesh.link.LinkFraming
@@ -38,9 +39,11 @@ import java.io.File
 import java.io.OutputStream
 import java.io.PipedInputStream
 import java.io.PipedOutputStream
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -103,7 +106,9 @@ class FramedLinkTest {
         pace: () -> PaceConfig = { PaceConfig() },
         metrics: MeshMetrics = MeshMetrics(),
         onBusy: () -> Unit = {},
-        onFileFed: () -> Unit = {},
+        onFeedChanged: () -> Unit = {},
+        now: () -> Long = { 0L },
+        onRxProgress: (String, Long, Long) -> Unit = { _, _, _ -> },
     ): Harness {
         val toLink = PipedOutputStream()
         val linkInput = PipedInputStream(toLink, 1 shl 18)
@@ -130,10 +135,11 @@ class FramedLinkTest {
                 partials = partials,
                 metrics = metrics,
                 callbacks = callbacks,
-                now = { 0L },
+                now = now,
                 pace = pace,
                 onBusy = onBusy,
-                onFileFed = onFileFed,
+                onFeedChanged = onFeedChanged,
+                onRxProgress = onRxProgress,
             )
         link.start()
         return Harness(link, toLink, fromLink, callbacks)
@@ -324,15 +330,15 @@ class FramedLinkTest {
     }
 
     @Test
-    fun aFileIsFedOnlyWhileItStreamsOrIsNextAndOnlyWhileItsPaceEndsItInTime() {
-        // ADR 2026-10.g24x: what a holder parks a second ask behind. A copy queued behind another file is not fed yet,
-        // one at a pace that cannot finish it within the bound is not one to wait on, and its end is poked.
+    fun aFileIsFedOnlyWhileItStreamsOrIsNextAndItsEndIsPoked() {
+        // ADR 2026-10.g24x: what a holder parks a second ask behind. A copy queued behind another file is not fed yet, the
+        // one streaming is, with its ETA by the pace until a report measures one, and its end is poked.
         val ended = AtomicInteger()
         val h =
             harness(
                 fromLinkBuffer = 16 * 1024,
                 pace = { PaceConfig(bytesPerSec = 1024, chunkBytes = 2048) },
-                onFileFed = { ended.incrementAndGet() },
+                onFeedChanged = { ended.incrementAndGet() },
             )
         val first = "a".repeat(64)
         val second = "b".repeat(64)
@@ -341,14 +347,15 @@ class FramedLinkTest {
         assertTrue(h.link.sendFile(file, FileMeta(FileKind.ATTACHMENT, second, "image/jpeg")))
         assertEquals(LinkFraming.Type.FILE_HEADER, LinkFraming.read(h.fromLink)!!.type)
         assertEquals(LinkFraming.Type.FILE_CHUNK, LinkFraming.read(h.fromLink)!!.type)
-        assertTrue("the one streaming is fed", awaitUntil { h.link.feedsFile(first) })
-        // The pace is noted after the chunk's write returns, which can be after the test has read it.
-        assertTrue("78 KB at 1 KiB/s is not done in 30 s", awaitUntil { !h.link.feedsFile(first, withinMs = 30_000) })
-        assertTrue(h.link.feedsFile(first, withinMs = 120_000))
-        assertFalse("the one queued behind it is not fed yet", h.link.feedsFile(second))
+        // The pace is noted before the chunk's write, which can be after the test has read it.
+        assertTrue("78 KB at 1 KiB/s is over a minute from its end", awaitUntil { (h.link.feed(first)?.etaMs ?: 0) > 60_000 })
+        val feed = h.link.feed(first)!!
+        assertTrue(feed.live)
+        assertFalse("not measured yet", feed.measured)
+        assertNull("the one queued behind it is not fed yet", h.link.feed(second))
         h.link.close()
         assertTrue("a stream cut short still ends its feed", awaitUntil { ended.get() >= 1 })
-        assertFalse(h.link.feedsFile(first))
+        assertNull(h.link.feed(first))
     }
 
     @Test
@@ -362,13 +369,161 @@ class FramedLinkTest {
         assertTrue(h.link.sendFile(file, FileMeta(FileKind.ATTACHMENT, key, "image/jpeg")))
         assertEquals(LinkFraming.Type.FILE_HEADER, LinkFraming.read(h.fromLink)!!.type)
         // The first chunk's write blocks on the small buffer: paced once, its pace known.
-        assertTrue("4 MiB at 32 KiB/s is not done in 30 s", awaitUntil { !h.link.feedsFile(key, withinMs = 30_000) })
-        assertTrue("at the settling pace it is", h.link.feedsFile(key, withinMs = 30_000, settlingPace = 1024 * 1024))
+        assertTrue("4 MiB at 32 KiB/s is over 30 s from its end", awaitUntil { (h.link.feed(key)?.etaMs ?: 0) > 30_000 })
+        assertTrue("at the settling pace it is not", h.link.feed(key, settlingPace = 1024 * 1024)!!.etaMs!! < 30_000)
         assertEquals(LinkFraming.Type.FILE_CHUNK, LinkFraming.read(h.fromLink)!!.type) // the writer paces the second
         assertTrue(
             "from the second chunk, at its own",
-            awaitUntil { !h.link.feedsFile(key, withinMs = 30_000, settlingPace = 1024 * 1024) },
+            awaitUntil { (h.link.feed(key, settlingPace = 1024 * 1024)?.etaMs ?: 0) > 30_000 },
         )
+        h.link.close()
+    }
+
+    @Test
+    fun theReceiversReportsMeasureTheFeedAndItsStall() {
+        // ADR 2026-10.nsr7: a report of how much the peer holds, by its own clock, measures the drain the stack's queue
+        // hides; a feed whose reports stop moving for the stall window holds nobody.
+        val t = AtomicLong(0)
+        val h =
+            harness(
+                fromLinkBuffer = 1024,
+                pace = { PaceConfig(bytesPerSec = 32 * 1024, chunkBytes = 2048) },
+                now = { t.get() },
+            )
+        val key = "c".repeat(64)
+        val file = tmp.newFile("measured.bin").apply { writeBytes(ByteArray(4 * 1024 * 1024)) }
+        assertTrue(h.link.sendFile(file, FileMeta(FileKind.ATTACHMENT, key, "image/jpeg")))
+        assertEquals(LinkFraming.Type.FILE_HEADER, LinkFraming.read(h.fromLink)!!.type)
+        assertTrue(awaitUntil { h.link.feed(key)?.etaMs != null })
+
+        h.link.onProgress("d".repeat(64), 1_000_000, 1_000) // another file's: ignored
+        assertFalse(h.link.feed(key)!!.measured)
+        h.link.onProgress(key, 1024 * 1024, 1_000) // 1 MiB in its first second
+        val measured = h.link.feed(key)!!
+        assertTrue(measured.measured)
+        assertEquals("3 MiB left at 1 MiB/s", 3_000L, measured.etaMs)
+
+        t.addAndGet(FeedMeter.STALL_MS + 1) // no report moved
+        assertFalse("stalled: it holds nobody", h.link.feed(key)!!.live)
+        h.link.onProgress(key, 2 * 1024 * 1024, 2_000)
+        assertTrue("moving again", h.link.feed(key)!!.live)
+        h.link.close()
+    }
+
+    @Test
+    fun aQueuedFileThePeerWithdrawsIsSkippedButAStreamingOneIsNot() {
+        // ADR 2026-10.nsr7's cancel: a copy queued behind another file is taken off the link; one streaming goes on.
+        val h = harness(fromLinkBuffer = 16 * 1024, pace = { PaceConfig(bytesPerSec = 64 * 1024, chunkBytes = 4096) })
+        val first = "a".repeat(64)
+        val second = "b".repeat(64)
+        val file = tmp.newFile("withdrawn.bin").apply { writeBytes(ByteArray(64 * 1024)) }
+        assertTrue(h.link.sendFile(file, FileMeta(FileKind.ATTACHMENT, first, "image/jpeg")))
+        assertTrue(h.link.sendFile(file, FileMeta(FileKind.ATTACHMENT, second, "image/jpeg")))
+        assertEquals(LinkFraming.Type.FILE_HEADER, LinkFraming.read(h.fromLink)!!.type)
+        assertFalse("the one streaming is not withdrawn", h.link.cancelQueued(first))
+        assertTrue(h.link.cancelQueued(second))
+        assertFalse("one withdrawal per queued copy", h.link.cancelQueued(second))
+        // It stops counting at once: a later ask of the peer's is served, not refused as a copy on the link or answered
+        // SENDING (the bluetooth-reviewer's finding), though the writer has not reached it yet.
+        assertFalse(h.link.hasPendingFile(second))
+        assertNull(h.link.feed(second))
+        var rec = LinkFraming.read(h.fromLink)
+        while (rec != null && rec.type != LinkFraming.Type.FILE_END) rec = LinkFraming.read(h.fromLink)
+        assertTrue(awaitUntil { !h.link.hasPendingFile(first) })
+        h.link.send(byteArrayOf(1, 2, 3)) // the next record out is this frame, not the withdrawn file's header
+        assertEquals(LinkFraming.Type.FRAME, LinkFraming.read(h.fromLink)!!.type)
+        h.link.close()
+    }
+
+    @Test
+    fun aFreshSendAfterAWithdrawalStreamsOnceAndTheWithdrawnOneNever() {
+        // The withdrawn send stays in the queue with its skip mark, so a fresh send of the same key queued after it is
+        // the one that streams: one copy (the bluetooth-reviewer's ordering note).
+        val h = harness(fromLinkBuffer = 16 * 1024, pace = { PaceConfig(bytesPerSec = 64 * 1024, chunkBytes = 4096) })
+        val first = "a".repeat(64)
+        val second = "b".repeat(64)
+        val file = tmp.newFile("fresh.bin").apply { writeBytes(ByteArray(32 * 1024)) }
+        assertTrue(h.link.sendFile(file, FileMeta(FileKind.ATTACHMENT, first, "image/jpeg")))
+        assertTrue(h.link.sendFile(file, FileMeta(FileKind.ATTACHMENT, second, "image/jpeg")))
+        assertEquals(LinkFraming.Type.FILE_HEADER, LinkFraming.read(h.fromLink)!!.type)
+        assertTrue(h.link.cancelQueued(second))
+        assertTrue(
+            "a fresh ask is not refused as a copy on the link",
+            h.link.sendFile(file, FileMeta(FileKind.ATTACHMENT, second, "image/jpeg")),
+        )
+        val headers = mutableListOf<String>()
+        var ends = 0
+        while (ends < 2) {
+            val rec = LinkFraming.read(h.fromLink) ?: break
+            if (rec.type == LinkFraming.Type.FILE_HEADER) headers += LinkFraming.decodeFileHeader(rec.payload)!!.key
+            if (rec.type == LinkFraming.Type.FILE_END) ends++
+        }
+        assertEquals(listOf(second), headers)
+        assertTrue(awaitUntil { !h.link.hasPendingFile(second) })
+        h.link.close()
+    }
+
+    @Test
+    fun aFeedsSettleAndFirstMeasurementArePoked() {
+        // ADR 2026-10.nsr7: a holder re-reads its parked asks when a feed's reading changes, not only at its end: an ask
+        // that may now go beside should not wait for the poll (device rep 72 waited 11 s).
+        val pokes = AtomicInteger()
+        val h =
+            harness(
+                fromLinkBuffer = 1024,
+                pace = { PaceConfig(bytesPerSec = 32 * 1024, chunkBytes = 2048) },
+                onFeedChanged = { pokes.incrementAndGet() },
+            )
+        val key = "f".repeat(64)
+        val file = tmp.newFile("pokes.bin").apply { writeBytes(ByteArray(4 * 1024 * 1024)) }
+        assertTrue(h.link.sendFile(file, FileMeta(FileKind.ATTACHMENT, key, "image/jpeg")))
+        assertEquals(LinkFraming.Type.FILE_HEADER, LinkFraming.read(h.fromLink)!!.type)
+        assertEquals(LinkFraming.Type.FILE_CHUNK, LinkFraming.read(h.fromLink)!!.type)
+        assertTrue("the second chunk's pace settles the feed", awaitUntil { pokes.get() == 1 })
+        h.link.onProgress(key, 2_048, 1_000)
+        assertEquals("its first report measures it", 2, pokes.get())
+        h.link.onProgress(key, 4_096, 2_000)
+        assertEquals("a later one changes nothing the holder reads at once", 2, pokes.get())
+        h.link.close()
+    }
+
+    @Test
+    fun aCopyQueuedBehindABlockedWriteStalls() {
+        // ADR 2026-10.nsr7: a copy queued with nothing streaming is next only while the writer moves. One blocked on a
+        // frame's write (a full stack buffer) holds every ask parked behind it, so it stalls like a feed would.
+        val t = AtomicLong(0)
+        val h = harness(fromLinkBuffer = 1024, now = { t.get() })
+        h.link.send(ByteArray(8 * 1024)) // more than the pipe takes: the writer blocks on it
+        val key = "g".repeat(64)
+        val file = tmp.newFile("queued.bin").apply { writeBytes(ByteArray(4 * 1024)) }
+        assertTrue(h.link.sendFile(file, FileMeta(FileKind.ATTACHMENT, key, "image/jpeg")))
+        t.set(FeedMeter.STALL_MS)
+        val queued = h.link.feed(key)!!
+        assertTrue("next, while the writer may still move", queued.live)
+        assertNull(queued.etaMs)
+        t.set(FeedMeter.STALL_MS + 1)
+        assertFalse("the writer has not moved for the stall window", h.link.feed(key)!!.live)
+        assertEquals(LinkFraming.Type.FRAME, LinkFraming.read(h.fromLink)!!.type) // the write goes through
+        assertTrue("moving again", awaitUntil { h.link.feed(key)?.live == true })
+        h.link.close()
+    }
+
+    @Test
+    fun aFileStreamingInIsReportedEveryTwoSecondsOfChunks() {
+        // ADR 2026-10.nsr7: the receive side tells its owner how much it holds, by its own clock since the header, every
+        // FramedLink.PROGRESS_EVERY_MS of chunks; a stall reports nothing.
+        val t = AtomicLong(0)
+        val reports = CopyOnWriteArrayList<Triple<String, Long, Long>>()
+        val h = harness(now = { t.get() }, onRxProgress = { k, held, ms -> reports += Triple(k, held, ms) })
+        val key = "e".repeat(64)
+        writeRecord(h.toLink, LinkFraming.Type.FILE_HEADER, LinkFraming.encodeFileHeader(hdr("ATTACHMENT", key, size = 8_192)))
+        writeRecord(h.toLink, LinkFraming.Type.FILE_CHUNK, ByteArray(1_024))
+        assertTrue(awaitUntil { h.link.rxFile?.bytes == 1_024L })
+        assertTrue("not yet two seconds in", reports.isEmpty())
+        t.set(FramedLink.PROGRESS_EVERY_MS)
+        writeRecord(h.toLink, LinkFraming.Type.FILE_CHUNK, ByteArray(1_024))
+        assertTrue(awaitUntil { reports.isNotEmpty() })
+        assertEquals(Triple(key, 2_048L, FramedLink.PROGRESS_EVERY_MS), reports.single())
         h.link.close()
     }
 

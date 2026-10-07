@@ -254,8 +254,9 @@ hop (fixed in `MeshRouter.countOverheard`, pinned by `MeshRouterTest`).
   a query parked on a `hold`-ed pipe stalls the asker's choice for that long: link the asker once the state it
   should find is in place (`BlobHaveLabTest`), and move a FETCHING recheck or a cycle with a clock jump and a tick.
   `LabTransport.blobQueries` / `blobAnswers` record both frames on the sender, as `blobAsks` does. A holder parks an
-  ask behind another copy's feed (ADR 2026-10.g24x), and a `holdFiles` pipe is a feed that never ends, so the lab
-  parks for `LabLimits.parkMaxMs` (2 s) only; a scenario about parking boots its holder with a long one
+  ask behind another copy's feed for as long as it is live (ADR 2026-10.g24x, 2026-10.nsr7), and a `holdFiles` pipe is
+  a feed that never ends, so `LabTransport.fileFeed` reads a held head as stalled `LabLimits.feedStallMs` (2 s) after
+  it was first read; a scenario about parking boots its holder with a long one
   (`PictureFanoutLabTest`). A carrier linked to a DM's recipient takes no copy of its picture until a jump past
   `CarrierPullPolicy.DEFER_MS` and a tick.
 - **A held frame that is filtered out at `release` is lost, like a dropped packet** — and the digest exchange

@@ -225,11 +225,15 @@ free). Two invariants that are easy to break:
 - **A picture goes to its linked recipient first, one Bluetooth copy at a time** (ADR 2026-10.g24x). A carrier holds
   back the pull of a DM's attachment while the DM's recipient is a live neighbour, for at most
   `CarrierPullPolicy.DEFER_MS` from custody: a delay, never a veto. The tick's custody re-read ends it, and a
-  recipient's own ask (`onRequest` → `want`) is never held back. Groups and rooms never wait. A holder parks an ask
-  whose copy would ride a 1M/2M Bluetooth link while another copy of that blob is being fed on one
-  (`MeshTransport.fileFeedingTo`, never `fileInFlightTo`, which outlives the feed). It answers SENDING for that ask
-  and serves it when the feed ends, or after `PARK_MAX_MS` beside it: never park without a bound or without a
-  session to serve it. Each link's pace is its own link's earned budget, not the feeders' weakest.
+  recipient's own ask (`onRequest` → `want`) is never held back. A group's picture waits too, for a carrier outside the
+  group while the author is linked to it (never a member's own copy); rooms never wait. A holder parks an ask
+  whose copy would ride a 1M/2M Bluetooth link while another copy of that blob is fed live on one
+  (`MeshTransport.fileFeed`, never `fileInFlightTo`, which outlives the feed). It answers SENDING with an ETA and
+  serves the fastest parked ask when the feed ends, stalls or passes its deadline, all three measured from the
+  receiver's `blobprog` reports (ADR 2026-10.nsr7). An ask whose own copy would end before every live feed goes beside
+  them. Members go before carriers. An asker that moves on, or gets the blob elsewhere, withdraws its other asks with a
+  `blobcancel`. Never park without a session to serve it, and never let a parked ask outlive a feed that is not live. Each
+  link's pace is its own link's earned budget, not the feeders' weakest.
 - **A cut attachment resumes from the bytes the receiver kept** (`PartialBlobs`, `FileIntake`, ADR
   2026-10.wtyc). A link closed mid-stream keeps an attachment's prefix; the ask names its length
   (`BlobReqContent.offset`), the holder streams the tail and echoes it (`FileHeaderWire.offset`), and the

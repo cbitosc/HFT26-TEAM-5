@@ -2,6 +2,7 @@ package app.getknit.knit.mesh.lab
 
 import app.getknit.knit.mesh.ArrivingFile
 import app.getknit.knit.mesh.BulkRoute
+import app.getknit.knit.mesh.FileFeed
 import app.getknit.knit.mesh.FileMeta
 import app.getknit.knit.mesh.InboundFrame
 import app.getknit.knit.mesh.MeshTransport
@@ -649,20 +650,36 @@ class LabTransport(
         key: String,
     ): Boolean = pipes[nodeId]?.let { p -> synchronized(p.heldFiles) { p.heldFiles.any { it.key == key && it.inFlight } } } ?: false
 
+    /** The lab's clock, for how long a held pipe's feed has gone unfed ([fileFeed]); [MeshLab] sets the node's. */
+    var clock: () -> Long = System::currentTimeMillis
+
+    /**
+     * How long the head of a held pipe reads as a live feed once someone first looked at it ([fileFeed]), before it
+     * counts as stalled: a held pipe is a feed whose receiver reports nothing (ADR 2026-10.nsr7). [MeshLab] sets it
+     * from `LabLimits.feedStallMs`.
+     */
+    var feedStallMs: Long = MeshLab.FEED_STALL_MS
+
+    // When each held head was first read as a feed: its stall window counts from there. By identity, under itself.
+    private val feedSeenAt = java.util.IdentityHashMap<Any, Long>()
+
     /**
      * Fed on a shared-budget link: the first file parked toward [nodeId] that its sender still feeds is [key]'s, on a
      * pipe the scenario has not declared Wi-Fi Aware ([bulkRoutes]) or Coded ([slowLinks]) — the Bluetooth link a phone
      * splits its pace over (ADR 2026-10.g24x). A link feeds one file at a time, so a copy parked behind another is
-     * queued, not fed, as `FramedLink.feedsFile` reads it.
+     * queued, not fed, as `FramedLink.feed` reads it. No ETA (the lab has no rates), and live until [feedStallMs] after
+     * it was first read: nothing reports its progress.
      */
-    override fun fileFeedingTo(
+    override fun fileFeed(
         nodeId: String,
         key: String,
-        withinMs: Long,
-    ): Boolean {
-        if (bulkRouteTo(nodeId) == BulkRoute.Linked || slowLinkTo(nodeId)) return false
-        val p = pipes[nodeId] ?: return false
-        return synchronized(p.heldFiles) { p.heldFiles.firstOrNull { it.inFlight }?.key == key }
+    ): FileFeed? {
+        if (bulkRouteTo(nodeId) == BulkRoute.Linked || slowLinkTo(nodeId)) return null
+        val p = pipes[nodeId] ?: return null
+        val head = synchronized(p.heldFiles) { p.heldFiles.firstOrNull { it.inFlight } } ?: return null
+        if (head.key != key) return null
+        val seen = synchronized(feedSeenAt) { feedSeenAt.getOrPut(head) { clock() } }
+        return FileFeed(etaMs = null, live = clock() - seen < feedStallMs)
     }
 
     /**

@@ -4,11 +4,15 @@ import app.getknit.knit.mesh.BlobExchange
 import app.getknit.knit.mesh.BlobStore
 import app.getknit.knit.mesh.BulkRoute
 import app.getknit.knit.mesh.FakeLoopTransport
+import app.getknit.knit.mesh.FileFeed
+import app.getknit.knit.mesh.FileProgress
 import app.getknit.knit.mesh.MeshRouter
 import app.getknit.knit.mesh.PartialBlobs
+import app.getknit.knit.mesh.protocol.BlobCancelContent
 import app.getknit.knit.mesh.protocol.BlobHasContent
 import app.getknit.knit.mesh.protocol.BlobHasItem
 import app.getknit.knit.mesh.protocol.BlobHaveContent
+import app.getknit.knit.mesh.protocol.BlobProgressContent
 import app.getknit.knit.mesh.protocol.BlobReqContent
 import app.getknit.knit.mesh.protocol.FrameType
 import app.getknit.knit.mesh.protocol.Protocol
@@ -88,6 +92,12 @@ class BlobHolderQueryTest {
         var now = 0L
         val partials = PartialBlobs(Files.createTempDirectory("hq-parts-$id").toFile(), minBytes = 1)
         val events = CopyOnWriteArrayList<BlobExchange.BlobEvent>()
+
+        // Whom the conversation naming any blob here is addressed to (null: unknown, everyone a member).
+        var to: Set<String>? = null
+
+        // While set, this node leaves queries unanswered: an answer that comes in late is the test's to deliver.
+        @Volatile var mute = false
         val exchange =
             BlobExchange(
                 transport = transport,
@@ -99,6 +109,7 @@ class BlobHolderQueryTest {
                 holderQuery = BlobExchange.HolderQuery(enabled = query, fetchingRecheckMs = recheckMs),
                 onEvent = { events += it },
                 timers = { timers },
+                addressees = { to },
             )
 
         // Every blob frame this node received: type, sender, payload.
@@ -114,11 +125,15 @@ class BlobHolderQueryTest {
 
                     FrameType.BLOB_HAVE -> {
                         val query = WireCodec.decodePayload<BlobHaveContent>(env.payload)
-                        if (answers && query != null) exchange.onHaveQuery(query.hashes, from, env.id)
+                        if (answers && !mute && query != null) exchange.onHaveQuery(query.hashes, from, env.id)
                     }
 
                     FrameType.BLOB_HAS -> {
                         WireCodec.decodePayload<BlobHasContent>(env.payload)?.let { exchange.onHaveAnswer(it, from) }
+                    }
+
+                    FrameType.BLOB_CANCEL -> {
+                        WireCodec.decodePayload<BlobCancelContent>(env.payload)?.let { exchange.onCancel(it.hash, from) }
                     }
                 }
             }
@@ -135,6 +150,13 @@ class BlobHolderQueryTest {
             heard
                 .filter { (type, _, env) ->
                     type == FrameType.BLOB_REQ && WireCodec.decodePayload<BlobReqContent>(env.payload)?.hash == hash
+                }.map { it.second }
+
+        /** The cancels for [hash] this node received, by sender. */
+        fun cancelsFrom(hash: String): List<String> =
+            heard
+                .filter { (type, _, env) ->
+                    type == FrameType.BLOB_CANCEL && WireCodec.decodePayload<BlobCancelContent>(env.payload)?.hash == hash
                 }.map { it.second }
 
         /** The queries this node received, by sender, each as the hashes it named. */
@@ -159,6 +181,9 @@ class BlobHolderQueryTest {
     }
 
     private fun picture(size: Int = 2_000) = Random(size).nextBytes(size)
+
+    /** A live copy being fed, [etaMs] from its end. */
+    private fun feeding(etaMs: Long) = FileFeed(etaMs = etaMs, live = true, measured = true)
 
     /** Records every file [holder] streams to anyone, as "to hash". */
     private fun CoroutineScope.recordServes(
@@ -429,7 +454,7 @@ class BlobHolderQueryTest {
             h.transport.connect(b.transport)
             backgroundScope.recordServes(h, a, b)
             val hash = h.store.seed(picture(3_100))
-            h.transport.feedingFiles += "a" to hash // a's copy is streaming on its Bluetooth link
+            h.transport.feeds["a" to hash] = feeding(60_000) // a's copy is streaming on its Bluetooth link
 
             h.exchange.onRequest(hash, "b")
             assertEquals("parked behind a's feed", 0, h.served(hash, "b"))
@@ -449,7 +474,7 @@ class BlobHolderQueryTest {
             runCurrent()
             assertEquals("still behind the feed", 0, h.served(hash, "b"))
 
-            h.transport.feedingFiles -= "a" to hash
+            h.transport.feeds -= "a" to hash
             advanceTimeBy(BlobExchange.PARK_POLL_MS + 1)
             runCurrent()
             assertEquals("served once that feed ended, once", 1, h.served(hash, "b"))
@@ -458,9 +483,12 @@ class BlobHolderQueryTest {
             assertEquals(1, h.served(hash, "b"))
         }
 
-    /** A feed to a stalled link must not hold everyone else: a parked ask that waited its longest goes beside it. */
+    /**
+     * ADR 2026-10.nsr7: a parked ask has no bound of its own — it waits as long as the feed ahead of it is live, however
+     * long that takes, and goes once the feed stalls or runs past its deadline ([FileFeed.live]).
+     */
     @Test
-    fun anAskParkedItsLongestIsServedBesideTheFeed() =
+    fun aParkedAskWaitsAsLongAsTheFeedIsLiveAndGoesWhenItIsNot() =
         runTest(UnconfinedTestDispatcher()) {
             val h = Node("h", backgroundScope, timers = backgroundScope)
             val a = Node("a", backgroundScope)
@@ -469,22 +497,114 @@ class BlobHolderQueryTest {
             h.transport.connect(b.transport)
             backgroundScope.recordServes(h, b)
             val hash = h.store.seed(picture(3_150))
-            h.transport.feedingFiles += "a" to hash // and it never ends
+            h.transport.feeds["a" to hash] = feeding(8 * 60_000) // an 8 MiB file at 18 KiB/s
 
             h.exchange.onRequest(hash, "b")
-            h.now += BlobExchange.PARK_MAX_MS - 1
-            advanceTimeBy(BlobExchange.PARK_POLL_MS + 1)
-            runCurrent()
-            assertEquals(0, h.served(hash, "b"))
-            h.now += 1
+            repeat(5) {
+                h.now += BlobExchange.SERVE_MEMO_MS - 1
+                h.exchange.onRequest(hash, "b") // its asker goes on asking
+                advanceTimeBy(BlobExchange.PARK_POLL_MS + 1)
+                runCurrent()
+            }
+            assertEquals("minutes in, still behind the live feed", 0, h.served(hash, "b"))
+            h.transport.feeds["a" to hash] = FileFeed(etaMs = 8 * 60_000, live = false) // stalled, or past its deadline
             advanceTimeBy(BlobExchange.PARK_POLL_MS + 1)
             runCurrent()
             assertEquals(1, h.served(hash, "b"))
         }
 
-    /** A feed that cannot end within the bound (an iPhone's base share, a stalled link) is not waited behind. */
+    /**
+     * Behind a slower feed — an iPhone's at the base pace — an asker whose own copy would end before it goes beside it,
+     * and an asker whose copy would not, or whose rate nobody knows, still waits (ADR 2026-10.nsr7; rep 65's four
+     * copies at once).
+     */
     @Test
-    fun anAskIsNotParkedBehindAFeedTooSlowToEndInTime() =
+    fun anAskWhoseCopyWouldEndFirstGoesBesideASlowerFeedAndTheRestWait() =
+        runTest(UnconfinedTestDispatcher()) {
+            val h = Node("h", backgroundScope, timers = backgroundScope)
+            val i = Node("i", backgroundScope)
+            val b = Node("b", backgroundScope)
+            val c = Node("c", backgroundScope)
+            val d = Node("d", backgroundScope)
+            for (n in listOf(i, b, c, d)) h.transport.connect(n.transport)
+            backgroundScope.recordServes(h, b, c, d)
+            val bytes = picture(18_432)
+            val hash = h.store.seed(bytes)
+            h.transport.feeds["i" to hash] = feeding(100_000) // the iPhone's copy, about 100 s from its end
+            h.transport.rates["b"] = 18_432 // b's copy: about 1 s
+            h.transport.rates["c"] = 128 // c's: about 144 s
+
+            h.exchange.onRequest(hash, "b")
+            assertEquals("b's copy would end long before the iPhone's: beside it", 1, h.served(hash, "b"))
+            h.transport.feeds["b" to hash] = feeding(1_000)
+            h.exchange.onRequest(hash, "c")
+            h.exchange.onRequest(hash, "d")
+            assertEquals("c's would not end first", 0, h.served(hash, "c"))
+            assertEquals("and d's rate is not known", 0, h.served(hash, "d"))
+        }
+
+    /**
+     * Going beside splits the budget once more, so it must save the asker more than it costs the feeds already running
+     * (device rep 72): behind two feeds 100 s from their ends, a 60 s copy goes and an 80 s one, which would end first
+     * too, waits.
+     */
+    @Test
+    fun anAskGoesBesideOnlyWhenItSavesMoreThanItCostsTheRunningFeeds() =
+        runTest(UnconfinedTestDispatcher()) {
+            val h = Node("h", backgroundScope, timers = backgroundScope)
+            val x = Node("x", backgroundScope)
+            val y = Node("y", backgroundScope)
+            val slow = Node("slow", backgroundScope)
+            val fast = Node("fast", backgroundScope)
+            for (n in listOf(x, y, slow, fast)) h.transport.connect(n.transport)
+            backgroundScope.recordServes(h, slow, fast)
+            val hash = h.store.seed(picture(18_432))
+            h.transport.feeds["x" to hash] = feeding(100_000)
+            h.transport.feeds["y" to hash] = feeding(100_000)
+            h.transport.feeding = 2
+            h.transport.rates["slow"] = 230 // ~80 s: saves 100 − 80 × 2/3 ≈ 47 s, costs 80 × 2/3 ≈ 53 s
+            h.transport.rates["fast"] = 307 // ~60 s: saves 100 − 40 = 60 s, costs 40 s
+
+            h.exchange.onRequest(hash, "slow")
+            assertEquals("its copy ends first, but the feeds lose more than it saves", 0, h.served(hash, "slow"))
+            h.exchange.onRequest(hash, "fast")
+            assertEquals(1, h.served(hash, "fast"))
+        }
+
+    /** When a feed ends, the parked ask whose link is expected to feed fastest goes next, one per blob a pass. */
+    @Test
+    fun theFastestParkedAskIsServedFirst() =
+        runTest(UnconfinedTestDispatcher()) {
+            val h = Node("h", backgroundScope, timers = backgroundScope)
+            val a = Node("a", backgroundScope)
+            val slow = Node("slow", backgroundScope)
+            val fast = Node("fast", backgroundScope)
+            for (n in listOf(a, slow, fast)) h.transport.connect(n.transport)
+            backgroundScope.recordServes(h, slow, fast)
+            val hash = h.store.seed(picture(3_180))
+            h.transport.feeds["a" to hash] = feeding(10)
+            h.transport.rates["slow"] = 2_048
+            h.transport.rates["fast"] = 18_432
+
+            h.exchange.onRequest(hash, "slow") // parked first
+            h.exchange.onRequest(hash, "fast")
+            assertEquals(0, h.served(hash, "slow") + h.served(hash, "fast"))
+            h.transport.feeds -= "a" to hash
+            h.exchange.feedsChanged()
+            assertEquals("the fast one goes first", 1, h.served(hash, "fast"))
+            assertEquals("and alone", 0, h.served(hash, "slow"))
+            h.transport.feeds["fast" to hash] = feeding(10)
+            advanceTimeBy(BlobExchange.PARK_POLL_MS * 3)
+            runCurrent()
+            assertEquals("the slow one waits behind it", 0, h.served(hash, "slow"))
+        }
+
+    /**
+     * A parked asker's SENDING answer says when its copy should land: the feed ahead's ETA plus its own copy's, and the
+     * holder keeps the ask that long past the serve memo (ADR 2026-10.nsr7).
+     */
+    @Test
+    fun aParkedAskersAnswerCarriesItsEtaAndTheAskIsKeptThatLong() =
         runTest(UnconfinedTestDispatcher()) {
             val h = Node("h", backgroundScope, timers = backgroundScope)
             val a = Node("a", backgroundScope)
@@ -492,15 +612,153 @@ class BlobHolderQueryTest {
             h.transport.connect(a.transport)
             h.transport.connect(b.transport)
             backgroundScope.recordServes(h, b)
-            val hash = h.store.seed(picture(3_160))
-            h.transport.feedingFiles += "a" to hash
-            h.transport.slowFeeds += "a" to hash
+            val bytes = picture(20_480)
+            val hash = h.store.seed(bytes)
+            h.transport.feeds["a" to hash] = feeding(60_000)
+            h.transport.rates["b"] = 256 // its own copy: 80 s, so it does not go beside the 60 s feed
 
             h.exchange.onRequest(hash, "b")
-            assertEquals(1, h.served(hash, "b"))
+            h.exchange.onHaveQuery(listOf(hash), "b", "q1")
+            val item =
+                b
+                    .answersFrom("h")
+                    .last()
+                    .items
+                    .single()
+            assertEquals(BlobHasItem.SENDING, item.state)
+            assertEquals("the feed's 60 s, then its own 80 s", 140_000L, item.eta)
+
+            h.now += BlobExchange.SERVE_MEMO_MS + 1 // past the memo, inside the promise
+            advanceTimeBy(BlobExchange.PARK_POLL_MS + 1)
+            runCurrent()
+            h.transport.feeds -= "a" to hash
+            advanceTimeBy(BlobExchange.PARK_POLL_MS + 1)
+            runCurrent()
+            assertEquals("kept, and served when the feed ended", 1, h.served(hash, "b"))
         }
 
-    /** The poll is a `delay`, which stops while the CPU sleeps: a feed's end serves its parked asks on the edge. */
+    /**
+     * Members first (cell (d), 2026-10-07: a member parked 287 s behind a carrier's lapsed pull): a member goes beside a
+     * carrier's copy even when its own would not end first, and a carrier waits behind a member's, however fast it is.
+     */
+    @Test
+    fun aMemberGoesBesideACarriersCopyAndACarrierWaitsBehindAMembers() =
+        runTest(UnconfinedTestDispatcher()) {
+            val h = Node("h", backgroundScope, timers = backgroundScope)
+            val nodes = listOf("c", "m1", "c2").map { Node(it, backgroundScope) }
+            nodes.forEach { h.transport.connect(it.transport) }
+            backgroundScope.recordServes(h, nodes[1], nodes[2])
+            val hash = h.store.seed(picture(18_432))
+            h.to = setOf("h", "m1", "m2")
+            h.transport.feeds["c" to hash] = feeding(100_000) // a carrier's copy, 100 s from its end
+            h.transport.rates["m1"] = 128 // about 144 s: it would not end first
+
+            h.exchange.onRequest(hash, "m1")
+            assertEquals("a carrier's copy holds no member", 1, h.served(hash, "m1"))
+            h.transport.feeds["m1" to hash] = feeding(144_000)
+            h.transport.rates["c2"] = 18_432
+            h.exchange.onRequest(hash, "c2")
+            assertEquals("a carrier waits behind a member's copy, however fast", 0, h.served(hash, "c2"))
+        }
+
+    @Test
+    fun aParkedMemberIsServedBeforeAFasterParkedCarrier() =
+        runTest(UnconfinedTestDispatcher()) {
+            val h = Node("h", backgroundScope, timers = backgroundScope)
+            val nodes = listOf("m1", "c", "m2").map { Node(it, backgroundScope) }
+            nodes.forEach { h.transport.connect(it.transport) }
+            backgroundScope.recordServes(h, nodes[1], nodes[2])
+            val hash = h.store.seed(picture(18_432))
+            h.to = setOf("h", "m1", "m2")
+            h.transport.feeds["m1" to hash] = feeding(10)
+            h.transport.rates["c"] = 18_432
+            h.transport.rates["m2"] = 2_048 // about 9 s: it waits behind the member's copy
+
+            h.exchange.onRequest(hash, "c")
+            h.exchange.onRequest(hash, "m2")
+            assertEquals(0, h.served(hash, "c") + h.served(hash, "m2"))
+            h.transport.feeds -= "m1" to hash
+            h.exchange.feedsChanged()
+            assertEquals("the member goes first", 1, h.served(hash, "m2"))
+            assertEquals("and the carrier waits its turn", 0, h.served(hash, "c"))
+        }
+
+    /** A cancel drops a parked ask, and a copy queued to its sender and not yet streaming (ADR 2026-10.nsr7). */
+    @Test
+    fun aCancelDropsAParkedAskAndAQueuedCopy() =
+        runTest(UnconfinedTestDispatcher()) {
+            val h = Node("h", backgroundScope, timers = backgroundScope)
+            val nodes = listOf("a", "b", "q").map { Node(it, backgroundScope) }
+            nodes.forEach { h.transport.connect(it.transport) }
+            backgroundScope.recordServes(h, nodes[1])
+            val hash = h.store.seed(picture(18_432))
+            h.transport.feeds["a" to hash] = feeding(60_000)
+            h.transport.rates["b"] = 256
+
+            h.exchange.onRequest(hash, "b") // parked
+            h.exchange.onCancel(hash, "b")
+            h.transport.feeds -= "a" to hash
+            h.exchange.feedsChanged()
+            assertEquals("its ask was withdrawn: nothing is served on the feed's end", 0, h.served(hash, "b"))
+
+            h.transport.queuedFiles += "q" to hash // a copy to q, queued behind another file
+            h.exchange.onCancel(hash, "q")
+            assertEquals(listOf("q" to hash), h.transport.cancelled)
+            h.exchange.onCancel(hash, "q") // nothing left to withdraw
+            assertEquals(1, h.transport.cancelled.size)
+        }
+
+    /** A blob that lands withdraws the asker's other asks: a holder that queued or parked one sends no second copy. */
+    @Test
+    fun aBlobThatLandsWithdrawsTheOtherAsks() =
+        runTest(UnconfinedTestDispatcher()) {
+            val a = Node("a", backgroundScope, query = false)
+            val b = Node("b", backgroundScope)
+            val c = Node("c", backgroundScope)
+            val phone = Node("phone", backgroundScope).apply { transport.advertises = Protocol.CAP_BLOB_HAVE or Protocol.CAP_DOORBELL }
+            listOf(b, c, phone).forEach { a.transport.connect(it.transport) }
+            val bytes = picture()
+            val hash = sha256Hex(bytes)
+
+            a.exchange.want(hash) // the blind round: one first, then everyone
+            a.now += BlobExchange.FIRST_ASK_GRACE_MS
+            a.exchange.reask()
+            assertEquals(3, listOf(b, c, phone).count { it.asksFrom(hash).isNotEmpty() })
+            // Widening keeps the first pick's ask: it may hold the closest copy.
+            assertTrue(listOf(b, c).all { it.cancelsFrom(hash).isEmpty() })
+            val path = File.createTempFile("land", ".bin").apply { writeBytes(bytes) }.path
+            a.exchange.onReceived(hash, "image/jpeg", path, from = "b")
+            assertTrue("b brought it", b.cancelsFrom(hash).isEmpty())
+            assertEquals("withdrawn once", listOf("a"), c.cancelsFrom(hash))
+            a.exchange.reask()
+            assertEquals(listOf("a"), c.cancelsFrom(hash))
+            assertTrue("never to an iPhone yet", phone.cancelsFrom(hash).isEmpty())
+        }
+
+    /** A parked ask is kept for its expected turn from the park itself, not only once its asker queries (cell (c)). */
+    @Test
+    fun aParkedAskIsKeptForItsTurnWithoutAQuery() =
+        runTest(UnconfinedTestDispatcher()) {
+            val h = Node("h", backgroundScope, timers = backgroundScope)
+            val a = Node("a", backgroundScope)
+            val b = Node("b", backgroundScope)
+            h.transport.connect(a.transport)
+            h.transport.connect(b.transport)
+            backgroundScope.recordServes(h, b)
+            val hash = h.store.seed(picture(20_480))
+            h.transport.feeds["a" to hash] = feeding(60_000)
+            h.transport.rates["b"] = 256 // its own copy: 80 s
+
+            h.exchange.onRequest(hash, "b") // parked; b goes quiet
+            h.now += BlobExchange.SERVE_MEMO_MS + 1
+            advanceTimeBy(BlobExchange.PARK_POLL_MS + 1)
+            runCurrent()
+            h.transport.feeds -= "a" to hash
+            h.exchange.feedsChanged()
+            assertEquals("kept past the memo with no query, and served on the feed's end", 1, h.served(hash, "b"))
+        }
+
+    /** The poll is a `delay`, which stops while the CPU sleeps: a feed's end serves its parked ask on the edge. */
     @Test
     fun aFeedsEndServesItsParkedAskWithoutWaitingForThePoll() =
         runTest(UnconfinedTestDispatcher()) {
@@ -511,12 +769,12 @@ class BlobHolderQueryTest {
             h.transport.connect(b.transport)
             backgroundScope.recordServes(h, b)
             val hash = h.store.seed(picture(3_170))
-            h.transport.feedingFiles += "a" to hash
+            h.transport.feeds["a" to hash] = feeding(60_000)
 
             h.exchange.onRequest(hash, "b")
             assertEquals(0, h.served(hash, "b"))
-            h.transport.feedingFiles -= "a" to hash
-            h.exchange.feedEnded() // no virtual time passes
+            h.transport.feeds -= "a" to hash
+            h.exchange.feedsChanged() // no virtual time passes
             assertEquals(1, h.served(hash, "b"))
         }
 
@@ -532,7 +790,7 @@ class BlobHolderQueryTest {
             h.transport.connect(c.transport)
             backgroundScope.recordServes(h, a, b, c)
             val hash = h.store.seed(picture(3_200))
-            h.transport.feedingFiles += "a" to hash
+            h.transport.feeds["a" to hash] = feeding(60_000)
             h.transport.bulkRoutes["b"] = BulkRoute.Linked // b's copy rides Wi-Fi Aware
             h.transport.slowLinks += "c" // c's rides Coded, outside the split
 
@@ -546,7 +804,7 @@ class BlobHolderQueryTest {
             lone.transport.connect(d.transport)
             backgroundScope.recordServes(lone, d)
             val hash2 = lone.store.seed(picture(3_300))
-            lone.transport.feedingFiles += "x" to hash2
+            lone.transport.feeds["x" to hash2] = feeding(60_000)
             lone.exchange.onRequest(hash2, "d")
             assertEquals(1, lone.served(hash2, "d"))
         }
@@ -563,7 +821,7 @@ class BlobHolderQueryTest {
             h.transport.connect(c.transport)
             backgroundScope.recordServes(h, b, c)
             val hash = h.store.seed(picture(3_400))
-            h.transport.feedingFiles += "a" to hash
+            h.transport.feeds["a" to hash] = feeding(60_000)
 
             h.exchange.onRequest(hash, "b")
             h.exchange.onRequest(hash, "c")
@@ -571,11 +829,39 @@ class BlobHolderQueryTest {
             h.now += BlobExchange.SERVE_MEMO_MS // c has moved on to another holder by now
             advanceTimeBy(BlobExchange.PARK_POLL_MS + 1)
             runCurrent()
-            h.transport.feedingFiles -= "a" to hash
+            h.transport.feeds -= "a" to hash
             advanceTimeBy(BlobExchange.PARK_POLL_MS * 3)
             runCurrent()
             assertEquals(0, h.served(hash, "b"))
             assertEquals(0, h.served(hash, "c"))
+        }
+
+    /**
+     * ADR 2026-10.nsr7: the receiver reports a file streaming in back to its sender, but only to one whose link carries
+     * the bit; the sender's exchange hands a report to the link that feeds it.
+     */
+    @Test
+    fun aFileStreamingInIsReportedToACapableSenderAndAReportReachesItsLink() =
+        runTest(UnconfinedTestDispatcher()) {
+            val r = Node("r", backgroundScope)
+            val s = Node("s", backgroundScope)
+            val old = Node("old", backgroundScope, answers = false)
+            val phone = Node("phone", backgroundScope).apply { transport.advertises = Protocol.CAP_BLOB_HAVE or Protocol.CAP_DOORBELL }
+            r.transport.connect(s.transport)
+            r.transport.connect(old.transport)
+            r.transport.connect(phone.transport)
+            val hash = "a".repeat(64)
+
+            r.exchange.onFileProgress(FileProgress("s", hash, 40_960, 2_000))
+            r.exchange.onFileProgress(FileProgress("old", hash, 40_960, 2_000))
+            r.exchange.onFileProgress(FileProgress("phone", hash, 40_960, 2_000))
+            val sent = s.heard.single { it.first == FrameType.BLOB_PROGRESS }.third
+            assertEquals(BlobProgressContent(hash, 40_960, 2_000), WireCodec.decodePayload<BlobProgressContent>(sent.payload))
+            assertTrue("a neighbour without the bit is never sent one", old.heard.none { it.first == FrameType.BLOB_PROGRESS })
+            assertTrue("nor is an iPhone, until its port takes the type", phone.heard.none { it.first == FrameType.BLOB_PROGRESS })
+
+            s.exchange.onProgressReport(BlobProgressContent(hash, 40_960, 2_000), "r")
+            assertEquals(listOf(FileProgress("r", hash, 40_960, 2_000)), s.transport.progressTaken.toList())
         }
 
     @Test
@@ -677,6 +963,65 @@ class BlobHolderQueryTest {
         }
 
     @Test
+    fun anAskThatFoundItsNeighbourLackingTheBlobIsNotWaitedOutBehindItsStream() =
+        runTest(UnconfinedTestDispatcher()) {
+            // Cell (d), 2026-10-07: asked while it was still fetching the blob, b remembers no asker, so nothing of ours
+            // is queued behind the other file it streams us. The fetch lets b go, and a holder linked later is asked.
+            val a = Node("a", backgroundScope)
+            val b = Node("b", backgroundScope).apply { mute = true } // its answer comes late, as on the phones (7 s)
+            val c = Node("c", backgroundScope)
+            a.transport.connect(b.transport)
+            val hash = c.store.seed(picture())
+            b.store.storingNow += hash // b says FETCHING
+
+            a.exchange.want(hash, author = "b")
+            a.now += BlobExchange.QUERY_WAIT_MS
+            a.exchange.reask() // no answer in time: the author is asked first
+            assertEquals(listOf("a"), b.asksFrom(hash))
+            val query =
+                b.heard
+                    .last { it.first == FrameType.BLOB_HAVE }
+                    .third.id
+            a.exchange.onHaveAnswer(BlobHasContent(listOf(BlobHasItem(hash, BlobHasItem.FETCHING)), 0, query), "b") // after our ask
+            a.transport.arrivingFrom += "b" // b streams something else to us, for minutes
+            a.transport.connect(c.transport)
+            a.exchange.linked(listOf("c"))
+            a.now += 1_000
+            a.exchange.reask()
+            a.exchange.reask()
+            assertEquals("c holds it: asked, rather than b's stream waited out", listOf("a"), c.asksFrom(hash))
+        }
+
+    @Test
+    fun aFetchLeavesAHolderWhoseOtherStreamHasLongToRunForAnIdleOne() =
+        runTest(UnconfinedTestDispatcher()) {
+            val a = Node("a", backgroundScope)
+            val b = Node("b", backgroundScope)
+            val c = Node("c", backgroundScope)
+            a.transport.connect(b.transport)
+            val bytes = picture()
+            val hash = c.store.seed(bytes)
+            b.store.lying[hash] = bytes.size.toLong() // b holds it, our copy queued behind the file it streams us
+
+            a.exchange.want(hash, author = "b")
+            assertEquals(listOf("a"), b.asksFrom(hash))
+            a.transport.arrivingFrom += "b"
+            a.transport.arrivingLeft["b"] = BlobExchange.STREAM_SWITCH_MS // not past the bound: wait it out
+            a.transport.connect(c.transport)
+            a.exchange.linked(listOf("c"))
+            a.now += 1_000
+            a.exchange.reask()
+            a.exchange.reask()
+            assertTrue("b's stream ends soon enough: our copy may be queued behind it", c.asksFrom(hash).isEmpty())
+            a.transport.arrivingLeft["b"] = 10 * 60_000L // a slow carrier copy with minutes to run
+            a.now += 1_000
+            a.exchange.reask()
+            a.exchange.reask()
+            assertEquals("c holds it and feeds nothing: asked instead", listOf("a"), c.asksFrom(hash))
+            assertEquals("and b's ask is withdrawn, so a copy it queued is not a second", 1, b.cancelsFrom(hash).size)
+        }
+
+    @Test
     fun theStreamPollIsTimedOnTheSession() =
         runTest(UnconfinedTestDispatcher()) {
             val a = Node("a", backgroundScope, query = false, timers = backgroundScope)
@@ -760,9 +1105,10 @@ class BlobHolderQueryTest {
         hash: String,
         state: Int = BlobHasItem.HAVE,
         load: Int = 0,
+        eta: Long? = null,
     ) {
         val query = holder.heard.last { it.first == FrameType.BLOB_HAVE && it.second == id }.third
-        exchange.onHaveAnswer(BlobHasContent(listOf(BlobHasItem(hash, state, 2_000)), load = load, re = query.id), holder.id)
+        exchange.onHaveAnswer(BlobHasContent(listOf(BlobHasItem(hash, state, 2_000, eta = eta)), load = load, re = query.id), holder.id)
     }
 
     /** #140's shape, held: [a]'s blind ask stands on the author [u], whose late HAVE said it holds [hash]; [b] answers late. */
@@ -875,6 +1221,48 @@ class BlobHolderQueryTest {
             a.exchange.reask() // b still silent past its wait
             assertEquals("past b's floor, the next holder is asked", listOf("a"), c.asksFrom(hash))
             assertTrue(a.store.has(hash))
+        }
+
+    /**
+     * ADR 2026-10.nsr7: a holder still SENDING that says when the copy should land holds the asker that long, past its
+     * ask's 45 s floor, and only then is the next holder asked.
+     */
+    @Test
+    fun aSendingAnswersEtaHoldsTheAskerPastItsFloor() =
+        runTest(UnconfinedTestDispatcher()) {
+            val a = Node("a", backgroundScope)
+            val b = Node("b", backgroundScope, answers = false).apply { transport.advertises = Protocol.CAP_BLOB_HAVE }
+            val c = Node("c", backgroundScope)
+            a.transport.connect(b.transport)
+            a.transport.connect(c.transport)
+            val bytes = picture()
+            val hash = sha256Hex(bytes)
+            c.store.seed(bytes)
+            c.transport.feeding = 1 // so b, unloaded, is the better choice
+
+            a.exchange.want(hash)
+            a.now = 1_000
+            a.answerFor(b, hash)
+            assertEquals("b is asked", listOf("a"), b.asksFrom(hash))
+            val eta = 3 * 60_000L // b parked our ask behind a feed of three minutes
+            repeat(BlobExchange.MAX_CONFIRMS + 1) {
+                a.now += BlobExchange.FIRST_ASK_GRACE_MS + 1_000
+                a.exchange.reask() // its grace up: confirmed, or held once confirmed enough
+                if (b.queriesFrom("a").size > it + 1) a.answerFor(b, hash, BlobHasItem.SENDING, eta = eta)
+            }
+            val promisedUntil = a.now + eta + BlobExchange.HOLD_SLACK_MS
+
+            a.now = 1_000 + BlobExchange.SERVE_MEMO_MS + 1 // the ask's floor: the old hold would end here
+            a.exchange.reask()
+            a.now += BlobExchange.QUERY_WAIT_MS + 1_000
+            a.exchange.reask()
+            assertTrue("inside the promise, c is not asked", c.asksFrom(hash).isEmpty())
+
+            a.now = promisedUntil + 1
+            a.exchange.reask() // the promise is spent: the cycle opens again
+            a.now += BlobExchange.QUERY_WAIT_MS + 1_000
+            a.exchange.reask()
+            assertEquals("past it, the next holder is asked", listOf("a"), c.asksFrom(hash))
         }
 
     @Test

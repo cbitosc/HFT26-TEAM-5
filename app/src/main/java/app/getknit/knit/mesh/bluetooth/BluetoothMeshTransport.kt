@@ -24,7 +24,9 @@ import app.getknit.knit.identity.Identity
 import app.getknit.knit.mesh.ArrivingFile
 import app.getknit.knit.mesh.BleSideDrop
 import app.getknit.knit.mesh.ConnectFailReason
+import app.getknit.knit.mesh.FileFeed
 import app.getknit.knit.mesh.FileMeta
+import app.getknit.knit.mesh.FileProgress
 import app.getknit.knit.mesh.InboundFrame
 import app.getknit.knit.mesh.MeshMetrics
 import app.getknit.knit.mesh.MeshTransport
@@ -680,44 +682,110 @@ class BluetoothMeshTransport(
 
     override fun fileArrivingFrom(nodeId: String): Boolean = links[nodeId]?.rxInProgress ?: false
 
+    override fun fileArrivingEtaMs(nodeId: String): Long? = links[nodeId]?.rxEtaMs()
+
+    override fun cancelQueuedFile(
+        nodeId: String,
+        key: String,
+    ): Boolean = links[nodeId]?.cancelQueued(key) ?: false
+
     override fun fileInFlightTo(
         nodeId: String,
         key: String,
     ): Boolean = links[nodeId]?.hasPendingFile(key) ?: false
 
-    // A Coded link's feed keeps its own pace outside the split ([paceFor]), so only a 1M/2M one counts. A feed whose
-    // link may still earn the boost is read at the boosted share until its second chunk is paced: its first chunk is
-    // paced at the base before the link reports its interval (~0.6 s on 2026-10-06), and a second ask lands within ms
-    // of the first, since both receivers act on the author's HAVE. Read at the base, a 245 KB photo looked a minute
-    // from its end, and the holder fed two copies at once.
-    override fun fileFeedingTo(
+    // A Coded link's feed keeps its own pace outside the split ([paceFor]), so only a 1M/2M one counts. Its ETA comes
+    // from the receiver's progress reports once one has come (ADR 2026-10.nsr7). Before that, a feed whose link may
+    // still earn the boost is read at the boosted share until its second chunk is paced, or while it is still earning,
+    // up to FramedLink's bound: its first chunk is paced at the base before the link reports its interval (~0.6 s on
+    // 2026-10-06, 10 s to a dark receiver on 2026-10-07), and a second ask lands within ms of the first, since both
+    // receivers act on the author's HAVE.
+    override fun fileFeed(
         nodeId: String,
         key: String,
-        withinMs: Long,
-    ): Boolean {
-        val link = links[nodeId]?.takeIf { linkPhy[it] != LinkPhy.CODED } ?: return false
-        return link.feedsFile(key, withinMs, settlingPace = settlingPace(link))
+    ): FileFeed? {
+        val link = links[nodeId]?.takeIf { linkPhy[it] != LinkPhy.CODED } ?: return null
+        val settling = boostedShare(link, joining = false, settling = true)
+        return link.feed(key, settlingPace = settling, earning = settling > 0 && !earned(link))
     }
 
     /**
-     * The share [link] feeds at once it has earned the boost, while it has a boost that can earn it (an Android peer, the
-     * flag and the trial's switch on, a tuner not given up, no audio): else 0. Earned or not yet, because a chunk's
-     * pace moves only at the next chunk, and the boost earns inside the first (the bluetooth-reviewer's finding: a park
-     * poll in that gap read the base and unparked). A link that has not earned it by its second chunk is read at its
-     * own pace from then, so a parked ask waits about one base chunk (2 s of feeding) for the guess.
+     * How fast a file to [nodeId] would go now (ADR 2026-10.nsr7): the share its pace would give it beside the feeds
+     * already going — boosted when the link will earn the boost ([willEarn]) — times the share of its pace the link's
+     * last measured stream drained ([FramedLink.drainRatio]). Coded keeps its own pace. 0 with no link.
      */
-    private fun settlingPace(link: FramedLink): Int {
-        if (boosts[link] == null || !LinkTuneDiag.boostOn || tuners[link]?.alive == false) return 0
-        if (audioMonitor.contended.value) return 0
-        val feeding = feedingLinks().size.coerceAtLeast(1)
+    override fun expectedFileRate(nodeId: String): Int {
+        val link = links[nodeId] ?: return 0
+        val phy = linkPhy[link] ?: LinkPhy.UNKNOWN
+        if (phy == LinkPhy.CODED) return CodedPhyPolicy.pace(phy, CodedPhyDiag.tuning).bytesPerSec
+        val boosted = boostedShare(link, joining = !link.txInProgress)
+        val share =
+            if (boosted > 0) {
+                boosted
+            } else {
+                val feeding = feedingLinks().size + if (link.txInProgress) 0 else 1
+                CodedPhyPolicy.pace(phy, CodedPhyDiag.tuning, feeding, earned = false, leLinks = links.size).bytesPerSec
+            }
+        return (share * link.drainRatio).toInt()
+    }
+
+    /**
+     * Whether a feed on [link] will earn the boost (ADR 2026-10.2da4, 2026-10.nsr7): it can (an Android peer, the flag
+     * and the trial's switch on, a tuner not given up, no audio), and someone will ask for the short interval — it has
+     * earned now, or within [EARNED_RECENTLY_MS] (its peer asks: a lit receiver), or this side is lit and asks itself.
+     * A dark pair never asks, and scoring one at the boosted share sent it beside an iPhone's feed (the reviewer's
+     * finding on the first draft).
+     */
+    private fun willEarn(link: FramedLink): Boolean =
+        canEarn(link) &&
+            (earned(link) || boosts[link]?.earnedWithin(EARNED_RECENTLY_MS) == true || powerState.state.value.interactive)
+
+    // Whether a feed on [link] can earn the boost at all: an Android peer, the flag and the trial's switch on, a tuner not
+    // given up, no audio. Whether anyone will ask for the interval is [willEarn]'s.
+    private fun canEarn(link: FramedLink): Boolean {
+        if (!BuildConfig.BLE_LINK_BOOST || DoorbellPolicy.serves(link.peer.capabilities)) return false
+        return LinkTuneDiag.boostOn && tuners[link]?.alive != false && !audioMonitor.contended.value
+    }
+
+    override fun onFileProgress(
+        nodeId: String,
+        key: String,
+        held: Long,
+        ms: Long,
+    ) {
+        links[nodeId]?.onProgress(key, held, ms)
+    }
+
+    // Every link's receive-side reports (FramedLink's onRxProgress), for BlobExchange to send back. Lossy past a few: a
+    // dropped one is the next one's sample, two seconds later.
+    private val rxProgress =
+        MutableSharedFlow<FileProgress>(extraBufferCapacity = PROGRESS_BUFFER, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+    override val fileProgress: Flow<FileProgress> = rxProgress.asSharedFlow()
+
+    /**
+     * The share [link] feeds at once it has earned the boost, while it will earn it ([willEarn]): else 0. [joining]
+     * counts a file it is not feeding yet into the split. Read as a feed's [settling] pace earned or not yet, and
+     * whenever it can earn ([canEarn]), because a chunk's pace moves only at the next chunk, and the boost earns inside
+     * the first: a dark holder's link earns when its lit receiver asks, which a link idle for [EARNED_RECENTLY_MS] has
+     * not shown yet (the bluetooth-reviewer's findings: a park poll in that gap read the base and unparked). A link
+     * that has not earned it by its second chunk is read at its own pace from then.
+     */
+    private fun boostedShare(
+        link: FramedLink,
+        joining: Boolean,
+        settling: Boolean = false,
+    ): Int {
+        if (!(if (settling) canEarn(link) else willEarn(link))) return 0
+        val feeding = (feedingLinks().size + if (joining) 1 else 0).coerceAtLeast(1)
         val phy = linkPhy[link] ?: LinkPhy.UNKNOWN
         return CodedPhyPolicy.pace(phy, CodedPhyDiag.tuning, feeding, earned = true, leLinks = leLinkCount()).bytesPerSec
     }
 
-    // Every link's file-stream ends, poked on its writer (FramedLink's onFileFed). Lossy past one: a reader re-reads the
+    // Every link's file-feed changes — an end, a settle or a pace move, a first measurement — poked by its FramedLink
+    // (onFeedChanged). Lossy past one: a reader re-reads the
     // links, so one pending poke says everything a second would.
-    private val feedEnds = MutableSharedFlow<Unit>(extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
-    override val fileFeedsEnded: Flow<Unit> = feedEnds.asSharedFlow()
+    private val feedChanges = MutableSharedFlow<Unit>(extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+    override val fileFeedsChanged: Flow<Unit> = feedChanges.asSharedFlow()
 
     // [paceFor]'s divisor: the links splitting the 1M/2M budget right now. A Coded feed keeps its own pace outside it.
     override fun feedingLoad(nodeId: String): Int = links.values.count { it.txInProgress && linkPhy[it] != LinkPhy.CODED }
@@ -1065,7 +1133,11 @@ class BluetoothMeshTransport(
             phyControls.mapNotNull { (link, control) ->
                 control.status().takeIf { it.attached && it.phy != LinkPhy.UNKNOWN }?.let { link to it }
             }
-        known.forEach { (link, status) -> if (links[link.nodeId] === link) linkPhy[link] = status.phy }
+        known.forEach { (link, status) ->
+            if (links[link.nodeId] !== link) return@forEach
+            // A PHY step makes what the link's last stream measured meaningless for the next (ADR 2026-10.nsr7).
+            if (linkPhy.put(link, status.phy).let { it != null && it != status.phy }) link.forgetDrain()
+        }
         CodedPhyDiag.publishLinkPhys(known.associate { (_, status) -> status.nodeId to status.phy })
         boosts.values.forEach(BleLinkBoost::poke) // a link on Coded is never boosted
     }
@@ -2011,7 +2083,8 @@ class BluetoothMeshTransport(
                 log = { msg -> Log.d(TAG, msg) },
                 landing = landing,
                 onBusy = { boostPoke(events.link) },
-                onFileFed = { feedEnds.tryEmit(Unit) },
+                onFeedChanged = { feedChanges.tryEmit(Unit) },
+                onRxProgress = { key, held, ms -> rxProgress.tryEmit(FileProgress(nodeId, key, held, ms)) },
             )
         events.link = framed
         crossings.forget(nodeId) // a fresh stream starts clean: the peer may have restarted with an empty SeenSet
@@ -2501,6 +2574,12 @@ class BluetoothMeshTransport(
         // A Coded start the stack failed internally (ADVERTISE_FAILED_INTERNAL_ERROR) is retried this many times per
         // bring-up, on [codedKeeper]'s doubling wait; [CODED_RETRYING] marks a retry in flight, so its failure is quiet.
         private const val MAX_CODED_START_RETRIES = 5
+
+        // A link that earned the boost this recently has a peer that asks for it: a file to it will earn it again.
+        private const val EARNED_RECENTLY_MS = 5 * 60_000L
+
+        // Receive-side progress reports buffered for BlobExchange: one per incoming file every couple of seconds.
+        private const val PROGRESS_BUFFER = 16
 
         // How often a feed recounts this phone's LE connections for the boosted budget ([leLinkCount]).
         private const val LE_COUNT_MS = 10_000L

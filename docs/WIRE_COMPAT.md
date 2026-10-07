@@ -38,7 +38,9 @@ Each evolves independently; bump the right one:
   connection time, **unauthenticated** — a routing/degradation hint only, never a trust input.
 - **`RelayEnvelope.type` registry**: `chat`, `groupupdate`, `groupleave`, `profile`, `receipt`,
   `reaction`, `blobreq`, `keyreq`, `typing`, `commons` (non-custodial; the spool commons' post, spec §7.4),
-  `blobhave` and `blobhas` (the blob holder query and its answer: unsigned, point-to-point, ADR 2026-10.6e5t).
+  `blobhave` and `blobhas` (the blob holder query and its answer: unsigned, point-to-point, ADR 2026-10.6e5t),
+  `blobprog` (a file receiver's progress report to its sender: unsigned, point-to-point, ADR 2026-10.nsr7),
+  `blobcancel` (an asker withdraws its ask: unsigned, point-to-point, ADR 2026-10.nsr7).
   (`meshpost` is **burned**: minted on an unpushed branch in September 2026 and withdrawn before it
   shipped — never reuse the string, since a lab build may still hold a frame of it.)
 - **`EncEnvelope.v`**: the E2E crypto scheme — `1` = static keys (AES-GCM + per-recipient HPKE wrap),
@@ -688,6 +690,22 @@ links only. No version bump, no discovery marker, no DB change. `vectors/wire-v1
 `blobHasContent` and `blobHasContentReserved`, and nothing moved. *Metadata cost:* an answer tells a linked
 neighbour which of the asked blobs this phone holds, exactly what serving its `blobreq` already told it. The `load`
 says how many files it is feeding, never to whom.
+
+**Precedent — a receiver's progress report (`blobprog`, under `CAP_BLOB_HAVE`, ADR 2026-10.nsr7).** A third type under
+the holder query's bit, with no bit of its own: none of 6e5t or this had been pushed when it was added. It is unsigned and
+`relay = false` like the query, and goes only to a neighbour whose link carries the bit. A build without the type
+refuses it as an unsigned frame and loses nothing: its sender judges the feed by pace and write staleness, as before.
+It is a frame, not a link record: `LinkFraming.read` throws on an unknown record type, which would drop a peer's
+link. A field was added to `blobhas` with it: `BlobHasItem.eta`, defaulted and ignored by an older reader. Nothing in
+the fast codecs. `vectors/wire-v1.json` gained `blobProgressContent` and `blobHasContentSendingEta`, and nothing moved.
+*Metadata cost:* the sender learns how fast its own file arrives at the neighbour it is feeding.
+
+**Precedent — an asker withdraws its ask (`blobcancel`, under `CAP_BLOB_HAVE`, ADR 2026-10.nsr7).** A fourth type
+under the same unshipped bit. The holder drops a parked ask, and takes a copy queued to the asker off the link before it
+starts; nothing on the link changes, since a queued file is the holder's own business. A copy already streaming goes on:
+cutting one short would need a link record, which tears down an older peer's link. A build without the type refuses it
+as an unsigned frame, and the copy comes as before. `vectors/wire-v1.json` gained `blobCancelContent`.
+*Metadata cost:* none beyond the ask it withdraws.
 
 **When you bump a version layer:** add a round-trip test plus an "unknown higher version drops locally
 but is counted" test. New crypto scheme ⇒ bump `EncEnvelope.MAX_SUPPORTED_VERSION` + every branch that

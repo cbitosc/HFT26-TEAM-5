@@ -139,7 +139,7 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   `BluetoothMeshTransport.writeOnce` rings:** READ ADR 2026-09.dqvb (companion change A4 for the iOS port). A link
   rings only when the peer's HELLO carries `CAP_DOORBELL`, which Android never claims, so Android↔Android links never
   ring (they open a GATT client only for 2da4's link boost, never with discovery). The doorbell UUIDs are cross-platform law, and the schedule is the port's. `typing`, `blobreq`,
-  `blobhave`, `blobhas` and `keyreq` don't ring. The GATT client attaches to the link's own ACL, closes on a 2 s attach timeout, and lives
+  `blobhave`, `blobhas`, `blobprog`, `blobcancel` and `keyreq` don't ring. The GATT client attaches to the link's own ACL, closes on a 2 s attach timeout, and lives
   and dies with the link. A ring is a write without response, poked at the enqueue, never after the socket write.
   The lookup runs at link-up and each one that finds the doorbell asks for `CONNECTION_PRIORITY_BALANCED`: an
   iPhone central runs the link at a 720 ms supervision timeout, BALANCED carries 5 s (#102, the ADR's amendment).
@@ -388,10 +388,18 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   and only the asking is dark in release. Wire change: the iOS port owes the responder as a companion change.
   Lab: `BlobHaveLabTest`; unit: `BlobHolderQueryTest`. **Before touching `CarrierPullPolicy`,
   `ForwardStore.carriedAttachments`, what `onCarriedFrame` / `rewantMissingBlobs` hold back, `BlobExchange`'s parked
-  asks (`parkBehindFeed`, `serveParked`, `PARK_MAX_MS`), `MeshTransport.fileFeedingTo` / `FramedLink.feedsFile`, or
-  `answersIn`'s author rule:** READ ADR 2026-10.g24x. A carrier leaves a DM's picture to its linked recipient for up to
-  10 min, a holder feeds one 1M/2M copy of a blob at a time (bounded at 30 s), and a linked author's HAVE decides the
-  fetch. Lab: `PictureFanoutLabTest`. **Before touching `FramedLink.rxFile`, `ArrivingFile`,
+  asks (`parkBehindFeed`, `waitsBehindFeed`, `serveParked`), or `answersIn`'s author rule:** READ ADR 2026-10.g24x. A
+  carrier leaves a DM's picture to its linked recipient for up to 10 min, and a group's it is not in to the members
+  while the author is linked (never a member's own copy, #132), a holder feeds one 1M/2M copy of a blob at a
+  time, and a linked author's HAVE decides the fetch. Lab: `PictureFanoutLabTest`. **Before touching `blobprog` /
+  `BlobProgressContent`, `blobcancel` / `BlobCancelContent`, `FramedLink.cancelQueued`, `BlobHasItem.eta`, `FeedMeter`, `FramedLink.feed` / `onProgress` / `onRxProgress`,
+  `MeshTransport.fileFeed` / `expectedFileRate` / `fileProgress`, or how long a parked ask or a held asker waits:** READ
+  ADR 2026-10.nsr7. A file's receiver reports what it holds every 2 s by its own clock, the sender measures the drain
+  from it, and a parked ask waits for a live feed however long (no bound of its own) until it ends, stalls (15 s with no
+  progress) or passes its deadline (first measured ETA × 1.25 + 30 s); the fastest asker goes next, and one goes
+  beside a feed only when its own copy would end first. Members go before carriers, and an asker lets go of a
+  neighbour its ask found lacking the blob, or whose other stream to it has more than 30 s left while an idle holder
+  waits, withdrawing its ask with a `blobcancel` (the amendments). Phase 2 (an in-flight window instead of the pace caps) is recorded there and not built. **Before touching `FramedLink.rxFile`, `ArrivingFile`,
   `FileHeaderWire.size`, `MeshController.arrivals` / `arrivalTicker`, `ChatViewModel.arrivals` or
   `ui/chat/ArrivalIndicator`:** READ ADR 2026-10.y9qh — the chat's progress ring is the same read of the link
   (bytes in, and the size the header declared: a label, never a bound), polled only while an attachment the

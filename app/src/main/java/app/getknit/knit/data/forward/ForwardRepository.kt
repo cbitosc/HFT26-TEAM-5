@@ -198,7 +198,7 @@ class ForwardRepository(
     override suspend fun attachmentsNeedingFetch(): Map<String, String> = dao.attachmentsNeedingFetch().associate { it.hash to it.senderId }
 
     override suspend fun carriedAttachments(): List<CarriedAttachment> =
-        dao.carriedAttachments().map { CarriedAttachment(it.hash, it.recipientId, it.receivedAt) }
+        dao.carriedAttachments().map { CarriedAttachment(it.hash, it.recipientId, it.receivedAt, it.senderId, it.groupId) }
 
     override suspend fun recipientOf(id: String): String? = dao.recipientOf(id)
 

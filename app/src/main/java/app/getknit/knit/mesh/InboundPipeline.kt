@@ -47,8 +47,10 @@ import app.getknit.knit.mesh.crypto.ratchet.RatchetSessions
 import app.getknit.knit.mesh.crypto.readsCryptoV3
 import app.getknit.knit.mesh.crypto.sealBytes
 import app.getknit.knit.mesh.lora.MeshtasticProto
+import app.getknit.knit.mesh.protocol.BlobCancelContent
 import app.getknit.knit.mesh.protocol.BlobHasContent
 import app.getknit.knit.mesh.protocol.BlobHaveContent
+import app.getknit.knit.mesh.protocol.BlobProgressContent
 import app.getknit.knit.mesh.protocol.BlobReqContent
 import app.getknit.knit.mesh.protocol.ChatContent
 import app.getknit.knit.mesh.protocol.EncEnvelope
@@ -315,6 +317,14 @@ class InboundPipeline(
                 WireCodec.decodePayload<BlobHaveContent>(env.payload)?.let { blobExchange.onHaveQuery(it.hashes, fromNodeId, env.id) }
             }
 
+            env.type == FrameType.BLOB_PROGRESS -> {
+                WireCodec.decodePayload<BlobProgressContent>(env.payload)?.let { blobExchange.onProgressReport(it, fromNodeId) }
+            }
+
+            env.type == FrameType.BLOB_CANCEL -> {
+                WireCodec.decodePayload<BlobCancelContent>(env.payload)?.let { blobExchange.onCancel(it.hash, fromNodeId) }
+            }
+
             else -> {
                 WireCodec.decodePayload<BlobHasContent>(env.payload)?.let { blobExchange.onHaveAnswer(it, fromNodeId) }
             }
@@ -362,7 +372,7 @@ class InboundPipeline(
                 handleReaction(env)
             }
 
-            FrameType.BLOB_REQ, FrameType.BLOB_HAVE, FrameType.BLOB_HAS -> {
+            FrameType.BLOB_REQ, FrameType.BLOB_HAVE, FrameType.BLOB_HAS, FrameType.BLOB_PROGRESS, FrameType.BLOB_CANCEL -> {
                 handleBlobFrame(env, fromNodeId)
             }
 
@@ -580,7 +590,8 @@ class InboundPipeline(
             if (env.type == FrameType.BLOB_REQ) return true
             // The holder query and its answer are unsigned like the ask (ADR 2026-10.6e5t), and point-to-point only: a
             // flooded copy is nobody's query. Ahead of the key path, so neither ever spends a key request.
-            if (env.type == FrameType.BLOB_HAVE || env.type == FrameType.BLOB_HAS) return !wire.relay
+            // The receiver's progress report and the asker's cancel ride the same way (ADR 2026-10.nsr7).
+            if (FrameType.isUnsignedPointToPoint(env.type)) return !wire.relay
             // A self frame — one of OUR own frames looping back, after a neighbor carried it and (once our SeenSet
             // window lapsed) re-served it — is authenticated like any other via [verifierBundle], which resolves
             // our identity's own bundle for it. It USED to be dropped here as a silent no-op ("we already have
@@ -2000,9 +2011,9 @@ class InboundPipeline(
      * A no-op for our own sends and delivered messages — [blobStore] already holds the blob. A room post (or a
      * key-less forward) of a picture we hold sealed from a conversation with its author is copied from our own store
      * instead, exactly as [deliverChat] would (ADR 2026-10.mptm) — a carried room frame can be custodied before it
-     * is delivered here. A DM whose recipient is linked to us waits ([CarrierPullPolicy], ADR 2026-10.g24x): the
-     * recipient is fetching it from the author now, and our copy would only split the author's feed; the database
-     * re-arm pulls it later.
+     * is delivered here. A DM whose recipient is linked to us waits ([CarrierPullPolicy], ADR 2026-10.g24x), and so
+     * does a group's picture whose author is: the recipient or the members are fetching it from the author now, and
+     * our copy would only split the author's feed; the database re-arm pulls it later.
      */
     suspend fun onCarriedFrame(
         env: RelayEnvelope,
@@ -2015,7 +2026,9 @@ class InboundPipeline(
         if (copyFromOwnStore(hash, env.senderId)) return
         if (blobs.carrierOnlyBlobBytes() >= CARRIER_BLOB_BUDGET_BYTES) return
         val linked = transport.neighbors.value.mapTo(HashSet()) { it.nodeId }
-        if (CarrierPullPolicy.defers(listOf(CarriedAttachment(hash, env.recipientId, clock())), linked, clock())) {
+        val member = env.group?.members?.contains(identity.nodeId()) == true
+        val carried = CarriedAttachment(hash, env.recipientId, clock(), env.senderId, env.group?.id, member)
+        if (CarrierPullPolicy.defers(listOf(carried), linked, clock())) {
             metrics.onCarrierPullDeferred()
             return
         }
@@ -3542,7 +3555,16 @@ class InboundPipeline(
     private companion object {
         /** Types a missing sender key never spends a key request on — see the comment in `verifyInbound`. */
         val NO_KEY_REQUEST_TYPES =
-            setOf(FrameType.KEY_REQ, FrameType.PROFILE, FrameType.TYPING, FrameType.COMMONS, FrameType.BLOB_HAVE, FrameType.BLOB_HAS)
+            setOf(
+                FrameType.KEY_REQ,
+                FrameType.PROFILE,
+                FrameType.TYPING,
+                FrameType.COMMONS,
+                FrameType.BLOB_HAVE,
+                FrameType.BLOB_HAS,
+                FrameType.BLOB_PROGRESS,
+                FrameType.BLOB_CANCEL,
+            )
 
         // Same tag as MeshManager on purpose: these inbound verify/drop log lines are grepped in field
         // diagnostics, so the extraction must not change them.

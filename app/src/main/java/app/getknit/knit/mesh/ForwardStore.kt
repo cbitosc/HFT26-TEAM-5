@@ -118,10 +118,14 @@ interface ForwardStore {
     }
 }
 
-/** One carried frame naming attachment [hash]: its cleartext recipient (null for a group or room frame) and when we
- *  took it into custody ([ForwardStore.carriedAttachments]). */
+/** One carried frame naming attachment [hash]: its cleartext recipient (null for a group or room frame), when we took
+ *  it into custody, its author, its group if it is a group's, and whether we are in that group (the store does not
+ *  know: its reader fills it in) ([ForwardStore.carriedAttachments]). */
 data class CarriedAttachment(
     val hash: String,
     val recipientId: String?,
     val carriedAt: Long,
+    val senderId: String? = null,
+    val groupId: String? = null,
+    val member: Boolean = false,
 )

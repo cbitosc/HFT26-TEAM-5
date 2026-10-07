@@ -152,6 +152,10 @@ interface MessageDao {
     @Query("SELECT COUNT(*) FROM messages WHERE attachmentHash = :hash")
     suspend fun countByAttachmentHash(hash: String): Int
 
+    /** The conversation of a message naming attachment [hash], if any: whom a holder serves first (ADR 2026-10.nsr7). */
+    @Query("SELECT conversationId FROM messages WHERE attachmentHash = :hash LIMIT 1")
+    suspend fun conversationOfAttachment(hash: String): String?
+
     /**
      * The (base64) per-attachment key stored with a message referencing the ciphertext [hash], if any —
      * used to decrypt a just-pulled E2E attachment blob so its plaintext can be screened. Null for a

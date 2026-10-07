@@ -204,9 +204,6 @@ class MeshManager(
     // How long a blob round's first ask has before every other neighbour is asked ([BlobExchange.FIRST_ASK_GRACE_MS],
     // ADR 2026-10.f7gg). Injectable for `mesh/lab`, whose scenarios must not hang an assertion on a wall-clock race.
     private val firstAskGraceMs: Long = BlobExchange.FIRST_ASK_GRACE_MS,
-    // The longest an ask waits parked behind another Bluetooth copy's feed ([BlobExchange.PARK_MAX_MS], ADR
-    // 2026-10.g24x). Injectable for `mesh/lab`, whose held pipes would otherwise make every other asker sit it out.
-    private val blobParkMaxMs: Long = BlobExchange.PARK_MAX_MS,
     // Whether this build queries neighbours for a blob's holders before it asks (ADR 2026-10.6e5t;
     // `BuildConfig.BLOB_QUERY`, dark in release until its device trial), and how long it waits for their answers.
     // Off, every neighbour gets ADR 2026-10.f7gg's blind round; answering a query is never gated.
@@ -258,11 +255,24 @@ class MeshManager(
             // A first ask's grace runs on the session (ADR 2026-10.f7gg); stopped, the tick and link-ups step it.
             firstAskGraceMs = firstAskGraceMs,
             holderQuery = blobHolderQuery,
-            parkMaxMs = blobParkMaxMs,
             onEvent = metrics::onBlobEvent,
             timers = { sessionScope },
+            addressees = ::addresseesOf,
             log = { Log.d(TAG, it) },
         )
+
+    /**
+     * Whom the conversation naming blob [hash] is addressed to: a group's members, a DM's two ends; null for a room's, or
+     * when no message we hold names it. A holder serves those ahead of carriers (ADR 2026-10.nsr7).
+     */
+    private suspend fun addresseesOf(hash: String): Set<String>? {
+        val conversation = messages.conversationOfAttachment(hash) ?: return null
+        return when (Conversations.kindFor(conversation)) {
+            ConversationKind.GROUP -> groups.find(conversation)?.let { GroupMembersStore.decode(it.members).toSet() }
+            ConversationKind.DM -> setOf(conversation, identity.nodeId())
+            else -> null
+        }
+    }
 
     // Store-and-forward DM custody: carries DMs we originate/relay and re-offers them to neighbors that
     // join later, so a message reaches a recipient that wasn't connected when it was first flooded.
@@ -695,7 +705,9 @@ class MeshManager(
         transport.start()
         watchNeighbors(session)
         // A link that ended a file's stream frees its parked asks at once (ADR 2026-10.g24x).
-        session.launch { transport.fileFeedsEnded.collect { blobExchange.feedEnded() } }
+        session.launch { transport.fileFeedsChanged.collect { blobExchange.feedsChanged() } }
+        // A file streaming in is reported back to its sender, which times its parked asks by it (ADR 2026-10.nsr7).
+        session.launch { transport.fileProgress.collect { blobExchange.onFileProgress(it) } }
         watchReachable(session)
         watchMetPeers(session)
         openToChatWatch.start(session)
@@ -2334,8 +2346,10 @@ class MeshManager(
         val linked = transport.neighbors.value.mapTo(HashSet()) { it.nodeId }
         if (linked.isEmpty()) return emptySet()
         val now = clock()
+        val ours = groups.active().mapTo(HashSet()) { it.groupId }
         return forwardStore
             .carriedAttachments()
+            .map { if (it.groupId in ours) it.copy(member = true) else it }
             .groupBy { it.hash }
             .filter { (hash, frames) -> hash in hashes && CarrierPullPolicy.defers(frames, linked, now) }
             .keys

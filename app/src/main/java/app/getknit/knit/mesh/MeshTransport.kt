@@ -152,6 +152,33 @@ data class ReceivedFile(
 )
 
 /**
+ * A copy of a file being fed to a neighbour on a link whose feeds share one pace budget, as the link reads it
+ * ([MeshTransport.fileFeed], ADR 2026-10.nsr7). [etaMs] is how long the rest should take, by the rate the receiver's
+ * progress reports measured or, before the first, by the pace; null while the copy is queued and its pace not known.
+ * [live] is false once the feed stalled (no progress, or no write, for the stall window) or ran past the deadline its
+ * first measurement set: a feed that is not live holds no parked ask. [measured] says [etaMs] came from the receiver.
+ */
+data class FileFeed(
+    val etaMs: Long?,
+    val live: Boolean,
+    val measured: Boolean = false,
+    // How soon [live] can next flip on its own (a stall or a deadline coming due), so a holder polls then and not every
+    // second; null when nothing is due.
+    val recheckMs: Long? = null,
+)
+
+/**
+ * A receiver's note on a file streaming in ([MeshTransport.fileProgress], ADR 2026-10.nsr7): from [from], under [key],
+ * [held] bytes of it (the whole length so far, a kept prefix included) [ms] after its header arrived.
+ */
+data class FileProgress(
+    val from: String,
+    val key: String,
+    val held: Long,
+    val ms: Long,
+)
+
+/**
  * A file streaming in on a live link right now (#115): its [key], the [bytes] in so far, and the [total] its
  * sender declared in the `FILE_HEADER` — null from a build that predates the field. The total is a label, never
  * a bound (the link holds its own ceiling); one the bytes have overrun is no total at all, so [fraction] is null
@@ -411,6 +438,22 @@ interface MeshTransport {
     fun fileArrivingFrom(nodeId: String): Boolean = false
 
     /**
+     * How long the file streaming in from [nodeId] has left, at its rate so far: what `BlobExchange` weighs before its
+     * fetch waits out that peer's stream of another file (ADR 2026-10.nsr7). Null when nothing streams in from it, or
+     * no rate or size is known yet. Default null.
+     */
+    fun fileArrivingEtaMs(nodeId: String): Long? = null
+
+    /**
+     * [nodeId] withdrew its ask for [key] (a `blobcancel`, ADR 2026-10.nsr7): one copy of it queued to that peer and not
+     * yet streaming is dropped from its link. True when one was. Default false: a plane with no data path queues none.
+     */
+    fun cancelQueuedFile(
+        nodeId: String,
+        key: String,
+    ): Boolean = false
+
+    /**
      * True while a file under [key] is queued on, or streaming over, a live link toward [nodeId] — from the
      * enqueue [sendFile] accepted to the end of the stream, and after it for as long as that link goes on
      * feeding [nodeId] a later file, which the stack delivers behind it (#121). Read by `BlobExchange.onRequest`
@@ -424,26 +467,51 @@ interface MeshTransport {
     ): Boolean = false
 
     /**
-     * True while a link toward [nodeId] whose feeds share one pace budget — a Bluetooth link not on Coded (ADR
-     * 2026-10.8jwn) — is feeding a file under [key] whose feed should end within [withinMs]: streaming it at a pace
-     * that feeds the rest in time, or holding it queued with nothing else streaming. A feed slower than that (an
-     * unearned link's base share, a stalled one) is not one to wait behind.
-     * Never after its end: unlike [fileInFlightTo], a file fed in full no longer counts while the link feeds the peer
-     * something else, and a copy queued behind another file does not count until its turn. Read by
-     * `BlobExchange.onRequest`, which feeds one such copy of a blob at a time (ADR 2026-10.g24x). Default false: a
-     * plane whose feeds take nothing from each other is never waited on.
+     * The copy of the file under [key] a link toward [nodeId] is feeding, when that link's feeds share one pace budget —
+     * a Bluetooth link not on Coded (ADR 2026-10.8jwn) — and the copy is streaming, or queued with nothing else
+     * streaming so the writer is about to take it. Null otherwise: a copy queued behind another file is not fed yet,
+     * and one fed in full no longer is, unlike [fileInFlightTo]. Read by `BlobExchange.onRequest`, which feeds one such
+     * copy of a blob at a time and parks the rest while it is [FileFeed.live] (ADR 2026-10.g24x, 2026-10.nsr7). Default
+     * null: a plane whose feeds take nothing from each other is never waited on.
      */
-    fun fileFeedingTo(
+    fun fileFeed(
         nodeId: String,
         key: String,
-        withinMs: Long,
-    ): Boolean = false
+    ): FileFeed? = null
 
     /**
-     * Fires when a link of this transport ends a file's stream, fed or not — on the writer the write woke, so a holder
-     * that parked asks behind that feed serves them while the CPU is up (ADR 2026-10.g24x). Default: never.
+     * The rate, in bytes a second, a file fed to [nodeId] now would most likely go at: the rate its link last measured
+     * from a receiver's reports, else the share its pace would give it beside the feeds already going. `BlobExchange`
+     * serves the fastest parked ask first, and serves one beside a slower feed only when its own copy would end first
+     * (ADR 2026-10.nsr7). Default 0: unknown, which never goes ahead of a feed.
      */
-    val fileFeedsEnded: Flow<Unit> get() = emptyFlow()
+    fun expectedFileRate(nodeId: String): Int = 0
+
+    /**
+     * [nodeId] reported how much of the file under [key] it holds ([FrameType.BLOB_PROGRESS], ADR 2026-10.nsr7): the
+     * link streaming that key to it takes the report, and every other link ignores it. Default: ignored.
+     */
+    fun onFileProgress(
+        nodeId: String,
+        key: String,
+        held: Long,
+        ms: Long,
+    ) {}
+
+    /**
+     * Every couple of seconds of chunks of a file streaming in on a link whose feeds share one pace budget, how much of
+     * it is held ([FileProgress]): `BlobExchange` sends it back to the sender as a `blobprog` (ADR 2026-10.nsr7). A
+     * stall emits nothing. Default: never.
+     */
+    val fileProgress: Flow<FileProgress> get() = emptyFlow()
+
+    /**
+     * Fires when a link of this transport changes how long a file's feed has left: it ends the stream, fed or not (on the
+     * writer the write woke, so a holder that parked asks behind that feed serves them while the CPU is up, ADR
+     * 2026-10.g24x); the pace settles or moves; the first progress report measures it (ADR 2026-10.nsr7). A bare poke:
+     * the holder re-reads its parked asks. Default: never.
+     */
+    val fileFeedsChanged: Flow<Unit> get() = emptyFlow()
 
     /**
      * How many files the plane a file to [nodeId] would ride is feeding right now, this node's own sends: what a

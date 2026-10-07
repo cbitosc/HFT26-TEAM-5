@@ -127,16 +127,21 @@ class ForwardDaoTest : RoomDbTest() {
         }
 
     @Test
-    fun `carriedAttachments lists each frame naming a missing blob with its recipient and carry time`() =
+    fun `carriedAttachments lists each frame naming a missing blob with its recipient, carry time, author and group`() =
         runTest {
             dao.insert(fwd("dm", attachmentHash = "H1", recipientId = "bob").copy(receivedAt = 7L))
             dao.insert(fwd("room", attachmentHash = "H1", recipientId = null).copy(receivedAt = 9L))
+            dao.insert(fwd("group", attachmentHash = "H1", recipientId = null, groupId = "g-1").copy(receivedAt = 11L))
             dao.insert(fwd("held", attachmentHash = "H2", recipientId = "bob")) // H2 is held below → excluded
             dao.insert(fwd("text", attachmentHash = null, recipientId = "bob")) // no attachment → excluded
             db.blobDao().insert(BlobEntity(hash = "H2", mime = "image/jpeg", bytes = ByteArray(0)))
 
             assertEquals(
-                setOf(CarriedAttachmentRow("H1", "bob", 7L), CarriedAttachmentRow("H1", null, 9L)),
+                setOf(
+                    CarriedAttachmentRow("H1", "bob", 7L, "peer", null),
+                    CarriedAttachmentRow("H1", null, 9L, "peer", null),
+                    CarriedAttachmentRow("H1", null, 11L, "peer", "g-1"),
+                ),
                 dao.carriedAttachments().toSet(),
             )
         }

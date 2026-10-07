@@ -54,6 +54,24 @@ object FrameType {
     const val BLOB_HAS = "blobhas"
 
     /**
+     * How much of a file streaming in over Bluetooth the receiver holds: a [BlobProgressContent], sent back to the
+     * sender every couple of seconds of chunks, so the sender measures the drain its stack's queue hides from it and
+     * times the asks it parked behind the feed by it (ADR 2026-10.nsr7). Unsigned and point-to-point like [BLOB_HAVE],
+     * and sent only to a neighbour whose link advertises `Protocol.CAP_BLOB_HAVE`; a build that does not know the type
+     * refuses the unsigned frame, which costs it nothing.
+     */
+    const val BLOB_PROGRESS = "blobprog"
+
+    /**
+     * An asker withdraws its ask for a blob: a [BlobCancelContent], sent to a neighbour it asked once it moves on or
+     * holds the blob (ADR 2026-10.nsr7's cancel amendment). The holder drops the ask if it is parked, and takes our copy
+     * off the link's queue if it has not started; a copy already streaming goes on (a link cannot cut a file short
+     * without a new record type). Unsigned and point-to-point like [BLOB_HAVE], and sent only to a neighbour whose link
+     * advertises `Protocol.CAP_BLOB_HAVE`; a build that does not know the type refuses it, and the copy comes as before.
+     */
+    const val BLOB_CANCEL = "blobcancel"
+
+    /**
      * A post in a **commons** — a spool's shared room (docs/SPOOL_PROTOCOL.md §7.4). Payload is a
      * [CommonsPost]. Deliberately **not** replayable and **not** custodial: a commons post lives on the
      * spool that runs the room and enters the app through the Internet plane's own door, never the
@@ -96,12 +114,15 @@ object FrameType {
     fun isCustodial(type: String): Boolean = isReplayable(type) || type == PROFILE
 
     /**
-     * The unsigned point-to-point blob traffic: [BLOB_REQ] and the [BLOB_HAVE]/[BLOB_HAS] query and answer. Taken
+     * The unsigned point-to-point blob traffic: [BLOB_REQ], the [BLOB_HAVE]/[BLOB_HAS] query and answer, the
+     * receiver's [BLOB_PROGRESS] report and the asker's [BLOB_CANCEL]. Taken
      * without a signature (`InboundPipeline.verifyInbound`), so its [RelayEnvelope.senderId] is a claim nobody checked:
      * none of it is ever evidence that a node was heard (`HeardFrom`, `RelayedPresence`), and none of it is carried,
      * parked or flooded.
      */
-    fun isUnsignedPointToPoint(type: String): Boolean = type == BLOB_REQ || type == BLOB_HAVE || type == BLOB_HAS
+    fun isUnsignedPointToPoint(type: String): Boolean = type in UNSIGNED_POINT_TO_POINT
+
+    private val UNSIGNED_POINT_TO_POINT = setOf(BLOB_REQ, BLOB_HAVE, BLOB_HAS, BLOB_PROGRESS, BLOB_CANCEL)
 }
 
 /**
@@ -318,6 +339,9 @@ data class BlobHaveContent(
  *
  * [size] is the whole blob's length, given with [HAVE] and [SENDING], so the asker can tell whether the Wi-Fi Aware
  * link is worth raising for it. [held] is reserved for [PARTIAL] — the bytes held from 0 — and no build emits it yet.
+ * [eta] rides [SENDING] when the holder can tell: the ms until the asker's copy should have landed, its own feed's
+ * measured end or, parked behind another copy's feed, that feed's end plus its own (ADR 2026-10.nsr7). The asker holds
+ * on the holder that long rather than ask another.
  */
 @Serializable
 data class BlobHasItem(
@@ -325,6 +349,7 @@ data class BlobHasItem(
     val state: Int,
     val size: Long? = null,
     val held: Long? = null,
+    val eta: Long? = null,
 ) {
     companion object {
         /** Not held, and not on its way here. */
@@ -354,6 +379,28 @@ data class BlobHasContent(
     val items: List<BlobHasItem>,
     val load: Int? = null,
     val re: String? = null,
+)
+
+/**
+ * Content of a [FrameType.BLOB_PROGRESS] frame: of the file under [hash] streaming in from the frame's recipient, the
+ * bytes the sender of the frame [held] (the whole length so far, a resumed stream's kept prefix included) [ms] after its
+ * header arrived, by the receiver's own clock — so the rate between two reports is the drain, whatever a report waited
+ * for on the way back (ADR 2026-10.nsr7).
+ */
+@Serializable
+data class BlobProgressContent(
+    val hash: String,
+    val held: Long,
+    val ms: Long,
+)
+
+/**
+ * Content of a [FrameType.BLOB_CANCEL] frame: the sender withdraws its ask for the blob under [hash] from the frame's
+ * recipient (ADR 2026-10.nsr7's cancel amendment).
+ */
+@Serializable
+data class BlobCancelContent(
+    val hash: String,
 )
 
 /**

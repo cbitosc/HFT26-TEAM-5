@@ -46,6 +46,12 @@ internal class BleLinkBoost(
     /** The link reported an interval that earns the larger budget, and nothing slower since (nor a release). */
     val earned: Boolean get() = policy.earned
 
+    // When the link last reported an interval that earns the boost (elapsed time; 0 never).
+    @Volatile private var earnedAt = 0L
+
+    /** Whether the link earned the boost within the last [ms]: its peer, or this side, asks for it (ADR 2026-10.nsr7). */
+    fun earnedWithin(ms: Long): Boolean = earned || (earnedAt != 0L && now() - earnedAt <= ms)
+
     /** This side asked for the short interval and has not let go. */
     val boosting: Boolean get() = policy.boosting
 
@@ -71,6 +77,10 @@ internal class BleLinkBoost(
         val before = policy.earned
         val step = policy.onParams(params.intervalUs, ok, now())
         val after = policy.earned
+        // Stamped on the way out too: the stack reports an update only when one happens, so a link that earned at the
+        // start of a long stream and lost it at the release would otherwise read as earned minutes before (5e9f267d's
+        // shape, the bluetooth-reviewer's finding).
+        if (before || after) earnedAt = now()
         if (ok && before != after) {
             Log.i(TAG, "bt boost $nodeId ${if (after) "earned" else "unearned"} interval=${params.intervalUs}us")
         }
@@ -86,6 +96,7 @@ internal class BleLinkBoost(
 
     /** The client that heard the link is gone (ended, or let go by `…debug.LINKTUNE --ez close`): unearned until heard again. */
     fun forget() {
+        if (policy.earned) earnedAt = now()
         policy.forget()
         poke()
     }

@@ -757,11 +757,12 @@ class MeshLab {
         const val FIRST_ASK_GRACE_MS = 20_000L
 
         /**
-         * How long a holder parks an ask behind another copy's feed ([app.getknit.knit.mesh.BlobExchange.PARK_MAX_MS],
-         * 30 s on a phone), shortened: a scenario that holds one peer's files would otherwise stall every other
-         * asker's copy that long. A scenario about parking boots its holder with a long one.
+         * How long a held pipe's feed reads as live before it counts as stalled (`FeedMeter.STALL_MS` is 15 s on a
+         * phone; ADR 2026-10.nsr7), shortened: a holder parks every other asker behind a live feed for as long as it
+         * lasts, and a scenario that holds one peer's files would otherwise stall the rest. A scenario about parking
+         * boots its holder with a long one.
          */
-        const val PARK_MAX_MS = 2_000L
+        const val FEED_STALL_MS = 2_000L
 
         /**
          * How long a fetch waits for its holder queries' answers, lengthened the same way
@@ -826,10 +827,11 @@ data class LabLimits(
     /** How long a blob round's first ask has before every other neighbour is asked ([MeshLab.FIRST_ASK_GRACE_MS]). */
     val firstAskGraceMs: Long = MeshLab.FIRST_ASK_GRACE_MS,
     /**
-     * The longest a holder parks an ask behind another copy's feed ([MeshLab.PARK_MAX_MS]; ADR 2026-10.g24x). Short by
-     * default: a held pipe is a feed that never ends, and only a scenario about parking means to wait on one.
+     * How long a held pipe's feed reads as live before it stalls ([MeshLab.FEED_STALL_MS]; ADR 2026-10.nsr7): a parked
+     * ask waits that long behind it. Short by default: a held pipe is a feed that never ends, and only a scenario about
+     * parking means to wait on one.
      */
-    val parkMaxMs: Long = MeshLab.PARK_MAX_MS,
+    val feedStallMs: Long = MeshLab.FEED_STALL_MS,
     /**
      * Whether the node queries its neighbours for a blob's holders before it asks (ADR 2026-10.6e5t;
      * `BuildConfig.BLOB_QUERY`, on in debug and off in release). Off by default, so every other scenario asks blind,
@@ -1006,6 +1008,8 @@ class LabNode internal constructor(
         transport =
             LabTransport(nodeId, File(dir, "rx"), partials, pages, chaos).apply {
                 advertises = if (limits.answersHolderQueries) Protocol.CAP_BLOB_HAVE else 0L
+                clock = now
+                feedStallMs = limits.feedStallMs
             }
         metrics = MeshMetrics()
         // The Internet plane is opted into through the same two settings the relay editor writes; the
@@ -1156,7 +1160,6 @@ class LabNode internal constructor(
                 spoolTickMs = limits.spoolTickMs,
                 spoolAttachmentRetryMs = limits.spoolAttachmentRetryMs,
                 firstAskGraceMs = limits.firstAskGraceMs,
-                blobParkMaxMs = limits.parkMaxMs,
                 blobHolderQuery =
                     BlobExchange.HolderQuery(
                         enabled = limits.blobQuery,

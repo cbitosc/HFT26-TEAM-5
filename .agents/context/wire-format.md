@@ -19,16 +19,19 @@ can evolve *additively* without another break. The three layers:
 - Per-type content (`ChatContent`, `ProfileContent`, `GroupLeaveContent`, `ReceiptContent`,
   `ReactionContent`, `BlobReqContent`, `BlobHaveContent`, `BlobHasContent`, `KeyReqContent`, `TypingContent`) lives
   inside `payload`; only endpoints parse it. Current `type`s: `chat`, `groupupdate`, `profile`, `receipt`, `reaction`,
-  `groupleave`, `blobreq`, `blobhave`, `blobhas`, `keyreq`, `typing` (a best-effort, single-hop, never-custodied "now
+  `groupleave`, `blobreq`, `blobhave`, `blobhas`, `blobprog`, `blobcancel`, `keyreq`, `typing` (a best-effort, single-hop, never-custodied "now
   typing" cue — see the typing-indicator flow), `commons`. A `blobreq` may carry an `offset`: the bytes the asker kept
   from a transfer a link drop cut off, answered by a link `FILE_HEADER` that echoes it (ADR 2026-10.wtyc). A
   `blobhave` asks a neighbour whose link carries `CAP_BLOB_HAVE` which of up to 32 blobs it holds; its `blobhas`
   answers each with a state (NONE, HAVE, SENDING, FETCHING; PARTIAL reserved), a size, the responder's load and the
-  query's id (ADR 2026-10.6e5t).
+  query's id (ADR 2026-10.6e5t), and a SENDING one may say when the asker's copy should land (`eta`, ms). A `blobprog`
+  goes from a file's receiver back to its sender every 2 s of chunks: the hash, the bytes held and the ms since the
+  header by the receiver's clock (ADR 2026-10.nsr7), under the same `CAP_BLOB_HAVE` bit. A `blobcancel` (the hash)
+  withdraws an asker's ask: the holder drops it if parked, and a copy queued and not yet streaming (the same bit).
 
 **One signature authenticates every type**: `WireEnvelope.sig` is raw Ed25519 over `signed` (which
 binds `type`/`id`/`senderId`), verified byte-exact in `MeshManager.verifyInbound`; the blob traffic — `blobreq`,
-`blobhave`, `blobhas`, each with `relay = false` (`FrameType.isUnsignedPointToPoint`) — and the v3 live-link delivery tick (ADR 059 — a `relay = false` DM-form chat addressed to
+`blobhave`, `blobhas`, `blobprog`, `blobcancel`, each with `relay = false` (`FrameType.isUnsignedPointToPoint`) — and the v3 live-link delivery tick (ADR 059 — a `relay = false` DM-form chat addressed to
 us, authenticated by its ratchet AEAD) are the only unsigned frames. `MeshManager` signs on origination; `verifyInbound` drops
 any flooded frame whose signature is missing/invalid or whose key doesn't derive to `senderId`, but
 the router still relays unknown/unverifiable frames verbatim so an old build is never a black hole.

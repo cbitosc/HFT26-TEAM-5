@@ -1,8 +1,10 @@
 package app.getknit.knit.mesh
 
+import app.getknit.knit.mesh.protocol.BlobCancelContent
 import app.getknit.knit.mesh.protocol.BlobHasContent
 import app.getknit.knit.mesh.protocol.BlobHasItem
 import app.getknit.knit.mesh.protocol.BlobHaveContent
+import app.getknit.knit.mesh.protocol.BlobProgressContent
 import app.getknit.knit.mesh.protocol.BlobReqContent
 import app.getknit.knit.mesh.protocol.FrameId
 import app.getknit.knit.mesh.protocol.FrameType
@@ -99,14 +101,15 @@ class BlobExchange(
     // and how long it waits for their answers. Off, every neighbour gets ADR 2026-10.f7gg's blind round. Answering is
     // never gated: [onHaveQuery] runs on every build.
     private val holderQuery: HolderQuery = HolderQuery(),
-    // The longest an ask waits parked behind another copy's feed before it is served beside it ([PARK_MAX_MS], ADR
-    // 2026-10.g24x). Injectable so `mesh/lab`, whose files sit on held pipes, need not sit it out.
-    private val parkMaxMs: Long = PARK_MAX_MS,
     // What happened, for the owner's counters (`MeshMetrics.onBlobEvent`).
     private val onEvent: (BlobEvent) -> Unit = {},
     // Where an ask's grace is timed (ADR 2026-10.f7gg): the mesh session's scope, read at each arm. Null (no
     // session, or a rig) leaves the next step to the next want, answer, link-up or tick.
     private val timers: () -> CoroutineScope? = { null },
+    // Whom the conversation naming a blob is addressed to — a group's members, a DM's two ends — or null when no message
+    // we hold names it (a relay's blob, an avatar) or it is a room's: a holder serves members ahead of carriers (ADR
+    // 2026-10.nsr7's member-first amendment).
+    private val addressees: suspend (hash: String) -> Set<String>? = { null },
     // Injected logger (the class stays Android-free): DI passes android.util.Log; tests default silent.
     private val log: (String) -> Unit = {},
 ) {
@@ -171,10 +174,9 @@ class BlobExchange(
         }
 
     // Asks for a blob we hold that came in while another Bluetooth copy of it was being fed (ADR 2026-10.g24x): hash ->
-    // asker -> its ask, oldest first. Each is served when no copy of that blob is fed on a shared-budget link to anyone
-    // else, or once it has waited [parkMaxMs] — a feed to a stalled link must not hold everyone else — and dropped
-    // when its asker unlinks or [SERVE_MEMO_MS] passes since it last asked (it has moved on to another holder by then).
-    // Capped by hash. Guarded by [lock].
+    // asker -> its ask. Each blob's fastest is served when no live copy of it is fed on a shared-budget link to anyone
+    // else — the feed ended, stalled, or ran past the deadline its first measurement set (ADR 2026-10.nsr7) — and an ask
+    // is dropped when its asker unlinks or stops renewing it ([ParkedAsk.keptUntil]). Capped by hash. Guarded by [lock].
     private val parked =
         object : LinkedHashMap<String, LinkedHashMap<String, ParkedAsk>>(16, 0.75f, false) {
             override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, LinkedHashMap<String, ParkedAsk>>): Boolean =
@@ -304,7 +306,7 @@ class BlobExchange(
     ) {
         if (onTheWay(hash)) return
         if (store.has(hash)) {
-            clearFetching(hash)
+            clearFetching(hash)?.let { withdrawAsks(hash, it, from = null) }
             partials.drop(hash) // obtained off-mesh: nothing left to resume
             return
         }
@@ -320,6 +322,7 @@ class BlobExchange(
             }
             log(askLine(hash, plan))
         }
+        plan.cancels.forEach { withdrawAsk(hash, it) }
         plan.events.forEach(onEvent)
         plan.wake?.let { armTimer(hash, it) }
     }
@@ -345,7 +348,7 @@ class BlobExchange(
         w.fetch?.let { f ->
             // Queries go out mid-fetch too (a newcomer, a fetching neighbour's recheck): fresh answers for the fallback.
             owedQueries(w, capableOf(linked.filter { it.id !in w.pullers }), t, p)
-            fetchWait(w, f, linked.firstOrNull { it.id == f.peer }, kept, t, p)?.let { return p.waitFor(it) }
+            fetchWait(w, f, linked, kept, t, p)?.let { return p.waitFor(it) }
         }
         // A cycle closes only with no ask outstanding, so an ask's grace always runs out inside the cycle it began in.
         if (w.cycleDue(t)) openCycle(w, t)
@@ -418,19 +421,74 @@ class BlobExchange(
     private fun fetchWait(
         w: Want,
         f: Fetch,
-        c: Candidate?,
+        linked: List<Candidate>,
         kept: Long,
         t: Long,
         p: Plan,
     ): Long? {
-        if (c == null) return w.over(f, "link gone")
-        if (c.streaming) {
-            f.quietSince = null
-            return minOf(STREAM_POLL_MS, f.graceMs)
-        }
+        val c = linked.firstOrNull { it.id == f.peer } ?: return w.over(f, "link gone")
+        if (c.streaming) return streamWait(w, f, c, linked, p)
         val quiet = f.quietSince ?: t.also { f.quietSince = it }
         (quiet + f.graceMs - t).takeIf { it > 0 }?.let { return it }
         return graceUp(w, f, c, kept, t, p)
+    }
+
+    /*
+     * While [c] streams another file to us, [fetchWait] waits it out — our copy may be queued behind it — except in two
+     * cases (the cell (d) device run of 2026-10-07: an asker sat 12 min on a neighbour feeding it an older carrier copy at
+     * about 2 KB/s, while another held the blob and fed nothing).
+     */
+
+    /** [fetchWait] while [c] streams another file to us: wait it out, or let [c] go — see above. */
+    private fun streamWait(
+        w: Want,
+        f: Fetch,
+        c: Candidate,
+        linked: List<Candidate>,
+        p: Plan,
+    ): Long? {
+        if (askedLacking(w, c)) {
+            // Not a fallback: it may hold the blob soon, and its HAVE asks it again, this time for real.
+            w.fetch = null
+            log("blob drop ${f.hash8}… ask on ${c.id}: it lacked the blob, nothing of ours is queued")
+            return null
+        }
+        idleHolderPast(w, c, linked)?.let { why -> return w.over(f, why, p).also { w.failed += c.id } }
+        f.quietSince = null
+        return minOf(STREAM_POLL_MS, f.graceMs)
+    }
+
+    /**
+     * Whether our ask found [c] lacking the blob: an answer saying so came in after the ask. A neighbour that lacks a blob
+     * remembers no asker (`onRequest` pulls it through, and the asker asks again), so nothing of ours is queued behind
+     * what it streams.
+     */
+    private fun askedLacking(
+        w: Want,
+        c: Candidate,
+    ): Boolean {
+        val a = w.answers[c.id] ?: return false
+        val asked = w.askedAt[c.id] ?: return false
+        return a.state !in HELD && a.receivedAt >= asked
+    }
+
+    /**
+     * Why [w]'s fetch leaves [c], or null to wait: what [c] streams has more than [STREAM_SWITCH_MS] left, and another
+     * neighbour holds the blob and feeds nothing. Our copy, queued or not, waits that long here and none there; one
+     * queued here may still come, a second copy a long wait is worth.
+     */
+    private fun idleHolderPast(
+        w: Want,
+        c: Candidate,
+        linked: List<Candidate>,
+    ): String? {
+        val left = c.streamLeftMs?.takeIf { it > STREAM_SWITCH_MS } ?: return null
+        val idle =
+            linked.firstOrNull { o ->
+                val a = w.answers[o.id]
+                o.id != c.id && !o.streaming && o.id !in w.failed && a?.state == BlobHasItem.HAVE && a.load == 0
+            } ?: return null
+        return "streaming another file ~$left ms, ${idle.id} idle"
     }
 
     /** [fetchWait] once [f]'s grace is up and [c] streams nothing to us: confirm, hold, or end it — see there. */
@@ -445,11 +503,11 @@ class BlobExchange(
         val queryable = c.capable && holderQuery.enabled
         return when {
             f.tier == Tier.Pending -> {
-                w.over(f, "floor")
+                w.over(f, "floor", p)
             }
 
             f.tier == Tier.Blind && !(queryable && w.answers[c.id]?.state in HELD) -> {
-                w.over(f, null)
+                w.over(f, null, p)
             }
 
             f.tier == Tier.Blind -> {
@@ -460,11 +518,11 @@ class BlobExchange(
             }
 
             !queryable -> {
-                w.over(f, "grace")
+                w.over(f, "grace", p)
             }
 
             f.confirms >= MAX_CONFIRMS -> {
-                hold(w, c, "sending", t) ?: w.over(f, "grace")
+                hold(w, c, "sending", t) ?: w.over(f, "grace", p)
             }
 
             else -> {
@@ -474,8 +532,10 @@ class BlobExchange(
     }
 
     /**
-     * Holds [w]'s fetch on [c] until our last ask's serve-memo floor, when it was asked inside it: nothing withdraws an
-     * ask, so asking the next holder now buys a second copy whenever the first one's is only late (#140). The hold ends
+     * Holds [w]'s fetch on [c] until our last ask's serve-memo floor, when it was asked inside it, or until the copy a
+     * SENDING answer said should land by then has had its slack (ADR 2026-10.nsr7): asking the next holder now buys a
+     * second copy whenever the first one's is only late (#140). A `blobcancel` reaches only a holder that reads one, and
+     * never stops a copy already streaming, so the floor stays (shortening it is a decision of its own). The hold ends
      * early when [c]'s link goes ([fetchWait]'s "link gone") or the bytes arrive; at the floor the next holder is asked.
      * Null when there is no floor left to hold on.
      */
@@ -485,7 +545,9 @@ class BlobExchange(
         why: String,
         t: Long,
     ): Long? {
-        val floor = w.askedAt[c.id]?.let { it + SERVE_MEMO_MS - t }?.takeIf { it > 0 } ?: return null
+        // A SENDING answer that said when our copy should land holds us that long too (ADR 2026-10.nsr7).
+        val promised = w.answers[c.id]?.etaAt?.let { it + HOLD_SLACK_MS - t }
+        val floor = listOfNotNull(w.askedAt[c.id]?.let { it + SERVE_MEMO_MS - t }, promised).maxOrNull()?.takeIf { it > 0 } ?: return null
         w.fetch = Fetch(c.id, w.hash8, Tier.Pending, t, floor)
         log("blob hold ${w.hash8}… on ${c.id} ($why), floor $floor ms")
         return floor
@@ -531,11 +593,11 @@ class BlobExchange(
 
             // Silence on a link that is still up is a late answer, not a no: hold on the ask we made (#140).
             a == null -> {
-                hold(w, c, "confirm silent", t) ?: w.over(f, "confirm silent")
+                hold(w, c, "confirm silent", t) ?: w.over(f, "confirm silent", p)
             }
 
             else -> {
-                w.over(f, "confirm ${stateLabel(a.state)}")
+                w.over(f, "confirm ${stateLabel(a.state)}", p)
             }
         }
     }
@@ -798,6 +860,7 @@ class BlobExchange(
                 streaming = transport.fileArrivingFrom(it.nodeId),
                 capable = it.capabilities and Protocol.CAP_BLOB_HAVE != 0L,
                 slow = transport.slowLinkTo(it.nodeId),
+                streamLeftMs = transport.fileArrivingEtaMs(it.nodeId),
             )
         }
 
@@ -922,8 +985,12 @@ class BlobExchange(
             val held = store.servable(asked)
             val items =
                 asked.map { h ->
-                    held[h]?.let { size -> BlobHasItem(h, if (h in sending) BlobHasItem.SENDING else BlobHasItem.HAVE, size) }
-                        ?: BlobHasItem(h, if (h in arriving || h in storing) BlobHasItem.FETCHING else BlobHasItem.NONE)
+                    val size = held[h]
+                    when {
+                        size == null -> BlobHasItem(h, if (h in arriving || h in storing) BlobHasItem.FETCHING else BlobHasItem.NONE)
+                        h in sending -> BlobHasItem(h, BlobHasItem.SENDING, size, eta = etaFor(h, from, size))
+                        else -> BlobHasItem(h, BlobHasItem.HAVE, size)
+                    }
                 }
             val load = transport.feedingLoad(from)
             transport.send(holderAnswerFrame(selfId(), BlobHasContent(items, load, queryId)), Peer(from))
@@ -980,12 +1047,25 @@ class BlobExchange(
                 // Named by the query it answers, and that query no older than the latest we queued this neighbour.
                 if (sent != null && (item.hash !in sent.hashes || sent.at < queriedAt)) return@filter false
                 w.answers[from] =
-                    Answer(item.state, item.size?.takeIf { it > 0 }, (content.load ?: 0).coerceAtLeast(0), sent?.at ?: queriedAt)
+                    Answer(
+                        item.state,
+                        item.size?.takeIf { it > 0 },
+                        (content.load ?: 0).coerceAtLeast(0),
+                        sent?.at ?: queriedAt,
+                        etaAt(item, t),
+                        receivedAt = t,
+                    )
                 if (item.state in HELD || item.state == BlobHasItem.FETCHING) w.sawLead(t)
                 true
             }
         return touched to sent?.let { t - it.at }
     }
+
+    /** When a SENDING [item] answered at [t] says our copy should have landed, at most [HOLD_CAP_MS] on (ADR 2026-10.nsr7). */
+    private fun etaAt(
+        item: BlobHasItem,
+        t: Long,
+    ): Long? = item.eta?.takeIf { item.state == BlobHasItem.SENDING && it >= 0 }?.let { t + minOf(it, HOLD_CAP_MS) }
 
     /** Whether [from] may have another answer now: a token bucket per neighbour, [ANSWER_BURST] deep. */
     private fun admitQuery(from: String): Boolean =
@@ -1081,7 +1161,7 @@ class BlobExchange(
             // whose serve waits behind a multi-minute blob to the same peer — or was enqueued inside the
             // memo: don't ship a second. Parked behind another copy's feed: served when that one ends.
             if (transport.fileInFlightTo(fromNodeId, hash)) return
-            if (mayPark && parkBehindFeed(hash, fromNodeId, offset, file.length() - from)) return
+            if (mayPark && parkBehindFeed(hash, fromNodeId, offset, file.length() - from, addressees(hash))) return
             if (servedRecently(hash, fromNodeId)) return
             if (!transport.sendFile(file, peer, FileMeta(FileKind.ATTACHMENT, hash, mime, offset = from))) {
                 forgetServed(hash, fromNodeId) // nothing went out — let the next ask retry at once
@@ -1092,30 +1172,36 @@ class BlobExchange(
     }
 
     /**
-     * Parks [asker]'s ask for [hash] when its copy of [bytes] would ride a shared-budget Bluetooth link while another
-     * copy of the blob is being fed on one to someone else (ADR 2026-10.g24x) — true when parked, and a re-ask while
-     * parked only refreshes it. Never with no session to serve it later, never for a copy the serve memo already
-     * covers, and never for one that rides Wi-Fi Aware: a live link, or a large blob the composite will raise one for.
+     * Parks [asker]'s ask for [hash] when its copy of [bytes] would ride a shared-budget Bluetooth link and waits behind
+     * another copy of the blob fed live on one ([waitsBehindFeed], ADR 2026-10.g24x, 2026-10.nsr7) — true when parked,
+     * and a re-ask while parked only refreshes it. Never with no session to serve it later, never for a copy the serve
+     * memo already covers, and never for one that rides Wi-Fi Aware: a live link, or a large blob the composite will
+     * raise one for.
      */
     private fun parkBehindFeed(
         hash: String,
         asker: String,
         offset: Long?,
         bytes: Long,
+        to: Set<String>?,
     ): Boolean {
         val scope = timers()?.takeIf { it.isActive } ?: return false
-        if (memoHolds(hash, asker) || !ridesSharedBudget(asker, bytes) || !feedingElsewhere(hash, asker)) return false
+        if (memoHolds(hash, asker) || !ridesSharedBudget(asker, bytes) || !waitsBehindFeed(hash, asker, bytes, to)) return false
         val fresh =
             synchronized(lock) {
                 val asks = parked.getOrPut(hash) { LinkedHashMap() }
                 val t = now()
-                val since = asks[asker]?.since
-                (since == null).also { asks[asker] = ParkedAsk(offset, since ?: t, t) }
+                val was = asks[asker]
+                (was == null).also { asks[asker] = ParkedAsk(offset, bytes, was?.since ?: t, t, was?.until ?: 0L) }
             }
         if (fresh) {
-            log("blob park ${hash.take(LOG_HASH_CHARS)}… for $asker behind a feed")
+            log("blob park ${hash.take(LOG_HASH_CHARS)}… for $asker behind a feed${if (isCarrier(asker, to)) " (carrier)" else ""}")
             onEvent(BlobEvent.Park)
         }
+        // Kept as long as its turn is expected to take, not only the memo's 45 s: an asker held elsewhere (a carrier
+        // answering FETCHING) may not query us again before the feed ends (device cell (c), 2026-10-07: dropped 4 s
+        // before its turn, it came back 10 s late on its own).
+        etaFor(hash, asker, bytes)
         pollParked(scope)
         return true
     }
@@ -1136,21 +1222,79 @@ class BlobExchange(
         }
 
     /**
-     * Whether a copy of [hash] is being fed on a shared-budget link to a neighbour other than [asker], at a pace that
-     * ends it within [parkMaxMs]: a slower feed — an iPhone's link, which never earns the boost, at the base share, or a
-     * stalled one — is not waited behind, or an earned asker would idle its budget for the bound (the
-     * bluetooth-reviewer's finding).
+     * Whether [asker]'s copy of [bytes] waits behind the copies of [hash] fed live to other neighbours (ADR 2026-10.nsr7):
+     * yes while any is, however long it takes — split budgets make two copies at once each take twice as long, so one
+     * at a time lands the first sooner and the second no later. The exception is an asker whose own copy, at the rate
+     * its link is expected to take ([MeshTransport.expectedFileRate]), would end before every one of them does: behind
+     * an iPhone's base-pace feed, a link that earns the boost goes beside it, and every slower asker still waits. A feed
+     * that stalled or ran past its deadline is not live ([FileFeed.live]) and holds nobody.
+     *
+     * Going beside costs the feeds already running: the budget splits one more way while the asker's copy runs, so each
+     * of the `n` feeds on the plane ([MeshTransport.feedingLoad]) ends about own ÷ (n + 1) later. The asker goes only
+     * when what it saves beats that: the last of the blob's `k` feeds' end, plus its own copy at the share it would then
+     * get, against its copy now — `max ETA − own × k ÷ (n + 1) > own × n ÷ (n + 1)`. With one feed that is the same as
+     * ending first; behind two or more it asks for more.
+     *
+     * Members first ([to], the conversation's addressees): a member waits only behind members' copies and goes beside a
+     * carrier's, which is a spare; a carrier waits behind any copy and never goes beside one (cell (d), 2026-10-07: a
+     * member parked 287 s behind a carrier's lapsed pull). Unknown addressees treat everyone as a member.
      */
-    private fun feedingElsewhere(
+    private fun waitsBehindFeed(
         hash: String,
         asker: String,
-    ): Boolean = transport.neighbors.value.any { it.nodeId != asker && transport.fileFeedingTo(it.nodeId, hash, parkMaxMs) }
+        bytes: Long,
+        to: Set<String>?,
+    ): Boolean {
+        val carrier = isCarrier(asker, to)
+        val feeds = liveFeeds(hash, asker, among = to.takeUnless { carrier })
+        if (feeds.isEmpty()) return false
+        if (carrier) return true
+        val own = ownCopyMs(asker, bytes) ?: return true
+        val etas = feeds.map { it.etaMs ?: return true }
+        if (etas.any { own >= it }) return true
+        val k = feeds.size.toLong()
+        val n = maxOf(transport.feedingLoad(asker).toLong(), k)
+        val saved = etas.max() - own * k / (n + 1)
+        val cost = own * n / (n + 1)
+        if (saved <= cost) return true
+        val theirs = etas.joinToString { "$it ms" }
+        val trade = "saves ~$saved ms for ~$cost ms of theirs"
+        log("blob beside ${hash.take(LOG_HASH_CHARS)}… → $asker: its copy ~$own ms, the feeds' $theirs; $trade")
+        return false
+    }
+
+    /** How long a copy of [bytes] to [asker] would take at its link's expected rate; null when that is not known. */
+    private fun ownCopyMs(
+        asker: String,
+        bytes: Long,
+    ): Long? = transport.expectedFileRate(asker).takeIf { it > 0 }?.let { bytes * MS_PER_SECOND / it }
 
     /**
-     * A link ended a file's stream (`MeshTransport.fileFeedsEnded`): serve the parked asks whose feed that was now, on
-     * the CPU the write woke — the 1 s poll is a `delay`, which stops while the CPU sleeps.
+     * The live copies of [hash] fed on shared-budget links to neighbours other than [asker] ([MeshTransport.fileFeed]),
+     * only those to neighbours [among] when it is given.
      */
-    suspend fun feedEnded() {
+    private fun liveFeeds(
+        hash: String,
+        asker: String,
+        among: Set<String>? = null,
+    ): List<FileFeed> =
+        transport.neighbors.value.mapNotNull { n ->
+            if (n.nodeId == asker || (among != null && n.nodeId !in among)) null else transport.fileFeed(n.nodeId, hash)?.takeIf { it.live }
+        }
+
+    /** Whether [asker] is a carrier of a blob whose conversation is addressed to [to]: known addressees, not among them. */
+    private fun isCarrier(
+        asker: String,
+        to: Set<String>?,
+    ): Boolean = to != null && asker !in to
+
+    /**
+     * A link's feed changed (`MeshTransport.fileFeedsChanged`): it ended, its pace settled or moved, or its first report
+     * measured it. Re-read the parked asks now — the ones whose feed ended are served, and one whose copy would now end
+     * first goes beside — on the CPU the write woke: the poll is a `delay`, which stops while the CPU sleeps, and it wakes
+     * only for a stall or a deadline.
+     */
+    suspend fun feedsChanged() {
         if (synchronized(lock) { parked.isEmpty() }) return
         serveParked(fromPoll = false)
     }
@@ -1161,47 +1305,74 @@ class BlobExchange(
         asker: String,
     ): Boolean = synchronized(lock) { parked[hash]?.containsKey(asker) == true }
 
-    /** Starts the loop that serves [parked] asks on [scope], unless one is running. */
+    /**
+     * Starts the loop that serves [parked] asks on [scope], unless one is running. It wakes when the soonest live feed
+     * ahead of a parked ask can next stall or pass its deadline ([FileFeed.recheckMs]), between [PARK_POLL_MS] and
+     * [PARK_POLL_MAX_MS]: a park lasts as long as the feed, minutes for a big file, and a feed's end is served on its
+     * edge anyway ([feedEnded]).
+     */
     private fun pollParked(scope: CoroutineScope) {
         synchronized(lock) {
             if (parkPoll?.isActive == true) return
             parkPoll =
                 scope.launch {
+                    var wait = PARK_POLL_MS
                     while (true) {
-                        delay(PARK_POLL_MS)
-                        if (!serveParked(fromPoll = true)) break
+                        delay(wait)
+                        wait = serveParked(fromPoll = true) ?: break
                     }
                 }
         }
     }
 
     /**
-     * One pass over [parked]: drops the asks whose asker unlinked or has not asked for [SERVE_MEMO_MS], and serves, for
-     * each blob, the oldest ask once no copy of it is fed to anyone else, or once it has waited [parkMaxMs]. True while
-     * anything stays parked; when nothing does, the loop is let go in the same critical section, so a park racing the
-     * end starts a new one.
+     * One pass over [parked]. First it drops the asks whose asker unlinked, or that nobody renewed (by asking or
+     * querying) for [SERVE_MEMO_MS] past what a SENDING answer promised it ([ParkedAsk.until]). Then, for each blob, it
+     * serves the ask whose link is expected to feed fastest (the oldest of equals) once that ask no longer waits behind
+     * a live feed ([waitsBehindFeed]): the feed ended, stalled or ran past its deadline, or the ask's own copy would end
+     * first. Returns how long the loop may sleep before the next pass while anything stays parked, or null when nothing
+     * does — and then the loop is let go in the same critical section, so a park racing the end starts a new one.
      */
-    private suspend fun serveParked(fromPoll: Boolean): Boolean {
+    private suspend fun serveParked(fromPoll: Boolean): Long? {
         val t = now()
         val linked = transport.neighbors.value.mapTo(HashSet()) { it.nodeId }
-        val heads =
+        val parkedNow =
             synchronized(lock) {
-                parked.values.forEach { asks -> asks.entries.removeAll { (peer, a) -> peer !in linked || t - a.at >= SERVE_MEMO_MS } }
+                parked.values.forEach { asks -> asks.entries.removeAll { (peer, a) -> peer !in linked || t >= a.keptUntil() } }
                 parked.entries.removeAll { it.value.isEmpty() }
-                parked.map { (hash, asks) -> asks.entries.first().let { Triple(hash, it.key, it.value) } }
+                parked.map { (hash, asks) -> hash to asks.entries.map { it.key to it.value } }
             }
-        for ((hash, asker, ask) in heads) {
-            val overdue = t - ask.since >= parkMaxMs
-            // The feed-end edge and the poll can both read this head: only the pass that takes it serves it.
-            if ((overdue || !feedingElsewhere(hash, asker)) && takeParked(hash, asker)) {
-                log("blob unpark ${hash.take(LOG_HASH_CHARS)}… → $asker${if (overdue) " (waited ${t - ask.since} ms)" else ""}")
-                // Every check again — another copy may have started meanwhile — but one that waited its longest goes now.
-                serveOrWant(hash, asker, ask.offset, mayPark = !overdue)
+        var next = PARK_POLL_MAX_MS
+        for ((hash, asks) in parkedNow) {
+            val to = addressees(hash)
+            val (asker, ask) = first(asks, to) ?: continue
+            // A blob with nothing live ahead of its asks is served this pass, one ask at a time: come back soon.
+            val feeds = liveFeeds(hash, asker)
+            next = minOf(next, feeds.minOfOrNull { it.recheckMs ?: PARK_POLL_MS } ?: PARK_POLL_MS)
+            // The feed-end edge and the poll can both read this ask: only the pass that takes it serves it.
+            if (!waitsBehindFeed(hash, asker, ask.bytes, to) && takeParked(hash, asker)) {
+                log("blob unpark ${hash.take(LOG_HASH_CHARS)}… → $asker (waited ${t - ask.since} ms)")
+                serveOrWant(hash, asker, ask.offset, mayPark = false)
             }
         }
         // Only the loop lets itself go: an edge's pass ending empty leaves a running loop to find that at its next poll.
-        return synchronized(lock) { parked.isNotEmpty().also { if (!it && fromPoll) parkPoll = null } }
+        val any = synchronized(lock) { parked.isNotEmpty().also { if (!it && fromPoll) parkPoll = null } }
+        return if (any) next.coerceIn(PARK_POLL_MS, PARK_POLL_MAX_MS) else null
     }
+
+    /**
+     * Of [asks], the one served next: a member of [to] before a carrier, then the one whose link is expected to feed
+     * fastest ([MeshTransport.expectedFileRate]), then the oldest.
+     */
+    private fun first(
+        asks: List<Pair<String, ParkedAsk>>,
+        to: Set<String>?,
+    ): Pair<String, ParkedAsk>? =
+        asks.maxWithOrNull(
+            compareBy<Pair<String, ParkedAsk>> { !isCarrier(it.first, to) }
+                .thenBy { transport.expectedFileRate(it.first) }
+                .thenByDescending { it.second.since },
+        )
 
     /** Takes [asker]'s parked ask for [hash] off [parked]: false when another pass took it first. */
     private fun takeParked(
@@ -1212,6 +1383,72 @@ class BlobExchange(
             val asks = parked[hash] ?: return@synchronized false
             (asks.remove(asker) != null).also { if (asks.isEmpty()) parked.remove(hash) }
         }
+
+    /**
+     * The ms until [from]'s copy of [hash] ([bytes] of it) should have landed, for a SENDING answer (ADR 2026-10.nsr7):
+     * its own feed's ETA while its copy is streaming; parked, the soonest live feed's end plus its own copy, which the
+     * parked ask is then kept for ([ParkedAsk.until]) — set at the park too, so an asker that never queries us again
+     * keeps its turn. A query from a parked asker renews its ask. Null when nobody can tell, and the asker waits as it
+     * did before.
+     */
+    private fun etaFor(
+        hash: String,
+        from: String,
+        bytes: Long,
+    ): Long? {
+        transport.fileFeed(from, hash)?.let { return it.etaMs }
+        val t = now()
+        val renewed = synchronized(lock) { parked[hash]?.get(from)?.also { it.at = t } } ?: return null
+        val wait = liveFeeds(hash, from).mapNotNull { it.etaMs }.minOrNull()
+        val eta = wait?.let { w -> ownCopyMs(from, renewed.bytes)?.let { w + it } } ?: return null
+        synchronized(lock) { renewed.until = maxOf(renewed.until, t + eta + HOLD_SLACK_MS) }
+        return eta
+    }
+
+    /** A report a sender can take: counts that cannot be negative, and a key no longer than a hash. */
+    private fun plausible(c: BlobProgressContent): Boolean =
+        c.held >= 0 && c.ms >= 0 && c.hash.isNotEmpty() && c.hash.length <= MAX_HASH_CHARS
+
+    /**
+     * A file streaming in from a neighbour reached [p] ([MeshTransport.fileProgress]): tell its sender how much of it we
+     * hold, so it measures the drain its stack's queue hides and times the asks it parked behind the feed by it (ADR
+     * 2026-10.nsr7). Only to a neighbour whose link carries [Protocol.CAP_BLOB_HAVE], and not yet to an iPhone
+     * ([Protocol.CAP_DOORBELL]); an older Android build refuses the unsigned frame and loses nothing.
+     */
+    suspend fun onFileProgress(p: FileProgress) {
+        val peer = transport.neighbors.value.firstOrNull { it.nodeId == p.from } ?: return
+        // Never to an iPhone yet: its port refuses the unsigned type as a signed one, and from an unpinned sender spends
+        // key requests on it (the bluetooth-reviewer's finding). Its companion change lifts this.
+        val capable = peer.capabilities and Protocol.CAP_BLOB_HAVE != 0L && peer.capabilities and Protocol.CAP_DOORBELL == 0L
+        if (!capable || p.key.isEmpty() || p.key.length > MAX_HASH_CHARS) return
+        try {
+            val content = BlobProgressContent(p.key, p.held, p.ms)
+            transport.send(
+                unsignedPointToPoint(FrameType.BLOB_PROGRESS, newRequestId(), selfId(), WireCodec.encodePayload(content)),
+                Peer(p.from),
+            )
+            onEvent(BlobEvent.ProgressSent)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (
+            @Suppress("TooGenericExceptionCaught") e: Exception, // an outbound report never throws into the collector
+        ) {
+            log("blob progress → ${p.from} failed: ${e.javaClass.simpleName}")
+        }
+    }
+
+    /**
+     * [from] said how much of a file we feed it holds ([FrameType.BLOB_PROGRESS], ADR 2026-10.nsr7): the link streaming
+     * that key to it measures its drain by it. Its parked asks are judged on the next pass.
+     */
+    fun onProgressReport(
+        content: BlobProgressContent,
+        from: String,
+    ) {
+        if (!plausible(content)) return
+        transport.onFileProgress(from, content.hash, content.held, content.ms)
+        onEvent(BlobEvent.ProgressTaken)
+    }
 
     /**
      * A blob we wanted arrived over a link: persist it and notify. [resumedFrom] is the byte its stream started at
@@ -1235,7 +1472,7 @@ class BlobExchange(
             return
         }
         partials.drop(hash) // nothing left to resume
-        clearFetching(hash)
+        clearFetching(hash)?.let { withdrawAsks(hash, it, from) }
         onObtained(hash, stored.absolutePath)
     }
 
@@ -1311,7 +1548,65 @@ class BlobExchange(
     private fun snapshotFetching(): List<String> = synchronized(lock) { fetching.keys.toList() }
 
     /** Removes [hash] from the fetching set (its blob arrived). */
-    private fun clearFetching(hash: String) = synchronized(lock) { fetching.remove(hash) }
+    private fun clearFetching(hash: String): Want? = synchronized(lock) { fetching.remove(hash) }
+
+    /**
+     * [hash] is held now: every other neighbour [w] asked for it gets a `blobcancel`, so a copy one queued or parked for
+     * us is not sent as a second ([from] brought it).
+     */
+    private suspend fun withdrawAsks(
+        hash: String,
+        w: Want,
+        from: String?,
+    ) {
+        val asked = synchronized(lock) { w.askedAt.keys.filter { it != from && w.withdraw(it) } }
+        asked.forEach { withdrawAsk(hash, it) }
+    }
+
+    /**
+     * Withdraws our ask for [hash] from [to] (a `blobcancel`, ADR 2026-10.nsr7): the holder drops it if it is parked, and
+     * a copy queued and not yet streaming. Only to a neighbour whose link carries [Protocol.CAP_BLOB_HAVE], and not yet
+     * to an iPhone ([Protocol.CAP_DOORBELL]), as [onFileProgress].
+     */
+    private suspend fun withdrawAsk(
+        hash: String,
+        to: String,
+    ) {
+        val peer = transport.neighbors.value.firstOrNull { it.nodeId == to } ?: return
+        if (peer.capabilities and Protocol.CAP_BLOB_HAVE == 0L || peer.capabilities and Protocol.CAP_DOORBELL != 0L) return
+        try {
+            transport.send(
+                unsignedPointToPoint(FrameType.BLOB_CANCEL, newRequestId(), selfId(), WireCodec.encodePayload(BlobCancelContent(hash))),
+                Peer(to),
+            )
+            onEvent(BlobEvent.CancelSent)
+            log("blob cancel ${hash.take(LOG_HASH_CHARS)}… → $to")
+        } catch (e: CancellationException) {
+            throw e
+        } catch (
+            @Suppress("TooGenericExceptionCaught") e: Exception, // a withdrawal never throws into a step
+        ) {
+            log("blob cancel → $to failed: ${e.javaClass.simpleName}")
+        }
+    }
+
+    /**
+     * [from] withdrew its ask for [hash] (a `blobcancel`, ADR 2026-10.nsr7): drop it if it is parked here, and take a copy
+     * queued to it off its link if that copy has not started. A copy already streaming goes on.
+     */
+    fun onCancel(
+        hash: String,
+        from: String,
+    ) {
+        if (hash.isEmpty() || hash.length > MAX_HASH_CHARS) return
+        val parkedOne = takeParked(hash, from)
+        val queued = transport.cancelQueuedFile(from, hash)
+        // A later ask of its own is a fresh one: served, not refused as a copy already sent.
+        if (queued) forgetServed(hash, from)
+        if (!parkedOne && !queued) return
+        onEvent(BlobEvent.CancelTaken)
+        log("blob cancel ← $from ${hash.take(LOG_HASH_CHARS)}…: ${if (parkedOne) "parked ask dropped" else "queued copy withdrawn"}")
+    }
 
     /**
      * True if we already enqueued [hash] to [nodeId] within [SERVE_MEMO_MS]; otherwise stamps the pair and
@@ -1346,16 +1641,24 @@ class BlobExchange(
         if (w.deadCycles > 0) log("blob cycle ${w.hash8}… after ${w.deadCycles} dead, next if dead in ${w.cycleGap(dead = true)} ms")
     }
 
-    /** Ends [f] — the holder brought nothing — and logs why; a blind first ask's end widens its round instead. */
+    /**
+     * Ends [f] — the holder brought nothing — and logs why; a blind first ask's end widens its round instead, and keeps
+     * its ask: widening adds asks and gives up on nobody, and the first pick (often the author) may have parked or
+     * queued the closest copy (device rerun of 2026-10-07: withdrawn at the widening, an author's parked ask was lost
+     * and the asker came back 28 s late). With [p], the holder still up, a fallback's ask is withdrawn ([Plan.cancels]):
+     * a copy it queued would come as a second.
+     */
     private fun Want.over(
         f: Fetch,
         why: String?,
+        p: Plan? = null,
     ): Long? {
         fetch = null
         if (f.tier == Tier.Blind) {
             blindWidened = true
             return null
         }
+        if (p != null && withdraw(f.peer)) p.cancels += f.peer
         failed += f.peer
         onEvent(BlobEvent.Fallback)
         log("blob fallback ${f.hash8}… ${f.peer} (${why ?: "grace"}) → next")
@@ -1399,6 +1702,21 @@ class BlobExchange(
 
         // Every ask, any cycle: the memo floor on asking a holder again, and #121's streaming rule.
         val askedAt = HashMap<String, Long>()
+
+        // neighbour -> the ask of ours on it that a `blobcancel` already withdrew: one cancel per ask.
+        val withdrawnAt = HashMap<String, Long>()
+
+        /**
+         * Whether our last ask on [peer] is still to be withdrawn; marks it withdrawn. Only an ask that may have queued
+         * or parked a copy: one on a neighbour whose last answer said it lacked the blob (a pull-through) left nothing,
+         * since a neighbour that lacks a blob remembers no asker (device rerun of 2026-10-07: a dead want's every cycle
+         * sent a cancel). Under the exchange's lock.
+         */
+        fun withdraw(peer: String): Boolean {
+            val asked = askedAt[peer] ?: return false
+            if (answers[peer]?.let { it.state !in HELD && it.receivedAt >= asked } == true) return false
+            return (withdrawnAt[peer] != asked).also { withdrawnAt[peer] = asked }
+        }
 
         // ADR 2026-10.f7gg's round over the neighbours nobody can query, and the neighbours asked to pull it through.
         val blindAsked = HashSet<String>()
@@ -1480,6 +1798,10 @@ class BlobExchange(
         val size: Long?,
         val load: Int,
         val querySentAt: Long,
+        // When a SENDING answer said our copy should have landed (ADR 2026-10.nsr7): [hold] waits on it that long.
+        val etaAt: Long? = null,
+        // When it reached us: one saying the neighbour lacks the blob, read after our ask, says the ask found it lacking.
+        val receivedAt: Long = 0L,
     )
 
     /**
@@ -1510,9 +1832,16 @@ class BlobExchange(
     /** An ask parked behind another copy's feed ([parked]): the prefix it named, when it was parked, and when it last asked. */
     private class ParkedAsk(
         val offset: Long?,
+        // The copy's length (the rest past [offset]): how long it would take decides whom a parked pass serves first.
+        val bytes: Long,
         val since: Long,
-        val at: Long,
-    )
+        // When its asker last asked or queried for it.
+        var at: Long,
+        // How long a SENDING answer promised the asker its copy would take, and its slack: kept at least that long.
+        var until: Long,
+    ) {
+        fun keptUntil(): Long = maxOf(at + SERVE_MEMO_MS, until)
+    }
 
     /** One neighbour's answer budget. */
     private class Bucket(
@@ -1527,6 +1856,8 @@ class BlobExchange(
         val streaming: Boolean,
         val capable: Boolean,
         val slow: Boolean,
+        // How long the file it is streaming to us has left, by its rate since its header; null when not known.
+        val streamLeftMs: Long? = null,
     ) {
         val id: String get() = peer.nodeId
     }
@@ -1538,6 +1869,9 @@ class BlobExchange(
         var wake: Long? = null
         var why: String = ""
         val events = mutableListOf<BlobEvent>()
+
+        // Neighbours whose ask of ours this step withdraws (a `blobcancel` each, sent after the step's asks).
+        val cancels = mutableListOf<String>()
 
         fun ask(
             to: Peer,
@@ -1598,6 +1932,12 @@ class BlobExchange(
 
         // An ask parked behind another copy's feed (ADR 2026-10.g24x).
         Park,
+
+        // A progress report sent back to a file's sender, and one taken from a file's receiver (ADR 2026-10.nsr7).
+        ProgressSent,
+        ProgressTaken,
+        CancelSent,
+        CancelTaken,
     }
 
     companion object {
@@ -1621,6 +1961,9 @@ class BlobExchange(
 
         // While the holder we wait on streams another file to us, how often we look for that stream's end.
         const val STREAM_POLL_MS = 2_000L
+
+        // How long a neighbour's stream of another file to us may still have before an idle holder is asked instead.
+        const val STREAM_SWITCH_MS = 30_000L
 
         // A neighbour that said it is fetching the blob itself is queried again this long after, and one asked to pull
         // it through this long after the pull, at most PULL_RECHECKS times a cycle.
@@ -1676,9 +2019,15 @@ class BlobExchange(
         // parked at once (an unsigned blobreq can park one; the eldest goes past the cap, and its askers ask again).
         const val PARK_POLL_MS = 1_000L
 
-        // The longest a parked ask waits behind another copy's feed: about a 500 KB photo at the boosted pace
-        // (ADR 2026-10.2da4). A feed slower than that — the base pace, a stalled link — is joined, not waited out.
-        const val PARK_MAX_MS = 30_000L
+        // The longest the loop sleeps between passes: a parked ask's fastest-first and beside checks move with the
+        // feeds' measured rates, which a report may change at any time.
+        const val PARK_POLL_MAX_MS = 10_000L
+
+        // How long past a SENDING answer's ETA the asker holds on that holder, and the holder keeps its parked ask
+        // (ADR 2026-10.nsr7), and the longest an ETA holds anyone: a holder's lie costs at most that.
+        const val HOLD_SLACK_MS = 30_000L
+        const val HOLD_CAP_MS = 15 * 60_000L
+        private const val MS_PER_SECOND = 1_000L
         private const val MAX_PARKED_BLOBS = 64
 
         // A never-arriving fetch ages out of [fetching] after this (hygiene; the cap is the bound). Generous

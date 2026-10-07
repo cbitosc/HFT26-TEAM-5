@@ -126,11 +126,11 @@ interface ForwardDao {
     suspend fun attachmentsNeedingFetch(): List<NeededAttachment>
 
     /**
-     * One row per carried frame naming an attachment not in the `blobs` table yet: whom it is for and when it was
-     * carried — [attachmentsNeedingFetch] per frame, for the carrier's pull deferral (ADR 2026-10.g24x).
+     * One row per carried frame naming an attachment not in the `blobs` table yet: whom it is for, when it was carried,
+     * its author and its group — [attachmentsNeedingFetch] per frame, for the carrier's pull deferral (ADR 2026-10.g24x).
      */
     @Query(
-        "SELECT attachmentHash AS hash, recipientId, receivedAt FROM forward_store " +
+        "SELECT attachmentHash AS hash, recipientId, receivedAt, senderId, groupId FROM forward_store " +
             "WHERE attachmentHash IS NOT NULL AND attachmentHash NOT IN (SELECT hash FROM blobs)",
     )
     suspend fun carriedAttachments(): List<CarriedAttachmentRow>
@@ -234,4 +234,6 @@ data class CarriedAttachmentRow(
     val hash: String,
     val recipientId: String?,
     val receivedAt: Long,
+    val senderId: String,
+    val groupId: String?,
 )

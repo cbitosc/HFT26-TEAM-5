@@ -94,8 +94,8 @@ class PictureFanoutLabTest {
     @Test
     fun aSecondAskForAPictureBeingFedWaitsForThatFeedThenIsServedOnce() =
         runBlocking {
-            // Alice waits out Bob's feed however long the scenario holds it: the bound is not what this one is about.
-            val alice = lab.node("alice", limits = LabLimits(parkMaxMs = PARKED_LONG_MS)).apply { setDisplayName("Alice") }
+            // Alice reads Bob's held feed as live however long the scenario holds it: its stall is not what this one is about.
+            val alice = lab.node("alice", limits = LabLimits(feedStallMs = PARKED_LONG_MS)).apply { setDisplayName("Alice") }
             val bob = lab.node("bob").apply { setDisplayName("Bob") }
             val carol = lab.node("carol").apply { setDisplayName("Carol") }
             lab.linkAll(alice to bob, alice to carol)
@@ -127,8 +127,8 @@ class PictureFanoutLabTest {
         }
 
     /**
-     * A feed to a stalled link must not hold everyone else: Bob's copy never ends here (his pipe holds its bytes), and
-     * Carol's parked ask is served beside it once it has waited its longest.
+     * A feed to a stalled link must not hold everyone else (ADR 2026-10.nsr7): Bob's copy never ends here (his pipe holds
+     * its bytes, and nothing reports its progress), and Carol's parked ask is served beside it once it stalls.
      */
     @Test
     fun aParkedAskIsServedBesideAFeedThatNeverEnds() =
@@ -154,7 +154,7 @@ class PictureFanoutLabTest {
             alice.transport.release(carol.transport)
             lab.await(1) { if (alice.metrics.files().blobAsksParked > parked) 1 else 0 } // parked behind Bob's feed
 
-            lab.await(1) { if (carol.blobs.exists(hash)) 1 else 0 } // past the park's bound, with Bob's feed still held
+            lab.await(1) { if (carol.blobs.exists(hash)) 1 else 0 } // once Bob's feed stalls, with it still held
             assertEquals("Carol was fed once", 1, alice.filesTo(carol, hash))
             alice.transport.releaseFiles(bob.transport)
             lab.assertConverged(listOf(alice, bob, carol), atLeast = 2) { groupId }
@@ -162,7 +162,7 @@ class PictureFanoutLabTest {
         }
 
     private companion object {
-        // Longer than any await in a scenario: a park that never times out on its own.
+        // Longer than any await in a scenario: a held feed that never stalls on its own.
         const val PARKED_LONG_MS = 10 * 60_000L
     }
 }

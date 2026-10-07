@@ -43,19 +43,22 @@ class FakeLoopTransport(
     /** `nodeId to key` pairs a test declares as queued or streaming toward that peer. */
     val inFlight = mutableSetOf<Pair<String, String>>()
 
-    /** `nodeId to key` pairs a test declares as being fed on a shared-budget link toward that peer ([fileFeedingTo]). */
-    val feedingFiles: MutableSet<Pair<String, String>> =
-        java.util.concurrent.ConcurrentHashMap
-            .newKeySet()
+    /** `nodeId to key` -> the copy a test declares as being fed on a shared-budget link toward that peer ([fileFeed]). */
+    val feeds: MutableMap<Pair<String, String>, FileFeed> = java.util.concurrent.ConcurrentHashMap()
 
-    /** Of [feedingFiles], the ones a test declares too slow to end within any bound asked about. */
-    val slowFeeds: MutableSet<Pair<String, String>> =
-        java.util.concurrent.ConcurrentHashMap
-            .newKeySet()
+    /** nodeId -> the rate a test declares a file to that peer would go at ([expectedFileRate]); absent is unknown. */
+    val rates: MutableMap<String, Int> = java.util.concurrent.ConcurrentHashMap()
 
-    /** Poked by a test to say a feed ended ([fileFeedsEnded]). */
+    /** Every progress report this transport was handed for its links ([onFileProgress]): `nodeId`, key, held, ms. */
+    val progressTaken = java.util.concurrent.CopyOnWriteArrayList<FileProgress>()
+
+    /** Poked by a test to say a file streaming in here reached a point ([fileProgress]). */
+    val rxProgress = MutableSharedFlow<FileProgress>(extraBufferCapacity = 8)
+    override val fileProgress = rxProgress.asSharedFlow()
+
+    /** Poked by a test to say a feed ended ([fileFeedsChanged]). */
     val feedEnds = MutableSharedFlow<Unit>(extraBufferCapacity = 8)
-    override val fileFeedsEnded = feedEnds.asSharedFlow()
+    override val fileFeedsChanged = feedEnds.asSharedFlow()
 
     /** Node ids a test declares as streaming a file in to us right now. */
     val arrivingFrom = mutableSetOf<String>()
@@ -135,6 +138,20 @@ class FakeLoopTransport(
 
     override fun fileArrivingFrom(nodeId: String): Boolean = nodeId in arrivingFrom
 
+    /** How long a test says the file streaming in from a node has left ([fileArrivingEtaMs]). */
+    val arrivingLeft = mutableMapOf<String, Long>()
+
+    override fun fileArrivingEtaMs(nodeId: String): Long? = arrivingLeft[nodeId]
+
+    /** Copies a test declares queued on a link, as (peer, key); a cancel takes one off ([cancelQueuedFile]). */
+    val queuedFiles = mutableSetOf<Pair<String, String>>()
+    val cancelled = mutableListOf<Pair<String, String>>()
+
+    override fun cancelQueuedFile(
+        nodeId: String,
+        key: String,
+    ): Boolean = queuedFiles.remove(nodeId to key).also { if (it) cancelled += nodeId to key }
+
     override fun bulkRouteTo(nodeId: String): BulkRoute = bulkRoutes[nodeId] ?: BulkRoute.None
 
     override fun expectBulkTransfer(nodeId: String): Boolean {
@@ -147,11 +164,21 @@ class FakeLoopTransport(
         key: String,
     ): Boolean = (nodeId to key) in inFlight
 
-    override fun fileFeedingTo(
+    override fun fileFeed(
         nodeId: String,
         key: String,
-        withinMs: Long,
-    ): Boolean = (nodeId to key) in feedingFiles && (nodeId to key) !in slowFeeds
+    ): FileFeed? = feeds[nodeId to key]
+
+    override fun expectedFileRate(nodeId: String): Int = rates[nodeId] ?: 0
+
+    override fun onFileProgress(
+        nodeId: String,
+        key: String,
+        held: Long,
+        ms: Long,
+    ) {
+        progressTaken += FileProgress(nodeId, key, held, ms)
+    }
 
     override fun feedingLoad(nodeId: String): Int = feeding
 

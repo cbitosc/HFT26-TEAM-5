@@ -150,3 +150,34 @@ the settle.
   `file … in`, never shortly after its `blob park` while that feed has more than 30 s left.
 - **With `--ez boost false`:** the second ask is served within about 1–2 s of its park, or never parks.
 - **With the boost on and both sides dark:** within about 3 s.
+
+**Device run on the chunk-counted build (3890f16b, 2026-10-06, ~21:30–22:00).** The P8 was the author, locked and
+dark, with its network adb dropped after each send. The group was the P3 (lit), the P7 and the P8, and the P9 pulled
+too as a carrier, since a group frame is never held back. Each photo was about 285 KB.
+
+- **The dark holder:**
+  - **Rep 40 (the lit P3 asked first):** its link earned and was fed in 17 s. The P9's ask parked 3.4 s in and was
+    unparked 7 ms after that feed's `file … in`.
+  - **Reps 43–44 (the first copy went to the dark P9):** the asks parked behind it were unparked 2.0–3.0 s after
+    their park, as the settle ended, and fed beside it.
+  - **Reps 41–42:** nothing parked. Older reps were still feeding the dark peers at the base, which split the budget,
+    so even the lit link's copy read as over 30 s from its end. That is "too slow to wait behind" working as written.
+- **Boost off on the author (`--ez boost false`, reps 45–47):** nothing parked, and three copies went in parallel at
+  the base split. The P3's own HIGH still earned its link: a client already attached stays. Pass.
+- **What it shows:** the lit receiver got its copy in about 48–50 s rather than 17 s whenever a dark pair's base-pace
+  feed ran beside it. And a carrier that is not a member, which pulls a group photo at once, often wins the race to
+  the author.
+
+**Superseded in part by ADR 2026-10.nsr7 (2026-10-07).** Item 4's 30 s rules are gone: a feed's end is measured from
+the receiver's `blobprog` reports. A parked ask waits for a live feed however long it takes, until the feed ends,
+stalls or passes its deadline. The fastest asker goes next, and an ask goes beside a feed only when its own copy would
+end first. The settling pace above stays as the estimate before the first report.
+
+**Amendment (2026-10-07): a carrier holds a group's picture too.** Item 1 held back only DM pictures. In both 2 MiB
+device runs of nsr7's cell (b), the P8, a carrier outside the group, asked the author first, and with nsr7's
+unbounded park both members waited through its whole ~114 s copy. Now a carried group frame we are not a member of
+(its cleartext roster, `GroupInfo.members`, or our own group row on the re-arm) holds its pull while its author is
+linked to us, for the same `DEFER_MS`. Members linked to the author fetch from it; a member linked to us and not to the
+author still gets it through our pull-through; and a member's own copy is never held, so one that heard the frame
+ahead of its seed still pulls the bytes (#132). Room frames are unchanged. Tests: `CarrierPullPolicyTest`,
+`ForwardDaoTest`'s `carriedAttachments` case; `AttachmentLabTest`'s #132 scenario guards the member exemption.

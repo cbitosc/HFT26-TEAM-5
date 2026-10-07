@@ -298,19 +298,41 @@ class CompositeMeshTransport(
     /** Any plane: a peer streaming to us on either link has fed us whatever sits behind that file. */
     override fun fileArrivingFrom(nodeId: String): Boolean = children.any { it.fileArrivingFrom(nodeId) }
 
+    override fun fileArrivingEtaMs(nodeId: String): Long? = children.mapNotNull { it.fileArrivingEtaMs(nodeId) }.maxOrNull()
+
+    override fun cancelQueuedFile(
+        nodeId: String,
+        key: String,
+    ): Boolean = children.any { it.cancelQueuedFile(nodeId, key) }
+
     /** Any plane: the serve went to whichever child held the link, and a re-ask must see it wherever it sits. */
     override fun fileInFlightTo(
         nodeId: String,
         key: String,
     ): Boolean = children.any { it.fileInFlightTo(nodeId, key) }
 
-    override fun fileFeedingTo(
+    /** Whichever plane feeds it: one link streams a key to a peer at a time. */
+    override fun fileFeed(
         nodeId: String,
         key: String,
-        withinMs: Long,
-    ): Boolean = children.any { it.fileFeedingTo(nodeId, key, withinMs) }
+    ): FileFeed? = children.firstNotNullOfOrNull { it.fileFeed(nodeId, key) }
 
-    override val fileFeedsEnded: Flow<Unit> = merge(*children.map { it.fileFeedsEnded }.toTypedArray())
+    /** The plane a file to [nodeId] would go out on now ([fileChildFor]) says how fast it would go. */
+    override fun expectedFileRate(nodeId: String): Int = fileChildFor(nodeId)?.expectedFileRate(nodeId) ?: 0
+
+    /** Every plane: the report names a key, and only the link streaming it takes it. */
+    override fun onFileProgress(
+        nodeId: String,
+        key: String,
+        held: Long,
+        ms: Long,
+    ) {
+        children.forEach { it.onFileProgress(nodeId, key, held, ms) }
+    }
+
+    override val fileProgress: Flow<FileProgress> = merge(*children.map { it.fileProgress }.toTypedArray())
+
+    override val fileFeedsChanged: Flow<Unit> = merge(*children.map { it.fileFeedsChanged }.toTypedArray())
 
     /**
      * The load of the plane an attachment to [nodeId] would ride: the high-throughput child when it holds a link to

@@ -10,7 +10,7 @@ description: >-
   findings and stamps what it reviewed; never edits the tree.
 tools: Bash, Read, Grep, Glob
 model: claude-opus-5-5
-effort: high
+effort: medium
 ---
 
 # Mesh-lab reviewer

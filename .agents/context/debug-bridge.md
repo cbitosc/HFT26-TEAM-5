@@ -59,10 +59,12 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   The metrics carry the holder query's counters (ADR 2026-10.6e5t): `blobQueriesSent` / `blobQueriesAnswered` /
   `blobQueriesRefused` / `blobAnswersTaken` / `blobAnswersIgnored`, then what the fetch did — `blobFetches` (a holder that said so, asked),
   `blobConfirms`, `blobFallbacks`, `blobBlindAsks` (f7gg's round, for neighbours that cannot answer) and
-  `blobPullThroughs`, plus ADR 2026-10.g24x's `blobAsksParked` (a holder's asks parked behind another copy's feed)
-  and `carrierPullsDeferred` (a carried DM's picture left to its linked recipient). The per-blob story is in logcat,
-  tag `MeshManager`: `blob query`, `blob answer … in <ms> ms`, `blob fetch`, `blob confirm`, `blob fallback`,
-  `blob pull`, and the holder's `blob has`, `blob park` and `blob unpark`.
+  `blobPullThroughs`, plus ADR 2026-10.g24x's `blobAsksParked` (a holder's asks parked behind another copy's feed),
+  ADR 2026-10.nsr7's `blobProgressSent` / `blobProgressTaken` (progress reports sent back to a file's sender, and taken
+  from its receiver), `blobCancelsSent` / `blobCancelsTaken` (asks withdrawn, and withdrawals that dropped a parked ask
+  or a queued copy) and `carrierPullsDeferred` (a carried DM's picture left to its linked recipient). The per-blob
+  story is in logcat, tag `MeshManager`: `blob query`, `blob answer … in <ms> ms`, `blob fetch`, `blob confirm`,
+  `blob fallback`, `blob pull`, and the holder's `blob has`, `blob park`, `blob beside` and `blob unpark`.
 - `…debug.STORE` — dumps the store-and-forward carry set (the **live** rows are the id set the cue-plane
   content digest is folded over; expired-unswept rows are digest/quota/serve-invisible residue awaiting the
   sweep), for diagnosing why two nodes never converge their digests (the churn from a carried-set delta):

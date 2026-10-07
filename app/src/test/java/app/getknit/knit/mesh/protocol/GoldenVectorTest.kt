@@ -131,6 +131,15 @@ class GoldenVectorTest {
             // A state reserved for a later build (PARTIAL, with the bytes it holds): decodes, and is never taken for HAVE.
             "blobHasContentReserved" to
                 WireCodec.encodePayload(BlobHasContent(items = listOf(BlobHasItem("h1", BlobHasItem.PARTIAL, size = 1_000, held = 400)))),
+            // A SENDING answer that says when the asker's copy should land (ADR 2026-10.nsr7).
+            "blobHasContentSendingEta" to
+                WireCodec.encodePayload(
+                    BlobHasContent(items = listOf(BlobHasItem("h1", BlobHasItem.SENDING, size = 409_600, eta = 140_000))),
+                ),
+            // A receiver's progress report: the bytes it holds, ms after the header by its own clock (ADR 2026-10.nsr7).
+            "blobProgressContent" to WireCodec.encodePayload(BlobProgressContent(hash = "h1", held = 245_760, ms = 13_500)),
+            // An asker withdraws its ask: the holder drops it if parked, and a copy queued and not yet streaming.
+            "blobCancelContent" to WireCodec.encodePayload(BlobCancelContent(hash = "h1")),
             "typingContent" to WireCodec.encodePayload(TypingContent(groupId = "g-1")),
             "mention" to WireCodec.encodePayload(Mention("node1", "Ann")),
             "replyRef" to WireCodec.encodePayload(ReplyRef("m0", "a", "Ann", "see you", hasAttachment = true)),

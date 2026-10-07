@@ -1262,6 +1262,10 @@ class MeshMetrics {
             blobBlindAsks = blob(BlobExchange.BlobEvent.BlindAsk),
             blobPullThroughs = blob(BlobExchange.BlobEvent.PullThrough),
             blobAsksParked = blob(BlobExchange.BlobEvent.Park),
+            blobProgressSent = blob(BlobExchange.BlobEvent.ProgressSent),
+            blobProgressTaken = blob(BlobExchange.BlobEvent.ProgressTaken),
+            blobCancelsSent = blob(BlobExchange.BlobEvent.CancelSent),
+            blobCancelsTaken = blob(BlobExchange.BlobEvent.CancelTaken),
         )
 
     private fun blob(event: BlobExchange.BlobEvent): Long = blobEvents.getValue(event).get()
@@ -1495,6 +1499,12 @@ class MeshMetrics {
             val blobBlindAsks: Long = 0,
             val blobPullThroughs: Long = 0,
             val blobAsksParked: Long = 0,
+            // Progress reports sent back to a file's sender, and taken from a file's receiver (ADR 2026-10.nsr7).
+            val blobProgressSent: Long = 0,
+            val blobProgressTaken: Long = 0,
+            // Asks withdrawn by a `blobcancel`, and withdrawals that dropped a parked ask or a queued copy (ADR 2026-10.nsr7).
+            val blobCancelsSent: Long = 0,
+            val blobCancelsTaken: Long = 0,
         )
 
         /**
