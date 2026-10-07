@@ -15,6 +15,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicInteger
@@ -61,6 +62,8 @@ class FieldLog(
     private val clock: () -> Long = { System.currentTimeMillis() },
     private val io: CoroutineDispatcher = Dispatchers.IO,
     private val tickMs: Long = FLUSH_EVERY_MS,
+    // Where the export stages its copy for the share sheet ([FieldLogExport.stage]); [clear] empties it. Null keeps none.
+    private val staged: File? = null,
 ) : FieldRecorder {
     private class Pending(
         val at: Long,
@@ -154,13 +157,17 @@ class FieldLog(
 
     suspend fun size(): Long = withContext(io) { lock.withLock { journal.size() } }
 
-    /** Deletes the log and its salt: what is recorded next reads under new pseudonyms. */
+    /**
+     * Deletes the log, its salt and any copy staged for a share: what is recorded next reads under new pseudonyms.
+     */
     suspend fun clear() =
         withContext(io) {
             lock.withLock {
                 queue.clear()
                 queued.set(0)
                 journal.clear()
+                // The copy last staged for a share is the log too: a Clear that left it would not be one.
+                staged?.listFiles()?.forEach { it.delete() }
                 pseudonyms = null
             }
         }

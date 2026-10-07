@@ -26,7 +26,8 @@ The journal lives in `noBackupFilesDir/fieldlog/`, so it is never in a backup.
   loses at most a minute.
 - **Pseudonym salt.** The `salt` file holds 32 random bytes. A pseudonym is HMAC-SHA256(salt, node id), cut to
   4 bytes. Clear deletes the salt.
-- **Switching it off.** Turning the log off deletes the journal and the salt.
+- **Clear and the off switch** delete the journal, the salt and the copy last staged in `cacheDir/fieldlog/` for
+  a share.
 
 ## File format
 

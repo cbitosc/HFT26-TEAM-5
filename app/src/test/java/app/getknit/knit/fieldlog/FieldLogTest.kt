@@ -17,6 +17,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
+import java.io.File
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class FieldLogTest {
@@ -27,6 +28,7 @@ class FieldLogTest {
     private val enabled = MutableStateFlow(true)
     private val statuses = MutableStateFlow(listOf(bt(linked = 0, nearby = 0)))
     private var now = 1_000_000L
+    private val staged get() = File(tmp.root, "staged").apply { mkdirs() }
 
     private fun bt(
         linked: Int,
@@ -43,6 +45,7 @@ class FieldLogTest {
             versionCode = 31,
             clock = { now },
             io = UnconfinedTestDispatcher(testScheduler),
+            staged = staged,
         )
 
     private fun List<String>.kinds() = map { Regex(""""e":"(\w+)"""").find(it)!!.groupValues[1] }
@@ -107,6 +110,19 @@ class FieldLogTest {
 
             assertEquals(1, calls)
             assertEquals(1, log.lines().count { it.contains("bt_scan") })
+        }
+
+    @Test
+    fun clearAndTheSwitchTurnedOffAlsoDeleteTheCopyStagedForAShare() =
+        runTest {
+            val log = newLog()
+            File(staged, "knit-fieldlog-2.9.0-20261007-1200.jsonl").writeText("{}")
+            log.clear()
+            assertEquals(0, staged.listFiles()!!.size)
+
+            File(staged, "knit-fieldlog-2.9.0-20261007-1300.jsonl").writeText("{}")
+            log.setEnabled(false) { enabled.value = it }
+            assertEquals(0, staged.listFiles()!!.size)
         }
 
     @Test

@@ -12,6 +12,7 @@ import app.getknit.knit.data.forward.ForwardRepository
 import app.getknit.knit.data.relay.RelayStatusRepository
 import app.getknit.knit.data.settings.LoraPlaneStateStore
 import app.getknit.knit.data.settings.SettingsStore
+import app.getknit.knit.fieldlog.FIELD_LOG_SHARE_DIR
 import app.getknit.knit.fieldlog.FieldJournal
 import app.getknit.knit.fieldlog.FieldLog
 import app.getknit.knit.fieldlog.FieldLogExport
@@ -112,6 +113,7 @@ val meshModule =
                 power = get<PowerStateSource>().state,
                 enabled = get<SettingsStore>().fieldLogEnabled,
                 versionCode = BuildConfig.VERSION_CODE.toLong(),
+                staged = File(androidContext().cacheDir, FIELD_LOG_SHARE_DIR),
             ).also { log ->
                 // Resolved at each sample, never here: the plane's status is built from the transport, which this precedes.
                 if (BuildConfig.LORA_PLANE) log.sampler("lora") { get<LoraPlaneStatus>().status.value.fieldSample() }

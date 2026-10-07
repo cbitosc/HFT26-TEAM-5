@@ -11,8 +11,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 
-/** Cache subdirectory the share sheet reads from; matches `<cache-path name="fieldlog" …>` in `res/xml/file_paths.xml`. */
-private const val SHARE_DIR = "fieldlog"
+/**
+ * Cache subdirectory the share sheet reads from; matches `<cache-path name="fieldlog" …>` in `res/xml/file_paths.xml`.
+ * [FieldLog.clear] empties it too, so a Clear or the switch turned off leaves no staged copy behind.
+ */
+const val FIELD_LOG_SHARE_DIR = "fieldlog"
 
 /**
  * Turns the field log into the one file the user can hand over (ADR 2026-10.a239): the journal, the latency
@@ -53,7 +56,7 @@ class FieldLogExport(
         withContext(Dispatchers.IO) {
             val doc = render()
             runCatching {
-                val dir = File(context.cacheDir, SHARE_DIR).apply { mkdirs() }
+                val dir = File(context.cacheDir, FIELD_LOG_SHARE_DIR).apply { mkdirs() }
                 dir.listFiles()?.forEach { it.delete() }
                 val name = shareFileName(currentCrashEnvironment().versionName, clock(), stem = "knit-fieldlog", extension = "jsonl")
                 val dest = File(dir, name)
