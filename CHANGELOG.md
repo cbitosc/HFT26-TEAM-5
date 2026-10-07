@@ -49,6 +49,9 @@ document:
 
 ### Fixed
 
+- Direct messages and groups now catch racial and other identity slurs, which only the Nearby room used to
+  catch. A slur is blocked when you send it and hidden until tapped when it arrives, and everyday swearing in
+  private chats still goes through.
 - A message you sent just as another phone came into range could miss that phone and reach it only about a
   minute later. It now arrives as soon as the two phones connect.
 - When a contact's phone set up encryption with yours again, after a reinstall for example, their direct

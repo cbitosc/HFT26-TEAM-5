@@ -6,8 +6,9 @@ package app.getknit.knit.moderation
  * `[0, 1]` (1 for a deterministic lexical hit) — for the ML pass it is the highest score among the
  * enforced toxicity categories, reported even when it stayed below threshold (i.e. [allowed] true) so
  * debug logs show near-misses rather than a flat 0. [category] records the coarse class that tripped
- * it; [label] is the specific underlying classifier label when known (e.g. `"sexual_explicit"`), null
- * for a lexical/profanity hit or when no model is bundled.
+ * it ([SLUR] for the every-scope slur list, [PROFANITY] for the room's word list); [label] is the specific
+ * underlying classifier label when known (e.g. `"sexual_explicit"`), null for a lexical hit or when no model
+ * is bundled.
  */
 data class TextVerdict(
     val allowed: Boolean,
@@ -15,7 +16,7 @@ data class TextVerdict(
     val score: Float = 0f,
     val label: String? = null,
 ) {
-    enum class Category { NONE, PROFANITY, TOXICITY }
+    enum class Category { NONE, PROFANITY, SLUR, TOXICITY }
 
     val flagged: Boolean get() = !allowed
 

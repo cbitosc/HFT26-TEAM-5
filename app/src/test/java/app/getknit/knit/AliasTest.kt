@@ -5,12 +5,12 @@ import app.getknit.knit.identity.ALIAS_ADVERBS
 import app.getknit.knit.identity.ALIAS_NOUNS
 import app.getknit.knit.identity.Alias
 import app.getknit.knit.identity.displayNameFor
+import app.getknit.knit.moderation.ShippedWordList
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import java.io.File
 import java.security.MessageDigest
 import kotlin.random.Random
 
@@ -149,6 +149,7 @@ class AliasTest {
         // word, and every adverb+adjective and adjective+noun concatenation, against the shipped list.
         val terms = profanityTerms()
         assertTrue("the profanity list must load", terms.size > 100)
+        assertTrue("the slur list must load", "kike" in terms)
         (ALIAS_ADVERBS + ALIAS_ADJECTIVES + ALIAS_NOUNS).forEach {
             assertTrue("'$it' is on the profanity list", it.lowercase() !in terms)
         }
@@ -174,21 +175,11 @@ class AliasTest {
         assertEquals("Alice", displayNameFor("Alice", id))
     }
 
-    /** The shipped `profanity_en.txt`, parsed as `WordList.load` does (see `WordListTest`). */
-    private fun profanityTerms(): Set<String> {
-        // Gradle runs unit tests with the module dir as the working dir.
-        val file =
-            listOf(
-                "src/main/assets/moderation/profanity_en.txt",
-                "app/src/main/assets/moderation/profanity_en.txt",
-            ).map(::File).firstOrNull { it.exists() }
-                ?: error("profanity_en.txt not found (cwd=${File(".").absolutePath})")
-        return file
-            .readLines()
-            .map { it.trim().lowercase() }
-            .filter { it.isNotEmpty() && !it.startsWith("#") }
+    /** The shipped `profanity_en.txt` and `slurs_en.txt` together — the room's whole lexical pass. */
+    private fun profanityTerms(): Set<String> =
+        (ShippedWordList.read(ShippedWordList.PROFANITY) + ShippedWordList.read(ShippedWordList.SLURS))
+            .map(String::lowercase)
             .toSet()
-    }
 
     private companion object {
         const val ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789"

@@ -39,9 +39,14 @@ class VerdictTest {
     }
 
     @Test
-    fun `text categories cover none, profanity, and toxicity`() {
+    fun `text categories cover none, profanity, slur, and toxicity`() {
         assertEquals(
-            listOf(TextVerdict.Category.NONE, TextVerdict.Category.PROFANITY, TextVerdict.Category.TOXICITY),
+            listOf(
+                TextVerdict.Category.NONE,
+                TextVerdict.Category.PROFANITY,
+                TextVerdict.Category.SLUR,
+                TextVerdict.Category.TOXICITY,
+            ),
             TextVerdict.Category.entries.toList(),
         )
     }

@@ -19,15 +19,16 @@ SafeSearch, ML Kit cloud) is usable.
 ```
 moderation/            TextModerator / ImageModerator interfaces + Verdict types
   ModelLoadGuard         poison-pill around each model's first load (§8) + ModelLoadPolicy
-  LexicalTextFilter      pure-Kotlin profanity filter (deterministic first pass)
+  LexicalTextFilter      pure-Kotlin word-list filter (deterministic first pass; slurs or profanity)
   HybridTextModerator    lexical first, ML classifier second (ml = MlTextModerator — Phase 4, wired)
+  ScopedTextModerator    room: slurs → profanity → ML; DMs/groups: slurs → ML (ADR 2026-10.d62w)
   NsfwImageModerator     TFLite NSFW image classifier (graceful degradation if no model)
-  WordList               loads assets/moderation/profanity_en.txt
+  WordList               loads assets/moderation/profanity_en.txt + slurs_en.txt
 di/ModerationModule.kt   Koin: binds TextModerator + ImageModerator
 data/BlobRepository.kt   image-moderation hub: send/receive screening + per-hash verdict cache
 data/FileTypes.kt        what bytes ACTUALLY are (§7): the image-signature sniff, apk/archive refusals
 data/blob/BlobVerdictEntity.kt   `blob_verdicts` table (NSFW verdict cached by content hash)
-assets/moderation/       profanity_en.txt, nsfw.tflite (LFS), README.md
+assets/moderation/       profanity_en.txt, slurs_en.txt, nsfw.tflite (LFS), README.md
 ```
 
 User control: a **Content filtering** toggle (default on) in Profile →
@@ -54,6 +55,16 @@ MIT-licensed [dsojevic/profanity-list](https://github.com/dsojevic/profanity-lis
 base literals; severity ≥ 2, with the `lgbtq` identity tag and common innocent words excluded).
 Morphological derivatives and contextual cases are backstopped by the ML pass; licensing in
 [`THIRD-PARTY-NOTICES.md`](../THIRD-PARTY-NOTICES.md).
+
+**Scopes.** That profanity list is the Nearby room's alone: private DMs and groups are not
+sworn-at-by-default spaces we police. Identity slurs are the exception, blocked in **every** scope by a
+second list, `assets/moderation/slurs_en.txt`, from the same generator: the corpus's `racial` and
+`religious` tags at severity ≥ 3, a hand-picked handful of anti-LGBTQ slurs (the `lgbtq` tag itself mixes
+slurs with self-descriptions), each term's plural (the matcher does not stem), and **without** the
+in-group spelling `nigga` and `coon` (raccoon). It runs ahead of the classifier because the classifier does
+not catch a slur aimed at a person: Detoxify scores it as an *insult*, a label we ignore so private rudeness
+goes through (e.g. `identity_attack` 0.06 for the n-word alone, 0.00 for several others). The measurements
+and the policy are ADR 2026-10.d62w; `SlurListTest` pins both the inclusions and the exclusions.
 
 ### Hook points
 
@@ -208,8 +219,9 @@ the packfile keeps clones fast. `.tflite` is also kept uncompressed in the APK
 - **Unit (`./gradlew :app:testDebugUnitTest`):** `LexicalTextFilterTest` (normalization/evasions/
   Scunthorpe), `HybridTextModeratorTest` (lexical short-circuit / ML fallthrough), `WordListTest` (the
   shipped `profanity_en.txt` asset contract — single `[a-z]+` tokens, sorted, no dupes, sentinels
-  present, identity/innocent terms excluded). The image classifier and hooks need a device + model and
-  are not JVM-testable.
+  present, identity/innocent terms excluded), `SlurListTest` (the same contract for `slurs_en.txt`, its
+  pinned exclusions, and the DM chain flagging a slur with no model). The image classifier and hooks need
+  a device + model and are not JVM-testable.
 - **Build/lint:** `./gradlew :app:assembleDebug :app:lintDebug detekt`.
 - **Device (two physical phones — the mesh can't form on an emulator):** send abusive text → blocked
   with toast (both toggle states); send an explicit image → confirm-in-DM / hard-block-in-room (both
@@ -337,8 +349,9 @@ new model or a new LiteRT, and a ROM update may fix the driver that faulted.
 This is the part worth being precise about, because it is **not** symmetrical:
 
 - **Nearby room text** — still screened. `LexicalTextFilter` runs first there and is pure Kotlin.
-- **DM and group text** — **not screened at all.** `ScopedTextModerator.direct` is the ML classifier alone
-  (§2: profanity is deliberately room-only), so latching it off leaves nothing behind it.
+- **DM and group text** — **slurs only.** `ScopedTextModerator.direct` is the slur list then the ML
+  classifier (§2: profanity is deliberately room-only), so latching the model off leaves the slur list
+  (ADR 2026-10.d62w) and nothing else: threats and sexual content go unscreened.
 - **Images, everywhere** — **not screened.** `NsfwImageModerator` has no lexical twin.
 
 None of that is new — a build whose model assets fail to load has always behaved this way — but it becomes

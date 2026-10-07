@@ -6,8 +6,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * The public room runs the full hybrid pass; DMs/groups run toxicity only. This verifies the scope routes
- * to the right underlying moderator (and only that one).
+ * The public room runs slurs + profanity + toxicity; DMs/groups run slurs + toxicity. This verifies the scope
+ * routes to the right underlying moderator (and only that one); [SlurListTest] covers what the DM chain flags.
  */
 class ScopedTextModeratorTest {
     private class Recording(

@@ -53,17 +53,17 @@ dependency was dropped when the scanner moved to CameraX.
 |---|---|---|
 | NSFW image classifier (`nsfw.tflite` — MobileNetV2, © 2020 The nsfw_model Developers) | [GantMan/nsfw_model](https://github.com/GantMan/nsfw_model) | MIT |
 | Toxicity text classifier (`toxicity.tflite`, `tokenizer.json` — Detoxify `unbiased-small` on ALBERT) | [unitaryai/detoxify](https://github.com/unitaryai/detoxify) | Apache-2.0 |
-| Profanity word list (`profanity_en.txt` — © 2021 David Sojevic) | [dsojevic/profanity-list](https://github.com/dsojevic/profanity-list) | MIT |
+| Profanity word list (`profanity_en.txt`, `slurs_en.txt` — © 2021 David Sojevic) | [dsojevic/profanity-list](https://github.com/dsojevic/profanity-list) | MIT |
 | Emoji catalog (`emoji_en.tsv` — from `emoji-test.txt`, Emoji 17.0, © Unicode, Inc.) | [Unicode, Inc. — emoji-test.txt](https://www.unicode.org/reports/tr51) | Unicode-3.0 |
 
 - **On-device moderation models** — the NSFW image classifier and the toxicity text classifier bundled
   under `app/src/main/assets/moderation/` are third-party works redistributed under their own licenses. The
   full notices, source URLs, and license texts are in
   [`app/src/main/assets/moderation/README.md`](app/src/main/assets/moderation/README.md).
-- **`profanity_en.txt`** — the deterministic profanity word list under `app/src/main/assets/moderation/`
-  is a derived work generated from [dsojevic/profanity-list](https://github.com/dsojevic/profanity-list)
+- **`profanity_en.txt`, `slurs_en.txt`** — the deterministic profanity and slur word lists under
+  `app/src/main/assets/moderation/` are derived works generated from [dsojevic/profanity-list](https://github.com/dsojevic/profanity-list)
   (MIT, © 2021 David Sojevic), pinned at commit `c27924319aa9bd6f917e3782b4f4b6604a50b652`, by
-  `scripts/gen-profanity-list.py`. It is redistributed under the MIT License; the full license text,
+  `scripts/gen-profanity-list.py`. They are redistributed under the MIT License; the full license text,
   source URL, pinned commit, and transform/curation rules are in
   [`app/src/main/assets/moderation/README.md`](app/src/main/assets/moderation/README.md).
 - **`emoji_en.tsv`** — the reaction picker's emoji catalog under `app/src/main/assets/emoji/` is a derived

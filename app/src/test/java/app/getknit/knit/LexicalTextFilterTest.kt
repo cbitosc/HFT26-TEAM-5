@@ -2,6 +2,8 @@ package app.getknit.knit
 
 import app.getknit.knit.location.GeoUri
 import app.getknit.knit.moderation.LexicalTextFilter
+import app.getknit.knit.moderation.TextVerdict
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -70,6 +72,14 @@ class LexicalTextFilterTest {
     fun allowListOverridesAMatch() {
         val tuned = LexicalTextFilter(blockedWords = listOf("ass"), allowedTerms = listOf("ass"))
         assertFalse(tuned.check("you ass").flagged)
+    }
+
+    @Test
+    fun aHitReportsTheFiltersCategory() {
+        assertEquals(TextVerdict.Category.PROFANITY, filter.check("shit").category)
+        val slurs = LexicalTextFilter(listOf("kike"), category = TextVerdict.Category.SLUR)
+        assertEquals(TextVerdict.Category.SLUR, slurs.check("k1ke").category)
+        assertEquals(TextVerdict.Category.NONE, slurs.check("hello").category)
     }
 
     @Test

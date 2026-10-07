@@ -3258,7 +3258,7 @@ class MeshManager(
      * inbound messages (in [deliverChat]); a flagged inbound message is still stored and merely collapsed
      * in the UI (collapse itself gated at display time by the setting, see [ChatViewModel]), so a false
      * positive never silently drops content. [isRoom] selects the moderation scope: the Nearby
-     * broadcast room gets profanity + toxicity, while DMs and groups get toxicity only (see
+     * broadcast room gets slurs + profanity + toxicity, while DMs and groups get slurs + toxicity (see
      * [ScopedTextModerator]). [direction] (`"outgoing"`/`"incoming"`) only labels the debug log; the
      * verdict score/category/decision is logged under [TEXT_MODERATION_TAG], mirroring the image
      * screen's `ImageModeration` logging — the body itself is never logged (only its length).

@@ -18,16 +18,19 @@ import java.text.Normalizer
  * It deliberately matches whole tokens (not arbitrary substrings) to avoid the "Scunthorpe problem"
  * (e.g. *class*, *assistant*), trading recall for far fewer false positives; the ML classifier layered
  * on top in [HybridTextModerator] is what catches the contextual cases this misses. [allowedTerms] is
- * an explicit allow-list escape hatch for tokens that would otherwise match.
+ * an explicit allow-list escape hatch for tokens that would otherwise match. A hit reports [category], so the
+ * slur list (every scope) and the profanity list (the room) say which one tripped.
  */
 class LexicalTextFilter(
     blockedWords: Collection<String>,
     allowedTerms: Collection<String> = emptySet(),
+    category: TextVerdict.Category = TextVerdict.Category.PROFANITY,
 ) : TextModerator {
     private val blocked: Set<String> =
         blockedWords.map(::normalize).filter { it.isNotEmpty() }.toSet()
     private val blockedCollapsed: Set<String> = blocked.map(::collapseRuns).toSet()
     private val allowed: Set<String> = allowedTerms.map(::normalize).filter { it.isNotEmpty() }.toSet()
+    private val flagged = TextVerdict(allowed = false, category = category, score = 1f)
 
     override suspend fun classify(text: String): TextVerdict = check(text)
 
@@ -39,15 +42,15 @@ class LexicalTextFilter(
         // Accumulate runs of single letters so a spaced-out evasion ("f u c k") is tested rejoined.
         val pendingSingles = StringBuilder()
         for (token in tokens) {
-            if (isBlocked(token)) return FLAGGED
+            if (isBlocked(token)) return flagged
             if (token.length == 1) {
                 pendingSingles.append(token)
             } else if (pendingSingles.isNotEmpty()) {
-                if (isBlocked(pendingSingles.toString())) return FLAGGED
+                if (isBlocked(pendingSingles.toString())) return flagged
                 pendingSingles.setLength(0)
             }
         }
-        if (pendingSingles.isNotEmpty() && isBlocked(pendingSingles.toString())) return FLAGGED
+        if (pendingSingles.isNotEmpty() && isBlocked(pendingSingles.toString())) return flagged
         return TextVerdict.ALLOWED
     }
 
@@ -88,8 +91,6 @@ class LexicalTextFilter(
         val SEPARATORS = Regex("[^a-z]+")
         val COMBINING_MARKS = Regex("\\p{Mn}+")
         const val MIN_RUN = 3
-        val FLAGGED =
-            TextVerdict(allowed = false, category = TextVerdict.Category.PROFANITY, score = 1f)
         val LEET =
             mapOf(
                 '0' to 'o',

@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
-"""Generate app/src/main/assets/moderation/profanity_en.txt from the vendored
+"""Generate app/src/main/assets/moderation/profanity_en.txt and slurs_en.txt from the vendored
 dsojevic/profanity-list corpus.
 
-The output is a committed, GENERATED file. Regenerate it with:
+Two lists, two scopes (ADR 2026-10.d62w):
+  * profanity_en.txt -- the Nearby room's lexical pass: swearing, sexual terms and slurs alike.
+  * slurs_en.txt     -- the lexical pass in EVERY scope, DMs and groups included: identity slurs only. The
+    on-device toxicity model scores a slur aimed at a person as an insult (a label Knit ignores so that
+    private rudeness is not blocked), not as an identity attack, so without this list a DM slur passes.
+
+The outputs are committed, GENERATED files. Regenerate them with:
 
     python3 scripts/gen-profanity-list.py
 
@@ -28,6 +34,10 @@ shipped literal "shit". Ship clean literals, match dirty input.
 The `allow_partial` / `exceptions` fields are ignored: the filter is always whole-token, so substring
 exceptions are moot and partial-match recall is intentionally left to the ML classifier that backstops
 the lexical pass.
+
+Slur list transform: keep entries tagged SLUR_TAGS at severity >= SLUR_SEVERITY_FLOOR, reduce them the same
+way, drop SLUR_DROP, union SLUR_ALWAYS_INCLUDE, then add each term's plain plural (term + "s") -- the
+matcher is whole-token and does not stem, so "kikes" would otherwise slip past "kike".
 """
 
 from __future__ import annotations
@@ -61,9 +71,23 @@ ALWAYS_INCLUDE = [
     "bastard", "dickhead", "cunt", "slut", "whore", "piss", "prick", "wanker", "twat",
 ]
 
+# --- slur list dials (ADR 2026-10.d62w) ---
+# Private chats block on these too, so the bar is "a slur in every ordinary use", not "offensive".
+SLUR_TAGS = {"racial", "religious"}
+SLUR_SEVERITY_FLOOR = 3  # severity 2 holds terms with innocent or discussion uses (negro, haji, swastika)
+# Dropped from the private-chat list only; the room's profanity list still carries them.
+#   nigga/niggs -- widely used in-group; blocking it in a DM blocks Black users talking to friends.
+#   coon/coons  -- everyday short for raccoon ("coon hunting", "coonhound").
+SLUR_DROP = {"nigga", "niggs", "coon", "coons"}
+# The lgbtq tag mixes slurs with self-descriptions (dyke, twink, enby, cishet), so it stays excluded as a
+# tag; these are the unambiguous slurs from it, picked by hand. Not "fag" (British for a cigarette) and not
+# "fagot" (Polish for a bassoon).
+SLUR_ALWAYS_INCLUDE = ["faggot", "shemale", "tranny", "trannie"]
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SOURCE_JSON = REPO_ROOT / "third_party" / "profanity-list" / "en.json"
 OUTPUT_TXT = REPO_ROOT / "app" / "src" / "main" / "assets" / "moderation" / "profanity_en.txt"
+SLURS_TXT = REPO_ROOT / "app" / "src" / "main" / "assets" / "moderation" / "slurs_en.txt"
 
 TOKEN = re.compile(r"[a-z]+")
 
@@ -103,6 +127,39 @@ def build() -> tuple[list[str], dict[str, int]]:
     return sorted(kept), stats
 
 
+def build_slurs(data: list[dict]) -> list[str]:
+    kept: set[str] = set()
+    for entry in data:
+        if entry.get("severity", 0) < SLUR_SEVERITY_FLOOR or not SLUR_TAGS & set(entry.get("tags", [])):
+            continue
+        for alt in entry.get("match", "").split("|"):
+            r = reduce(alt)
+            if TOKEN.fullmatch(r) and len(r) >= MIN_LEN and r not in SLUR_DROP:
+                kept.add(r)
+    kept.update(SLUR_ALWAYS_INCLUDE)
+    kept.update([t + "s" for t in kept if not t.endswith("s")])
+    return sorted(kept - SLUR_DROP)
+
+
+def slurs_header() -> str:
+    return f"""\
+# English identity-slur list for LexicalTextFilter -- the lexical pass that runs in EVERY conversation
+# scope, DMs and groups included (the general profanity list is the Nearby room's alone). One term per
+# line; blank lines and lines starting with '#' are ignored. Matching is the same whole-token,
+# evasion-tolerant matcher as profanity_en.txt. Why it exists: ADR 2026-10.d62w.
+#
+# GENERATED FILE -- DO NOT EDIT BY HAND. Regenerate with:  python3 scripts/gen-profanity-list.py
+#
+# Source:  {SOURCE_REPO} -- {SOURCE_URL}
+# Commit:  {SOURCE_COMMIT}  (retrieved {RETRIEVED})
+# License: MIT (c) 2021 David Sojevic -- full text: app/src/main/assets/moderation/README.md
+#
+# Transform: keep the {", ".join(sorted(SLUR_TAGS))} tags at severity >= {SLUR_SEVERITY_FLOOR}; reduce as for the
+# profanity list; drop the in-group and everyday terms in SLUR_DROP; union the hand-picked anti-LGBTQ slurs;
+# add each term's plural; dedupe; sort. Full detail: scripts/gen-profanity-list.py.
+"""
+
+
 def header() -> str:
     tags = ", ".join(sorted(EXCLUDE_TAGS))
     return f"""\
@@ -132,6 +189,10 @@ def main() -> int:
     terms, stats = build()
     with OUTPUT_TXT.open("w", encoding="utf-8", newline="\n") as f:
         f.write(header() + "\n" + "\n".join(terms) + "\n")
+    slurs = build_slurs(json.loads(SOURCE_JSON.read_text(encoding="utf-8")))
+    with SLURS_TXT.open("w", encoding="utf-8", newline="\n") as f:
+        f.write(slurs_header() + "\n" + "\n".join(slurs) + "\n")
+    print(f"wrote {len(slurs)} terms -> {SLURS_TXT.relative_to(REPO_ROOT)}", file=sys.stderr)
     tags = ", ".join(sorted(EXCLUDE_TAGS))
     print(f"wrote {len(terms)} terms -> {OUTPUT_TXT.relative_to(REPO_ROOT)}", file=sys.stderr)
     print(
