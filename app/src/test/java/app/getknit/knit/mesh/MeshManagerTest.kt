@@ -593,7 +593,7 @@ class MeshManagerTest {
     // --- moderation gate ---
 
     @Test
-    fun flaggedTextIsBlockedOnSendAndNeitherStoredNorFlooded() =
+    fun flaggedTextIsBlockedOnSendInTheRoomAndNeitherStoredNorFlooded() =
         runTest(UnconfinedTestDispatcher()) {
             val rig = Rig(backgroundScope)
             coEvery { rig.textModeration.classify(any(), any()) } returns
@@ -602,10 +602,31 @@ class MeshManagerTest {
             val ok = rig.manager.sendChat("something abusive")
             advanceUntilIdle()
 
-            assertFalse("block-on-send: a flagged message is refused", ok)
+            assertFalse("block-on-send: a flagged room message is refused", ok)
             assertTrue("nothing is persisted locally", rig.saved.isEmpty())
             assertTrue("and nothing hits the wire", rig.transport.sent.isEmpty())
             coVerify(exactly = 0) { rig.messages.save(any()) }
+            coVerify(exactly = 1) { rig.textModeration.classify("something abusive", true) }
+        }
+
+    @Test
+    fun aDmAndAGroupMessageAreNeverClassifiedOnTheWayOut() =
+        runTest(UnconfinedTestDispatcher()) {
+            // Only the public rooms screen what is sent (ADR 2026-10.9rh6): a private message's receivers
+            // screen it and hide it behind their own Content filtering toggle.
+            val rig = Rig(backgroundScope)
+            rig.pin(rig.bob)
+            coEvery { rig.textModeration.classify(any(), any()) } returns
+                TextVerdict(allowed = false, category = TextVerdict.Category.TOXICITY)
+            val group = GroupInfo(id = "g-1", members = listOf(rig.me.nodeId, rig.bob.nodeId), createdBy = rig.me.nodeId)
+
+            assertTrue(rig.manager.sendChat("something abusive", recipientId = rig.bob.nodeId))
+            assertTrue(rig.manager.sendChat("something abusive", group = group))
+            advanceUntilIdle()
+
+            assertEquals(2, rig.saved.size)
+            assertTrue(rig.saved.all { it.moderation == MessageEntity.MODERATION_NONE })
+            coVerify(exactly = 0) { rig.textModeration.classify(any(), any()) }
         }
 
     @Test
@@ -758,20 +779,21 @@ class MeshManagerTest {
         }
 
     @Test
-    fun aCommonsPostIsRefusedByRoomModerationAndByARoomThisDeviceIsNotIn() =
+    fun aCommonsPostIsNeverClassifiedOnTheWayOutAndARoomThisDeviceIsNotInRefusesIt() =
         runTest(UnconfinedTestDispatcher()) {
+            // A commons lives on a private spool, so like a DM its members screen what arrives (ADR 2026-10.9rh6).
             val store = FakeCommonsStore(roomId, roomSecret)
             val rig = Rig(backgroundScope, commons = store)
-            coEvery { rig.textModeration.classify(any(), true) } returns
+            coEvery { rig.textModeration.classify(any(), any()) } returns
                 TextVerdict(allowed = false, category = TextVerdict.Category.TOXICITY)
 
-            assertFalse(rig.manager.sendCommons(roomId, "something vile", emptyList(), null))
-            coEvery { rig.textModeration.classify(any(), any()) } returns TextVerdict.ALLOWED
+            assertTrue(rig.manager.sendCommons(roomId, "something vile", emptyList(), null))
             assertFalse(rig.manager.sendCommons(Conversations.commonsIdFor("ff".repeat(32)), "hello?", emptyList(), null))
             advanceUntilIdle()
 
-            assertTrue(store.posted.isEmpty())
+            assertEquals(listOf("something vile"), store.posted.map { it.first.body })
             assertTrue(rig.transport.sent.isEmpty())
+            coVerify(exactly = 0) { rig.textModeration.classify(any(), any()) }
         }
 
     @Test

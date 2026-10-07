@@ -71,6 +71,7 @@ class MessageRequestsViewModelTest {
         store = InMemoryMessages(mainDispatcher)
         coEvery { identity.nodeId() } returns "me"
         every { settings.acceptedConversations } returns acceptedFlow
+        every { settings.contentFilteringEnabled } returns MutableStateFlow(true)
         every { settings.blockedNodeIds } returns blockedFlow
         every { peers.observeDirectory() } returns peersFlow.map { directoryOf(it) }
         every { groups.observeGroups() } returns groupsFlow

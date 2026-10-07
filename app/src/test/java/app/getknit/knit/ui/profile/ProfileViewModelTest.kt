@@ -127,6 +127,27 @@ class ProfileViewModelTest {
             assertEquals("the crop is dismissed", null, vm.cropTarget.value)
         }
 
+    /** A photo the explicit-image screen refused leaves the old one in place and says so (ADR 2026-10.9rh6). */
+    @Test
+    fun aRefusedPhotoChangesNothingAndIsSignalled() =
+        runTest {
+            coEvery { avatars.saveOwnAvatar(any(), any<CropRect>()) } returns null
+            avatarHashFlow.value = "old-hash"
+            val vm = vm(appScope = this)
+            val changes = mutableListOf<PhotoChange>()
+            backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.photoChanged.collect { changes += it } }
+            advanceUntilIdle()
+            vm.stageCrop()
+            advanceUntilIdle()
+
+            vm.confirmCrop(scale = 1f, offset = Offset.Zero, diameter = 200f)
+            advanceUntilIdle()
+
+            assertEquals(listOf(PhotoChange.REFUSED), changes)
+            coVerify(exactly = 0) { settings.setOwnAvatar(any(), any()) }
+            coVerify(exactly = 0) { blobs.deleteIfUnreferenced("old-hash") }
+        }
+
     @Test
     fun clearingThePhotoDropsTheHashWithItsStampAndReclaimsTheBlob() =
         runTest {

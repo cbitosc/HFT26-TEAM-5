@@ -342,6 +342,9 @@ class InboundPipelineTest {
         val seedCustodyReplays = mutableListOf<Pair<String, String?>>()
         var failClassify = false
 
+        /** What every inbound classification answers: true flags the text. */
+        var flagText = false
+
         /** When armed, records the `isRoom` scope each inbound classification ran under. */
         var classifyScopes: MutableList<Boolean>? = null
 
@@ -436,7 +439,7 @@ class InboundPipelineTest {
                     classifyText = { _, _, isRoom ->
                         if (failClassify) error("moderation boom")
                         classifyScopes?.add(isRoom)
-                        false
+                        flagText
                     },
                     resealUnacked = { resealed += it },
                     redistributeGroupKey = { groupId, requester -> redistributed += groupId to requester },
@@ -2478,6 +2481,28 @@ class InboundPipelineTest {
 
             assertEquals("hello room", rig.msgMap["b1"]?.body)
             coVerify { rig.notifier.notify(any(), any(), any(), any(), any()) }
+        }
+
+    @Test
+    fun aFlaggedMessageNotifiesAsHiddenOnlyWhileContentFilteringIsOn() =
+        runTest {
+            // A DM is no longer screened on the way out (ADR 2026-10.9rh6), and a notification has no tap to
+            // reveal: while filtering is on, the shade says only what the collapsed thread says.
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.peerMap[alice.nodeId] =
+                PeerEntity(nodeId = alice.nodeId, pubKey = alice.bundle.encoded, verified = true, updatedAt = 1L)
+            val bodies = mutableListOf<String>()
+            coEvery { rig.notifier.notify(any(), any(), any(), any(), any()) } answers { bodies += firstArg<NotifMessage>().body }
+            rig.flagText = true
+
+            rig.deliver(alice, rig.dmChat(alice, rig.self, id = "x1", body = "something vile"))
+            rig.settings.contentFilteringEnabled.value = false
+            rig.deliver(alice, rig.dmChat(alice, rig.self, id = "x2", body = "something vile"))
+
+            assertEquals(listOf("Message hidden", "something vile"), bodies)
+            assertEquals("the row keeps the words either way", "something vile", rig.msgMap["x1"]?.body)
+            assertEquals(MessageEntity.MODERATION_TEXT_FLAGGED, rig.msgMap["x1"]?.moderation)
         }
 
     @Test

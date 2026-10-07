@@ -33,14 +33,14 @@ class ImageScreeningService(
     fun observeFlaggedHashes(): Flow<List<String>> = verdicts.observeFlaggedHashes()
 
     /**
-     * Send-side screen: true if the image in [bytes] is classified explicit. Always runs — this is a
-     * send-side "good-citizen" check (block-in-room / confirm-in-DM) and is **not** gated by the
-     * content-filtering setting, which only governs receive-side hiding. [bytes] are the exact bytes that
+     * Send-side screen: true if the image in [bytes] is classified explicit. Run for a picture bound for the
+     * Nearby room (which blocks a flagged one) and for an avatar or group photo being set, never for a DM or a
+     * group (ADR 2026-10.9rh6), and **not** gated by the content-filtering setting, which only governs
+     * receive-side hiding. [bytes] are the exact bytes that
      * will be stored and transmitted, decoded here at the same [SCREEN_MAX_DIM] bound the receive-side
      * screen uses — so the sender and recipient classify byte-identical input and reach the same verdict
      * (the screen reflects what is actually sent, not the sharper, full-resolution pre-JPEG source
-     * bitmap). Sending an explicit image is allowed but discouraged, so callers use this to prompt for
-     * confirmation (not to block). Fail-open (returns false) when the bytes can't be decoded; no verdict
+     * bitmap). Fail-open (returns false) when the bytes can't be decoded; no verdict
      * is cached here (the receive side caches by the stored/ciphertext hash, see [screenImage]).
      */
     suspend fun isImageExplicit(bytes: ByteArray): Boolean {

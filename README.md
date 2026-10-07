@@ -206,11 +206,12 @@ Knit is built for situations where there's **no reliable network but people are 
   (re-pushed only when they actually change) and shown next to messages.
 - **On-device content moderation** — abusive-text and explicit-image (NSFW) filtering that runs
   **entirely offline** (no network, no server): a deterministic profanity filter, a bundled TFLite
-  **toxicity** text classifier, and a bundled TFLite **NSFW** image classifier. Abusive **text is
-  blocked on send**; explicit **images** are blocked outright in the public Nearby room and
-  **allowed-but-discouraged via a "send anyway?" confirmation** in DMs/groups; both are
-  **collapsed/blurred behind tap-to-reveal on receive** (receiver-side enforcement is what actually
-  protects a user in a mesh), with one-tap block-sender and a user toggle. See
+  **toxicity** text classifier, and a bundled TFLite **NSFW** image classifier. In the public Nearby and
+  Meshtastic rooms, abusive **text** and explicit **images are blocked on send**; DMs, groups and the
+  commons are never checked on the sender's phone. Everything received, in every conversation, is
+  **collapsed/blurred behind tap-to-reveal** (receiver-side enforcement is what actually protects a user
+  in a mesh), under the receiver's own toggle, with one-tap block-sender. Your own avatar and group photos
+  are screened when you set them. See
   [`docs/CONTENT_MODERATION.md`](docs/CONTENT_MODERATION.md).
 - **Messaging-style notifications** with per-context channels (Nearby, groups, DMs) and a separate
   channel for mentions.

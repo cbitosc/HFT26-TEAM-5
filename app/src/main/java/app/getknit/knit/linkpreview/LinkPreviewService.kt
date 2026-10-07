@@ -17,20 +17,21 @@ import kotlinx.coroutines.withTimeoutOrNull
  *
  * The order of the gates is the point. The connectivity questions come first, before any bytes move: a phone
  * that is only on the mesh, behind a captive portal or under Data Saver never opens a socket. Then the page
- * (bounded by the fetcher), the picture (optional — any failure there yields a text-only card), and finally
- * moderation on the sender's own device: a picture the classifier flags is dropped from the card, and a card
- * whose text the message gate would refuse is dropped whole. Both run on the recipient again (one verdict per
- * card), so a modified client cannot smuggle either past a stock one.
+ * (bounded by the fetcher), the picture (optional — any failure there yields a text-only card), and finally,
+ * for the Nearby room only, moderation on the sender's own device: a card whose text the room's gate would refuse
+ * is dropped whole, and a picture the classifier flags is dropped from the card. A DM's or a group's card is not
+ * screened here at all (ADR 2026-10.9rh6). Every recipient screens the card again (one verdict per card), so a
+ * modified client cannot smuggle either past a stock one.
  *
  * A short memo keeps a retyped or re-pasted link from being fetched twice; it holds the *pre-moderation* blob,
- * because the room and a DM classify differently and the same link can be pasted in both. Nothing persists.
+ * because only the room screens and the same link can be pasted in both. Nothing persists.
  * Pure Kotlin with every collaborator injected, so it is JVM-tested with fakes; the Android pieces
  * (`PreviewImage.shrink`, the screening service) arrive as functions.
  */
 class LinkPreviewService(
     private val gate: InternetGate,
     private val fetcher: PreviewFetcher,
-    // ImageScreeningService::isImageExplicit — the send-side screen every staged picture already passes.
+    // ImageScreeningService::isImageExplicit — the room's send-side screen, the one a staged room picture passes.
     private val screenImage: suspend (ByteArray) -> Boolean,
     // The message body's own send gate, scoped like it: (text, isRoom) → flagged.
     private val textFlagged: suspend (String, Boolean) -> Boolean,
@@ -70,7 +71,7 @@ class LinkPreviewService(
     private val memoLock = Mutex()
     private val memo = LinkedHashMap<String, Pair<Long, LinkPreviewBlob>>()
 
-    /** The card for [url] as it appears in a draft, classified for the Nearby room when [isRoom]. Never throws. */
+    /** The card for [url] as it appears in a draft, screened only when it is bound for the Nearby room ([isRoom]). Never throws. */
     suspend fun fetchCard(
         url: String,
         isRoom: Boolean,
@@ -100,11 +101,20 @@ class LinkPreviewService(
                     remembered
                 }
             }
-        if (textFlagged(blob.moderationText(), isRoom)) {
+        if (!isRoom) return CardResult.Card(blob)
+        if (textFlagged(blob.moderationText(), true)) {
             log("card text flagged for ${LinkPreviewBlob.hostOf(normalized)}, no card")
             return CardResult.NoCard
         }
-        return CardResult.Card(blob)
+        return CardResult.Card(withoutFlaggedPicture(blob))
+    }
+
+    /** [blob] as the room may carry it: its picture dropped when the classifier flags it, the text kept. */
+    private suspend fun withoutFlaggedPicture(blob: LinkPreviewBlob): LinkPreviewBlob {
+        val image = blob.image ?: return blob
+        if (!screenImage(image)) return blob
+        log("card picture flagged for ${LinkPreviewBlob.hostOf(blob.url)}, dropped")
+        return LinkPreviewBlob(v = blob.v, url = blob.url, title = blob.title, description = blob.description)
     }
 
     private sealed interface Fetched {
@@ -148,12 +158,7 @@ class LinkPreviewService(
     private suspend fun fetchPicture(imageUrl: String): Shrunk? {
         val normalized = LinkPreviewPolicy.normalize(imageUrl) ?: return null
         val fetched = fetcher.fetchImage(normalized) as? ImageFetch.Image ?: return null
-        val shrunk = withContext(cpu) { shrink(fetched.bytes) } ?: return null
-        if (screenImage(shrunk.bytes)) {
-            log("card picture flagged for ${LinkPreviewBlob.hostOf(imageUrl)}, dropped")
-            return null
-        }
-        return shrunk
+        return withContext(cpu) { shrink(fetched.bytes) }
     }
 
     private suspend fun memoized(url: String): LinkPreviewBlob? =

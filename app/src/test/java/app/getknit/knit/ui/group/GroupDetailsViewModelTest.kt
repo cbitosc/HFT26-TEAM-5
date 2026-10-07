@@ -3,6 +3,9 @@
 package app.getknit.knit.ui.group
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.net.Uri
+import androidx.compose.ui.geometry.Offset
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import app.getknit.knit.data.AvatarStore
@@ -19,6 +22,7 @@ import app.getknit.knit.mesh.Peer
 import app.getknit.knit.ui.directoryOf
 import app.getknit.knit.ui.group
 import app.getknit.knit.ui.peer
+import app.getknit.knit.ui.util.CropRect
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
@@ -148,6 +152,27 @@ class GroupDetailsViewModelTest {
             coVerify { groups.upsert(any()) }
             assertEquals(1, mesh.sentGroupUpdates.size)
             assertEquals("New Name", mesh.sentGroupUpdates.single().name)
+        }
+
+    /** A group photo the explicit-image screen refused changes nothing, sends nothing, and says so (ADR 2026-10.9rh6). */
+    @Test
+    fun aRefusedGroupPhotoChangesNothingAndIsSignalled() =
+        runTest {
+            coEvery { groups.find(groupId) } returns group(groupId = groupId, members = listOf("me", "a"))
+            coEvery { avatars.loadForCrop(any()) } returns Bitmap.createBitmap(400, 400, Bitmap.Config.ARGB_8888)
+            coEvery { avatars.saveOwnAvatar(any(), any<CropRect>()) } returns null
+            val vm = vm()
+            val refusals = mutableListOf<Unit>()
+            backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.photoRefused.collect { refusals += it } }
+
+            vm.pickGroupPhoto(mockk<Uri>())
+            advanceUntilIdle()
+            vm.confirmGroupPhoto(scale = 1f, offset = Offset.Zero, diameter = 200f)
+            advanceUntilIdle()
+
+            assertEquals(1, refusals.size)
+            coVerify(exactly = 0) { groups.upsert(any()) }
+            assertTrue(mesh.sentGroupUpdates.isEmpty())
         }
 
     @Test

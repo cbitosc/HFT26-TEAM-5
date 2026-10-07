@@ -87,7 +87,8 @@ class MessageRequestsViewModel(
             settings.acceptedConversations.distinctUntilChanged(),
             peers.observeDirectory(),
             groups.observeGroups(),
-        ) { t, accepted, directory, groupList ->
+            settings.contentFilteringEnabled.distinctUntilChanged(),
+        ) { t, accepted, directory, groupList, hideFlagged ->
             // Until our own id resolves we can't compute "self-authored", so surface nothing rather than
             // mis-classifying our own threads as requests during the ~1s cold-start gap.
             val me = t.me ?: return@combine emptyList<RequestRow>()
@@ -110,7 +111,7 @@ class MessageRequestsViewModel(
 
             t.conversations
                 .filter(::isRequest)
-                .mapNotNull { id -> requestRowFor(id, t.heads[id], groupsById[id], directory, me) }
+                .mapNotNull { id -> requestRowFor(id, t.heads[id], groupsById[id], directory, me, hideFlagged) }
                 .sortedByDescending { it.lastMessageAt ?: 0L }
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
@@ -121,6 +122,7 @@ class MessageRequestsViewModel(
         group: GroupEntity?,
         directory: PeerDirectory,
         me: String,
+        hideFlagged: Boolean,
     ): RequestRow? {
         val isGroup = Conversations.kindFor(conversationId) == ConversationKind.GROUP
         // A group we've already left (or that has no roster row yet) isn't an active request.
@@ -142,7 +144,7 @@ class MessageRequestsViewModel(
             title = title,
             avatarHash = if (isGroup) group?.photoShownHash else directory.byNode[conversationId]?.avatarHash,
             isGroup = isGroup,
-            lastPreview = last?.let { previewFor(it, directory, isGroup) },
+            lastPreview = last?.let { previewFor(it, directory, isGroup, hideFlagged) },
             lastMessageAt = last?.sentAt,
             discriminator = if (isGroup) null else directory.label(conversationId).discriminator,
             faces = if (isGroup) groupFaces(memberIds, me, directory) else emptyList(),
@@ -196,8 +198,9 @@ class MessageRequestsViewModel(
         message: MessageEntity,
         directory: PeerDirectory,
         isGroup: Boolean,
+        hideFlagged: Boolean,
     ): String {
-        val body = messagePreview(context, message)
+        val body = messagePreview(context, message, hideFlagged)
         if (!isGroup) return body
         val sender = directory.label(message.senderId).text
         return context.getString(R.string.chat_list_preview_with_sender, sender, body)

@@ -95,6 +95,7 @@ class ChatListViewModelTest {
     private val cloneDismissedFlow = MutableStateFlow(0L)
     private val pausedUntilFlow = MutableStateFlow<Long?>(null)
     private val meshEnabledFlow = MutableStateFlow(true)
+    private val filteringFlow = MutableStateFlow(true)
 
     // A finite stand-in for the production poller, which never idles under a virtual clock.
     private val relayFlow = MutableStateFlow(RelayFacts())
@@ -118,6 +119,7 @@ class ChatListViewModelTest {
         every { settings.cloneDismissedAt } returns cloneDismissedFlow
         every { settings.meshPausedUntil } returns pausedUntilFlow
         every { settings.meshEnabled } returns meshEnabledFlow
+        every { settings.contentFilteringEnabled } returns filteringFlow
     }
 
     @After
@@ -313,6 +315,37 @@ class ChatListViewModelTest {
                 vm.state.value.conversations
                     .first { it.id == Conversations.MESHTASTIC }
             assertEquals("Sam: hi", row.lastPreview)
+        }
+
+    @Test
+    fun aFlaggedMessagePreviewsAsHiddenOnlyWhileContentFilteringIsOn() =
+        runTest {
+            // A DM is no longer screened on the way out (ADR 2026-10.9rh6), so its flagged text lands here; the
+            // preview has no tap to reveal, so it says only what the thread says.
+            val vm = vm()
+            backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.state.collect {} }
+            acceptedFlow.value = setOf("sam")
+            store.set(
+                msg(
+                    senderId = "sam",
+                    body = "something vile",
+                    sentAt = 100,
+                    conversationId = "sam",
+                    recipientId = "me",
+                    moderation = MessageEntity.MODERATION_TEXT_FLAGGED,
+                    received = true,
+                ),
+            )
+            advanceUntilIdle()
+
+            fun preview() =
+                vm.state.value.conversations
+                    .first { it.id == "sam" }
+                    .lastPreview
+            assertEquals(context.getString(R.string.moderation_preview_hidden), preview())
+            filteringFlow.value = false
+            advanceUntilIdle()
+            assertEquals("something vile", preview())
         }
 
     @Test

@@ -32,7 +32,7 @@ class BlePairProfileTest : BlePairTest() {
         runBlocking<Unit> {
             awaitLink()
             val photo = noiseBitmap(AVATAR_SIDE, "$run-avatar-$self")
-            val hash = avatars.saveOwnAvatar(photo)
+            val hash = checkNotNull(avatars.saveOwnAvatar(photo)) { "the noise photo was refused as explicit" }
             photo.recycle()
             settings.setOwnAvatar(hash, System.currentTimeMillis()) // the stamp re-broadcasts the profile
             note("set our photo $hash")

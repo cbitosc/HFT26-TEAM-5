@@ -121,12 +121,14 @@ fun ProfileScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val photoUpdated = stringResource(R.string.profile_photo_updated)
     val photoRemoved = stringResource(R.string.profile_photo_removed)
+    val photoRefused = stringResource(R.string.moderation_photo_refused)
     LaunchedEffect(Unit) {
         viewModel.photoChanged.collect { change ->
             val message =
                 when (change) {
                     PhotoChange.UPDATED -> photoUpdated
                     PhotoChange.REMOVED -> photoRemoved
+                    PhotoChange.REFUSED -> photoRefused
                 }
             snackbarHostState.showSnackbar(message)
         }

@@ -212,6 +212,7 @@ carries; never renumber an old one.
 | [2026-10.6e5t](decisions/2026-10-6e5t-a-blob-is-fetched-from-the-best-neighbour-that-says-it-holds-it.md) | A blob is fetched from the best neighbour that says it holds it | mesh, wire, blobs |
 | [2026-10.8hmx](decisions/2026-10-8hmx-an-animated-picture-keeps-its-frames.md) | An animated picture keeps its frames | attachments, privacy |
 | [2026-10.8jwn](decisions/2026-10-8jwn-a-bluetooth-file-feed-splits-one-pace-budget-across-the-links-it-feeds.md) | A Bluetooth file feed splits one pace budget across the links it feeds | ble, mesh |
+| [2026-10.9rh6](decisions/2026-10-9rh6-block-on-send-only-in-the-public-rooms.md) | Block on send only in the public rooms | moderation, privacy |
 | [2026-10.9utz](decisions/2026-10-9utz-the-ble-presence-set-is-enabled-again-after-every-connection.md) | The BLE presence set is enabled again after every connection | ble, mesh |
 | [2026-10.a239](decisions/2026-10-a239-the-field-log-is-kept-on-the-phone-and-handed-over-only-by-the-user.md) | The field log is kept on the phone and handed over only by the user | privacy, diagnostics, bluetooth |
 | [2026-10.d62w](decisions/2026-10-d62w-identity-slurs-are-blocked-by-a-word-list-in-every-conversation.md) | Identity slurs are blocked by a word list in every conversation, not only the Nearby room | moderation, privacy |

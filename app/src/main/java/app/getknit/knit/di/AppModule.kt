@@ -124,7 +124,7 @@ val appModule =
         }
         // nodeId is derived from the keypair's public bundle; the device id only feeds the block tag.
         single { Identity(get(), get()) }
-        single { AvatarStore(androidContext(), get()) }
+        single { AvatarStore(androidContext(), get(), get()) }
         // One plaintext, one identity (ADR 2026-10.mptm): what a pick goes out as when the phone already holds it,
         // and the room copy a want takes from a sealed one instead of the mesh.
         single { AttachmentIdentities(get(), get()) }

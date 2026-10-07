@@ -8,7 +8,11 @@ SafeSearch, ML Kit cloud) is usable.
 
 > **Mesh threat model.** There is no central moderator. A tampered client can skip any *sender-side*
 > check, so **receiver-side hiding is the real protection**; sender-side is good-citizen UX. Knit
-> therefore screens on both ends. Receiver-side hiding is user-controlled by the **Content filtering**
+> therefore screens what is sent only where strangers read it — the **Nearby room** and the **Meshtastic
+> room** — and screens everything that arrives, in every conversation (ADR 2026-10.9rh6). A DM, a group or a
+> commons post is never checked on the sender's phone: the classifiers miss things and misfire, and in a
+> private conversation the reader's own toggle decides. Avatars and group photos are the exception, screened
+> when set, because a face is shown to everyone. Receiver-side hiding is user-controlled by the **Content filtering**
 > toggle (default on — see the *User control* note in §1); the recipient can opt out, but a peer can
 > never force unscreened content onto a recipient who leaves it on. No on-device moderation is perfect — classifiers have false
 > positives/negatives, are English-centric, and are evadable; this raises the bar, it is not a
@@ -34,9 +38,10 @@ assets/moderation/       profanity_en.txt, slurs_en.txt, nsfw.tflite (LFS), READ
 User control: a **Content filtering** toggle (default on) in Profile →
 `SettingsStore.contentFilteringEnabled`. It means **"hide sensitive content others send to me"** and
 gates **receive-side hiding only** — the inbound text collapse, the inbound image blur, and the
-explicit-avatar rejection (off → adopt the avatar anyway). The toggle does **not** affect what you can
-send: the sender-side "good-citizen" checks (block abusive text, confirm/hard-block explicit images) and
-the Nearby-room protection always run, and the on-device models always screen (so the receive-side
+explicit-avatar rejection (off → adopt the avatar anyway), and the notification and chat-list preview of a
+flagged message, which read "Message hidden" while it is on. The toggle does **not** affect what you can
+send: the public rooms' sender-side checks (block abusive text and explicit images) and the screen of your
+own avatar and group photos always run, and the on-device models always screen (so the receive-side
 hide/reveal flips reactively when the toggle changes, without re-scanning). The hide is applied at
 display/decision time, not at screen time, so a verdict is always cached.
 
@@ -57,7 +62,7 @@ Morphological derivatives and contextual cases are backstopped by the ML pass; l
 [`THIRD-PARTY-NOTICES.md`](../THIRD-PARTY-NOTICES.md).
 
 **Scopes.** That profanity list is the Nearby room's alone: private DMs and groups are not
-sworn-at-by-default spaces we police. Identity slurs are the exception, blocked in **every** scope by a
+sworn-at-by-default spaces we police. Identity slurs are the exception, flagged in **every** scope by a
 second list, `assets/moderation/slurs_en.txt`, from the same generator: the corpus's `racial` and
 `religious` tags at severity ≥ 3, a hand-picked handful of anti-LGBTQ slurs (the `lgbtq` tag itself mixes
 slurs with self-descriptions), each term's plural (the matcher does not stem), and **without** the
@@ -68,9 +73,12 @@ and the policy are ADR 2026-10.d62w; `SlurListTest` pins both the inclusions and
 
 ### Hook points
 
-- **Outbound (block-on-send):** `MeshManager.sendChat()` returns `false` and stores/sends nothing if
+- **Outbound (block-on-send, the public rooms only):** `MeshManager.sendChat()` for the Nearby room and
+  `sendPublicPost()` for the Meshtastic room return a refusal and store/send nothing if
   `isTextFlagged(text)`. `ChatViewModel.send()` keeps the draft and toasts; only an accepted message
-  clears the input (via the `clearInput` event).
+  clears the input (via the `clearInput` event). A DM, a group message and a commons post
+  (`sendCommons()`) are never classified on the way out (ADR 2026-10.9rh6) — a slur in one is collapsed on
+  receipt, behind the receiver's toggle, not refused on send.
 - **A shared position is taken out first.** `isTextFlagged` classifies `GeoUri.strip(text)` and answers
   `false` when nothing is left (ADR 2026-09.tss4): the position rides the body as a `geo:` token of digits,
   and the lexical pass below reads leet digits as letters, so a run of coordinates can spell a blocked word
@@ -80,7 +88,10 @@ and the policy are ADR 2026-10.d62w; `SlurListTest` pins both the inclusions and
   messages with `MessageEntity.moderation = MODERATION_TEXT_FLAGGED` (still stored, never dropped). The
   chat bubble collapses them behind tap-to-reveal **only when the content-filtering toggle is on** —
   `ChatViewModel` gates `ChatRow.moderationFlagged` on `contentFilteringEnabled`, so toggling it
-  reveals/hides reactively. Block-sender reuses the existing long-press menu.
+  reveals/hides reactively. Neither a notification nor a list preview has a tap to reveal, so under the
+  same toggle the notification (`InboundPipeline.notificationBody`) and the chat-list and message-requests
+  preview (`messagePreview(…, hideFlagged)`) say "Message hidden" instead of the words. Block-sender reuses
+  the existing long-press menu.
 
 ## 3. Image moderation (implemented; model required to activate)
 
@@ -112,18 +123,16 @@ when a peer arrives after none) hide it on the send path.
 **Hook points** (`BlobRepository` is the hub; verdicts cached by SHA-256 in `blob_verdicts`, so
 identical bytes are scanned once across send/receive):
 
-- **Outbound (context-dependent):** `AttachmentStore.ingest()` always stores the image and reports a
-  flag via `BlobRepository.isImageExplicit(bitmap)` — reached from the photo picker, the keyboard, the
-  camera, and from `ingestFile` whenever a picked file's bytes turn out to carry an image signature (§7);
-  `ChatViewModel.attach()` then decides by conversation:
-  - **DMs / groups — warn-and-confirm (allowed but discouraged):** a flagged image is **not staged
-    until the user confirms** a "send anyway?" dialog (`confirmAttachment` → `confirmFlaggedAttachment()`;
-    declining GCs the blob).
+- **Outbound (the Nearby room only):** `AttachmentStore.ingest()` always stores the image, and when the
+  caller asks (`screen = true`) reports a flag via `ImageScreeningService.isImageExplicit(bytes)` — reached
+  from the photo picker, the keyboard, the camera, and from `ingestFile` whenever a picked file's bytes turn
+  out to carry an image signature (§7). `ChatViewModel` asks only in the Nearby room (`screen = isRoom`):
   - **Public Nearby broadcast room — hard-blocked (no confirmation bypass):** the flag drops the image
     with a toast and GCs the blob, because it broadcasts to everyone in range.
+  - **DMs / groups — not screened** (ADR 2026-10.9rh6; until then a "send anyway?" dialog). Every
+    recipient screens the picture on arrival and blurs it behind its own toggle.
 
-  A clean image stages immediately; GIFs are screened on their first frame. The send-side checks above
-  always run (they are not gated by the toggle).
+  A clean image stages immediately. The room's check always runs (it is not gated by the toggle).
 - **Inbound (flag-on-receive):** `MeshBlobStore.ingest()` → `ImageScreeningService.screenImage()`
   always caches a verdict for a plaintext blob, whichever plane brought it: a radio pull reaches it through
   `saveIncoming()`, a spool fetch through `MeshManager.scopeBlobs().save` (#109 — a bare insert there left a
@@ -145,9 +154,12 @@ identical bytes are scanned once across send/receive):
   adoptable:** a refused avatar's bytes can stay — the sealed profile whose cleartext names them pins them
   in custody, and the spool fetches from custody before any profile is applied — so both profile writers
   adopt a held avatar only when screening has not refused it (`InboundPipeline.avatarAdoptable`, the avatar
-  half of the group photo's decided-vs-shown rule). (Own-avatar
-  send-screening is intentionally omitted — every recipient screens what it receives, so an explicit
-  own-avatar is dropped on their side when they have filtering on.)
+  half of the group photo's decided-vs-shown rule).
+- **Own avatar and group photo (screened when set):** `AvatarStore.saveOwnAvatar` screens the encoded 256²
+  JPEG — the bytes every peer will pull — before it stores them, and answers null for a flagged one: the
+  profile keeps its old photo (`PhotoChange.REFUSED`) and a group sends no update (`photoRefused`), and the
+  screen says why. Not gated by the toggle, fail-open when the model is latched (ADR 2026-10.9rh6). A
+  modified client can skip it, so the receive-side screen above stays the real protection.
 
 ### 3.1 Bundled NSFW model
 
@@ -224,11 +236,12 @@ the packfile keeps clones fast. `.tflite` is also kept uncompressed in the APK
   a device + model and are not JVM-testable.
 - **Build/lint:** `./gradlew :app:assembleDebug :app:lintDebug detekt`.
 - **Device (two physical phones — the mesh can't form on an emulator):** send abusive text → blocked
-  with toast (both toggle states); send an explicit image → confirm-in-DM / hard-block-in-room (both
-  states); receive both from a peer → with the toggle **on** text is collapsed, image blurred with
-  tap-to-view, and a flagged avatar shows the peer's monogram; with the toggle **off** received text and
-  images are shown and a flagged avatar is adopted. Flipping the toggle while a chat is open reveals/hides
-  already-received text and images reactively.
+  with toast in the Nearby room, sent in a DM (both toggle states); send an explicit image → hard-block in
+  the room, sent in a DM (both states); set an explicit avatar → refused with a message; receive both from a
+  peer in a DM → with the toggle **on** text is collapsed, its notification and chat-list preview read
+  "Message hidden", the image is blurred with tap-to-view, and a flagged avatar shows the peer's monogram;
+  with the toggle **off** received text and images are shown and a flagged avatar is adopted. Flipping the
+  toggle while a chat is open reveals/hides already-received text and images reactively.
 
 ## 7. Audio and files are not screened
 
@@ -273,7 +286,7 @@ What protects a recipient instead:
   and the room is the *only* thing that hides either).
   The room is the one surface that
   floods unencrypted to strangers in range, and it is where this document's own threat model is weakest —
-  it is also where the image classifier *hard-blocks* rather than merely confirming. Unscreenable content
+  it is also the one place the image classifier screens a picture on the way out, and hard-blocks it. Unscreenable content
   broadcast to everyone nearby is the combination worth refusing, so it is refused. That refusal was load
   bearing twice over — the receive-side skip above and `docs/NEXT_WIRE_BREAK.md`'s first parked item both
   assumed a room attachment is an image — until link-preview cards (§7.1) became the one other kind the
@@ -302,10 +315,11 @@ A link-preview card (ADR 2026-09.n752) is an attachment whose bytes are a contai
 the title, description and a small picture the **sender's** phone fetched for a link in its own message.
 Both halves are text or image, so both classifiers apply, and they apply twice:
 
-- **On the sender**, before the card is staged: `LinkPreviewService` runs the picture through
-  `ImageScreeningService.isImageExplicit` (flagged ⇒ the card is sent without it) and the title and
-  description through the same `ScopedTextModerator` gate the message body faces, scoped to the thread
-  (flagged ⇒ no card at all). A modified client can skip this, exactly as it can skip the body's gate.
+- **On the sender, for the Nearby room only**, before the card is staged: `LinkPreviewService.fetchCard`
+  runs the title and description through the room's `ScopedTextModerator` gate (flagged ⇒ no card at all)
+  and the picture through `ImageScreeningService.isImageExplicit` (flagged ⇒ the card is sent without it).
+  A DM's or a group's card is not screened on the sender (ADR 2026-10.9rh6); the memo holds the unscreened
+  card so one fetch serves both. A modified client can skip this, exactly as it can skip the body's gate.
 - **On the recipient**, when the blob lands: `ImageScreeningService.screenAttachment` opens the container
   (`LinkPreviewBlob.decodeOrNull`, which is also where a peer-supplied card is normalized and refused),
   classifies the picture at the usual 512 px bound and the text in the receiving thread's scope, and caches
@@ -348,8 +362,9 @@ new model or a new LiteRT, and a ROM update may fix the driver that faulted.
 
 This is the part worth being precise about, because it is **not** symmetrical:
 
-- **Nearby room text** — still screened. `LexicalTextFilter` runs first there and is pure Kotlin.
-- **DM and group text** — **slurs only.** `ScopedTextModerator.direct` is the slur list then the ML
+- **Nearby room text** — still screened, on send and on receipt. `LexicalTextFilter` runs first there and is
+  pure Kotlin.
+- **DM and group text** (screened on receipt only) — **slurs only.** `ScopedTextModerator.direct` is the slur list then the ML
   classifier (§2: profanity is deliberately room-only), so latching the model off leaves the slur list
   (ADR 2026-10.d62w) and nothing else: threats and sexual content go unscreened.
 - **Images, everywhere** — **not screened.** `NsfwImageModerator` has no lexical twin.

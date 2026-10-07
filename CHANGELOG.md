@@ -35,6 +35,11 @@ document:
 
 ### Changed
 
+- Knit no longer blocks what you send in direct messages, groups or the commons, only in the Nearby and
+  Meshtastic rooms. Whoever receives it decides: with Content filtering on, flagged text and pictures stay
+  hidden until tapped, and the notification just says "Message hidden".
+- Your profile photo and group photos are now checked for explicit content when you set them, and one that
+  fails isn't used. Until now, only the phones receiving a photo checked it.
 - If a stranger had the same name as one of your contacts, your contact's name kept an alias after it for
   good, even once the stranger was gone. The alias now goes away a week after your phone last heard from that
   person.
@@ -50,8 +55,8 @@ document:
 ### Fixed
 
 - Direct messages and groups now catch racial and other identity slurs, which only the Nearby room used to
-  catch. A slur is blocked when you send it and hidden until tapped when it arrives, and everyday swearing in
-  private chats still goes through.
+  catch. A slur that arrives stays hidden until tapped, and everyday swearing in private chats still goes
+  through.
 - A message you sent just as another phone came into range could miss that phone and reach it only about a
   minute later. It now arrives as soon as the two phones connect.
 - When a contact's phone set up encryption with yours again, after a reinstall for example, their direct

@@ -113,7 +113,7 @@ class AttachmentStoreIngestTest {
     @Test
     fun aJpegOfferedAsAnOpaqueFileTakesTheImageDoor() =
         runTest {
-            val result = success(store.ingestFile(fileUri("blob.bin", geotaggedJpeg())))
+            val result = success(store.ingestFile(fileUri("blob.bin", geotaggedJpeg()), screen = true))
 
             val (mime, bytes) = stored.getValue(result.ingested.hash)
             assertEquals("image/jpeg", mime)
@@ -125,7 +125,24 @@ class AttachmentStoreIngestTest {
     fun theScreenersVerdictRidesTheResult() =
         runTest {
             coEvery { screening.isImageExplicit(any()) } returns true
-            assertTrue(success(store.ingest(geotaggedJpeg(), "image/jpeg")).flagged)
+            assertTrue(success(store.ingest(geotaggedJpeg(), "image/jpeg", screen = true)).flagged)
+        }
+
+    @Test
+    fun aPickForAPrivateChatIsNeverScreened() =
+        runTest {
+            // Only the Nearby room screens what is sent (ADR 2026-10.9rh6): every door, a reused identity
+            // included, leaves the screener alone unless the caller asks for it.
+            coEvery { screening.isImageExplicit(any()) } returns true
+            val photo = geotaggedJpeg()
+
+            assertFalse(success(store.ingest(photo, "image/jpeg")).flagged)
+            assertFalse(success(store.ingest(fileUri("photo.jpg", encoded(picture(900, 700))))).flagged)
+            assertFalse(success(store.ingestFile(fileUri("blob.bin", encoded(picture(800, 600))))).flagged)
+            coEvery { identities.find(sha256Hex(photo)) } returns held(plainHash = sha256Hex(photo))
+            assertFalse(success(store.ingest(fileUri("saved.jpg", photo))).flagged)
+
+            coVerify(exactly = 0) { screening.isImageExplicit(any()) }
         }
 
     @Test
@@ -208,7 +225,7 @@ class AttachmentStoreIngestTest {
             val identity = held(plainHash = sha256Hex(photo))
             coEvery { identities.find(sha256Hex(photo)) } returns identity
 
-            val result = success(store.ingest(fileUri("saved.jpg", photo)))
+            val result = success(store.ingest(fileUri("saved.jpg", photo), screen = true))
 
             assertEquals(identity, result.ingested.reuse)
             assertEquals(sha256Hex(photo), result.ingested.hash)
@@ -216,7 +233,7 @@ class AttachmentStoreIngestTest {
             // Byte for byte what was picked: no second JPEG generation, and no new identity for the mesh to carry.
             assertArrayEquals(photo, stored.getValue(sha256Hex(photo)).second)
             coVerify(exactly = 0) { identities.plaintextOf(any()) }
-            // Screened as a fresh pick would be, so the room's block and a DM's confirmation are unchanged.
+            // Screened as a fresh pick would be, so the room's block is unchanged.
             coVerify(exactly = 1) { screening.isImageExplicit(photo) }
         }
 
@@ -366,7 +383,7 @@ class AttachmentStoreIngestTest {
         runTest {
             val photo = encoded(picture(1000, 800))
 
-            val result = success(store.ingest(fileUri("photo.jpg", photo)))
+            val result = success(store.ingest(fileUri("photo.jpg", photo), screen = true))
 
             val (mime, bytes) = stored.getValue(result.ingested.hash)
             assertEquals("image/jpeg", mime)
@@ -546,7 +563,7 @@ class AttachmentStoreIngestTest {
         runTest {
             val sticker = animatedWebp(512, 512)
 
-            val first = success(store.ingest(fileUri("sticker", sticker)))
+            val first = success(store.ingest(fileUri("sticker", sticker), screen = true))
             val (mime, bytes) = stored.getValue(first.ingested.hash)
 
             assertEquals("image/webp", mime)

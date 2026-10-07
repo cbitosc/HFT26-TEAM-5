@@ -187,7 +187,12 @@ class ProfileViewModel(
         appScope.launch {
             val crop = computeAvatarCrop(source.width, source.height, diameter, scale, offset.x, offset.y)
             val oldHash = settings.ownAvatarHash.first()
-            val newHash = avatars.saveOwnAvatar(source, crop)
+            // Screened before it is stored (ADR 2026-10.9rh6): a refused picture leaves the old avatar in place.
+            val newHash =
+                avatars.saveOwnAvatar(source, crop) ?: run {
+                    _photoChanged.emit(PhotoChange.REFUSED)
+                    return@launch
+                }
             settings.setOwnAvatar(newHash, System.currentTimeMillis()) // the stamp triggers a profile re-broadcast
             _photoChanged.emit(PhotoChange.UPDATED)
             if (oldHash != newHash) blobs.deleteIfUnreferenced(oldHash)
@@ -221,7 +226,7 @@ class ProfileViewModel(
 }
 
 /** What a landed photo write did, for the screen's confirmation. */
-enum class PhotoChange { UPDATED, REMOVED }
+enum class PhotoChange { UPDATED, REMOVED, REFUSED }
 
 /** Tokens of the owner's phrase the Profile screen reads: the alias plus the one continuation it shows. */
 private const val OWNER_TOKENS = 2

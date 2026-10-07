@@ -36,9 +36,10 @@ import java.security.MessageDigest
  * go straight into the encrypted database. That invariant is why the in-app camera hands its capture over as a
  * [ByteArray] rather than staging a plaintext JPEG in `cacheDir`.
  *
- * Before staging, the image is screened for explicit content via [ImageScreeningService]. Sending an
- * explicit image is *allowed but discouraged*: a flagged image is still ingested, and [ingest] reports the
- * flag so the caller can ask the user to confirm before staging/sending it (the receive side blurs it).
+ * Before staging, an image bound for the public Nearby room (`screen = true`) is screened for explicit content
+ * via [ImageScreeningService]: a flagged image is still ingested, and [ingest] reports the flag so the caller
+ * can refuse it. One bound for a DM or a group is never screened on the way out — its receivers screen what
+ * arrives and hide it behind their own Content filtering toggle (ADR 2026-10.9rh6).
  *
  * Arbitrary files ([ingestFile]) and voice notes ([ingestVoice]) share the tail of this pipeline and none
  * of its head — with one deliberate exception: a picked *file* whose bytes turn out to carry an image
@@ -100,8 +101,8 @@ class AttachmentStore(
     )
 
     /**
-     * Outcome of an ingest: stored ([Success], with [Success.flagged] true when screening judged the image
-     * explicit so the caller can prompt for confirmation), or [Failed] with the [Failed.reason] the caller
+     * Outcome of an ingest: stored ([Success], with [Success.flagged] true when a requested screen judged the
+     * image explicit so the caller can refuse it), or [Failed] with the [Failed.reason] the caller
      * needs in order to say something useful.
      *
      * The reason exists because [ingestFile] made silence wrong. A failed *image* pick could be swallowed —
@@ -136,7 +137,7 @@ class AttachmentStore(
      * Ingests [uri] into the blob store. GIFs are re-encoded smaller and animated WebPs and APNGs keep their frames
      * ([animated]); other images are downscaled to [MAX_DIMENSION] and re-encoded as JPEG. Returns [IngestResult.Failed]
      * on a decode failure or if the processed image exceeds [MAX_BYTES], else [IngestResult.Success] with
-     * [Success.flagged] set when on-device screening judged the image explicit.
+     * [Success.flagged] set when on-device screening, run only when [screen] asks for it, judged the image explicit.
      *
      * This is the *image* door, reached from the photo picker and the keyboard. [ingestFile] is the door for
      * everything else, and hands anything that turns out to be an image straight back here.
@@ -144,12 +145,16 @@ class AttachmentStore(
      * The source is read whole first (bounded) so a picture this phone already holds is found by its bytes
      * ([ingestPicked]). One past [MAX_BYTES] can be nothing we hold, so it takes the long way, decoded from [uri].
      */
-    suspend fun ingest(uri: Uri): IngestResult =
+    suspend fun ingest(
+        uri: Uri,
+        screen: Boolean = false,
+    ): IngestResult =
         withContext(Dispatchers.IO) {
             val sourceMime = context.contentResolver.getType(uri)
-            readBounded(uri)?.let { raw -> return@withContext ingestPicked(raw, sourceMime) }
+            readBounded(uri)?.let { raw -> return@withContext ingestPicked(raw, sourceMime, screen) }
             ingest(
                 sourceMime = sourceMime,
+                screen = screen,
                 held = null,
                 readRaw = { context.contentResolver.openInputStream(uri)?.use { it.readBytes() } },
                 decodeOriented = { decodeOrientedBounded(context, uri, MAX_DIMENSION) },
@@ -164,12 +169,14 @@ class AttachmentStore(
     internal suspend fun ingestPicked(
         raw: ByteArray,
         sourceMime: String?,
+        screen: Boolean = false,
     ): IngestResult =
         withContext(Dispatchers.IO) {
-            reused(raw)?.let { return@withContext it }
+            reused(raw, screen = screen)?.let { return@withContext it }
             val result =
                 ingest(
                     sourceMime = sourceMime,
+                    screen = screen,
                     held = raw,
                     readRaw = { raw },
                     decodeOriented = { decodeOrientedBounded(raw, MAX_DIMENSION) },
@@ -183,13 +190,14 @@ class AttachmentStore(
      * The pick as the identity this phone already sends [raw] under ([AttachmentIdentities.find]), or null when
      * there is none. The plaintext is staged under its own hash exactly as a fresh ingest would stage it — [raw]
      * itself when it is that plaintext, else opened from the identity (a source match: the original of a photo we
-     * re-encoded) — and screened as a fresh image would be, so the room's block and a DM's confirmation behave as
-     * they always did. [name] and the size are kept for a file; an image carries neither, as on [ingestFile]'s image
+     * re-encoded) — and, when [screen] asks, screened as a fresh image would be, so the room's block behaves as it
+     * always did. [name] and the size are kept for a file; an image carries neither, as on [ingestFile]'s image
      * hand-back.
      */
     private suspend fun reused(
         raw: ByteArray,
         name: String? = null,
+        screen: Boolean,
     ): IngestResult.Success? {
         if (raw.isEmpty()) return null
         val bytesHash = sha256(raw)
@@ -210,7 +218,7 @@ class AttachmentStore(
                 sourceHash = bytesHash.takeIf { it != held.plainHash },
                 reuse = held,
             ),
-            flagged = image && imageScreening.isImageExplicit(plain),
+            flagged = screen && image && imageScreening.isImageExplicit(plain),
         )
     }
 
@@ -222,10 +230,12 @@ class AttachmentStore(
     suspend fun ingest(
         bytes: ByteArray,
         sourceMime: String?,
+        screen: Boolean = false,
     ): IngestResult =
         withContext(Dispatchers.IO) {
             ingest(
                 sourceMime = sourceMime,
+                screen = screen,
                 held = bytes,
                 readRaw = { bytes },
                 decodeOriented = { decodeOrientedBounded(bytes, MAX_DIMENSION) },
@@ -280,7 +290,10 @@ class AttachmentStore(
      * A genuine non-image is stored opaque and is never flagged: nothing on the device can classify a
      * spreadsheet. See `docs/CONTENT_MODERATION.md` §7 for what protects a recipient instead.
      */
-    suspend fun ingestFile(uri: Uri): IngestResult =
+    suspend fun ingestFile(
+        uri: Uri,
+        screen: Boolean = false,
+    ): IngestResult =
         withContext(Dispatchers.IO) {
             val name = AttachmentName.sanitize(displayName(uri))
             val declared = context.contentResolver.getType(uri)
@@ -293,10 +306,10 @@ class AttachmentStore(
             }
             val bytes = readBounded(uri) ?: return@withContext IngestResult.Failed(IngestResult.Reason.TooLarge)
             failureFor(bytes)?.let { return@withContext it }
-            reused(bytes, name)?.let { return@withContext it }
+            reused(bytes, name, screen)?.let { return@withContext it }
 
             FileTypes.imageMimeOf(bytes)?.let { sniffed ->
-                val asImage = ingestPicked(bytes, sniffed)
+                val asImage = ingestPicked(bytes, sniffed, screen)
                 if (asImage is IngestResult.Success) return@withContext asImage
             }
 
@@ -350,8 +363,9 @@ class AttachmentStore(
     /**
      * Stores a link-preview card the sender fetched for a link in its draft, as the blob its message will
      * reference — the third door, beside images and files, and the narrowest: the container is already built
-     * and already moderated (`LinkPreviewService` screened the picture and the text on the way in), so nothing
-     * here decodes or classifies. Never flagged, for that reason; the card rides a DM or group sealed like any
+     * and, for the Nearby room, already moderated (`LinkPreviewService` screened the picture and the text on the
+     * way in; a DM's or a group's card is screened by its receivers, ADR 2026-10.9rh6), so nothing here decodes
+     * or classifies. Never flagged, for that reason; the card rides a DM or group sealed like any
      * other attachment, and the Nearby room in the clear.
      */
     suspend fun ingestLinkPreview(blob: LinkPreviewBlob): IngestResult =
@@ -384,6 +398,7 @@ class AttachmentStore(
      */
     private suspend fun ingest(
         sourceMime: String?,
+        screen: Boolean,
         held: ByteArray?,
         readRaw: () -> ByteArray?,
         decodeOriented: () -> Bitmap?,
@@ -405,9 +420,9 @@ class AttachmentStore(
         failureFor(bytes)?.let { return it }
         // Screen the exact bytes we store and transmit (decoded at the receiver's bound), so the
         // send-side verdict matches what the recipient computes rather than scoring the sharper,
-        // pre-JPEG source. Stored regardless — an explicit image is allowed but the caller confirms
-        // before sending; fail-open when the bytes can't be decoded.
-        val flagged = imageScreening.isImageExplicit(bytes)
+        // pre-JPEG source. Only for the room ([screen]); stored regardless — the caller drops a flagged
+        // one — and fail-open when the bytes can't be decoded.
+        val flagged = screen && imageScreening.isImageExplicit(bytes)
         val hash = sha256(bytes)
         blobs.insert(hash, mime, bytes)
         return IngestResult.Success(Ingested(hash, mime, animated = AnimatedImage.isAnimated(bytes)), flagged)

@@ -13,6 +13,7 @@ import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -94,7 +95,7 @@ class LinkPreviewServiceTest {
     fun aPageWithAPictureBecomesACard() =
         runTest {
             val rig = rig()
-            val result = rig.service.fetchCard(url, isRoom = false)
+            val result = rig.service.fetchCard(url, isRoom = true)
             val card = (result as CardResult.Card).blob
             assertEquals(url, card.url)
             assertEquals("Title", card.title)
@@ -103,7 +104,7 @@ class LinkPreviewServiceTest {
             assertEquals("image/webp", card.imageMime)
             assertEquals(listOf(url), rig.fetcher.pages)
             assertEquals(1, rig.screened.size)
-            assertEquals(listOf("Title\nDesc" to false), rig.classified)
+            assertEquals(listOf("Title\nDesc" to true), rig.classified)
         }
 
     @Test
@@ -172,28 +173,41 @@ class LinkPreviewServiceTest {
         }
 
     @Test
-    fun aFlaggedPictureIsDroppedButTheCardIsKept() =
+    fun aFlaggedPictureIsDroppedFromARoomCardButTheCardIsKept() =
         runTest {
             val rig = rig()
             rig.imageFlagged = true
-            val card = (rig.service.fetchCard(url, isRoom = false) as CardResult.Card).blob
+            val card = (rig.service.fetchCard(url, isRoom = true) as CardResult.Card).blob
             assertEquals("Title", card.title)
             assertNull(card.image)
             assertNull(card.imageMime)
         }
 
     @Test
-    fun flaggedTextDropsTheWholeCardInTheScopeItWasClassifiedFor() =
+    fun flaggedTextDropsTheWholeRoomCard() =
         runTest {
             val rig = rig()
             rig.textFlagged = true
             assertEquals(CardResult.NoCard, rig.service.fetchCard(url, isRoom = true))
             assertEquals(listOf("Title\nDesc" to true), rig.classified)
-            // The memo holds the pre-moderation card, so the same link in a DM is classified again, not refused by memory.
-            rig.textFlagged = false
-            assertTrue(rig.service.fetchCard(url, isRoom = false) is CardResult.Card)
+        }
+
+    @Test
+    fun aPrivateChatsCardIsNeverScreenedAndTheMemoKeepsThePictureForIt() =
+        runTest {
+            // Only the Nearby room screens what is sent (ADR 2026-10.9rh6); a DM's or a group's receivers screen
+            // the card. The memo holds the pre-moderation card, so the room's refusal is not remembered either.
+            val rig = rig()
+            rig.textFlagged = true
+            rig.imageFlagged = true
+            assertEquals(CardResult.NoCard, rig.service.fetchCard(url, isRoom = true))
+
+            val card = (rig.service.fetchCard(url, isRoom = false) as CardResult.Card).blob
+            assertEquals("Title", card.title)
+            assertNotNull("the picture rides the private card", card.image)
             assertEquals(1, rig.fetcher.pages.size)
-            assertEquals(false, rig.classified.last().second)
+            assertEquals("only the room's fetch was classified", listOf("Title\nDesc" to true), rig.classified)
+            assertTrue("and no picture was screened for it, text first", rig.screened.isEmpty())
         }
 
     @Test

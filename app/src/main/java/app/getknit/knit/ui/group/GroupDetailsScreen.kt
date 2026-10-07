@@ -1,5 +1,6 @@
 package app.getknit.knit.ui.group
 
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -47,6 +48,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
@@ -88,6 +90,14 @@ fun GroupDetailsScreen(
     // Leaving tombstones the group and deletes its messages; pop back past the chat once it persists.
     LaunchedEffect(Unit) {
         viewModel.left.collect { onLeft() }
+    }
+
+    // A group photo the explicit-image screen refused changes nothing, so the screen says why.
+    val context = LocalContext.current
+    LaunchedEffect(Unit) {
+        viewModel.photoRefused.collect {
+            Toast.makeText(context, R.string.moderation_photo_refused, Toast.LENGTH_LONG).show()
+        }
     }
 
     // Group-photo pick → crop → save, mirroring the profile-avatar flow (and the old chat header path).

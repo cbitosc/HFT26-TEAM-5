@@ -169,6 +169,8 @@ class ChatListViewModel(
         val transfers: Map<String, TransferState>,
         val bridgedChannel: String?,
         val commons: List<CommonsEntity> = emptyList(),
+        /** Content filtering is on, so a flagged newest message previews as hidden (ADR 2026-10.9rh6). */
+        val hideFlagged: Boolean = false,
     )
 
     // Neighbor count + radio health + the (already-dismissal-aware) banner + Internet-plane state, folded
@@ -196,6 +198,13 @@ class ChatListViewModel(
     private val draftsAndTransfers =
         combine(drafts.all, transfers.states) { draftRows, live -> draftRows to live }
 
+    // Paired for the same reason: the joined commons and whether content filtering hides a flagged preview.
+    private val roomsAndFilter =
+        combine(
+            commons?.observeAll() ?: flowOf(emptyList()),
+            settings.contentFilteringEnabled.distinctUntilChanged(),
+        ) { rooms, hideFlagged -> rooms to hideFlagged }
+
     // Per-thread summaries for every conversation, blocked senders left out of each (so a blocked peer's
     // message never becomes a row's preview, and their DM thread is dropped below).
     private val table = messages.observeConversationTable(CHAT_LIST_KINDS, settings.blockedNodeIds, myNodeId)
@@ -208,8 +217,10 @@ class ChatListViewModel(
             groups.observeGroups(),
             draftsAndTransfers,
             messages.observeNewestOriginChannel(Conversations.MESHTASTIC).distinctUntilChanged(),
-            commons?.observeAll() ?: flowOf(emptyList()),
-        ) { accepted, groupList, (draftRows, live), channel, rooms -> ListInputs(accepted, groupList, draftRows, live, channel, rooms) }
+            roomsAndFilter,
+        ) { accepted, groupList, (draftRows, live), channel, (rooms, hideFlagged) ->
+            ListInputs(accepted, groupList, draftRows, live, channel, rooms, hideFlagged)
+        }
 
     // Radio-off banner: which warning the per-radio statuses imply, and whether the user has dismissed it.
     // The critical AllRadiosOff warning is never stored in [dismissed], so it always shows (not dismissible).

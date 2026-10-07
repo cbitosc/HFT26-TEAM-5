@@ -163,7 +163,7 @@ internal class ChatListAssembler(
         message: MessageEntity,
         isDm: Boolean,
     ): String {
-        val body = messagePreview(context, message)
+        val body = messagePreview(context, message, s.inputs.hideFlagged)
         val speaker = speakerLabel(context, message, directory, me, isDm) ?: return body
         return context.getString(R.string.chat_list_preview_with_sender, speaker, body)
     }

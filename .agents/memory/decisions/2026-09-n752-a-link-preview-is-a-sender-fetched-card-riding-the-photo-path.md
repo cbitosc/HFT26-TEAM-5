@@ -83,3 +83,9 @@ slot, Signal's rule too). What keeps this true: `LinkPreviewBlobTest` and the tw
 place the caps and the redirect walk are observable), `LinkPreviewServiceTest`, `ImageScreeningServiceTest`
 and `MeshBlobStoreTest`'s card cases, `InboundPipelineTest`'s two card cases, `MeshManagerTest`'s
 sealed-and-clear case, the `ChatViewModelTest` composer cases, and `ChatScreenContentTest`.
+
+## Amendment (2026-10-07): the sender screens a card only for the Nearby room
+
+ADR 2026-10.9rh6: `LinkPreviewService.fetchCard` classifies a card's text and picture only when it is bound for
+the Nearby room, and its memo holds the unscreened card for both scopes. The receive half is unchanged: every
+recipient opens and screens the card, one verdict per card.

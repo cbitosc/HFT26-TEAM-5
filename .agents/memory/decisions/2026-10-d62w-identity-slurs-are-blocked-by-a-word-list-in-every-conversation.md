@@ -55,3 +55,9 @@ is latched off (ADR 037) now still screens DM slurs, and nothing else. The trap:
 — it is generated; change the dials (`SLUR_TAGS`, `SLUR_SEVERITY_FLOOR`, `SLUR_DROP`,
 `SLUR_ALWAYS_INCLUDE`) and regenerate. `SlurListTest` pins the inclusions, the exclusions, and the DM chain
 flagging a slur with no model; `AliasTest` checks generated aliases against both lists.
+
+## Amendment (2026-10-07): flagged on receipt, blocked on send in the rooms only
+
+ADR 2026-10.9rh6 stops screening DMs, groups and the commons on the sender's phone. The slur list still
+flags a slur in every scope on receipt, behind the receiver's Content filtering toggle; it is blocked on
+send only in the Nearby and Meshtastic rooms.

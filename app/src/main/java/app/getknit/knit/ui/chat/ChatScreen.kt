@@ -289,7 +289,6 @@ fun ChatScreen(
     val state by viewModel.state.collectAsStateWithLifecycle()
     val isSending by viewModel.isSending.collectAsStateWithLifecycle()
     val pendingAttachment by viewModel.pendingAttachment.collectAsStateWithLifecycle()
-    val confirmAttachment by viewModel.confirmAttachment.collectAsStateWithLifecycle()
     val stagedAttachmentRelay by viewModel.stagedAttachmentRelay.collectAsStateWithLifecycle()
     val linkPreviewLoading by viewModel.linkPreviewLoading.collectAsStateWithLifecycle()
     val showPublicConsent by viewModel.showPublicConsent.collectAsStateWithLifecycle()
@@ -605,27 +604,6 @@ fun ChatScreen(
         onVoicePlay = viewModel::playVoice,
         onVoiceSeek = viewModel::seekVoice,
     )
-
-    // Sending an explicit image is allowed but discouraged: confirm before staging a flagged one.
-    // Stays with the wrapper: its trigger is the ViewModel's confirmAttachment flow and its buttons are
-    // pure ViewModel calls.
-    if (confirmAttachment != null) {
-        AlertDialog(
-            onDismissRequest = viewModel::dismissFlaggedAttachment,
-            title = { Text(stringResource(R.string.moderation_image_confirm_title)) },
-            text = { Text(stringResource(R.string.moderation_image_confirm_body)) },
-            confirmButton = {
-                TextButton(onClick = viewModel::confirmFlaggedAttachment) {
-                    Text(stringResource(R.string.moderation_image_confirm_send))
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = viewModel::dismissFlaggedAttachment) {
-                    Text(stringResource(android.R.string.cancel))
-                }
-            },
-        )
-    }
 
     // Nothing on the device can classify an archive or an executable, so a save of one says so first. This
     // is the honest complement to the fact that Knit never offers to *open* a file it cannot screen: the

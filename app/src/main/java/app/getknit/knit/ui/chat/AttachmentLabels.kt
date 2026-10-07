@@ -34,16 +34,32 @@ fun attachmentPreview(
 
 /**
  * The one-line preview of a whole message: its body with a shared position named rather than printed
- * (`geo:37.42…` reads as "📍 Location"), or, for a body-less message, [attachmentPreview]'s stand-in.
+ * (`geo:37.42…` reads as "📍 Location"), or, for a body-less message, [attachmentPreview]'s stand-in. With
+ * [hideFlagged] (content filtering on), text the moderator flagged says only that it is hidden — a preview has no
+ * tap to reveal, and since only the public rooms screen on the way out, a DM's flagged text lands here
+ * (ADR 2026-10.9rh6).
  */
 fun messagePreview(
     context: Context,
     message: MessageEntity,
+    hideFlagged: Boolean,
 ): String =
     when {
-        message.body.isNotBlank() -> GeoUri.describe(message.body, context.getString(R.string.chat_list_preview_location))
-        message.attachmentHash != null -> attachmentPreview(context, message)
-        else -> ""
+        hideFlagged && message.moderation == MessageEntity.MODERATION_TEXT_FLAGGED -> {
+            context.getString(R.string.moderation_preview_hidden)
+        }
+
+        message.body.isNotBlank() -> {
+            GeoUri.describe(message.body, context.getString(R.string.chat_list_preview_location))
+        }
+
+        message.attachmentHash != null -> {
+            attachmentPreview(context, message)
+        }
+
+        else -> {
+            ""
+        }
     }
 
 /** [attachmentPreview]'s form for a caller that holds the fields rather than the row. */

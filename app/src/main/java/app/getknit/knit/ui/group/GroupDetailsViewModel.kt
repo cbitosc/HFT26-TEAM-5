@@ -191,7 +191,12 @@ class GroupDetailsViewModel(
         viewModelScope.launch {
             val group = groups.find(groupId) ?: return@launch
             val crop = computeAvatarCrop(source.width, source.height, diameter, scale, offset.x, offset.y)
-            val newHash = avatars.saveOwnAvatar(source, crop)
+            // Screened before it is stored (ADR 2026-10.9rh6): a refused picture changes nothing and sends nothing.
+            val newHash =
+                avatars.saveOwnAvatar(source, crop) ?: run {
+                    _photoRefused.emit(Unit)
+                    return@launch
+                }
             // Decided and shown at once: the bytes are already local (ADR 2026-09.nxcq).
             val updated =
                 group.copy(photoHash = newHash, photoUpdatedAt = System.currentTimeMillis(), photoShownHash = newHash)
@@ -207,6 +212,10 @@ class GroupDetailsViewModel(
     fun cancelGroupPhotoCrop() {
         _groupPhotoCropTarget.value = null
     }
+
+    /** Emitted when the screen refused a group photo the user picked, so the screen can say why nothing changed. */
+    private val _photoRefused = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    val photoRefused: SharedFlow<Unit> = _photoRefused.asSharedFlow()
 
     /** Emitted after the leave persists, so the screen can navigate away (the thread no longer exists). */
     private val _left = MutableSharedFlow<Unit>(extraBufferCapacity = 1)

@@ -2717,9 +2717,9 @@ class InboundPipeline(
         if (isNew) {
             if (isAccepted(conversationId, me)) {
                 if (env.senderId != me && content.mentions.mention(me)) {
-                    notifyMention(env, content, conversationId, sealed?.attachmentName)
+                    notifyMention(env, content, conversationId, sealed?.attachmentName, moderation)
                 } else {
-                    notifyIncoming(env, content, conversationId, sealed?.attachmentName, origin)
+                    notifyIncoming(env, content, conversationId, sealed?.attachmentName, moderation, origin)
                 }
             } else if (env.senderId != me) {
                 // A stranger's first DM/group: no per-message alert — just refresh the coalesced
@@ -2904,11 +2904,28 @@ class InboundPipeline(
         content: ChatContent,
         conversationId: String,
         fileName: String?,
+        moderation: Int,
         origin: MeshPostOrigin? = null,
     ) {
-        // Attachment-only messages have a blank body; show a placeholder so they still notify.
-        val body = GeoUri.describe(content.body, GeoUri.LABEL).ifBlank { attachmentPreview(content, fileName) }
-        notifyWithBody(env, conversationId, body, origin)
+        notifyWithBody(env, conversationId, notificationBody(content, fileName, moderation), origin)
+    }
+
+    /**
+     * What a notification says of [content]. A message the moderator flagged ([moderation]) says only that it
+     * is hidden while content filtering is on — the thread collapses it behind a tap, and a notification has no
+     * tap to reveal. Since only the public rooms screen on the way out (ADR 2026-10.9rh6), this is where a DM's
+     * or a group's flagged text would otherwise land in the shade. Attachment-only messages have a blank body,
+     * so a placeholder names the attachment and they still notify.
+     */
+    private suspend fun notificationBody(
+        content: ChatContent,
+        fileName: String?,
+        moderation: Int,
+    ): String {
+        if (moderation == MessageEntity.MODERATION_TEXT_FLAGGED && settings.contentFilteringEnabled.first()) {
+            return HIDDEN_NOTIFICATION_BODY
+        }
+        return GeoUri.describe(content.body, GeoUri.LABEL).ifBlank { attachmentPreview(content, fileName) }
     }
 
     /** Posts [body] as a message from [env]'s sender in [conversationId] — the shared tail of every inbound notification. */
@@ -3010,6 +3027,7 @@ class InboundPipeline(
         content: ChatContent,
         conversationId: String,
         fileName: String?,
+        moderation: Int,
     ) {
         val me = identity.nodeId()
         val peer = peers.find(env.senderId)
@@ -3017,7 +3035,7 @@ class InboundPipeline(
         val labels = peers.labelIndex()
         val senderLabel = labels.labelFor(env.senderId, peer?.name)
         val peerAvatar = peer?.avatarHash?.let { blobs.bytes(it) }
-        val body = GeoUri.describe(content.body, GeoUri.LABEL).ifBlank { attachmentPreview(content, fileName) }
+        val body = notificationBody(content, fileName, moderation)
         val incoming =
             mentionNotification(
                 senderId = env.senderId,
@@ -3569,6 +3587,9 @@ class InboundPipeline(
         // Same tag as MeshManager on purpose: these inbound verify/drop log lines are grepped in field
         // diagnostics, so the extraction must not change them.
         const val TAG = "MeshManager"
+
+        /** A flagged message's notification text while content filtering hides it; the thread says the same. */
+        const val HIDDEN_NOTIFICATION_BODY = "Message hidden"
 
         /** Most acked ids applied from one sealed CTL_RECEIPT — 2× AckSync's send-side batch cap. */
         const val MAX_RECEIPT_ACKS = 2 * AckSync.MAX_BATCH_ACKS

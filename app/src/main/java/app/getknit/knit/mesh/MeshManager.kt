@@ -1057,9 +1057,10 @@ class MeshManager(
      * on the frame so members can (re)build the group from it. All three still flood (no routing table
      * yet); only the addressed recipient(s) deliver/ack, while relays forward the frame untouched.
      *
-     * Returns false without sending or storing anything if on-device content filtering flags [text] as
-     * abusive (block-on-send); true once the message is stored locally and flooded. The [attachment] is
-     * screened separately at ingest time, so by here it is already clean.
+     * In the Nearby room only, returns false without sending or storing anything if on-device content
+     * filtering flags [text] as abusive (block-on-send); true once the message is stored locally and flooded.
+     * A DM or a group message is never classified on the way out: its receivers screen it and hide it behind
+     * their own Content filtering toggle (ADR 2026-10.9rh6). A room [attachment] was screened at ingest.
      *
      * `@Suppress("LongMethod")`: ktlint's one-arg-per-line wrapping of the two parallel MessageEntity /
      * content builds inflates the raw line count past detekt's LongMethod=60; the logic is two
@@ -1074,14 +1075,15 @@ class MeshManager(
         group: GroupInfo?,
         replyTo: ReplyRef?,
     ): Boolean {
-        if (isTextFlagged(text, "outgoing", isRoom = recipientId == null && group == null)) return false
+        val isRoom = recipientId == null && group == null
+        if (isRoom && isTextFlagged(text, "outgoing", isRoom = true)) return false
         val me = identity.nodeId()
         val id = FrameId.new()
         val sentAt = clock()
         val conversationId = Conversations.idFor(me, recipientId, me, group?.id)
 
         // Broadcast room: plaintext (no fixed recipient set to encrypt to) — the legacy path, unchanged.
-        if (recipientId == null && group == null) {
+        if (isRoom) {
             messages.save(
                 MessageEntity(
                     id = id,
@@ -3117,7 +3119,8 @@ class MeshManager(
     }
 
     /**
-     * A post in a commons (docs/SPOOL_PROTOCOL.md §7.4). Moderated as a room post, signed like every frame,
+     * A post in a commons (docs/SPOOL_PROTOCOL.md §7.4). Not moderated on the way out — a commons lives on a
+     * private spool, so like a DM or a group its members screen what arrives (ADR 2026-10.9rh6). Signed like every frame,
      * stored as the message row plus the exact signed bytes the plane re-seals on every heal round — and then
      * **not** originated: no radio flood, no custody, no fan-out. The spool that runs the room is its only
      * carrier, and the plane is woken to push it now. Cleartext inside the room's seal, like a Nearby post
@@ -3130,7 +3133,6 @@ class MeshManager(
         replyTo: ReplyRef?,
     ): Boolean {
         val room = commons?.find(conversationId) ?: return false
-        if (isTextFlagged(text, "outgoing", isRoom = true)) return false
         val me = identity.nodeId()
         val id = FrameId.new()
         val sentAt = clock()
@@ -3252,10 +3254,11 @@ class MeshManager(
     }
 
     /**
-     * Whether [text] is non-blank and the on-device moderator flags it as abusive. Always runs — not
-     * gated by the content-filtering setting, which only governs receive-side hiding. Drives both
-     * block-on-send (in [sendChat], a send-side "good-citizen"/Nearby check) and the stored flag on
-     * inbound messages (in [deliverChat]); a flagged inbound message is still stored and merely collapsed
+     * Whether [text] is non-blank and the on-device moderator flags it as abusive. Not gated by the
+     * content-filtering setting, which only governs receive-side hiding. Drives both block-on-send in the
+     * two public rooms (Nearby in [sendChat], Meshtastic in [sendPublicPost]; never a DM, group or commons,
+     * ADR 2026-10.9rh6) and the stored flag on every inbound message (in [deliverChat]); a flagged inbound
+     * message is still stored and merely collapsed
      * in the UI (collapse itself gated at display time by the setting, see [ChatViewModel]), so a false
      * positive never silently drops content. [isRoom] selects the moderation scope: the Nearby
      * broadcast room gets slurs + profanity + toxicity, while DMs and groups get slurs + toxicity (see

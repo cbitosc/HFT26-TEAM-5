@@ -261,10 +261,17 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   `MlTextModeratorWarmUpTest`; on hardware `ToxicityInstrumentedTest` / `NsfwInstrumentedTest`.
 - **When touching `LexicalTextFilter`, `ScopedTextModerator`, `WordList`, `MlTextModerator`'s block thresholds,
   `scripts/gen-profanity-list.py` or a list under `assets/moderation/`:** READ ADR 2026-10.d62w and
-  `docs/CONTENT_MODERATION.md` §2. Profanity is the Nearby room's alone; identity slurs are blocked in every
+  `docs/CONTENT_MODERATION.md` §2. Profanity is the Nearby room's alone; identity slurs are flagged in every
   scope by `slurs_en.txt`, because the toxicity model scores a slur aimed at someone as an insult (a label it
   ignores) and its `severe_toxicity` never fires. Both lists are generated — change the script's dials, never
   the file — and `SlurListTest` pins what a private chat must not block (`nigga`, `coon`, `fag`, `dyke`).
+- **When touching a send-side screen — `MeshManager.sendChat` / `sendPublicPost` / `sendCommons`'s
+  `isTextFlagged`, `AttachmentStore.ingest`'s `screen`, `ChatViewModel.stage`, `LinkPreviewService.fetchCard`,
+  `AvatarStore.saveOwnAvatar` — or the "Message hidden" stand-ins (`InboundPipeline.notificationBody`,
+  `messagePreview`'s `hideFlagged`):** READ ADR 2026-10.9rh6. Only the Nearby and Meshtastic rooms screen
+  what is sent; a DM, a group and the commons never do, and the receiver's Content filtering toggle decides
+  what is hidden. Avatars and group photos are the exception, screened when set. A spool requiring
+  moderation (`docs/SPOOL_PROTOCOL.md` §7.5, client half unbuilt) is what would bring the private screen back.
 - **When touching receive-side screening — `MeshBlobStore.ingest` / `saveIncoming`, `MeshManager.scopeBlobs()`,
   `ScopeBlobs.refused`, or what adopts a received avatar or group photo (`InboundPipeline.avatarAdoptable`,
   `adoptAdvertisedAvatar`, `settleArrivedGroupPhoto`):** READ `docs/CONTENT_MODERATION.md` §3 and §7. Every blob

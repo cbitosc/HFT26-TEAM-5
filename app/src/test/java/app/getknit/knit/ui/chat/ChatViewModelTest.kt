@@ -1317,7 +1317,7 @@ class ChatViewModelTest {
     fun blobSizesAreAskedForTheWindowsAttachmentsAndTheStagedOneOnly() =
         runTest {
             val ingested = AttachmentStore.Ingested(hash = "staged", mime = "image/jpeg")
-            coEvery { attachments.ingest(any<Uri>()) } returns AttachmentStore.IngestResult.Success(ingested, flagged = false)
+            coEvery { attachments.ingest(any<Uri>(), any()) } returns AttachmentStore.IngestResult.Success(ingested, flagged = false)
             val vm = vm()
             backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.state.collect {} }
             backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.stagedAttachmentRelay.collect {} }
@@ -1608,7 +1608,7 @@ class ChatViewModelTest {
         runTest {
             val uri = Uri.parse("content://images/1")
             val ingested = AttachmentStore.Ingested(hash = "h1", mime = "image/jpeg")
-            coEvery { attachments.ingest(uri) } returns AttachmentStore.IngestResult.Success(ingested, flagged = true)
+            coEvery { attachments.ingest(uri, any()) } returns AttachmentStore.IngestResult.Success(ingested, flagged = true)
             val vm = vm() // Nearby room
 
             vm.attach(uri)
@@ -1616,6 +1616,32 @@ class ChatViewModelTest {
 
             assertNull("flagged image is not staged in the public room", vm.pendingAttachment.value)
             coVerify { blobs.deleteIfUnreferenced("h1") }
+            coVerify { attachments.ingest(uri, true) }
+        }
+
+    @Test
+    fun attachingAnImageInADmNeverAsksForAScreenAndStagesIt() =
+        runTest {
+            // Only the Nearby room screens what is sent (ADR 2026-10.9rh6); a DM's receivers screen it.
+            val uri = Uri.parse("content://images/5")
+            val jpeg = byteArrayOf(5, 5, 5)
+            val ingested = AttachmentStore.Ingested(hash = "h5", mime = "image/jpeg")
+            coEvery { attachments.ingest(uri, any()) } returns AttachmentStore.IngestResult.Success(ingested, flagged = false)
+            coEvery { attachments.ingest(jpeg, "image/jpeg", any()) } returns
+                AttachmentStore.IngestResult.Success(ingested, flagged = false)
+            val vm = vm("bob")
+
+            vm.attach(uri)
+            advanceUntilIdle()
+            assertEquals(ingested, vm.pendingAttachment.value)
+            vm.attachCaptured(jpeg)
+            advanceUntilIdle()
+
+            coVerify { attachments.ingest(uri, false) }
+            coVerify { attachments.ingest(jpeg, "image/jpeg", false) }
+            coVerify(exactly = 0) { attachments.ingest(any<Uri>(), true) }
+            coVerify(exactly = 0) { attachments.ingest(any<ByteArray>(), any(), true) }
+            coVerify(exactly = 0) { blobs.deleteIfUnreferenced("h5") }
         }
 
     @Test
@@ -1623,7 +1649,7 @@ class ChatViewModelTest {
         runTest {
             val uri = Uri.parse("content://images/2")
             val ingested = AttachmentStore.Ingested(hash = "h2", mime = "image/jpeg")
-            coEvery { attachments.ingest(uri) } returns AttachmentStore.IngestResult.Success(ingested, flagged = false)
+            coEvery { attachments.ingest(uri, any()) } returns AttachmentStore.IngestResult.Success(ingested, flagged = false)
             val vm = vm()
 
             vm.attach(uri)
@@ -1638,7 +1664,7 @@ class ChatViewModelTest {
             val jpeg = byteArrayOf(1, 2, 3)
             val ingested = AttachmentStore.Ingested(hash = "h3", mime = "image/jpeg")
             coEvery {
-                attachments.ingest(jpeg, "image/jpeg")
+                attachments.ingest(jpeg, "image/jpeg", any())
             } returns AttachmentStore.IngestResult.Success(ingested, flagged = false)
             val vm = vm()
 
@@ -1654,7 +1680,7 @@ class ChatViewModelTest {
             val jpeg = byteArrayOf(4, 5, 6)
             val ingested = AttachmentStore.Ingested(hash = "h4", mime = "image/jpeg")
             coEvery {
-                attachments.ingest(jpeg, "image/jpeg")
+                attachments.ingest(jpeg, "image/jpeg", any())
             } returns AttachmentStore.IngestResult.Success(ingested, flagged = true)
             val vm = vm() // Nearby room
 
@@ -1663,6 +1689,7 @@ class ChatViewModelTest {
 
             assertNull("flagged photo is not staged in the public room", vm.pendingAttachment.value)
             coVerify { blobs.deleteIfUnreferenced("h4") }
+            coVerify { attachments.ingest(jpeg, "image/jpeg", true) }
         }
 
     @Test
@@ -1674,7 +1701,7 @@ class ChatViewModelTest {
             // sheet, which lists the room because sharing *text* into it is a fair thing to want.
             val uri = Uri.parse("content://images/9")
             val ingested = AttachmentStore.Ingested(hash = "h9", mime = "image/gif")
-            coEvery { attachments.ingest(uri) } returns AttachmentStore.IngestResult.Success(ingested, flagged = false)
+            coEvery { attachments.ingest(uri, any()) } returns AttachmentStore.IngestResult.Success(ingested, flagged = false)
             val vm = vm(Conversations.MESHTASTIC)
             val events = mutableListOf<Int>()
             backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.events.collect { events += it } }
@@ -1693,9 +1720,10 @@ class ChatViewModelTest {
         runTest {
             val jpeg = byteArrayOf(7, 8, 9)
             val uri = Uri.parse("content://images/3")
-            coEvery { attachments.ingest(jpeg, "image/jpeg") } returns
+            coEvery { attachments.ingest(jpeg, "image/jpeg", any()) } returns
                 AttachmentStore.IngestResult.Failed(AttachmentStore.IngestResult.Reason.Unreadable)
-            coEvery { attachments.ingest(uri) } returns AttachmentStore.IngestResult.Failed(AttachmentStore.IngestResult.Reason.Unreadable)
+            coEvery { attachments.ingest(uri, any()) } returns
+                AttachmentStore.IngestResult.Failed(AttachmentStore.IngestResult.Reason.Unreadable)
             val vm = vm()
             val events = mutableListOf<Int>()
             backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.events.collect { events += it } }
@@ -2468,7 +2496,7 @@ class ChatViewModelTest {
     fun aGroupRefusesAFileUntilEveryOtherMemberCanReadOne() =
         runTest {
             val uri = Uri.parse("content://docs/report")
-            coEvery { attachments.ingestFile(uri) } returns
+            coEvery { attachments.ingestFile(uri, any()) } returns
                 AttachmentStore.IngestResult.Success(
                     AttachmentStore.Ingested("h", "application/pdf", name = "r.pdf", sizeBytes = 10),
                     flagged = false,
@@ -2500,7 +2528,7 @@ class ChatViewModelTest {
     fun aSharedFileIsRefusedByTheRoomAndByAnOldPeerButNotByAnUnsettledState() =
         runTest {
             val uri = Uri.parse("content://docs/report")
-            coEvery { attachments.ingestFile(uri) } returns
+            coEvery { attachments.ingestFile(uri, any()) } returns
                 AttachmentStore.IngestResult.Success(
                     AttachmentStore.Ingested("h", "application/pdf", name = "r.pdf", sizeBytes = 10),
                     flagged = false,
@@ -2544,9 +2572,9 @@ class ChatViewModelTest {
         runTest {
             val tooBig = Uri.parse("content://docs/big")
             val apk = Uri.parse("content://docs/app")
-            coEvery { attachments.ingestFile(tooBig) } returns
+            coEvery { attachments.ingestFile(tooBig, any()) } returns
                 AttachmentStore.IngestResult.Failed(AttachmentStore.IngestResult.Reason.TooLarge)
-            coEvery { attachments.ingestFile(apk) } returns
+            coEvery { attachments.ingestFile(apk, any()) } returns
                 AttachmentStore.IngestResult.Failed(AttachmentStore.IngestResult.Reason.Installable)
             coEvery { peers.find("bob") } returns peer("bob", "Bob", capabilities = Protocol.LOCAL_CAPABILITIES)
             stubDm("bob")
@@ -2574,7 +2602,7 @@ class ChatViewModelTest {
                     name = "report.pdf",
                     sizeBytes = 1_400_000,
                 )
-            coEvery { attachments.ingestFile(uri) } returns AttachmentStore.IngestResult.Success(ingested, flagged = false)
+            coEvery { attachments.ingestFile(uri, any()) } returns AttachmentStore.IngestResult.Success(ingested, flagged = false)
             coEvery { peers.find("bob") } returns peer("bob", "Bob", capabilities = Protocol.LOCAL_CAPABILITIES)
             stubDm("bob")
             val vm = vm("bob")
@@ -2675,7 +2703,8 @@ class ChatViewModelTest {
         runTest {
             aCardIsAvailable()
             val photo = AttachmentStore.Ingested("h-photo", "image/jpeg")
-            coEvery { attachments.ingest(any<ByteArray>(), any()) } returns AttachmentStore.IngestResult.Success(photo, flagged = false)
+            coEvery { attachments.ingest(any<ByteArray>(), any(), any()) } returns
+                AttachmentStore.IngestResult.Success(photo, flagged = false)
             val vm = vm()
             vm.attachCaptured(byteArrayOf(1))
             advanceUntilIdle()

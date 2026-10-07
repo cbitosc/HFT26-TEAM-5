@@ -498,13 +498,6 @@ class ChatViewModel(
     private val _pendingAttachment = MutableStateFlow<AttachmentStore.Ingested?>(null)
     val pendingAttachment: StateFlow<AttachmentStore.Ingested?> = _pendingAttachment.asStateFlow()
 
-    /**
-     * An image flagged as explicit by on-device screening, awaiting the user's "send anyway?"
-     * confirmation. Sending such images is allowed but discouraged: it's staged only once confirmed.
-     */
-    private val _confirmAttachment = MutableStateFlow<AttachmentStore.Ingested?>(null)
-    val confirmAttachment: StateFlow<AttachmentStore.Ingested?> = _confirmAttachment.asStateFlow()
-
     /** The composer's text as typed, fed by the screen so a link in it can grow a card. */
     private val draft = MutableStateFlow("")
 
@@ -1776,7 +1769,9 @@ class ChatViewModel(
                     // duplicate can slip through the tryEmit -> collect -> clearText hop.
                     _clearInput.tryEmit(Unit)
                 } else {
-                    _events.tryEmit(R.string.moderation_text_blocked)
+                    // Only the Nearby room screens what is sent (ADR 2026-10.9rh6); a commons refuses a post
+                    // only when this phone is no longer in it.
+                    _events.tryEmit(if (isCommons) R.string.chat_commons_not_joined else R.string.moderation_text_blocked)
                 }
             } finally {
                 if (!accepted) _isSending.value = false
@@ -1909,7 +1904,7 @@ class ChatViewModel(
      * explain.
      */
     fun attach(uri: Uri) {
-        viewModelScope.launch { stage(attachments.ingest(uri), notifyFailure = false) }
+        viewModelScope.launch { stage(attachments.ingest(uri, screen = isRoom), notifyFailure = false) }
     }
 
     /**
@@ -1923,7 +1918,7 @@ class ChatViewModel(
                 _events.tryEmit(it)
                 return@launch
             }
-            stage(attachments.ingestFile(uri), notifyFailure = true)
+            stage(attachments.ingestFile(uri, screen = isRoom), notifyFailure = true)
         }
     }
 
@@ -2112,13 +2107,14 @@ class ChatViewModel(
      * dropping it would look like the camera simply did nothing.
      */
     fun attachCaptured(jpeg: ByteArray) {
-        viewModelScope.launch { stage(attachments.ingest(jpeg, "image/jpeg"), notifyFailure = true) }
+        viewModelScope.launch { stage(attachments.ingest(jpeg, "image/jpeg", screen = isRoom), notifyFailure = true) }
     }
 
     /**
-     * Stages an ingested image, or handles its verdict. A picture flagged as explicit by on-device
-     * screening is handled by context: the public Nearby room **blocks** it outright (no confirmation
-     * bypass), while DMs/groups route it to [confirmAttachment] for a "send anyway?" confirmation.
+     * Stages an ingested image, or handles its verdict. Only the public Nearby room screens a picture on
+     * the way out, and it **blocks** one flagged as explicit outright; a DM or a group never screens, so its
+     * ingest is never flagged — its receivers screen what arrives and hide it behind their own Content
+     * filtering toggle (ADR 2026-10.9rh6).
      */
     private suspend fun stage(
         result: AttachmentStore.IngestResult,
@@ -2143,22 +2139,18 @@ class ChatViewModel(
                         _events.tryEmit(R.string.chat_commons_text_only)
                     }
 
-                    !result.flagged -> {
-                        // A staged card gives way to whatever the user attached on purpose (one slot).
-                        _pendingAttachment.value?.takeIf { it.link != null && result.ingested.link == null }?.let { card ->
-                            blobs.deleteIfUnreferenced(card.hash)
-                        }
-                        _pendingAttachment.value = result.ingested
-                    }
-
-                    isRoom -> {
-                        // Hard block in the broadcast room; drop the ingested-but-unsent blob.
+                    isRoom && result.flagged -> {
+                        // Hard block in the broadcast room, the one scope that screens; drop the unsent blob.
                         blobs.deleteIfUnreferenced(result.ingested.hash)
                         _events.tryEmit(R.string.moderation_image_blocked)
                     }
 
                     else -> {
-                        _confirmAttachment.value = result.ingested
+                        // A staged card gives way to whatever the user attached on purpose (one slot).
+                        _pendingAttachment.value?.takeIf { it.link != null && result.ingested.link == null }?.let { card ->
+                            blobs.deleteIfUnreferenced(card.hash)
+                        }
+                        _pendingAttachment.value = result.ingested
                     }
                 }
             }
@@ -2278,19 +2270,6 @@ class ChatViewModel(
         hash: String,
         positionMs: Int,
     ) = voicePlayer.seek(hash, positionMs)
-
-    /** The user confirmed the explicit-image warning: stage the (already-ingested) image for sending. */
-    fun confirmFlaggedAttachment() {
-        _pendingAttachment.value = _confirmAttachment.value ?: return
-        _confirmAttachment.value = null
-    }
-
-    /** The user declined the explicit-image warning: drop it and GC the ingested-but-unsent blob. */
-    fun dismissFlaggedAttachment() {
-        val pending = _confirmAttachment.value ?: return
-        _confirmAttachment.value = null
-        viewModelScope.launch { blobs.deleteIfUnreferenced(pending.hash) }
-    }
 
     /**
      * Discards the staged attachment; its blob (ingested on pick or on finishing a recording) is GC'd unless
