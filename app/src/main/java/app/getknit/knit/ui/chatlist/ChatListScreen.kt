@@ -33,7 +33,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Message
-import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DownloadForOffline
 import androidx.compose.material.icons.filled.Favorite
@@ -126,7 +125,6 @@ fun ChatListScreen(
     onOpenSettings: () -> Unit,
     onOpenYourMesh: () -> Unit,
     onOpenDiagnostics: () -> Unit,
-    onOpenBlockedUsers: () -> Unit,
     onOpenMessageRequests: () -> Unit,
     onOpenDonate: () -> Unit,
     onOpenAddContact: () -> Unit,
@@ -154,7 +152,6 @@ fun ChatListScreen(
         onOpenSettings = onOpenSettings,
         onOpenYourMesh = onOpenYourMesh,
         onOpenDiagnostics = onOpenDiagnostics,
-        onOpenBlockedUsers = onOpenBlockedUsers,
         onOpenMessageRequests = onOpenMessageRequests,
         onOpenDonate = onOpenDonate,
         onOpenAddContact = onOpenAddContact,
@@ -233,7 +230,6 @@ internal fun ChatListScreenContent(
     onOpenSettings: () -> Unit,
     onOpenYourMesh: () -> Unit,
     onOpenDiagnostics: () -> Unit,
-    onOpenBlockedUsers: () -> Unit,
     onOpenMessageRequests: () -> Unit,
     onOpenDonate: () -> Unit,
     onShareApp: () -> Unit,
@@ -349,14 +345,6 @@ internal fun ChatListScreenContent(
                                 onClick = {
                                     menuOpen = false
                                     onOpenDiagnostics()
-                                },
-                            )
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.blocked_users_title)) },
-                                leadingIcon = { Icon(Icons.Filled.Block, contentDescription = null) },
-                                onClick = {
-                                    menuOpen = false
-                                    onOpenBlockedUsers()
                                 },
                             )
                             DropdownMenuItem(
@@ -1015,7 +1003,6 @@ fun ChatListScreenPopulatedPreview() =
             onOpenSettings = {},
             onOpenYourMesh = {},
             onOpenDiagnostics = {},
-            onOpenBlockedUsers = {},
             onOpenMessageRequests = {},
             onOpenDonate = {},
             onOpenAddContact = {},
@@ -1049,7 +1036,6 @@ fun ChatListScreenRadioWarningPreview() =
             onOpenSettings = {},
             onOpenYourMesh = {},
             onOpenDiagnostics = {},
-            onOpenBlockedUsers = {},
             onOpenMessageRequests = {},
             onOpenDonate = {},
             onOpenAddContact = {},
@@ -1084,7 +1070,6 @@ fun ChatListScreenClonePreview() =
             onOpenSettings = {},
             onOpenYourMesh = {},
             onOpenDiagnostics = {},
-            onOpenBlockedUsers = {},
             onOpenMessageRequests = {},
             onOpenDonate = {},
             onOpenAddContact = {},
@@ -1113,7 +1098,6 @@ fun ChatListScreenLoadingPreview() =
             onOpenSettings = {},
             onOpenYourMesh = {},
             onOpenDiagnostics = {},
-            onOpenBlockedUsers = {},
             onOpenMessageRequests = {},
             onOpenDonate = {},
             onOpenAddContact = {},
@@ -1160,7 +1144,6 @@ fun ChatListScreenFirstRunPreview() =
             onOpenSettings = {},
             onOpenYourMesh = {},
             onOpenDiagnostics = {},
-            onOpenBlockedUsers = {},
             onOpenMessageRequests = {},
             onOpenDonate = {},
             onOpenAddContact = {},
@@ -1195,7 +1178,6 @@ fun ChatListScreenQuietPreview() =
             onOpenSettings = {},
             onOpenYourMesh = {},
             onOpenDiagnostics = {},
-            onOpenBlockedUsers = {},
             onOpenMessageRequests = {},
             onOpenDonate = {},
             onOpenAddContact = {},

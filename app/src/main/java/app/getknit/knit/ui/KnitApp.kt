@@ -387,7 +387,6 @@ fun KnitApp(startRoute: String? = null) {
                 onOpenSettings = { navController.navigate(Routes.SETTINGS) },
                 onOpenYourMesh = { navController.navigate(Routes.YOUR_MESH) },
                 onOpenDiagnostics = { navController.navigate(Routes.DIAGNOSTICS) },
-                onOpenBlockedUsers = { navController.navigate(Routes.BLOCKED_USERS) },
                 onOpenMessageRequests = { navController.navigate(Routes.MESSAGE_REQUESTS) },
                 onOpenDonate = { navController.navigate(Routes.DONATE) },
                 onOpenAddContact = { navController.navigate(Routes.ADD_CONTACT) },
@@ -528,6 +527,7 @@ fun KnitApp(startRoute: String? = null) {
                 onOpenAbout = { navController.navigate(Routes.ABOUT) },
                 onOpenLicenses = { navController.navigate(Routes.LICENSES) },
                 onOpenBackup = { navController.navigate(Routes.backup()) },
+                onOpenBlockedUsers = { navController.navigate(Routes.BLOCKED_USERS) },
             )
         }
         composable(Routes.PROFILE) {

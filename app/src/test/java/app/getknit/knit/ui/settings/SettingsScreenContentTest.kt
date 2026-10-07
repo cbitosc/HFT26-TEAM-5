@@ -66,6 +66,7 @@ class SettingsScreenContentTest {
         onOpenAbout: () -> Unit = {},
         onOpenLicenses: () -> Unit = {},
         onOpenBackup: () -> Unit = {},
+        onOpenBlockedUsers: () -> Unit = {},
         supervision: DeviceSupervision = DeviceSupervision.None,
         unusedPause: UnusedAppPause? = null,
         onOpenUnusedPauseSettings: () -> Unit = {},
@@ -104,6 +105,7 @@ class SettingsScreenContentTest {
                     onOpenAbout = onOpenAbout,
                     onOpenLicenses = onOpenLicenses,
                     onOpenBackup = onOpenBackup,
+                    onOpenBlockedUsers = onOpenBlockedUsers,
                     onSignOut = onSignOut,
                     unusedPause = unusedPause,
                     onOpenUnusedPauseSettings = onOpenUnusedPauseSettings,
@@ -339,12 +341,17 @@ class SettingsScreenContentTest {
         compose.onNodeWithText(context.getString(R.string.settings_supervised_managed)).performScrollTo().assertIsDisplayed()
     }
 
-    /** About and the licenses list sit behind the overflow: neither is a setting, so neither is a row. */
+    /** Blocked users, About and the licenses list sit behind the overflow: none is a setting, so none is a row. */
     @Test
-    fun theOverflowMenuOpensAboutAndTheLicenses() {
+    fun theOverflowMenuOpensBlockedUsersAboutAndTheLicenses() {
+        var blocked = 0
         var about = 0
         var licenses = 0
-        render(onOpenAbout = { about++ }, onOpenLicenses = { licenses++ })
+        render(onOpenBlockedUsers = { blocked++ }, onOpenAbout = { about++ }, onOpenLicenses = { licenses++ })
+
+        compose.onNodeWithContentDescription(context.getString(R.string.chat_more_options)).performClick()
+        compose.onNodeWithText(context.getString(R.string.blocked_users_title)).performClick()
+        assertEquals(1, blocked)
 
         compose.onNodeWithContentDescription(context.getString(R.string.chat_more_options)).performClick()
         compose.onNodeWithText(context.getString(R.string.settings_menu_about)).performClick()
@@ -354,6 +361,7 @@ class SettingsScreenContentTest {
         compose.onNodeWithText(context.getString(R.string.settings_menu_licenses)).performClick()
         assertEquals(1, licenses)
         assertEquals(1, about)
+        assertEquals(1, blocked)
     }
 
     /** Backup and restore is a row, not a menu item: it changes what happens to your data, so it sits with the settings. */

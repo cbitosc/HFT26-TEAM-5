@@ -7,7 +7,7 @@ import org.junit.runner.RunWith
 
 /**
  * Black-box coverage of the chat-list **overflow menu** and the screens behind it. The menu is a real
- * `DropdownMenu` popup window, and its destinations (Add contact / Diagnostics / Blocked / Donate) have no
+ * `DropdownMenu` popup window, and its destinations (Add contact / Diagnostics / Donate, and Blocked users behind Settings' own overflow) have no
  * in-process Compose test today — this is their only black-box coverage. Each is opened through the menu
  * and asserted by its own stable screen `testTag`; Back returns to the seeded chat list.
  *
@@ -24,7 +24,6 @@ class OverflowNavigationUiAutomatorTest : SeededUiAutomatorTest() {
         assertText(str(R.string.settings_title))
         assertText(str(R.string.add_contact_title))
         assertText(str(R.string.diagnostics_title))
-        assertText(str(R.string.blocked_users_title))
         assertText(str(R.string.donate_title))
         assertText(str(R.string.share_app_menu))
     }
@@ -38,8 +37,19 @@ class OverflowNavigationUiAutomatorTest : SeededUiAutomatorTest() {
     @Test
     fun overflow_opensDiagnostics() = openThenBack(R.string.diagnostics_title, destTag = "screen_diagnostics")
 
+    /** Blocked users lives in Settings' overflow: chat list → Settings → its menu → the list, and Back to Settings. */
     @Test
-    fun overflow_opensBlockedUsers() = openThenBack(R.string.blocked_users_title, destTag = "screen_blocked_users")
+    fun settingsOverflow_opensBlockedUsers() {
+        launch()
+        openOverflow()
+        requireText(str(R.string.settings_title)).click()
+        assertTag("screen_settings")
+        openOverflow()
+        requireText(str(R.string.blocked_users_title)).click()
+        assertTag("screen_blocked_users")
+        device.pressBack()
+        assertTag("screen_settings")
+    }
 
     @Test
     fun overflow_opensDonate() = openThenBack(R.string.donate_title, destTag = "screen_donate")
@@ -60,7 +70,7 @@ class OverflowNavigationUiAutomatorTest : SeededUiAutomatorTest() {
         assertTag("chat_row_nearby")
     }
 
-    /** Opens the chat-list top-bar overflow (the MoreVert icon, addressed by its contentDescription). */
+    /** Opens the top-bar overflow (the MoreVert icon, addressed by its contentDescription; chat list and Settings share it). */
     private fun openOverflow() {
         requireDesc(str(R.string.chat_more_options)).click()
     }

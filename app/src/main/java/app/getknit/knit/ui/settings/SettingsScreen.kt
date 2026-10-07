@@ -24,6 +24,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.outlined.Article
+import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PhonelinkErase
 import androidx.compose.material.icons.outlined.Info
@@ -106,6 +107,7 @@ fun SettingsScreen(
     onOpenAbout: () -> Unit = {},
     onOpenLicenses: () -> Unit = {},
     onOpenBackup: () -> Unit = {},
+    onOpenBlockedUsers: () -> Unit = {},
     viewModel: SettingsViewModel = koinViewModel(),
 ) {
     val header by viewModel.header.collectAsStateWithLifecycle()
@@ -155,6 +157,7 @@ fun SettingsScreen(
         onOpenAbout = onOpenAbout,
         onOpenLicenses = onOpenLicenses,
         onOpenBackup = onOpenBackup,
+        onOpenBlockedUsers = onOpenBlockedUsers,
         onSignOut = { showSignOut = true },
         onAllowBattery = { requestIgnoreBatteryOptimizations(context) },
         onOpenBatterySettings = { openAppSettings(context) },
@@ -178,6 +181,7 @@ internal fun SettingsScreenContent(
     onOpenAbout: () -> Unit = {},
     onOpenLicenses: () -> Unit = {},
     onOpenBackup: () -> Unit = {},
+    onOpenBlockedUsers: () -> Unit = {},
     // The clone row's action — opens the confirmation in the stateful wrapper, never the wipe itself.
     onSignOut: () -> Unit = {},
     // Whether the Internet-relay plane is introduced at all in this build. A parameter rather than a
@@ -211,8 +215,8 @@ internal fun SettingsScreenContent(
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.action_back))
                     }
                 },
-                // About and the licenses list live behind the overflow rather than as rows: neither is a
-                // setting, and the column below is for things that change how Knit behaves.
+                // Blocked users, About and the licenses list live behind the overflow rather than as rows:
+                // none is a setting, and the column below is for things that change how Knit behaves.
                 actions = {
                     Box {
                         IconButton(
@@ -222,6 +226,15 @@ internal fun SettingsScreenContent(
                             Icon(Icons.Filled.MoreVert, contentDescription = stringResource(R.string.chat_more_options))
                         }
                         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.blocked_users_title)) },
+                                leadingIcon = { Icon(Icons.Filled.Block, contentDescription = null) },
+                                onClick = {
+                                    menuOpen = false
+                                    onOpenBlockedUsers()
+                                },
+                                modifier = Modifier.testTag("settings_menu_blocked"),
+                            )
                             DropdownMenuItem(
                                 text = { Text(stringResource(R.string.settings_menu_about)) },
                                 leadingIcon = { Icon(Icons.Outlined.Info, contentDescription = null) },
