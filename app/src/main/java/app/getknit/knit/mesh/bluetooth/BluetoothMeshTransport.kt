@@ -685,12 +685,34 @@ class BluetoothMeshTransport(
         key: String,
     ): Boolean = links[nodeId]?.hasPendingFile(key) ?: false
 
-    // A Coded link's feed keeps its own pace outside the split ([paceFor]), so only a 1M/2M one counts.
+    // A Coded link's feed keeps its own pace outside the split ([paceFor]), so only a 1M/2M one counts. A feed whose
+    // link may still earn the boost is read at the boosted share until its second chunk is paced: its first chunk is
+    // paced at the base before the link reports its interval (~0.6 s on 2026-10-06), and a second ask lands within ms
+    // of the first, since both receivers act on the author's HAVE. Read at the base, a 245 KB photo looked a minute
+    // from its end, and the holder fed two copies at once.
     override fun fileFeedingTo(
         nodeId: String,
         key: String,
         withinMs: Long,
-    ): Boolean = links[nodeId]?.takeIf { linkPhy[it] != LinkPhy.CODED }?.feedsFile(key, withinMs) ?: false
+    ): Boolean {
+        val link = links[nodeId]?.takeIf { linkPhy[it] != LinkPhy.CODED } ?: return false
+        return link.feedsFile(key, withinMs, settlingPace = settlingPace(link))
+    }
+
+    /**
+     * The share [link] feeds at once it has earned the boost, while it has a boost that can earn it (an Android peer, the
+     * flag and the trial's switch on, a tuner not given up, no audio): else 0. Earned or not yet, because a chunk's
+     * pace moves only at the next chunk, and the boost earns inside the first (the bluetooth-reviewer's finding: a park
+     * poll in that gap read the base and unparked). A link that has not earned it by its second chunk is read at its
+     * own pace from then, so a parked ask waits about one base chunk (2 s of feeding) for the guess.
+     */
+    private fun settlingPace(link: FramedLink): Int {
+        if (boosts[link] == null || !LinkTuneDiag.boostOn || tuners[link]?.alive == false) return 0
+        if (audioMonitor.contended.value) return 0
+        val feeding = feedingLinks().size.coerceAtLeast(1)
+        val phy = linkPhy[link] ?: LinkPhy.UNKNOWN
+        return CodedPhyPolicy.pace(phy, CodedPhyDiag.tuning, feeding, earned = true, leLinks = leLinkCount()).bytesPerSec
+    }
 
     // Every link's file-stream ends, poked on its writer (FramedLink's onFileFed). Lossy past one: a reader re-reads the
     // links, so one pending poke says everything a second would.

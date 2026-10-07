@@ -115,6 +115,9 @@ class FramedLink(
     // than failing it (a suspended iPhone, a stalled controller), and a feed that has not moved in a while is not ending.
     @Volatile private var txWroteAt = 0L
 
+    // How many chunks of the stream under [txKey] have been paced: [feedsFile]'s settle lasts until the second.
+    @Volatile private var txPaced = 0
+
     // The receive side: one file streams in at a time, reassembled by [intake] (FileIntake, pulled out of here by
     // #116 so a cut attachment keeps its prefix and a resumed one splices onto it). Every call into it holds
     // [rxLock], which [close] takes too, so a teardown from the owner's thread never races the reader on the file
@@ -235,20 +238,33 @@ class FramedLink(
      * through inside that bound, at a pace that feeds what is left in time, or holding it queued with nothing else
      * streaming, so the writer is about to take it (its pace not known yet). A copy queued behind another file is not
      * fed yet, and its end not yet written is what ends it — unlike [hasPendingFile], a file fed in full no longer
-     * counts (ADR 2026-10.g24x).
+     * counts (ADR 2026-10.g24x). Until its second chunk is paced, the stream's pace is read as at least [settlingPace]:
+     * the pace the owner expects the link to settle into (a boost asked as the stream began), which the first chunk,
+     * paced before the answer, cannot show. Counted in chunks, not time: the next chunk's pace is read after a `delay`,
+     * which stops while the CPU sleeps, so a clock's settle could end before the pace it waits for has moved.
      */
     fun feedsFile(
         key: String,
         withinMs: Long = Long.MAX_VALUE,
+        settlingPace: Int = 0,
     ): Boolean =
         synchronized(pendingLock) {
             if (!pendingFileKeys.containsKey(key)) return@synchronized false
             when (txKey) {
                 null -> true
-                key -> now() - txWroteAt <= withinMs && txPace.let { pace -> pace <= 0 || txLeft * MS_PER_SECOND / pace <= withinMs }
+                key -> streamEndsWithin(withinMs, settlingPace)
                 else -> false
             }
         }
+
+    /** The stream under [txKey] moved inside [withinMs] and, at its pace (see [feedsFile]), feeds what is left in it. */
+    private fun streamEndsWithin(
+        withinMs: Long,
+        settlingPace: Int,
+    ): Boolean {
+        val pace = if (txPaced < SETTLE_CHUNKS) maxOf(txPace, settlingPace) else txPace
+        return now() - txWroteAt <= withinMs && (pace <= 0 || txLeft * MS_PER_SECOND / pace <= withinMs)
+    }
 
     private fun notePending(
         key: String,
@@ -434,6 +450,7 @@ class FramedLink(
         txLeft = 0L
         txPace = 0
         txWroteAt = now()
+        txPaced = 0
         txKey = item.meta.key
         val startedAt = now()
         val meta = item.meta
@@ -464,6 +481,7 @@ class FramedLink(
                     if (drainFramesInto(out)) out.flush()
                     cfg = pace()
                     txPace = cfg.bytesPerSec // known before this chunk's write, which may block
+                    txPaced++
                     window.rebase(cfg, now())
                     val n = input.read(buf, 0, cfg.chunkBytes.coerceIn(1, buf.size))
                     if (n == -1) break
@@ -592,5 +610,9 @@ class FramedLink(
         const val FEEDING_BIT = 1
         const val RECEIVING_BIT = 2
         const val MS_PER_SECOND = 1_000L
+
+        // A stream's first chunk is paced before the link has answered the boost it asked for: [feedsFile] reads the
+        // settling pace until the second chunk's pace is known.
+        private const val SETTLE_CHUNKS = 2
     }
 }

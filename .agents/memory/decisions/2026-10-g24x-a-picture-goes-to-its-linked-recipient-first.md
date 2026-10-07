@@ -101,3 +101,52 @@ ends). `AttachmentLabTest`'s #79 scenario now asserts that Carol carries without
   the P8 both ask for. Pass: each `blob unpark … → <second>` follows the first feed's `file … in` line within about 2 s.
 - **Release defaults.** Two Androids with `BLE_LINK_BOOST` off, and a room photo two peers pull. Pass: the second
   asker's `rx` lands no later than a parallel feed at budget ÷ 2 would deliver it.
+
+**Amendment (2026-10-06, evening): a feed is judged at the pace its boost settles into.** The first device run of
+item 4 fed two copies at once. In a NANOFF three-Pixel clique the Pixel 8 authored a 245 KB group photo. The Pixel 7 and
+the Pixel 9 both asked it off its HAVE, 49 ms apart (item 2 makes every receiver ask the author at once). The first
+feed's first chunk was paced at the unearned base (`bt file pace budget=4096 feeding=1 … earned=false`). The link
+earned the boost about 0.6 s later (`bt boost … earned interval=15000us`), but a chunk's pace moves only at the next
+chunk, two seconds of the base share later. So the second ask read 245 KB at 4 KiB/s, about 60 s left, against the
+30 s bound, and was served beside the first. The 265 KB and 328 KB photos that followed did the same. A 65 KB one
+parked and was served on the feed's end, as designed.
+
+`BluetoothMeshTransport.fileFeedingTo` now passes `FramedLink.feedsFile` a settling pace. Until a stream's second
+chunk has been paced, a link with a boost that can earn is read at its boosted share, whether it has earned yet or
+not. A boost can earn when the link is an Android peer, the flag and `LinkTuneDiag.boostOn` are on, its tuner has not
+given up, and no Bluetooth audio streams.
+
+- **Earned or not yet:** a 1 s park poll landed in the gap between the earn and the next chunk's pace. That was the
+  bluetooth-reviewer's finding on the first draft, which dropped the settle on the earn.
+- **Counted in chunks, not time:** the next pace is read after a `delay`, which stops while the CPU sleeps. A 5 s
+  elapsed-clock window, the second draft, could end on a sleeping holder before the pace had moved. That was the
+  reviewer's second finding.
+- **A link that never earns:** a dark pair, where neither side asks, is read at its own pace from its second chunk.
+  So a parked ask waits about one base chunk, two seconds of feeding, for the guess.
+
+An iPhone link has no boost and is read at its base as before. With `BLE_LINK_BOOST` off, or `--ez boost false`,
+nothing changes. That one exception to "an unearned link's base share is not waited behind" (item 4) is bounded by
+the settle.
+
+**Device run (2026-10-06, ~20:50–21:05, the time-window draft):**
+
+- The P3 was the author, unlocked and lit; Wi-Fi Aware was off.
+- **DM cell:** five reps of a 410 KB photo to the P7, with the P8 and the P9 linked carriers. The P7 held each in
+  27–31 s, from one copy fed at 18 KiB/s in 23.8 s, and both carriers deferred.
+- **Group cell, reps 25–27:** the P9 (a carrier, which pulls a group frame at once), the P7 and the P8 asked within
+  about 1 s. The two later asks parked and stayed parked across the polls. Each `blob unpark` landed 3–4 ms after the
+  previous feed's `file … in`.
+- **The third asker:** it reached `PARK_MAX_MS`, which is counted from its park and not from its turn, about 7 s into
+  the second feed, and was served beside it.
+- **Rep 28:** the author's screen timed out and the boost released. The second parked ask was served beside the feed
+  at the settle's end.
+- **The P9 as a sender:** its secure keyguard sleeps 10 s after a `KEYCODE_WAKEUP`, which is not user activity. That
+  releases the boost, so it cannot be the lit sender headlessly.
+
+**Device cells owed for the amendment:**
+
+- **The dark holder:** the author's screen off and network adb disconnected; two lit receivers ask for a 245–330 KB
+  group photo; five reps. Pass: every `blob unpark … → <second>` lands within about 2 s after the first feed's
+  `file … in`, never shortly after its `blob park` while that feed has more than 30 s left.
+- **With `--ez boost false`:** the second ask is served within about 1–2 s of its park, or never parks.
+- **With the boost on and both sides dark:** within about 3 s.

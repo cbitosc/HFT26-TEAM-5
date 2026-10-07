@@ -352,6 +352,27 @@ class FramedLinkTest {
     }
 
     @Test
+    fun aFeedIsReadAtItsSettlingPaceUntilItsSecondChunkIsPaced() {
+        // ADR 2026-10.g24x's amendment: the first chunk is paced before the link answers the boost it asked for, so
+        // until the second chunk's pace is read the owner's settling pace stands in for it. Counted in chunks: the
+        // next pace is read after a delay, which a clock would not wait for while the CPU sleeps.
+        val h = harness(fromLinkBuffer = 1024, pace = { PaceConfig(bytesPerSec = 32 * 1024, chunkBytes = 2048) })
+        val key = "a".repeat(64)
+        val file = tmp.newFile("settle.bin").apply { writeBytes(ByteArray(4 * 1024 * 1024)) }
+        assertTrue(h.link.sendFile(file, FileMeta(FileKind.ATTACHMENT, key, "image/jpeg")))
+        assertEquals(LinkFraming.Type.FILE_HEADER, LinkFraming.read(h.fromLink)!!.type)
+        // The first chunk's write blocks on the small buffer: paced once, its pace known.
+        assertTrue("4 MiB at 32 KiB/s is not done in 30 s", awaitUntil { !h.link.feedsFile(key, withinMs = 30_000) })
+        assertTrue("at the settling pace it is", h.link.feedsFile(key, withinMs = 30_000, settlingPace = 1024 * 1024))
+        assertEquals(LinkFraming.Type.FILE_CHUNK, LinkFraming.read(h.fromLink)!!.type) // the writer paces the second
+        assertTrue(
+            "from the second chunk, at its own",
+            awaitUntil { !h.link.feedsFile(key, withinMs = 30_000, settlingPace = 1024 * 1024) },
+        )
+        h.link.close()
+    }
+
+    @Test
     fun aFileFedWhileTheLinkGoesOnFeedingThePeerStaysPendingUntilTheLinkIsIdle() {
         // #121: the stack's buffer drains in order, so a file fed ahead of one still streaming may not have reached the
         // peer yet. The link keeps vouching for it until nothing is queued or streaming, and forgets it then.
