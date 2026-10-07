@@ -640,7 +640,7 @@ Oracles: `bt phy mode=…`, `bt coded advert live|dark <status>`, `via=coded|1m`
 `bt phy <id> link dropped on <PHY> rssi=… (<reason>)`, `bt coded advert fast (…)` / `slow`, `bt coded advert
 refused <status>, retry in …` / `enabled again`, `bt coded advert retry n/5`,
 `bt phy <id> ONE_M→CODED rssi=… (auto)`, `bt phy <id> gave up …`, `file …/… <N>B in <ms>ms @<pace>` (the hand-off) and
-`rx …/… <N>B in <ms>ms` (the drain), `bt file pace budget=… feeding=… share=… chunk=… earned=… le=…`, `bt boost <id>
+`rx …/… <N>B in <ms>ms` (the drain), `bt file pace budget=… feeding=… share=… chunk=… earned=… le=… → <node>` (per link since ADR 2026-10.g24x), `bt boost <id>
 high[ mtu=517]|release|earned interval=…us|unearned interval=…us`, `bt scan coded windows on|off`,
 `bt refused client … codedOnly=`, and once a minute `bt coded heard <id> hits=… rssi=a..b 1m=… eff=… dwell=…
 promotable=… dials=…` per unlinked peer heard on Coded (raise the log ring with `adb logcat -G 16M` before a walk);

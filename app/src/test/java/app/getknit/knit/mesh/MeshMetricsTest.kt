@@ -167,6 +167,8 @@ class MeshMetricsTest {
         assertEquals(1L, files.filesResumedIn)
         assertEquals(3L, files.splicesRefused)
         assertEquals(files, metrics.snapshot().files)
+        metrics.onCarrierPullDeferred()
+        assertEquals(1L, metrics.files().carrierPullsDeferred)
     }
 
     @Test
@@ -176,7 +178,7 @@ class MeshMetricsTest {
 
         val files = metrics.files()
         assertEquals(
-            listOf(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L),
+            listOf(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L, 11L),
             listOf(
                 files.blobQueriesSent,
                 files.blobQueriesAnswered,
@@ -188,6 +190,7 @@ class MeshMetricsTest {
                 files.blobFallbacks,
                 files.blobBlindAsks,
                 files.blobPullThroughs,
+                files.blobAsksParked,
             ),
         )
         assertEquals(files, metrics.snapshot().files)

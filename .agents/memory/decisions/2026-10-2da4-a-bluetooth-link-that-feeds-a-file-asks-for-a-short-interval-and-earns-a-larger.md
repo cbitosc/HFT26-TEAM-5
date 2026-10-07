@@ -150,3 +150,11 @@ Tests:
 - `BluetoothWaitClockTest`.
 
 `BleLinkBoost` and the tuner are verified on hardware only; there is no host GATT stack.
+
+## Amendment 2026-10-06 — each link earns its own budget (ADR 2026-10.g24x)
+
+Point 5's "one iPhone, Coded or unheard link among the feeders holds them all to the base" is gone. A feed's budget
+is its own link's: boosted while that link has earned it, the base otherwise, split over the feeding links as
+before. On 2026-10-06 one iPhone pulling a photo held three earned links to a quarter of the base. `bt file pace` is
+written per link and ends `→ <node>`. The debug bridge's `LinkTuneReport.earned` still reads "every feeding link
+earned".

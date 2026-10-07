@@ -300,9 +300,10 @@ class AttachmentLabTest {
      * Carol one she held. Since #136 (ADR 2026-10.f7gg) Bob's first ask goes to Alice alone, the author, and the
      * round widens to Carol only if no header lands within its grace. Here Alice's link to Bob is the slow one
      * (her serve is parked with its header across), so the round never widens: Carol hears of the picture only
-     * from Bob's relay of the frame, pulls her own copy from Alice as a carrier, and never has an ask of Bob's on
-     * file. The re-link Bob ↔ Carol is the tick, and the file recorder on every transport is the phone's `file …`
-     * line: exactly one copy per (hash, link), and Bob asks once.
+     * from Bob's relay of the frame, carries it without pulling its bytes — Bob, its recipient, is linked to her and
+     * fetching them (ADR 2026-10.g24x) — and never has an ask of Bob's on file. The re-link Bob ↔ Carol is the
+     * tick, and the file recorder on every transport is the phone's `file …` line: exactly one copy per (hash, link),
+     * and Bob asks once.
      */
     @Test
     fun aPictureAlreadyStreamingInIsNeitherAskedForAgainNorServedTwice() =
@@ -320,16 +321,17 @@ class AttachmentLabTest {
 
             alice.transport.holdFiles(bob.transport) // Bob's link is the Moto's: the header lands, the bytes take their time
             alice.transport.hold(carol.transport) // Carol hears of the picture from Bob's relay, never from Alice's frame
+            val deferred = carol.metrics.files().carrierPullsDeferred
             val picture = Random(7).nextBytes(4_096)
             assertTrue(alice.sendImage(picture, "for bob", to = bob))
             val id = alice.ownMessageId(alice.dmWith(bob), "for bob")
             val hash = checkNotNull(alice.attachmentHash(alice.dmWith(bob), id))
             val fileToBob = "${bob.nodeId} ATTACHMENT $hash"
 
-            // Alice's serve to Bob is on the link, header across. Carol carries Bob's relay of the frame and asks the
-            // author for her own copy, which lands whole: Alice's files to her are not held, only her frames.
+            // Alice's serve to Bob is on the link, header across. Carol carries Bob's relay of the frame and leaves its
+            // bytes to Bob, the recipient she is linked to (ADR 2026-10.g24x).
             lab.await(1) { alice.transport.heldFiles(bob.transport).count { it == hash } }
-            lab.await(1) { if (carol.blobs.exists(hash)) 1 else 0 }
+            lab.await(1) { if (carol.metrics.files().carrierPullsDeferred > deferred) 1 else 0 }
             assertTrue("the header across is what Bob reads as arriving", hash in bob.transport.arrivingFiles())
             alice.transport.release(carol.transport) // Alice's copy of the frame lands on Carol, behind Bob's relay of it
 
@@ -337,6 +339,10 @@ class AttachmentLabTest {
             // re-arms from the database and steps every blob he lacks — but this one's bytes are already on the way.
             lab.clock.advance(BlobExchange.ROUND_MS + MeshLab.FIRST_ASK_GRACE_MS)
             val digests = bob.transport.digestsSent.count { it == carol.nodeId }
+            // ADR 2026-10.g24x: Carol, linked to Bob until here, left the picture to him. Read now: a tick of hers in the
+            // re-link gap below would find him gone and pull it, as the policy means it to.
+            assertTrue("Carol asked for it: ${carol.transport.blobAsks}", carol.transport.blobAsks.none { it.hash == hash })
+            assertTrue("Alice fed Carol a copy", alice.transport.files.none { it == "${carol.nodeId} ATTACHMENT $hash" })
             lab.unlink(bob, carol)
             lab.link(bob, carol)
             lab.await(digests + 1) { bob.transport.digestsSent.count { it == carol.nodeId } } // the batch's last hook
@@ -351,7 +357,7 @@ class AttachmentLabTest {
             assertEquals("Alice served Bob once", 1, alice.transport.files.count { it == fileToBob })
             assertTrue("Carol never pushed Bob a copy", carol.transport.files.none { it == fileToBob })
             val bobToCarol = bob.transport.files.filter { it.startsWith(carol.nodeId) }
-            assertTrue("Bob never pushed Carol the copy she holds: $bobToCarol", bobToCarol.isEmpty())
+            assertTrue("Bob never pushed Carol a copy: $bobToCarol", bobToCarol.isEmpty())
         }
 
     @Test

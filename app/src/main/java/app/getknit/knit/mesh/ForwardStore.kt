@@ -81,6 +81,13 @@ interface ForwardStore {
      */
     suspend fun attachmentsNeedingFetch(): Map<String, String>
 
+    /**
+     * Every carried frame naming an attachment whose blob we don't yet hold, one entry per frame: whom it is for and
+     * when we took it into custody. What [CarrierPullPolicy] reads to hold a pull back while the recipient is linked
+     * (ADR 2026-10.g24x). The default holds nothing back, for the fakes; the Room implementation reads the rows.
+     */
+    suspend fun carriedAttachments(): List<CarriedAttachment> = emptyList()
+
     /** The carried frame [id]'s cleartext recipient, or null if not held. */
     suspend fun recipientOf(id: String): String?
 
@@ -110,3 +117,11 @@ interface ForwardStore {
         const val ORIGIN_SELF = 1
     }
 }
+
+/** One carried frame naming attachment [hash]: its cleartext recipient (null for a group or room frame) and when we
+ *  took it into custody ([ForwardStore.carriedAttachments]). */
+data class CarriedAttachment(
+    val hash: String,
+    val recipientId: String?,
+    val carriedAt: Long,
+)

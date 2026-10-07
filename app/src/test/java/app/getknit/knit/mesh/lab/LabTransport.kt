@@ -650,6 +650,22 @@ class LabTransport(
     ): Boolean = pipes[nodeId]?.let { p -> synchronized(p.heldFiles) { p.heldFiles.any { it.key == key && it.inFlight } } } ?: false
 
     /**
+     * Fed on a shared-budget link: the first file parked toward [nodeId] that its sender still feeds is [key]'s, on a
+     * pipe the scenario has not declared Wi-Fi Aware ([bulkRoutes]) or Coded ([slowLinks]) — the Bluetooth link a phone
+     * splits its pace over (ADR 2026-10.g24x). A link feeds one file at a time, so a copy parked behind another is
+     * queued, not fed, as `FramedLink.feedsFile` reads it.
+     */
+    override fun fileFeedingTo(
+        nodeId: String,
+        key: String,
+        withinMs: Long,
+    ): Boolean {
+        if (bulkRouteTo(nodeId) == BulkRoute.Linked || slowLinkTo(nodeId)) return false
+        val p = pipes[nodeId] ?: return false
+        return synchronized(p.heldFiles) { p.heldFiles.firstOrNull { it.inFlight }?.key == key }
+    }
+
+    /**
      * Delivers everything parked for [to], in the order [reorder] returns (default: as sent), and stops holding
      * — unless [keepHolding], which parks what the far side sends back in answer to the batch as well. A
      * scenario that calls `release` and then `hold` again has a gap between the two in which a delivered frame's

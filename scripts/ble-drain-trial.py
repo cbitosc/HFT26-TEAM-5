@@ -65,7 +65,9 @@ STREAM = re.compile(r"^(rx|file) ")
 LINK_UP = re.compile(r"^bt link up: (\S+) \(")
 LINK_DOWN = re.compile(r"^bt link down: (\S+) \(")
 KEPT = re.compile(r"^(bt file pace |bt tune |bt boost |bt conn params |bt phy |bt link )")
-EARNED = re.compile(r"^bt file pace .* earned=true")
+# Per link since ADR 2026-10.g24x (the line ends `→ <node>`): the rep is earned when the receiver's own feed was.
+# A line with no node is an older build's, written only when every feeding link had earned.
+EARNED = re.compile(r"^bt file pace .* earned=true le=\d+(?: → (\S+))?$")
 # The tuner's line for a BALANCED it served, not the boost's intent: an ask queued on a client that never attached
 # is dropped unserved.
 RELEASE = re.compile(r"^bt tune (\S+) ask priority=BALANCED requested=true")
@@ -319,7 +321,8 @@ class Trial:
             "pace": a.pace,
             "boost": a.boost,
             "boostPace": reply.get("boostPace"),
-            "earned": any(EARNED.match(m) for _, m in tx_lines),
+            "earned": any((m := EARNED.match(msg)) and (m.group(1) is None or m.group(1).startswith(self.rx.node_id[:8]))
+                          for _, msg in tx_lines),
             "releaseAfterS": round(released_at - fed_at, 1) if released_at and fed_at else None,
             "tune": a.tune,
             "phyMode": {p.label: p.phy_mode for p in (self.tx, self.rx)},

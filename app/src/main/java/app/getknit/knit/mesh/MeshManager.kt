@@ -204,6 +204,9 @@ class MeshManager(
     // How long a blob round's first ask has before every other neighbour is asked ([BlobExchange.FIRST_ASK_GRACE_MS],
     // ADR 2026-10.f7gg). Injectable for `mesh/lab`, whose scenarios must not hang an assertion on a wall-clock race.
     private val firstAskGraceMs: Long = BlobExchange.FIRST_ASK_GRACE_MS,
+    // The longest an ask waits parked behind another Bluetooth copy's feed ([BlobExchange.PARK_MAX_MS], ADR
+    // 2026-10.g24x). Injectable for `mesh/lab`, whose held pipes would otherwise make every other asker sit it out.
+    private val blobParkMaxMs: Long = BlobExchange.PARK_MAX_MS,
     // Whether this build queries neighbours for a blob's holders before it asks (ADR 2026-10.6e5t;
     // `BuildConfig.BLOB_QUERY`, dark in release until its device trial), and how long it waits for their answers.
     // Off, every neighbour gets ADR 2026-10.f7gg's blind round; answering a query is never gated.
@@ -255,6 +258,7 @@ class MeshManager(
             // A first ask's grace runs on the session (ADR 2026-10.f7gg); stopped, the tick and link-ups step it.
             firstAskGraceMs = firstAskGraceMs,
             holderQuery = blobHolderQuery,
+            parkMaxMs = blobParkMaxMs,
             onEvent = metrics::onBlobEvent,
             timers = { sessionScope },
             log = { Log.d(TAG, it) },
@@ -690,6 +694,8 @@ class MeshManager(
         router.start()
         transport.start()
         watchNeighbors(session)
+        // A link that ended a file's stream frees its parked asks at once (ADR 2026-10.g24x).
+        session.launch { transport.fileFeedsEnded.collect { blobExchange.feedEnded() } }
         watchReachable(session)
         watchMetPeers(session)
         openToChatWatch.start(session)
@@ -2305,10 +2311,14 @@ class MeshManager(
         val wanted = ownHashes.entries.mapTo(mutableListOf<Pair<String, String?>>()) { (hash, author) -> hash to author }
         // Carrier-only custody blobs backfill only while under the byte budget (the same pull-time soft cap
         // onCarriedFrame applies), so a restart re-attempts pulls that a live-session over-budget skip left
-        // missing; skip ones already re-requested above as our own/received attachments.
+        // missing; skip ones already re-requested above as our own/received attachments, and ones a DM's linked
+        // recipient is fetching now ([CarrierPullPolicy], ADR 2026-10.g24x) — this tick re-reads them, so the hold
+        // ends by itself when the recipient's link goes or the window passes.
         if (blobs.carrierOnlyBlobBytes() < CARRIER_BLOB_BUDGET_BYTES) {
-            forwardStore.attachmentsNeedingFetch().forEach { (hash, author) ->
-                if (hash !in ownHashes) wanted += hash to author
+            val carried = forwardStore.attachmentsNeedingFetch()
+            val held = heldForLinkedRecipients(carried.keys)
+            carried.forEach { (hash, author) ->
+                if (hash !in ownHashes && hash !in held) wanted += hash to author
             }
         }
         // A group's decided photo not shown yet (ADR 2026-09.nxcq): the row is the durable want, so a pull lost
@@ -2316,6 +2326,19 @@ class MeshManager(
         // screening refused keeps its verdict and is never asked for again while filtering is on.
         groups.photoHashesNeedingFetch().forEach { if (!refusedImage(it)) wanted += it to null }
         blobExchange.wantAll(wanted)
+    }
+
+    /** The carried attachments among [hashes] whose pull [CarrierPullPolicy] holds back right now. */
+    private suspend fun heldForLinkedRecipients(hashes: Set<String>): Set<String> {
+        if (hashes.isEmpty()) return emptySet()
+        val linked = transport.neighbors.value.mapTo(HashSet()) { it.nodeId }
+        if (linked.isEmpty()) return emptySet()
+        val now = clock()
+        return forwardStore
+            .carriedAttachments()
+            .groupBy { it.hash }
+            .filter { (hash, frames) -> hash in hashes && CarrierPullPolicy.defers(frames, linked, now) }
+            .keys
     }
 
     /** Periodically reclaims expired carried DMs, bounding the forward store between heartbeat sweeps. */

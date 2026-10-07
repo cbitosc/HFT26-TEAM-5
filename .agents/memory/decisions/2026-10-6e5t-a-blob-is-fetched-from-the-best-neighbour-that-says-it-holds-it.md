@@ -226,3 +226,11 @@ Kept true by `BlobHolderQueryTest`, which covers:
 
 It is also covered by `BlobHaveLabTest.aSecondHolderThatAnswersLateIsNotAskedWhileTheFirstOnesCopyIsOnItsWay`, the
 trace end to end with the asker's frames held on both links.
+
+## Amendment 2026-10-06 — the author's HAVE decides, and a holder feeds one copy at a time (ADR 2026-10.g24x)
+
+A querying asker whose best holder so far is the frame's author asks it on its HAVE, without waiting for the rest of
+the answers, as it already did for a holder on a live Wi-Fi Aware link: a trace waited 5 s on a carrier's NONE
+after the author answered in 124 ms. And `onHaveQuery` answers SENDING for an ask the holder has parked behind
+another Bluetooth copy of the same blob, so the asker waits on it as it would on any copy already on the way. Both
+are ADR 2026-10.g24x's.

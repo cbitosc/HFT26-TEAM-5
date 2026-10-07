@@ -2,6 +2,7 @@ package app.getknit.knit.data.forward
 
 import androidx.room3.withWriteTransaction
 import app.getknit.knit.data.KnitDatabase
+import app.getknit.knit.mesh.CarriedAttachment
 import app.getknit.knit.mesh.CarriedFrame
 import app.getknit.knit.mesh.ForwardStore
 import app.getknit.knit.mesh.StoreDigest
@@ -195,6 +196,9 @@ class ForwardRepository(
         }
 
     override suspend fun attachmentsNeedingFetch(): Map<String, String> = dao.attachmentsNeedingFetch().associate { it.hash to it.senderId }
+
+    override suspend fun carriedAttachments(): List<CarriedAttachment> =
+        dao.carriedAttachments().map { CarriedAttachment(it.hash, it.recipientId, it.receivedAt) }
 
     override suspend fun recipientOf(id: String): String? = dao.recipientOf(id)
 

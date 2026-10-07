@@ -2000,7 +2000,9 @@ class InboundPipeline(
      * A no-op for our own sends and delivered messages — [blobStore] already holds the blob. A room post (or a
      * key-less forward) of a picture we hold sealed from a conversation with its author is copied from our own store
      * instead, exactly as [deliverChat] would (ADR 2026-10.mptm) — a carried room frame can be custodied before it
-     * is delivered here.
+     * is delivered here. A DM whose recipient is linked to us waits ([CarrierPullPolicy], ADR 2026-10.g24x): the
+     * recipient is fetching it from the author now, and our copy would only split the author's feed; the database
+     * re-arm pulls it later.
      */
     suspend fun onCarriedFrame(
         env: RelayEnvelope,
@@ -2012,6 +2014,11 @@ class InboundPipeline(
         if (blobStore.has(hash)) return
         if (copyFromOwnStore(hash, env.senderId)) return
         if (blobs.carrierOnlyBlobBytes() >= CARRIER_BLOB_BUDGET_BYTES) return
+        val linked = transport.neighbors.value.mapTo(HashSet()) { it.nodeId }
+        if (CarrierPullPolicy.defers(listOf(CarriedAttachment(hash, env.recipientId, clock())), linked, clock())) {
+            metrics.onCarrierPullDeferred()
+            return
+        }
         blobExchange.want(hash, author = env.senderId, via = via)
     }
 

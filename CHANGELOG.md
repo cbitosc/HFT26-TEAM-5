@@ -41,6 +41,9 @@ document:
   message.
 - A photo saved from a chat or another app no longer gets a little blurrier each time it's sent on. Knit still
   removes its location and camera details before the photo leaves your phone.
+- A photo sent to someone nearby over Bluetooth no longer crawls when other phones are around. Phones that
+  only pass the message along now wait instead of downloading the photo at the same moment, so its recipient
+  gets it first.
 
 ### Fixed
 

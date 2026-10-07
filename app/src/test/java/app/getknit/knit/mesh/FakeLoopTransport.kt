@@ -43,6 +43,20 @@ class FakeLoopTransport(
     /** `nodeId to key` pairs a test declares as queued or streaming toward that peer. */
     val inFlight = mutableSetOf<Pair<String, String>>()
 
+    /** `nodeId to key` pairs a test declares as being fed on a shared-budget link toward that peer ([fileFeedingTo]). */
+    val feedingFiles: MutableSet<Pair<String, String>> =
+        java.util.concurrent.ConcurrentHashMap
+            .newKeySet()
+
+    /** Of [feedingFiles], the ones a test declares too slow to end within any bound asked about. */
+    val slowFeeds: MutableSet<Pair<String, String>> =
+        java.util.concurrent.ConcurrentHashMap
+            .newKeySet()
+
+    /** Poked by a test to say a feed ended ([fileFeedsEnded]). */
+    val feedEnds = MutableSharedFlow<Unit>(extraBufferCapacity = 8)
+    override val fileFeedsEnded = feedEnds.asSharedFlow()
+
     /** Node ids a test declares as streaming a file in to us right now. */
     val arrivingFrom = mutableSetOf<String>()
 
@@ -132,6 +146,12 @@ class FakeLoopTransport(
         nodeId: String,
         key: String,
     ): Boolean = (nodeId to key) in inFlight
+
+    override fun fileFeedingTo(
+        nodeId: String,
+        key: String,
+        withinMs: Long,
+    ): Boolean = (nodeId to key) in feedingFiles && (nodeId to key) !in slowFeeds
 
     override fun feedingLoad(nodeId: String): Int = feeding
 

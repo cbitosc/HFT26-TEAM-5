@@ -219,6 +219,7 @@ class MeshMetrics {
     private val framesReplayed = AtomicLong()
     private val healsCompleted = AtomicLong()
     private val blobAsksHandled = AtomicLong()
+    private val carrierPullsDeferred = AtomicLong()
     private val filesResumedOut = AtomicLong()
     private val filesResumedIn = AtomicLong()
     private val splicesRefused = AtomicLong()
@@ -450,6 +451,14 @@ class MeshMetrics {
      */
     fun onBlobAskHandled() {
         blobAsksHandled.incrementAndGet()
+    }
+
+    /**
+     * A carrier left a carried DM's picture to its linked recipient instead of pulling it now (ADR 2026-10.g24x) — what
+     * the mesh-in-a-box lab waits on, since custody holds the frame before the pull is decided.
+     */
+    fun onCarrierPullDeferred() {
+        carrierPullsDeferred.incrementAndGet()
     }
 
     /** We streamed a neighbor only the rest of a blob, from the offset its ask named: a cut transfer resumed (#116). */
@@ -1238,6 +1247,7 @@ class MeshMetrics {
             filesSentNan = filesSentNan.get(),
             filesSentBt = filesSentBt.get(),
             blobAsksHandled = blobAsksHandled.get(),
+            carrierPullsDeferred = carrierPullsDeferred.get(),
             filesResumedOut = filesResumedOut.get(),
             filesResumedIn = filesResumedIn.get(),
             splicesRefused = splicesRefused.get(),
@@ -1251,6 +1261,7 @@ class MeshMetrics {
             blobFallbacks = blob(BlobExchange.BlobEvent.Fallback),
             blobBlindAsks = blob(BlobExchange.BlobEvent.BlindAsk),
             blobPullThroughs = blob(BlobExchange.BlobEvent.PullThrough),
+            blobAsksParked = blob(BlobExchange.BlobEvent.Park),
         )
 
     private fun blob(event: BlobExchange.BlobEvent): Long = blobEvents.getValue(event).get()
@@ -1469,6 +1480,7 @@ class MeshMetrics {
             val filesSentNan: Long = 0,
             val filesSentBt: Long = 0,
             val blobAsksHandled: Long = 0,
+            val carrierPullsDeferred: Long = 0,
             val filesResumedOut: Long = 0,
             val filesResumedIn: Long = 0,
             val splicesRefused: Long = 0,
@@ -1482,6 +1494,7 @@ class MeshMetrics {
             val blobFallbacks: Long = 0,
             val blobBlindAsks: Long = 0,
             val blobPullThroughs: Long = 0,
+            val blobAsksParked: Long = 0,
         )
 
         /**

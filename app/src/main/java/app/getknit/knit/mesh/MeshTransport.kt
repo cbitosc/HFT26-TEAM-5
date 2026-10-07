@@ -424,6 +424,28 @@ interface MeshTransport {
     ): Boolean = false
 
     /**
+     * True while a link toward [nodeId] whose feeds share one pace budget — a Bluetooth link not on Coded (ADR
+     * 2026-10.8jwn) — is feeding a file under [key] whose feed should end within [withinMs]: streaming it at a pace
+     * that feeds the rest in time, or holding it queued with nothing else streaming. A feed slower than that (an
+     * unearned link's base share, a stalled one) is not one to wait behind.
+     * Never after its end: unlike [fileInFlightTo], a file fed in full no longer counts while the link feeds the peer
+     * something else, and a copy queued behind another file does not count until its turn. Read by
+     * `BlobExchange.onRequest`, which feeds one such copy of a blob at a time (ADR 2026-10.g24x). Default false: a
+     * plane whose feeds take nothing from each other is never waited on.
+     */
+    fun fileFeedingTo(
+        nodeId: String,
+        key: String,
+        withinMs: Long,
+    ): Boolean = false
+
+    /**
+     * Fires when a link of this transport ends a file's stream, fed or not — on the writer the write woke, so a holder
+     * that parked asks behind that feed serves them while the CPU is up (ADR 2026-10.g24x). Default: never.
+     */
+    val fileFeedsEnded: Flow<Unit> get() = emptyFlow()
+
+    /**
      * How many files the plane a file to [nodeId] would ride is feeding right now, this node's own sends: what a
      * `blobhas` answer names as its `load` (ADR 2026-10.6e5t). A Bluetooth holder splits one pace budget across every
      * link it is feeding (ADR 2026-10.8jwn), so an asker choosing between two holders takes the less loaded one.

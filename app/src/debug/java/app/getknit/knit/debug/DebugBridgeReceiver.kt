@@ -1272,6 +1272,8 @@ class DebugBridgeReceiver :
             .put("blobFallbacks", snap.files.blobFallbacks)
             .put("blobBlindAsks", snap.files.blobBlindAsks)
             .put("blobPullThroughs", snap.files.blobPullThroughs)
+            .put("blobAsksParked", snap.files.blobAsksParked)
+            .put("carrierPullsDeferred", snap.files.carrierPullsDeferred)
             .put("dmSealedV2", snap.seals.dmSealedV2)
             .put("dmSealedV3", snap.seals.dmSealedV3)
             .put("ticksUnsigned", snap.receipts.ticksUnsigned)

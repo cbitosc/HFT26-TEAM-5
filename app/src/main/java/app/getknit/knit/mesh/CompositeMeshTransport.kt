@@ -304,6 +304,14 @@ class CompositeMeshTransport(
         key: String,
     ): Boolean = children.any { it.fileInFlightTo(nodeId, key) }
 
+    override fun fileFeedingTo(
+        nodeId: String,
+        key: String,
+        withinMs: Long,
+    ): Boolean = children.any { it.fileFeedingTo(nodeId, key, withinMs) }
+
+    override val fileFeedsEnded: Flow<Unit> = merge(*children.map { it.fileFeedsEnded }.toTypedArray())
+
     /**
      * The load of the plane an attachment to [nodeId] would ride: the high-throughput child when it holds a link to
      * [nodeId] (an attachment takes it, [sendFile]), else the preference-order link holder.

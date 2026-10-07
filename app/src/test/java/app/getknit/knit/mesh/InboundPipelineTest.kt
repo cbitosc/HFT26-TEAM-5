@@ -2390,6 +2390,43 @@ class InboundPipelineTest {
             coVerify { rig.blobExchange.want("dm-doc", alice.nodeId, "carrier", null) }
         }
 
+    /** ADR 2026-10.g24x: a DM's linked recipient is fetching its picture now, so a carrier holds its own pull back. */
+    @Test
+    fun onCarriedFrameHoldsBackTheAttachmentOfADmWhoseRecipientIsLinked() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            val bob = FakeLoopTransport("bob")
+
+            fun dm(
+                id: String,
+                hash: String,
+                to: String,
+            ) = rig.attachmentChat(alice, id = id, attachmentHash = hash).let {
+                RelayEnvelope(
+                    type = it.type,
+                    id = it.id,
+                    senderId = it.senderId,
+                    sentAt = it.sentAt,
+                    recipientId = to,
+                    payload = it.payload,
+                )
+            }
+
+            rig.transport.connect(bob)
+            rig.pipeline.onCarriedFrame(dm("d1", "for-linked-bob", "bob"))
+            rig.pipeline.onCarriedFrame(dm("d2", "for-absent-carol", "carol"))
+            rig.pipeline.onCarriedFrame(rig.attachmentChat(alice, id = "r1", attachmentHash = "room-pic"))
+
+            coVerify(exactly = 0) { rig.blobExchange.want("for-linked-bob", any(), any(), any()) }
+            coVerify { rig.blobExchange.want("for-absent-carol", alice.nodeId, null, null) }
+            coVerify { rig.blobExchange.want("room-pic", alice.nodeId, null, null) }
+
+            rig.transport.disconnect(bob)
+            rig.pipeline.onCarriedFrame(dm("d3", "for-gone-bob", "bob"))
+            coVerify { rig.blobExchange.want("for-gone-bob", alice.nodeId, null, null) }
+        }
+
     @Test
     fun onCarriedFrameSkipsABlobWeAlreadyHold() =
         runTest {

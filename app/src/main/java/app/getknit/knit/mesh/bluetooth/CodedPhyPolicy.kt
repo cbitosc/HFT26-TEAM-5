@@ -100,9 +100,9 @@ data class PhyTuning(
      */
     val filePaceBytesPerSec: Int = CodedPhyPolicy.BLE_PACE_BYTES_PER_SEC,
     /**
-     * The budget that replaces [filePaceBytesPerSec] while every link feeding a file has earned the short interval it
-     * asked for ([LinkBoostPolicy], #120), on a phone holding at most [boostFullLeLinks] LE connections; ≤ 0 is
-     * unbounded. `…debug.LINKTUNE --ei boostPace` sweeps it.
+     * The budget that replaces [filePaceBytesPerSec] for a link that has earned the short interval it asked for
+     * ([LinkBoostPolicy], #120; each link its own since ADR 2026-10.g24x), on a phone holding at most [boostFullLeLinks]
+     * LE connections; ≤ 0 is unbounded. `…debug.LINKTUNE --ei boostPace` sweeps it.
      */
     val boostPaceBytesPerSec: Int = CodedPhyPolicy.BOOST_PACE_BYTES_PER_SEC,
     /** The earned budget on a phone holding more LE connections than that; `…debug.LINKTUNE --ei crowdedPace`. */
@@ -295,7 +295,7 @@ object CodedPhyPolicy {
     const val BLE_PACE_BYTES_PER_SEC = 4 * 1024
 
     /**
-     * The budget while every feeding link has earned a short connection interval ([LinkBoostPolicy], #120). A link at
+     * The budget of a link that has earned a short connection interval ([LinkBoostPolicy], #120). A link at
      * `CONNECTION_PRIORITY_HIGH` settles at 15 ms or less and drained 22.5–29 KB/s from the Pixel 9 (three packets in
      * flight, about two per event, 2026-10-06); 18 KiB/s is 85% of the slowest, and on that trial a 700 KB photo crossed
      * in 41–42 s with every text behind it in 3.4 s or less. It holds up to [BOOST_FULL_LE_LINKS] LE connections.
@@ -324,8 +324,8 @@ object CodedPhyPolicy {
      * The pace a file is fed to a Bluetooth link at, by the PHY the link was last read on. A link on 1M or 2M takes its
      * share of [PhyTuning.filePaceBytesPerSec]: the budget split evenly among the [feeding] links on 1M or 2M streaming
      * a file right now, this one included (ADR 2026-10.8jwn), in chunks of about [CHUNK_FEED_SECONDS] of that share, so a frame
-     * queued mid-file waits about one chunk on the feed side. While every one of those links has [earned] a short
-     * connection interval (#120) the budget is [PhyTuning.boostPaceBytesPerSec] instead, or
+     * queued mid-file waits about one chunk on the feed side. While this link has [earned] a short connection interval
+     * (#120; each link its own since ADR 2026-10.g24x) the budget is [PhyTuning.boostPaceBytesPerSec] instead, or
      * [PhyTuning.crowdedBoostPaceBytesPerSec] on a phone holding more than [PhyTuning.boostFullLeLinks] LE connections
      * ([leLinks]), split the same way. A link on
      * Coded S=8 drains far slower, and at the 1M pace a whole photo reached the stack in seconds and every frame after it

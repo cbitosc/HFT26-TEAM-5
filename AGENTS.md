@@ -83,8 +83,9 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   `…debug.LINKTUNE`, or measuring a drain:** READ ADR 2026-10.2da4 (and work item #120). A link's drain is the host's
   buffer share times the interval, so while a file moves either way, a side whose screen is on asks for
   `CONNECTION_PRIORITY_HIGH` (and the MTU once) through one GATT client per link, and lets go 15 s after neither
-  direction streams, or at once on screen-off; a dark side only listens. The budget rises to 18 KiB/s (12 past four LE
-  connections) only while every feeding link *reported* ≤ 15 ms (`earned`), else 8jwn's 4 KiB/s. Dark in release until
+  direction streams, or at once on screen-off; a dark side only listens. A link's budget rises to 18 KiB/s (12 past four
+  LE connections) only while that link *reported* ≤ 15 ms (`earned`; per link since ADR 2026-10.g24x), else 8jwn's
+  4 KiB/s. Dark in release until
   its trial. The trial is `scripts/ble-drain-trial.py --boost on|off`, and the oracle is both phones' HCI snoops read
   by `scripts/btsnoop-drain.py` — the sender's, since only it shows the queue.
 - **When touching `mesh/lora/` or `mesh/bluetooth/meshtastic/` (the LoRa/Meshtastic bridge):** READ
@@ -385,7 +386,12 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   trip); the rest keep f7gg's round. A query is not an ask (it serves, pulls and stamps nothing), HAVE is the serve predicate read without materialising,
   SENDING peeks the memo, an unknown state is never HAVE (PARTIAL is reserved for a range ask), every build answers
   and only the asking is dark in release. Wire change: the iOS port owes the responder as a companion change.
-  Lab: `BlobHaveLabTest`; unit: `BlobHolderQueryTest`. **Before touching `FramedLink.rxFile`, `ArrivingFile`,
+  Lab: `BlobHaveLabTest`; unit: `BlobHolderQueryTest`. **Before touching `CarrierPullPolicy`,
+  `ForwardStore.carriedAttachments`, what `onCarriedFrame` / `rewantMissingBlobs` hold back, `BlobExchange`'s parked
+  asks (`parkBehindFeed`, `serveParked`, `PARK_MAX_MS`), `MeshTransport.fileFeedingTo` / `FramedLink.feedsFile`, or
+  `answersIn`'s author rule:** READ ADR 2026-10.g24x. A carrier leaves a DM's picture to its linked recipient for up to
+  10 min, a holder feeds one 1M/2M copy of a blob at a time (bounded at 30 s), and a linked author's HAVE decides the
+  fetch. Lab: `PictureFanoutLabTest`. **Before touching `FramedLink.rxFile`, `ArrivingFile`,
   `FileHeaderWire.size`, `MeshController.arrivals` / `arrivalTicker`, `ChatViewModel.arrivals` or
   `ui/chat/ArrivalIndicator`:** READ ADR 2026-10.y9qh — the chat's progress ring is the same read of the link
   (bytes in, and the size the header declared: a label, never a bound), polled only while an attachment the

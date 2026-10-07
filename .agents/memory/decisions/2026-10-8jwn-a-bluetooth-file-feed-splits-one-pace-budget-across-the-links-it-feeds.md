@@ -110,3 +110,7 @@ every link feeding a file on 1M/2M has reported 15 ms or less, the budget is `Ph
 4 KiB/s. `CodedPhyPolicy.pace` takes the `earned` flag and the LE count, `paceFor` computes them, and the
 `bt file pace` line ends `earned=… le=…`. On the trial's best cell a 700 KB photo crossed in 41–42 s with every text behind
 it in 3.4 s or less. Dark in release behind `BLE_LINK_BOOST` until its device trial (2da4).
+
+**Amended 2026-10-06 (ADR 2026-10.g24x).** The split stands, but each link's budget is its own (the boosted one only
+while that link has earned it), and a holder feeds one 1M/2M copy of a blob at a time, so a room or group photo no
+longer means one feed per member asking at once.

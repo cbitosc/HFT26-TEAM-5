@@ -126,6 +126,16 @@ interface ForwardDao {
     suspend fun attachmentsNeedingFetch(): List<NeededAttachment>
 
     /**
+     * One row per carried frame naming an attachment not in the `blobs` table yet: whom it is for and when it was
+     * carried — [attachmentsNeedingFetch] per frame, for the carrier's pull deferral (ADR 2026-10.g24x).
+     */
+    @Query(
+        "SELECT attachmentHash AS hash, recipientId, receivedAt FROM forward_store " +
+            "WHERE attachmentHash IS NOT NULL AND attachmentHash NOT IN (SELECT hash FROM blobs)",
+    )
+    suspend fun carriedAttachments(): List<CarriedAttachmentRow>
+
+    /**
      * Every carried frame including expired-but-unswept rows, newest first — the `debug.STORE` bridge dump.
      * Deliberately wider than what the digest folds (live rows only), so a dump can show the benign lapsed
      * residue awaiting the sweep alongside the live set the cue plane actually advertises.
@@ -218,3 +228,10 @@ interface ForwardDao {
         now: Long,
     )
 }
+
+/** Room projection for [ForwardDao.carriedAttachments]: one carried frame naming a blob we lack. */
+data class CarriedAttachmentRow(
+    val hash: String,
+    val recipientId: String?,
+    val receivedAt: Long,
+)

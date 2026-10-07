@@ -59,6 +59,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -200,11 +201,9 @@ class BluetoothMeshTransport(
     // with the link.
     private val linkPhy = ConcurrentHashMap<FramedLink, LinkPhy>()
 
-    // The feeding count and earned flag [paceFor] last logged, so `bt file pace` is written when the split or the budget
-    // changes, not every chunk.
-    @Volatile private var lastFeeding = 0
-
-    @Volatile private var lastEarned = false
+    // The feeding count and earned flag [paceFor] last logged for each link, so `bt file pace` is written when a link's
+    // split or budget changes, not every chunk. Dropped with the link.
+    private val lastPace = ConcurrentHashMap<FramedLink, Pair<Int, Boolean>>()
 
     // This phone's LE connections as [leLinkCount] last counted them, and when: the boosted budget depends on how many
     // share the controller's buffers, and the count costs a binder call, so a feed reads it at most every 10 s.
@@ -686,6 +685,18 @@ class BluetoothMeshTransport(
         key: String,
     ): Boolean = links[nodeId]?.hasPendingFile(key) ?: false
 
+    // A Coded link's feed keeps its own pace outside the split ([paceFor]), so only a 1M/2M one counts.
+    override fun fileFeedingTo(
+        nodeId: String,
+        key: String,
+        withinMs: Long,
+    ): Boolean = links[nodeId]?.takeIf { linkPhy[it] != LinkPhy.CODED }?.feedsFile(key, withinMs) ?: false
+
+    // Every link's file-stream ends, poked on its writer (FramedLink's onFileFed). Lossy past one: a reader re-reads the
+    // links, so one pending poke says everything a second would.
+    private val feedEnds = MutableSharedFlow<Unit>(extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+    override val fileFeedsEnded: Flow<Unit> = feedEnds.asSharedFlow()
+
     // [paceFor]'s divisor: the links splitting the 1M/2M budget right now. A Coded feed keeps its own pace outside it.
     override fun feedingLoad(nodeId: String): Int = links.values.count { it.txInProgress && linkPhy[it] != LinkPhy.CODED }
 
@@ -1040,27 +1051,27 @@ class BluetoothMeshTransport(
     /**
      * The pace a file is fed to [link] at, by the PHY it was last read on (#114, ADR 2026-10.yvn6), and on 1M/2M by how
      * many links share the budget right now (#117, ADR 2026-10.8jwn): every link here streaming a file and not on Coded, this one included.
-     * The budget is the boosted one only while every one of those links has earned it (#120): one that has not, or has
-     * no boost (an iPhone, the flag off), holds them all to the base. Read before each chunk, so a feed that starts or
-     * ends, or a link that earns or loses the boost, re-splits the others at their next chunk. A feed whose writes stall
-     * keeps its share until its write fails.
+     * The budget is [link]'s own (ADR 2026-10.g24x): the boosted one while it has earned the boost (#120), else the base. A link that
+     * has not earned it, or has no boost (an iPhone, the flag off), holds only itself to the base — it once held every
+     * feeding link there, and one iPhone pulling a photo cut three boosted links to a quarter of their pace. Read before
+     * each chunk, so a feed that starts or ends, or a link that earns or loses the boost, re-splits at its next chunk. A
+     * feed whose writes stall keeps its share until its write fails.
      */
     private fun paceFor(link: FramedLink): PaceConfig {
         val phy = linkPhy[link] ?: LinkPhy.UNKNOWN
-        val feedingLinks = feedingLinks()
-        val feeding = feedingLinks.size
-        val earned = earned(feedingLinks)
+        val feeding = feedingLinks().size
+        val earned = earned(link)
         val le = if (earned) leLinkCount() else links.size
         val tuning = CodedPhyDiag.tuning
         val pace = CodedPhyPolicy.pace(phy, tuning, feeding, earned, le)
-        if (phy != LinkPhy.CODED && (feeding != lastFeeding || earned != lastEarned)) {
-            lastFeeding = feeding
-            lastEarned = earned
-            // `earned` and `le` ride last, so every parse of the line before them holds.
+        // Recorded only for the live link: a writer still finishing a chunk on a link torn down meanwhile would put it
+        // back into the map after its teardown removed it, and pin it there.
+        if (phy != LinkPhy.CODED && links[link.nodeId] === link && lastPace.put(link, feeding to earned) != feeding to earned) {
+            // `earned` and `le` ride after the split, and the link last, so every parse of the line before them holds.
             Log.i(
                 TAG,
                 "bt file pace budget=${CodedPhyPolicy.budget(tuning, earned, le)} feeding=$feeding " +
-                    "share=${pace.bytesPerSec} chunk=${pace.chunkBytes} earned=$earned le=$le",
+                    "share=${pace.bytesPerSec} chunk=${pace.chunkBytes} earned=$earned le=$le → ${link.nodeId}",
             )
         }
         return pace
@@ -1090,11 +1101,16 @@ class BluetoothMeshTransport(
     private fun feedingLinks(): List<FramedLink> = links.values.filter { it.txInProgress && linkPhy[it] != LinkPhy.CODED }
 
     /**
-     * Whether every one of [feedingLinks] has earned the boosted budget (none feeding earns nothing). Never while
-     * Bluetooth audio streams: the budget was measured with none, and A2DP takes the air a 15 ms link drains through.
+     * Whether every one of [feedingLinks] has earned the boosted budget (none feeding earns nothing): the debug bridge's
+     * summary. Each feed is paced by its own link's [earned].
      */
-    private fun earned(feedingLinks: List<FramedLink>): Boolean =
-        feedingLinks.isNotEmpty() && !audioMonitor.contended.value && feedingLinks.all { boosts[it]?.earned == true }
+    private fun earned(feedingLinks: List<FramedLink>): Boolean = feedingLinks.isNotEmpty() && feedingLinks.all { earned(it) }
+
+    /**
+     * Whether [link] has earned the boosted budget (#120, ADR 2026-10.g24x). Never while Bluetooth audio streams: the budget was
+     * measured with none, and A2DP takes the air a 15 ms link drains through.
+     */
+    private fun earned(link: FramedLink): Boolean = !audioMonitor.contended.value && boosts[link]?.earned == true
 
     /**
      * Makes [link]'s boost at its first file either way, and pokes it on every file edge after (FramedLink's `onBusy`).
@@ -1973,6 +1989,7 @@ class BluetoothMeshTransport(
                 log = { msg -> Log.d(TAG, msg) },
                 landing = landing,
                 onBusy = { boostPoke(events.link) },
+                onFileFed = { feedEnds.tryEmit(Unit) },
             )
         events.link = framed
         crossings.forget(nodeId) // a fresh stream starts clean: the peer may have restarted with an empty SeenSet
@@ -1987,6 +2004,7 @@ class BluetoothMeshTransport(
             linkAddresses.remove(prev)
             linkDevices.remove(prev)
             linkPhy.remove(prev)
+            lastPace.remove(prev)
             phyControls.remove(prev)?.close()
             publishLinkPhys()
             doorbells.remove(prev)?.close() // teardownLink(only = prev) will find it replaced and release nothing
@@ -2035,6 +2053,7 @@ class BluetoothMeshTransport(
         linkAddresses.remove(fl)
         linkDevices.remove(fl)
         linkPhy.remove(fl)
+        lastPace.remove(fl)
         phyControls.remove(fl)?.let { control ->
             notePhyDrop(control.status(), reason)
             control.close()

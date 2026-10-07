@@ -757,6 +757,13 @@ class MeshLab {
         const val FIRST_ASK_GRACE_MS = 20_000L
 
         /**
+         * How long a holder parks an ask behind another copy's feed ([app.getknit.knit.mesh.BlobExchange.PARK_MAX_MS],
+         * 30 s on a phone), shortened: a scenario that holds one peer's files would otherwise stall every other
+         * asker's copy that long. A scenario about parking boots its holder with a long one.
+         */
+        const val PARK_MAX_MS = 2_000L
+
+        /**
          * How long a fetch waits for its holder queries' answers, lengthened the same way
          * ([app.getknit.knit.mesh.BlobExchange.QUERY_WAIT_MS] is 5 s; ADR 2026-10.6e5t): a scenario that counts asks
          * must not race a slow runner's answer. With [FIRST_ASK_GRACE_MS] it stays under
@@ -818,6 +825,11 @@ data class LabLimits(
     val rideHoldMs: Long = MeshLab.RIDE_HOLD_MS,
     /** How long a blob round's first ask has before every other neighbour is asked ([MeshLab.FIRST_ASK_GRACE_MS]). */
     val firstAskGraceMs: Long = MeshLab.FIRST_ASK_GRACE_MS,
+    /**
+     * The longest a holder parks an ask behind another copy's feed ([MeshLab.PARK_MAX_MS]; ADR 2026-10.g24x). Short by
+     * default: a held pipe is a feed that never ends, and only a scenario about parking means to wait on one.
+     */
+    val parkMaxMs: Long = MeshLab.PARK_MAX_MS,
     /**
      * Whether the node queries its neighbours for a blob's holders before it asks (ADR 2026-10.6e5t;
      * `BuildConfig.BLOB_QUERY`, on in debug and off in release). Off by default, so every other scenario asks blind,
@@ -1141,6 +1153,7 @@ class LabNode internal constructor(
                 spoolTickMs = limits.spoolTickMs,
                 spoolAttachmentRetryMs = limits.spoolAttachmentRetryMs,
                 firstAskGraceMs = limits.firstAskGraceMs,
+                blobParkMaxMs = limits.parkMaxMs,
                 blobHolderQuery =
                     BlobExchange.HolderQuery(
                         enabled = limits.blobQuery,

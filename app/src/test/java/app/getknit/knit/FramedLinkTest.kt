@@ -103,6 +103,7 @@ class FramedLinkTest {
         pace: () -> PaceConfig = { PaceConfig() },
         metrics: MeshMetrics = MeshMetrics(),
         onBusy: () -> Unit = {},
+        onFileFed: () -> Unit = {},
     ): Harness {
         val toLink = PipedOutputStream()
         val linkInput = PipedInputStream(toLink, 1 shl 18)
@@ -132,6 +133,7 @@ class FramedLinkTest {
                 now = { 0L },
                 pace = pace,
                 onBusy = onBusy,
+                onFileFed = onFileFed,
             )
         link.start()
         return Harness(link, toLink, fromLink, callbacks)
@@ -319,6 +321,34 @@ class FramedLinkTest {
         assertTrue("pending while streaming", h.link.hasPendingFile(key))
         while (rec != null && rec.type != LinkFraming.Type.FILE_END) rec = LinkFraming.read(h.fromLink)
         assertTrue("released once the stream ends", awaitUntil { !h.link.hasPendingFile(key) })
+    }
+
+    @Test
+    fun aFileIsFedOnlyWhileItStreamsOrIsNextAndOnlyWhileItsPaceEndsItInTime() {
+        // ADR 2026-10.g24x: what a holder parks a second ask behind. A copy queued behind another file is not fed yet,
+        // one at a pace that cannot finish it within the bound is not one to wait on, and its end is poked.
+        val ended = AtomicInteger()
+        val h =
+            harness(
+                fromLinkBuffer = 16 * 1024,
+                pace = { PaceConfig(bytesPerSec = 1024, chunkBytes = 2048) },
+                onFileFed = { ended.incrementAndGet() },
+            )
+        val first = "a".repeat(64)
+        val second = "b".repeat(64)
+        val file = tmp.newFile("feeds.bin").apply { writeBytes(ByteArray(80 * 1024)) }
+        assertTrue(h.link.sendFile(file, FileMeta(FileKind.ATTACHMENT, first, "image/jpeg")))
+        assertTrue(h.link.sendFile(file, FileMeta(FileKind.ATTACHMENT, second, "image/jpeg")))
+        assertEquals(LinkFraming.Type.FILE_HEADER, LinkFraming.read(h.fromLink)!!.type)
+        assertEquals(LinkFraming.Type.FILE_CHUNK, LinkFraming.read(h.fromLink)!!.type)
+        assertTrue("the one streaming is fed", awaitUntil { h.link.feedsFile(first) })
+        // The pace is noted after the chunk's write returns, which can be after the test has read it.
+        assertTrue("78 KB at 1 KiB/s is not done in 30 s", awaitUntil { !h.link.feedsFile(first, withinMs = 30_000) })
+        assertTrue(h.link.feedsFile(first, withinMs = 120_000))
+        assertFalse("the one queued behind it is not fed yet", h.link.feedsFile(second))
+        h.link.close()
+        assertTrue("a stream cut short still ends its feed", awaitUntil { ended.get() >= 1 })
+        assertFalse(h.link.feedsFile(first))
     }
 
     @Test
