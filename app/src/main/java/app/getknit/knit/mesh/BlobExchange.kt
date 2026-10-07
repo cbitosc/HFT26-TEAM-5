@@ -347,7 +347,7 @@ class BlobExchange(
         val p = Plan()
         w.fetch?.let { f ->
             // Queries go out mid-fetch too (a newcomer, a fetching neighbour's recheck): fresh answers for the fallback.
-            owedQueries(w, capableOf(linked.filter { it.id !in w.pullers }), t, p)
+            owedQueries(w, capableOf(linked.filter { it.id !in w.pullers }), t, p, stuckOn = stuckOn(f, linked))
             fetchWait(w, f, linked, kept, t, p)?.let { return p.waitFor(it) }
         }
         // A cycle closes only with no ask outstanding, so an ask's grace always runs out inside the cycle it began in.
@@ -365,20 +365,39 @@ class BlobExchange(
     private fun capableOf(live: List<Candidate>): List<Candidate> = if (holderQuery.enabled) live.filter { it.capable } else emptyList()
 
     /**
+     * The holder [f] waits on while what it streams us has more than [STREAM_SWITCH_MS] left, or null: the one wait in
+     * which another neighbour's fresh HAVE moves the fetch ([idleHolderPast]).
+     */
+    private fun stuckOn(
+        f: Fetch,
+        linked: List<Candidate>,
+    ): String? =
+        linked
+            .firstOrNull { it.id == f.peer }
+            ?.takeIf { c -> c.streaming && (c.streamLeftMs ?: 0L) > STREAM_SWITCH_MS }
+            ?.id
+
+    /**
      * The queries [w] owes this cycle: each capable neighbour once, and again once its recheck is due ([recheckAt]) — a
-     * recheck of one we asked to pull it through is counted against [PULL_RECHECKS].
+     * recheck of one we asked to pull it through is counted against [PULL_RECHECKS]. [stuckOn] is the holder a fetch
+     * waits on behind a long stream ([stuckOn]), while it is one.
      */
     private fun owedQueries(
         w: Want,
         capable: List<Candidate>,
         t: Long,
         p: Plan,
+        stuckOn: String? = null,
     ) {
         // A recheck due within the timer's coalescing window goes now: the timer stepped it early to share this frame.
-        val owed = capable.filter { c -> c.id !in w.queried || recheckAt(w, c.id)?.let { t + TIMER_COALESCE_MS >= it } == true }
+        val owed =
+            capable.filter { c ->
+                c.id !in w.queried || recheckAt(w, c.id, stuckOn)?.let { t + TIMER_COALESCE_MS >= it } == true
+            }
         for (c in owed) {
             val recheck = c.id in w.queried
-            if (recheck && w.answers[c.id]?.state != BlobHasItem.FETCHING) w.pullRechecks.merge(c.id, 1, Int::plus)
+            val counted = w.answers[c.id]?.state != BlobHasItem.FETCHING && !lackedWhileStuck(w, c.id, stuckOn)
+            if (recheck && counted) w.pullRechecks.merge(c.id, 1, Int::plus)
             w.queried[c.id] = t
             p.query += c.id
         }
@@ -390,11 +409,14 @@ class BlobExchange(
      * it, as long after the pull or its last query, at most [PULL_RECHECKS] times — it holds the blob the moment its own
      * fetch lands, and the next cycle may be minutes off ([Want.cycleGap]). A trial's line waited 36 s on the tick. Only
      * in the first [PULL_RECHECK_DEAD_CYCLES] cycles of a dead streak, where a pull through more than one hop lands: past
-     * them the blob is one nobody reaches, and its rechecks were most of what it cost (the 2026-10-05 re-run).
+     * them the blob is one nobody reaches, and its rechecks were most of what it cost (the 2026-10-05 re-run). And,
+     * while the fetch waits on [stuckOn] behind a long stream, one that said it lacked the blob, as long after it said so
+     * ([lackedWhileStuck]).
      */
     private fun recheckAt(
         w: Want,
         id: String,
+        stuckOn: String? = null,
     ): Long? {
         val at = w.queried[id] ?: return null
         val state = w.answers[id]?.state
@@ -403,10 +425,26 @@ class BlobExchange(
                 w.pullRechecks.getOrDefault(id, 0) < PULL_RECHECKS
         return when {
             state == BlobHasItem.FETCHING -> at + holderQuery.fetchingRecheckMs
+            lackedWhileStuck(w, id, stuckOn) -> at + holderQuery.fetchingRecheckMs
             pulling -> maxOf(at, w.askedAt[id] ?: at) + holderQuery.fetchingRecheckMs
             else -> null
         }
     }
+
+    /*
+     * A NONE is otherwise final for the fetch: a cycle opens only with no ask outstanding, so it is never asked again
+     * while one is. But a neighbour that lacked the blob when we asked often holds it a minute later: two members fetch
+     * a new post at once, and the one queued behind a long stream never learns the other's copy landed (the iPhone smoke
+     * of 2026-10-07: the P8 sat 8 min behind a DM file while the P9 held the photo idle, answering NONE from 0.4 s before
+     * its own fetch began). Only while stuck, since only then would its HAVE move the fetch.
+     */
+
+    /** Whether [id] is rechecked as one that lacked the blob while the fetch waits on [stuckOn] — see above. */
+    private fun lackedWhileStuck(
+        w: Want,
+        id: String,
+        stuckOn: String?,
+    ): Boolean = stuckOn != null && id != stuckOn && id !in w.failed && w.answers[id]?.state == BlobHasItem.NONE
 
     /**
      * How long the outstanding fetch [f] still has, or null once it is over: failed, or cleared so the holder is asked
@@ -1565,15 +1603,16 @@ class BlobExchange(
 
     /**
      * Withdraws our ask for [hash] from [to] (a `blobcancel`, ADR 2026-10.nsr7): the holder drops it if it is parked, and
-     * a copy queued and not yet streaming. Only to a neighbour whose link carries [Protocol.CAP_BLOB_HAVE], and not yet
-     * to an iPhone ([Protocol.CAP_DOORBELL]), as [onFileProgress].
+     * a copy queued and not yet streaming. Only to a neighbour whose link carries [Protocol.CAP_BLOB_HAVE]; unlike
+     * [onFileProgress], an iPhone ([Protocol.CAP_DOORBELL]) gets one too, since its port takes the type (knit-ios ADR
+     * 2026-10.ds45).
      */
     private suspend fun withdrawAsk(
         hash: String,
         to: String,
     ) {
         val peer = transport.neighbors.value.firstOrNull { it.nodeId == to } ?: return
-        if (peer.capabilities and Protocol.CAP_BLOB_HAVE == 0L || peer.capabilities and Protocol.CAP_DOORBELL != 0L) return
+        if (peer.capabilities and Protocol.CAP_BLOB_HAVE == 0L) return
         try {
             transport.send(
                 unsignedPointToPoint(FrameType.BLOB_CANCEL, newRequestId(), selfId(), WireCodec.encodePayload(BlobCancelContent(hash))),
@@ -1603,7 +1642,11 @@ class BlobExchange(
         val queued = transport.cancelQueuedFile(from, hash)
         // A later ask of its own is a fresh one: served, not refused as a copy already sent.
         if (queued) forgetServed(hash, from)
-        if (!parkedOne && !queued) return
+        if (!parkedOne && !queued) {
+            // Logged too: a withdrawal that came after the copy began, or after it ended, is otherwise no trace at all.
+            log("blob cancel ← $from ${hash.take(LOG_HASH_CHARS)}…: nothing queued")
+            return
+        }
         onEvent(BlobEvent.CancelTaken)
         log("blob cancel ← $from ${hash.take(LOG_HASH_CHARS)}…: ${if (parkedOne) "parked ask dropped" else "queued copy withdrawn"}")
     }

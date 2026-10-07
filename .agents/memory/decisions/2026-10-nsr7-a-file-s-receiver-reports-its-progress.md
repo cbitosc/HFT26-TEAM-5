@@ -116,21 +116,26 @@ P3. Three changes:
    streams us has more than `STREAM_SWITCH_MS` (30 s) left, the asker moves on to another linked neighbour that said
    HAVE with load 0 and streams us nothing. The time left comes from `FramedLink.rxEtaMs` (rate since its header)
    through `MeshTransport.fileArrivingEtaMs`. A copy already queued at the first neighbour still comes, so this can
-   cost a second copy; a 30 s wait is worth that risk.
+   cost a second copy; a 30 s wait is worth that risk. While the fetch waits like this, a neighbour that said NONE is
+   queried again `FETCHING_RECHECK_MS` (10 s) after its answer (`lackedWhileStuck`): an answer is otherwise final for
+   the fetch, since a cycle opens only with no ask outstanding. In the iPhone smoke of 2026-10-07 the P9 answered NONE
+   0.4 s before its own fetch began, held the photo 40 s later, and the P8 sat 8 min behind a DM file never learning it.
 3. **Members before carriers at the holder** (`addressees`, `MeshManager.addresseesOf`). A blob's addressees come
    from the message naming it: a group's members, or a DM's two ends; they are unknown for a room or a relay. A member
    waits only behind members' copies and goes beside a carrier's. A carrier waits behind any copy and never goes
    beside one. Among parked asks a member goes first, then the fastest, then the oldest.
 
 Tests: `BlobHolderQueryTest`'s `anAskThatFoundItsNeighbourLackingTheBlob…`, `aFetchLeavesAHolderWhoseOtherStream…`,
-`aMemberGoesBesideACarriersCopy…` and `aParkedMemberIsServedBeforeAFasterParkedCarrier`; each fails with its change
+`aNeighbourThatLackedTheBlobIsQueriedAgain…`, `aMemberGoesBesideACarriersCopy…` and
+`aParkedMemberIsServedBeforeAFasterParkedCarrier`; each fails with its change
 switched off. Device check owed: cell (d)'s cut again. Pass: the cut receiver holds the file within about 2 min of its
 relink, and no file arrives twice after a `blob fallback … streaming another file`.
 
 **Amendment (2026-10-07): an asker withdraws its ask (`blobcancel`).** Nothing could withdraw an ask, so moving on
 to a second holder risked a second copy: the reason ADR 6e5t's #140 amendment holds an asker to its floor, and the
 risk in item 2 above. A `blobcancel` frame (`BlobCancelContent`: the hash; unsigned, point-to-point, under
-`CAP_BLOB_HAVE`, not to an iPhone yet) withdraws one.
+`CAP_BLOB_HAVE`; to an iPhone too since 2026-10-07, once its port took the type in knit-ios ADR 2026-10.ds45, while
+`blobprog` stays off iPhones) withdraws one.
 
 - **The holder** (`BlobExchange.onCancel`) drops the ask if it is parked. It takes one copy queued to the asker off the
   link if that copy has not started (`MeshTransport.cancelQueuedFile` → `FramedLink.cancelQueued`; the writer skips
@@ -139,7 +144,7 @@ risk in item 2 above. A `blobcancel` frame (`BlobCancelContent`: the hash; unsig
 - **The asker** sends one when a fetch falls back from a neighbour its ask is on (grace, floor, confirm, or a busy
   stream with an idle holder waiting), and to every other neighbour it asked once the blob lands. Each ask is
   withdrawn once (`Want.withdrawnAt`), and only one that may have queued or parked a copy: never one on a neighbour
-  whose last answer said it lacked the blob, and never the first pick's when a blind round widens, since widening gives
+  whose answer saying it lacked the blob came at or after that ask (it left nothing queued), and never the first pick's when a blind round widens, since widening gives
   up on nobody. The device rerun showed the cost of withdrawing at a widening: an author's parked ask was dropped, and
   the asker came back 28 s late.
 - **What is left:** a race, where the busy holder starts our copy before the cancel arrives, sends a second copy. So
@@ -150,7 +155,8 @@ risk in item 2 above. A `blobcancel` frame (`BlobCancelContent`: the hash; unsig
 Tests: `BlobHolderQueryTest`'s `aCancelDropsAParkedAskAndAQueuedCopy` and `aBlobThatLandsWithdrawsTheOtherAsks`,
 the busy-stream switch's cancel, and `FramedLinkTest.aQueuedFileThePeerWithdrawsIsSkippedButAStreamingOneIsNot`; each
 fails with the cancel switched off. Counters: `blobCancelsSent`, `blobCancelsTaken`. Vector: `blobCancelContent`. The
-iOS port owes taking the type quietly, and later sending it.
+iOS port takes the type quietly and sends it (knit-ios ADR 2026-10.ds45), so Android sends it to an iPhone too; an
+iPhone build older than that drops it, or asks an unpinned sender for its key, and its queued copy comes as before.
 
 **Not taken.**
 

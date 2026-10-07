@@ -732,7 +732,7 @@ class BlobHolderQueryTest {
             assertEquals("withdrawn once", listOf("a"), c.cancelsFrom(hash))
             a.exchange.reask()
             assertEquals(listOf("a"), c.cancelsFrom(hash))
-            assertTrue("never to an iPhone yet", phone.cancelsFrom(hash).isEmpty())
+            assertEquals("an iPhone too: its port takes the type", listOf("a"), phone.cancelsFrom(hash))
         }
 
     /** A parked ask is kept for its expected turn from the park itself, not only once its asker queries (cell (c)). */
@@ -1019,6 +1019,48 @@ class BlobHolderQueryTest {
             a.exchange.reask()
             assertEquals("c holds it and feeds nothing: asked instead", listOf("a"), c.asksFrom(hash))
             assertEquals("and b's ask is withdrawn, so a copy it queued is not a second", 1, b.cancelsFrom(hash).size)
+        }
+
+    /**
+     * A neighbour that lacked the blob when queried, and holds it a minute later, is queried again while our fetch waits
+     * behind a long stream — and only then — so the switch to an idle holder learns of it (the iPhone smoke of
+     * 2026-10-07: the P9 answered NONE 0.4 s before its own fetch, and the P8 sat 8 min behind a DM file).
+     */
+    @Test
+    fun aNeighbourThatLackedTheBlobIsQueriedAgainWhileTheFetchWaitsBehindALongStream() =
+        runTest(UnconfinedTestDispatcher()) {
+            val a = Node("a", backgroundScope)
+            val b = Node("b", backgroundScope)
+            val c = Node("c", backgroundScope)
+            a.transport.connect(b.transport)
+            a.transport.connect(c.transport)
+            val bytes = picture()
+            val hash = sha256Hex(bytes)
+            b.store.lying[hash] = bytes.size.toLong() // b holds it, our copy queued behind the file it streams us
+
+            a.exchange.want(hash, author = "b")
+            assertEquals(listOf("a"), b.asksFrom(hash))
+            assertEquals("c was queried once, and lacked it", 1, c.queriesFrom("a").count { hash in it })
+            a.transport.arrivingFrom += "b"
+            a.transport.arrivingLeft["b"] = BlobExchange.STREAM_SWITCH_MS // not past the bound: no recheck
+            a.now += BlobExchange.FETCHING_RECHECK_MS
+            a.exchange.reask()
+            assertEquals("b's stream ends soon enough: c's NONE stands", 1, c.queriesFrom("a").count { hash in it })
+
+            a.transport.arrivingLeft["b"] = 10 * 60_000L // minutes to run
+            a.exchange.reask()
+            assertEquals("stuck, and c's NONE is a recheck old: queried again", 2, c.queriesFrom("a").count { hash in it })
+            assertTrue("still lacking: b keeps the fetch", c.asksFrom(hash).isEmpty())
+            c.store.seed(bytes) // c's own fetch lands
+            a.now += BlobExchange.FETCHING_RECHECK_MS / 2
+            a.exchange.reask()
+            assertEquals("not due yet", 2, c.queriesFrom("a").count { hash in it })
+            a.now += BlobExchange.FETCHING_RECHECK_MS / 2
+            a.exchange.reask()
+            a.exchange.reask()
+            assertEquals("queried again a recheck later", 3, c.queriesFrom("a").count { hash in it })
+            assertEquals("c holds it and feeds nothing: asked instead", listOf("a"), c.asksFrom(hash))
+            assertEquals("and b's ask is withdrawn", 1, b.cancelsFrom(hash).size)
         }
 
     @Test
