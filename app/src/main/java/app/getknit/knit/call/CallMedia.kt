@@ -8,11 +8,14 @@ package app.getknit.knit.call
 fun interface CallMedia {
     /**
      * One call's media session. [servers] are the TURN credentials to gather relay candidates from (possibly none);
-     * [relayOnly] gathers relay candidates alone (C-3.7-3). [events] may arrive on any thread.
+     * [relayOnly] gathers relay candidates alone (C-3.7-3). [direct] says a Wi-Fi Direct leg is planned (§3.10):
+     * candidates on its group come as [MediaEvent.DirectCandidates] and its pair is preferred. [events] may arrive on
+     * any thread.
      */
     fun open(
         servers: List<TurnServer>,
         relayOnly: Boolean,
+        direct: Boolean,
         events: (MediaEvent) -> Unit,
     ): CallSession
 }
@@ -35,13 +38,19 @@ interface CallSession {
 
     fun setSpeaker(on: Boolean)
 
-    /** The selected candidate pair's types, `local/remote` (e.g. `relay/srflx`), or null before ICE has chosen. */
+    /**
+     * The selected candidate pair's types, `local/remote` (e.g. `relay/srflx`), with `/wifi-direct` after them when the
+     * pair rides the call's Wi-Fi Direct group; null before ICE has chosen.
+     */
     suspend fun route(): String?
 
     fun close()
 }
 
-/** What the media layer reports. [LateCandidates] comes at most once per session, when gathering completes late. */
+/**
+ * What the media layer reports. [LateCandidates] comes at most once per session, when gathering completes late;
+ * [DirectCandidates] whenever the call's Wi-Fi Direct group yields some.
+ */
 sealed interface MediaEvent {
     /** ICE (and DTLS) reached connected — again, after a [Disconnected]. */
     data object Connected : MediaEvent
@@ -54,6 +63,14 @@ sealed interface MediaEvent {
 
     /** Candidates gathered after [CallSession.offer]/[CallSession.answer] returned, as `candidate:` lines. */
     class LateCandidates(
+        val lines: List<String>,
+    ) : MediaEvent
+
+    /**
+     * Candidates on the call's Wi-Fi Direct group gathered after our description went out, as `candidate:` lines.
+     * They ride the call's lane alone, never a CANDS: only a peer inside the group can reach them (§3.10).
+     */
+    class DirectCandidates(
         val lines: List<String>,
     ) : MediaEvent
 }

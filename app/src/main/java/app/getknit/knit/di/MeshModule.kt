@@ -67,6 +67,7 @@ import app.getknit.knit.net.InternetGate
 import app.getknit.knit.transfer.AndroidDirectWifi
 import app.getknit.knit.transfer.AndroidTransferFiles
 import app.getknit.knit.transfer.DirectWifi
+import app.getknit.knit.transfer.DirectWifiLease
 import app.getknit.knit.transfer.TransferFiles
 import app.getknit.knit.transfer.TransferManager
 import app.getknit.knit.transfer.TransferSignals
@@ -368,8 +369,10 @@ val meshModule =
         single<MeshController> { get<MeshManager>() }
         // Direct Wi-Fi file transfer (transfer/): the radio and storage seams, the sealed-DM signaling seam
         // (MeshManager) and the one state machine. Its inbound half reaches it through MeshManager's
-        // onTransferSignal hook above, resolved late so neither singleton constructs the other.
-        single<DirectWifi> { AndroidDirectWifi(androidContext(), get<MeshTransport>()) }
+        // onTransferSignal hook above, resolved late so neither singleton constructs the other. The radio is
+        // shared with a call between neighbours (call/DirectCallPath) through one lease; the transfer holds its view.
+        single { DirectWifiLease(AndroidDirectWifi(androidContext(), get<MeshTransport>())) }
+        single<DirectWifi> { get<DirectWifiLease>().leasedTo(DirectWifiLease.TRANSFER) }
         single<TransferFiles> { AndroidTransferFiles(androidContext()) }
         single<TransferSignals> { get<MeshManager>() }
         single {

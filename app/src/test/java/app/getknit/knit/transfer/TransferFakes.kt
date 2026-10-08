@@ -60,11 +60,16 @@ class FakeDirectWifi(
         )
     }
 
+    /** Whether each join asked for an IPv4 lease, in order. */
+    val joinIpv4 = Collections.synchronizedList(mutableListOf<Boolean>())
+
     override suspend fun join(
         credentials: GroupCredentials,
         attemptMs: Long,
+        ipv4: Boolean,
     ): JoinedGroup {
         log.note("join")
+        joinIpv4 += ipv4
         if (joinDelayMs > 0) delay(joinDelayMs)
         if (joinFailures > 0) {
             if (joinFailures != Int.MAX_VALUE) joinFailures -= 1

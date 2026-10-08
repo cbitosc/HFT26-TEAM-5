@@ -39,6 +39,7 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.Sensors
+import androidx.compose.material.icons.outlined.WifiTethering
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilledTonalIconToggleButton
 import androidx.compose.material3.Icon
@@ -409,13 +410,19 @@ private fun ButtonLabel(label: String) {
     )
 }
 
-/** Which way the audio goes, from the selected pair's candidate types ("relay/srflx"): through TURN or not. */
+/**
+ * Which way the audio goes, from the selected pair's candidate types ("relay/srflx"): through TURN or not — or over
+ * the call's own Wi-Fi Direct group, which the media marks with a trailing "/wifi-direct" (§3.10).
+ */
 @Composable
 private fun RoutePill(route: String) {
-    val types = route.split('/')
+    val parts = route.split('/')
+    val wifiDirect = "wifi-direct" in parts
+    val types = parts - "wifi-direct"
     val relayed = "relay" in types
     val label =
         when {
+            wifiDirect -> "Wi-Fi Direct"
             relayed -> "Relayed"
             types.all { it == "host" } -> "Direct · same network"
             else -> "Direct"
@@ -427,7 +434,11 @@ private fun RoutePill(route: String) {
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Icon(
-                if (relayed) Icons.Outlined.Cloud else Icons.Outlined.Sensors,
+                when {
+                    wifiDirect -> Icons.Outlined.WifiTethering
+                    relayed -> Icons.Outlined.Cloud
+                    else -> Icons.Outlined.Sensors
+                },
                 contentDescription = null,
                 modifier = Modifier.size(16.dp),
             )

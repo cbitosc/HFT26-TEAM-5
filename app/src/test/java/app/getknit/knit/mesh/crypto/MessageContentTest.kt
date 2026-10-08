@@ -5,6 +5,7 @@ import app.getknit.knit.data.message.MessageEntity
 import app.getknit.knit.data.message.withReply
 import app.getknit.knit.data.message.withVideo
 import app.getknit.knit.mesh.protocol.CallPayload
+import app.getknit.knit.mesh.protocol.DirectInvite
 import app.getknit.knit.mesh.protocol.GroupInfo
 import app.getknit.knit.mesh.protocol.GroupKeyPayload
 import app.getknit.knit.mesh.protocol.GroupRootPayload
@@ -417,6 +418,19 @@ class MessageContentTest {
         val offer = CallPayload(id = "c2", ph = CallPayload.PHASE_OFFER, sdp = "v=0")
         assertEquals(offer, MessageContent.decode(MessageContent(body = "", ctl = MessageContent.CTL_CALL, cl = offer).encode())!!.cl)
         assertNull(MessageContent.decode(MessageContent(body = "hi").encode())!!.cl)
+    }
+
+    @Test
+    fun aCallsWifiDirectInviteAndVerdictRoundTripAndABrokenInviteCostsOnlyItself() {
+        // §3.10: the caller's group rides its OFFER, the callee's "joining" its RINGING.
+        val invite = DirectInvite(s = "DIRECT-kn-abcdefgh", p = "abcdefghijklmnopqrstuvwx", o = 45_000, k = "AAAA")
+        val offer = CallPayload(id = "c3", ph = CallPayload.PHASE_OFFER, sdp = "v=0", dw = invite)
+        assertEquals(offer, MessageContent.decode(MessageContent(body = "", ctl = MessageContent.CTL_CALL, cl = offer).encode())!!.cl)
+        val ringing = CallPayload(id = "c3", ph = CallPayload.PHASE_RINGING, dx = CallPayload.DIRECT_JOINING)
+        assertEquals(ringing, MessageContent.decode(MessageContent(body = "", ctl = MessageContent.CTL_CALL, cl = ringing).encode())!!.cl)
+        // Every invite field is optional: one that names only part of a group still decodes, and the reader refuses it.
+        val partial = offer.copy(dw = DirectInvite(s = "DIRECT-kn-abcdefgh"))
+        assertEquals(partial, MessageContent.decode(MessageContent(body = "", ctl = MessageContent.CTL_CALL, cl = partial).encode())!!.cl)
     }
 
     private companion object {

@@ -1,9 +1,11 @@
 package app.getknit.knit.call
 
+import app.getknit.knit.transfer.GroupAddress
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.net.InetAddress
 
 class SdpGuardTest {
     private val sdp =
@@ -49,5 +51,27 @@ class SdpGuardTest {
             listOf("candidate:3 1 udp 1 203.0.113.9 49170 typ relay"),
             SdpGuard.relayOnly(listOf("candidate:1 1 udp 1 192.0.2.1 5000 typ host", "candidate:3 1 udp 1 203.0.113.9 49170 typ relay")),
         )
+    }
+
+    @Test
+    fun aCandidatesAddressIsItsFifthField() {
+        assertEquals("192.0.2.1", SdpGuard.candidateAddress("a=candidate:1 1 udp 2122260223 192.0.2.1 50000 typ host"))
+        assertEquals("2001:db8::7", SdpGuard.candidateAddress("candidate:2 1 udp 1686052607 2001:db8::7 50001 typ host"))
+        assertEquals(null, SdpGuard.candidateAddress("candidate:2 1 udp"))
+        assertEquals(null, SdpGuard.candidateAddress("a=fingerprint:sha-256 AB:CD"))
+    }
+
+    @Test
+    fun aGroupCarriesItsOwnSubnetOnlyAndNeverResolvesAName() {
+        val link =
+            DirectLink(
+                interfaceName = "p2p-wlan0-0",
+                subnets = listOf(GroupAddress(InetAddress.getByName("192.168.49.1"), 24)),
+            )
+        assertTrue(link.carries("192.168.49.23"))
+        assertFalse(link.carries("192.168.1.23"))
+        assertFalse(link.carries("2001:db8::1"))
+        assertFalse("a hostname is never looked up", link.carries("example.invalid"))
+        assertFalse("an mDNS-obfuscated host candidate", link.carries("0b1c2d3e-aaaa.local"))
     }
 }

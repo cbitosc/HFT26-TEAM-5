@@ -1,9 +1,13 @@
 package app.getknit.knit.call
 
 import app.getknit.knit.mesh.protocol.CallPayload
+import app.getknit.knit.mesh.protocol.DirectInvite
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
@@ -14,6 +18,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.Base64
 import java.util.Collections
 
 /**
@@ -22,14 +27,17 @@ import java.util.Collections
  * would; [Net.drop] loses one on the air.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
+@Suppress("LargeClass") // one call's whole contract over one two-sided harness, its direct leg included; splitting would scatter it
 class CallManagerTest {
     private class FakeSession(
         val servers: List<TurnServer>,
         val relay: Boolean,
+        val direct: Boolean,
         val events: (MediaEvent) -> Unit,
         private val sdp: () -> String?,
     ) : CallSession {
         var accepted: String? = null
+        var accepts = 0
         var answeredOffer: String? = null
         val added = Collections.synchronizedList(mutableListOf<String>())
         var micOff = false
@@ -41,6 +49,7 @@ class CallManagerTest {
 
         override suspend fun accept(remoteAnswer: String): Boolean {
             accepted = remoteAnswer
+            accepts += 1
             return true
         }
 
@@ -71,10 +80,97 @@ class CallManagerTest {
         override fun open(
             servers: List<TurnServer>,
             relayOnly: Boolean,
+            direct: Boolean,
             events: (MediaEvent) -> Unit,
         ): CallSession {
             check(!throwOnOpen) { "no audio device" }
-            return FakeSession(servers, relayOnly, events) { sdp }.also { sessions += it }
+            return FakeSession(servers, relayOnly, direct, events) { sdp }.also { sessions += it }
+        }
+    }
+
+    /**
+     * The direct leg (§3.10) as a recorder: what [CallManager] asked of it. Its "lane" hands a mirrored signal or a
+     * group candidate straight to the peer's [CallManager] while [laneUp] — the real lane's job, minus the radio.
+     */
+    private class FakeDirect(
+        private val name: String,
+        private val scope: CoroutineScope,
+    ) : CallDirect {
+        var peer: FakeDirect? = null
+        var offering = false
+        var joinable = true
+        var prewarmAllowed = true
+        var laneUp = false
+        val joins = Collections.synchronizedList(mutableListOf<String>())
+        val hosts = Collections.synchronizedList(mutableListOf<String>())
+        val ends = Collections.synchronizedList(mutableListOf<Pair<String, CallPayload?>>())
+        val laneCands = Collections.synchronizedList(mutableListOf<String>())
+        private val legs = Collections.synchronizedSet(mutableSetOf<String>())
+        private val ended = Collections.synchronizedSet(mutableSetOf<String>())
+        private val events = MutableSharedFlow<LaneEvent>(extraBufferCapacity = 64)
+
+        override val inbound = events
+        override val link: StateFlow<DirectLink?> = MutableStateFlow(null)
+
+        override suspend fun invite(
+            callId: String,
+            peerId: String,
+        ): DirectInvite? = if (offering) INVITE else null
+
+        override fun canJoin(
+            peerId: String,
+            prewarm: Boolean,
+        ): Boolean = joinable && (!prewarm || prewarmAllowed)
+
+        override fun join(
+            callId: String,
+            peerId: String,
+            invite: DirectInvite,
+        ) {
+            joins += callId
+            legs += callId
+        }
+
+        override fun host(
+            callId: String,
+            peerId: String,
+            invite: DirectInvite,
+        ) {
+            hosts += callId
+            legs += callId
+        }
+
+        override fun mirror(
+            callId: String,
+            payload: CallPayload,
+        ) {
+            if (callId in ended || callId !in legs) return
+            lane(LaneEvent.Signal(name, payload))
+        }
+
+        override fun candidates(
+            callId: String,
+            lines: List<String>,
+        ) {
+            laneCands += lines
+            lane(LaneEvent.Candidates(name, callId, lines))
+        }
+
+        override fun end(
+            callId: String,
+            terminal: CallPayload?,
+        ) {
+            ends += callId to terminal
+            if (callId in legs && callId !in ended) terminal?.let { lane(LaneEvent.Signal(name, it)) }
+            ended += callId
+            legs -= callId
+        }
+
+        override fun pending(callId: String): Boolean = callId in legs && !laneUp
+
+        private fun lane(event: LaneEvent) {
+            val target = peer ?: return
+            if (laneUp) scope.launch { target.events.emit(event) }
         }
     }
 
@@ -104,6 +200,7 @@ class CallManagerTest {
         val sent: MutableList<CallPayload>,
         val missed: MutableList<MissedCall>,
         val turnAsks: MutableList<String>,
+        val direct: FakeDirect,
     ) {
         var fail = false
         var turn: suspend (String) -> List<TurnServer> = { emptyList() }
@@ -121,6 +218,7 @@ class CallManagerTest {
         val missed = Collections.synchronizedList(mutableListOf<MissedCall>())
         val turnAsks = Collections.synchronizedList(mutableListOf<String>())
         val media = FakeMedia()
+        val direct = FakeDirect(name, backgroundScope)
         lateinit var side: Side
         val manager =
             CallManager(
@@ -141,8 +239,9 @@ class CallManagerTest {
                 selfId = { name },
                 clock = { testScheduler.currentTime },
                 timings = TIMINGS,
+                direct = direct,
             )
-        side = Side(name, manager, media, sent, missed, turnAsks)
+        side = Side(name, manager, media, sent, missed, turnAsks, direct)
         net.nodes[name] = manager
         backgroundScope.launch { manager.missed.collect { missed += it } }
         return side
@@ -150,8 +249,19 @@ class CallManagerTest {
 
     private fun TestScope.pair(): Triple<Net, Side, Side> {
         val net = Net(backgroundScope) { testScheduler.currentTime }
-        return Triple(net, side(ALICE, net), side(BOB, net))
+        val alice = side(ALICE, net)
+        val bob = side(BOB, net)
+        alice.direct.peer = bob.direct
+        bob.direct.peer = alice.direct
+        return Triple(net, alice, bob)
     }
+
+    /** Alice and Bob are neighbours: Alice's calls offer a group, and both lanes carry once their legs exist. */
+    private fun TestScope.neighbours(): Triple<Net, Side, Side> =
+        pair().also { (_, alice, bob) ->
+            alice.direct.offering = true
+            bob.direct.offering = true
+        }
 
     /** Alice calls Bob and Bob answers; both are left Connecting with their media open. */
     private suspend fun TestScope.connecting(): Triple<Net, Side, Side> {
@@ -546,6 +656,297 @@ class CallManagerTest {
             assertNull(alice.manager.start(BOB))
         }
 
+    // ---- §3.10: the Wi-Fi Direct leg of a call between neighbours ----
+
+    private fun Side.offer(): CallPayload = synchronized(sent) { sent.first { it.ph == CallPayload.PHASE_OFFER } }
+
+    private fun Side.lastOf(ph: Int): CallPayload = synchronized(sent) { sent.last { it.ph == ph } }
+
+    @Test
+    fun aNeighbourCallOffersItsGroupAndTheCallerHostsOnlyOnceTheCalleeJoins() =
+        runTest {
+            val (_, alice, bob) = neighbours()
+            alice.manager.start(BOB)
+            runCurrent()
+            val id = alice.state!!.id
+            assertEquals(INVITE, alice.offer().dw)
+            assertTrue(alice.media.last.direct)
+            // Bob joins while he rings and says so; only then does Alice raise the group.
+            assertEquals(listOf(id), bob.direct.joins)
+            assertEquals(CallPayload.DIRECT_JOINING, bob.lastOf(CallPayload.PHASE_RINGING).dx)
+            assertEquals(listOf(id), alice.direct.hosts)
+
+            assertTrue(bob.manager.answer(id))
+            runCurrent()
+            assertTrue(bob.media.last.direct)
+            assertEquals(CallPayload.DIRECT_JOINING, bob.lastOf(CallPayload.PHASE_ANSWER).dx)
+            // One attempt per call on each side, whichever frame said it.
+            assertEquals(listOf(id), alice.direct.hosts)
+            assertEquals(listOf(id), bob.direct.joins)
+        }
+
+    @Test
+    fun aCalleeThatCannotJoinNeverMakesTheCallerHost() =
+        runTest {
+            val (_, alice, bob) = neighbours()
+            bob.direct.joinable = false
+            alice.manager.start(BOB)
+            runCurrent()
+            assertNull(bob.lastOf(CallPayload.PHASE_RINGING).dx)
+            bob.manager.answer(bob.state!!.id)
+            runCurrent()
+            assertNull(bob.lastOf(CallPayload.PHASE_ANSWER).dx)
+            assertTrue(alice.direct.hosts.isEmpty() && bob.direct.joins.isEmpty())
+            assertEquals(CallPhase.Connecting, alice.state!!.phase)
+        }
+
+    @Test
+    fun relayOnlyOnEitherSideKeepsTheCallOffTheGroup() =
+        runTest {
+            val (_, alice, bob) = neighbours()
+            alice.manager.relayOnly = true
+            alice.manager.start(BOB)
+            runCurrent()
+            // A group pair would show the peer our real address: no invite at all.
+            assertNull(alice.offer().dw)
+            assertFalse(alice.media.last.direct)
+            assertTrue(bob.direct.joins.isEmpty())
+            alice.manager.hangUp()
+            runCurrent()
+
+            alice.manager.relayOnly = false
+            bob.manager.relayOnly = true
+            alice.sent.clear()
+            alice.manager.start(BOB)
+            runCurrent()
+            assertEquals(INVITE, alice.offer().dw)
+            assertNull(bob.lastOf(CallPayload.PHASE_RINGING).dx)
+            assertTrue(bob.direct.joins.isEmpty() && alice.direct.hosts.isEmpty())
+        }
+
+    @Test
+    fun aStaleJoiningIsNotHostedButTheAnswersIs() =
+        runTest {
+            val (net, alice, bob) = neighbours()
+            net.drop = { _, p -> p.ph == CallPayload.PHASE_RINGING }
+            alice.manager.start(BOB)
+            runCurrent()
+            val id = alice.state!!.id
+            // Custody hands Alice the RINGING the radio hand-over lost, long after Bob's join gave up.
+            alice.manager.onSignal(
+                BOB,
+                CallPayload(id = id, ph = CallPayload.PHASE_RINGING, dx = CallPayload.DIRECT_JOINING),
+                testScheduler.currentTime - TIMINGS.directCommitMaxAgeMs - 1,
+            )
+            runCurrent()
+            assertTrue(alice.direct.hosts.isEmpty())
+            bob.manager.answer(id)
+            runCurrent()
+            assertEquals(listOf(id), alice.direct.hosts)
+        }
+
+    @Test
+    fun aCalleeThatMayNotJoinWhileRingingJoinsAtTheAnswer() =
+        runTest {
+            val (_, alice, bob) = neighbours()
+            bob.manager.directMode = DirectMode.ANSWER
+            alice.manager.start(BOB)
+            runCurrent()
+            assertNull(bob.lastOf(CallPayload.PHASE_RINGING).dx)
+            assertTrue(bob.direct.joins.isEmpty() && alice.direct.hosts.isEmpty())
+            val first = bob.state!!.id
+            bob.manager.answer(first)
+            runCurrent()
+            assertEquals(listOf(first), bob.direct.joins)
+            assertEquals(CallPayload.DIRECT_JOINING, bob.lastOf(CallPayload.PHASE_ANSWER).dx)
+            assertEquals(listOf(first), alice.direct.hosts)
+            alice.manager.hangUp()
+            runCurrent()
+
+            // API 29-32 off screen: the same, under the default mode.
+            bob.manager.directMode = DirectMode.PREWARM
+            bob.direct.prewarmAllowed = false
+            alice.manager.start(BOB)
+            runCurrent()
+            val second = bob.state!!.id
+            assertEquals(listOf(first), bob.direct.joins)
+            bob.manager.answer(second)
+            runCurrent()
+            assertEquals(listOf(first, second), bob.direct.joins)
+            assertEquals(listOf(first, second), alice.direct.hosts)
+        }
+
+    @Test
+    fun directModeOffMakesNoInviteAndJoinsNone() =
+        runTest {
+            val (_, alice, bob) = neighbours()
+            alice.manager.directMode = DirectMode.OFF
+            alice.manager.start(BOB)
+            runCurrent()
+            assertNull(alice.offer().dw)
+            alice.manager.hangUp()
+            runCurrent()
+            alice.manager.directMode = DirectMode.PREWARM
+            bob.manager.directMode = DirectMode.OFF
+            alice.sent.clear()
+            alice.manager.start(BOB)
+            runCurrent()
+            bob.manager.answer(bob.state!!.id)
+            runCurrent()
+            assertTrue(bob.direct.joins.isEmpty() && alice.direct.hosts.isEmpty())
+        }
+
+    @Test
+    fun everyEndEndsTheDirectLegOnceWithTheFrameThatTellsThePeer() =
+        runTest {
+            val (_, alice, bob) = neighbours()
+            alice.manager.start(BOB)
+            runCurrent()
+            val id = alice.state!!.id
+            bob.manager.decline(id)
+            runCurrent()
+            val bobs = bob.direct.ends.single()
+            assertEquals(id, bobs.first)
+            assertEquals(CallPayload.PHASE_DECLINE, bobs.second?.ph)
+            // Alice was told; she tells nobody, and her leg ends all the same.
+            assertEquals(id to null, alice.direct.ends.single())
+
+            alice.manager.start(BOB)
+            runCurrent()
+            val next = alice.state!!.id
+            bob.manager.answer(next)
+            runCurrent()
+            alice.manager.hangUp()
+            runCurrent()
+            assertEquals(
+                CallPayload.PHASE_END,
+                alice.direct.ends
+                    .single { it.first == next }
+                    .second
+                    ?.ph,
+            )
+            assertEquals(1, bob.direct.ends.count { it.first == next })
+        }
+
+    @Test
+    fun aFailureWhileTheGroupComesUpWaitsForItUnderTheLongerConnectTimer() =
+        runTest {
+            val (_, alice, bob) = neighbours()
+            alice.manager.start(BOB)
+            runCurrent()
+            bob.manager.answer(bob.state!!.id)
+            runCurrent()
+            // No other route: ICE gives up before the group is there.
+            alice.media.last.events(MediaEvent.Failed)
+            bob.media.last.events(MediaEvent.Failed)
+            runCurrent()
+            assertEquals(CallPhase.Connecting, alice.state!!.phase)
+            assertEquals(CallPhase.Connecting, bob.state!!.phase)
+            advanceTimeBy(TIMINGS.connectMs + 1)
+            runCurrent()
+            assertEquals(CallPhase.Connecting, alice.state!!.phase)
+            advanceTimeBy(TIMINGS.directConnectMs - TIMINGS.connectMs)
+            runCurrent()
+            assertEquals(CallPayload.REASON_NO_ROUTE, alice.state!!.reason)
+            assertEquals(CallPayload.REASON_NO_ROUTE, bob.state!!.reason)
+        }
+
+    @Test
+    fun signalsRideTheLaneWhenTheMeshLosesThem() =
+        runTest {
+            val (net, alice, bob) = neighbours()
+            alice.manager.start(BOB)
+            runCurrent()
+            val id = alice.state!!.id
+            // The group took the only radio the mesh had between them: from here, only the lane carries.
+            net.drop = { _, _ -> true }
+            alice.direct.laneUp = true
+            bob.direct.laneUp = true
+            bob.manager.answer(id)
+            runCurrent()
+            assertEquals(CallPhase.Connecting, alice.state!!.phase)
+            assertEquals(SDP, alice.media.last.accepted)
+            alice.media.last.events(MediaEvent.Connected)
+            bob.media.last.events(MediaEvent.Connected)
+            runCurrent()
+            alice.manager.hangUp()
+            runCurrent()
+            assertEquals(CallPhase.Ended, bob.state!!.phase)
+            assertEquals(CallPayload.REASON_USER, bob.state!!.reason)
+        }
+
+    @Test
+    fun aSignalByBothPathsCountsOnce() =
+        runTest {
+            val (_, alice, bob) = neighbours()
+            alice.direct.laneUp = true
+            bob.direct.laneUp = true
+            alice.manager.start(BOB)
+            runCurrent()
+            bob.manager.answer(bob.state!!.id)
+            runCurrent()
+            assertEquals(1, alice.media.last.accepts)
+            assertEquals(CallPhase.Connecting, alice.state!!.phase)
+        }
+
+    @Test
+    fun groupCandidatesRideTheLaneOnlyAndWaitForTheRemoteSdp() =
+        runTest {
+            val (_, alice, bob) = neighbours()
+            alice.direct.laneUp = true
+            bob.direct.laneUp = true
+            alice.manager.start(BOB)
+            runCurrent()
+            alice.media.last.events(MediaEvent.DirectCandidates(listOf(GROUP_CAND)))
+            runCurrent()
+            assertEquals(listOf(GROUP_CAND), alice.direct.laneCands)
+            assertFalse(CallPayload.PHASE_CANDS in alice.phases())
+            // Bob only rings: his media opens at the answer, and the candidate waits for it.
+            bob.manager.answer(bob.state!!.id)
+            runCurrent()
+            assertTrue(GROUP_CAND in bob.media.last.added)
+        }
+
+    @Test
+    fun glareHostsOnlyTheSurvivingCall() =
+        runTest {
+            val (_, alice, bob) = neighbours()
+            alice.manager.start(BOB)
+            bob.manager.start(ALICE)
+            runCurrent()
+            val id = alice.state!!.id
+            assertEquals(id, bob.state!!.id)
+            // Bob answered Alice's offer at once and joins her group; his own offer raised nothing.
+            assertEquals(listOf(id), bob.direct.joins)
+            assertEquals(listOf(id), alice.direct.hosts)
+            assertTrue(bob.direct.hosts.isEmpty() && alice.direct.joins.isEmpty())
+            assertEquals(CallPayload.DIRECT_JOINING, bob.lastOf(CallPayload.PHASE_ANSWER).dx)
+        }
+
+    @Test
+    fun aNeighbourCallDialsWithNoTurnAndNoStunAtAll() =
+        runTest {
+            val (_, alice, bob) = neighbours()
+            alice.manager.start(BOB)
+            runCurrent()
+            assertTrue(
+                alice.media.last.servers
+                    .isEmpty(),
+            )
+            assertEquals(INVITE, alice.offer().dw)
+            bob.manager.answer(bob.state!!.id)
+            runCurrent()
+            assertTrue(
+                bob.media.last.servers
+                    .isEmpty(),
+            )
+            alice.media.last.events(MediaEvent.Connected)
+            bob.media.last.events(MediaEvent.Connected)
+            runCurrent()
+            assertEquals(CallPhase.Connected, alice.state!!.phase)
+            assertEquals(CallPhase.Connected, bob.state!!.phase)
+        }
+
     private companion object {
         const val ALICE = "alice"
         const val BOB = "bob"
@@ -564,5 +965,15 @@ class CallManagerTest {
             ).joinToString("\r\n")
 
         val TIMINGS = CallTimings()
+
+        val INVITE =
+            DirectInvite(
+                s = "DIRECT-kn-abcdefgh",
+                p = "abcdefghijklmnopqrstuvwx",
+                o = 45_000,
+                k = Base64.getEncoder().encodeToString(ByteArray(DIRECT_SECRET_BYTES)),
+            )
+
+        const val GROUP_CAND = "candidate:9 1 udp 2122260223 192.168.49.1 50000 typ host"
     }
 }

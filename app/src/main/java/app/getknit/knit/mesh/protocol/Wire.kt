@@ -820,6 +820,11 @@ data class TransferPayload(
  * bitmask (1 audio; 2 video is reserved). Every field but [id]/[ph] is nullable or defaulted, per
  * docs/WIRE_COMPAT.md rule 1. The media is DTLS-SRTP, so the `a=fingerprint` inside [sdp] — sealed and signed by
  * the peer — is what authenticates it (§3.7).
+ *
+ * A call between neighbours can carry its media over a Wi-Fi Direct group (§3.10, `call/DirectCallPath`): the
+ * caller's OFFER names the group it will host in [dw], and the callee answers [dx] = [DIRECT_JOINING] on its
+ * RINGING (or on its ANSWER, when it could only commit at answer) once it is joining. A build that knows neither
+ * ignores both, and the call rides its Internet path as before.
  */
 @Serializable
 data class CallPayload(
@@ -830,6 +835,8 @@ data class CallPayload(
     val cand: List<String>? = null,
     val rsn: Int? = null,
     val m: Int = MEDIA_AUDIO,
+    val dw: DirectInvite? = null,
+    val dx: Int? = null,
 ) {
     companion object {
         const val PHASE_OFFER = 1
@@ -848,8 +855,26 @@ data class CallPayload(
         const val REASON_ERROR = 6
 
         const val MEDIA_AUDIO = 1
+
+        /** [dx]: the callee is joining the caller's group, so the caller hosts it. */
+        const val DIRECT_JOINING = 1
     }
 }
+
+/**
+ * The Wi-Fi Direct group a caller offers to host for a call between neighbours (`CallPayload.dw`, §3.10): the group's
+ * name [s] and passphrase [p], the TCP port [o] its call lane listens on, and the lane's 32-byte secret [k] (base64,
+ * per docs/WIRE_COMPAT.md's no-defaulted-ByteArray rule). Single-use, minted per call, and sealed with the OFFER like
+ * a transfer's READY. Every field is nullable so a malformed invite costs the invite, never the frame; the reader
+ * validates all four before it joins anything.
+ */
+@Serializable
+data class DirectInvite(
+    val s: String? = null,
+    val p: String? = null,
+    val o: Int? = null,
+    val k: String? = null,
+)
 
 /**
  * The end-to-end encryption envelope carried inside an encrypted [ChatContent]. A random per-message

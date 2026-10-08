@@ -3,7 +3,7 @@
 | | |
 |--------------------|-------------------------------------------------------------------------------------------------------------------------------|
 | Status             | **Draft sketch, not normative.** Nothing here is on the wire                                                                  |
-| Decision           | ADR 2026-10.3tee (Proposed)                                                                                                   |
+| Decision           | ADR 2026-10.3tee (Proposed); §3.10, a call between neighbours over Wi-Fi Direct, is ADR 2026-10.kxnw                          |
 | Spool side         | §2 is written to drop into `docs/SPOOL_PROTOCOL.md` as §7.6 (records) and a §10.1 bullet (observations) once accepted        |
 | Client side        | §3 is app protocol: a new `MessageContent.ctl` value, invisible to spools and relays                                          |
 
@@ -28,6 +28,8 @@ A 1:1 audio call has three paths:
   media keys (§3.7).
 - **TURN credentials** are the only new spool-side behaviour (§2). The spool hands out short-lived
   credentials for a TURN server its operator runs. It never carries media.
+- **Between neighbours** the media can skip the Internet altogether: the two phones raise a Wi-Fi Direct group and
+  ICE prefers its pair to any other (§3.10). That needs no spool and no STUN, and with them it still wins.
 
 ## 2. Spool side: TURN provisioning
 
@@ -193,6 +195,8 @@ CallPayload {
     cand: [String]?  // CANDS: "candidate:…" lines; an empty list = end of candidates
     rsn:  Int?       // DECLINE, CANCEL, END
     m:    Int = 1    // media bitmask: 1 audio; 2 video reserved
+    dw:   DirectInvite?  // OFFER: the Wi-Fi Direct group the caller will host (§3.10)
+    dx:   Int?       // RINGING, ANSWER: 1 = the callee is joining that group (§3.10)
 }
 ```
 
@@ -293,6 +297,64 @@ Android rings only while the callee holds a live spool connection. `event` fan-o
 `OFFER` in well under a second. Otherwise the offer waits and becomes a missed call (C-3.4-2). iOS
 background ringing is out of scope until ADR 2026-10.3tee's push question is settled.
 
+### 3.10 A call between neighbours: the Wi-Fi Direct leg
+
+When caller and callee are mesh neighbours, the call's media rides a Wi-Fi Direct group the two phones raise —
+no spool, no STUN — and with an Internet path as well, the group wins and the Internet path is its fallback. The
+group is the direct transfer's (ADR 2026-09.wtmz): raised by credentials alone, no discovery, no dialog, with Wi-Fi
+Aware paused while it is up and Bluetooth carrying the mesh. ADR 2026-10.kxnw records why.
+
+```
+DirectInvite {           // CallPayload.dw — every field optional, so a broken invite costs only itself
+    s: String?           // group name, DIRECT-kn-xxxxxxxx
+    p: String?           // passphrase
+    o: Int?              // the lane's TCP port on the group
+    k: String?           // the lane's 32-byte secret, base64
+}
+```
+
+- **C-3.10-1** The caller puts `dw` in its OFFER only when the callee is a mesh neighbour whose pinned profile
+  carries `CAP_DIRECT_TRANSFER`, the radio is free and usable, and neither relay-only nor direct mode `off` is set.
+  Minting raises nothing.
+- **C-3.10-2** A callee that can join answers `dx = 1` on its RINGING and joins while it rings, after a grace that
+  lets the RINGING leave before the radio does. It joins with an **IPv4 lease**: libwebrtc never gathers on an IPv6
+  link-local. A callee that may not join off screen (API 29-32) or runs direct mode `answer` joins when it answers,
+  and says `dx = 1` on its ANSWER. A relay-only callee never joins: its checks would show its real address.
+- **C-3.10-3** The caller hosts on the first `dx = 1` whose signed `sentAt` is under 8 s old, on RINGING or ANSWER,
+  once per call. A peer that never says it — an older build, a callee that could not join, a glare loser — makes the
+  caller raise nothing.
+- **C-3.10-4** Once joined, the callee dials the **lane**: TCP to the group owner on port `o`, admitted by the
+  transfer's client proof under `HKDF(k, "knit/call/v1/lane-proof")`; the host then writes a 16-byte salt and both
+  ends key AES-256-GCM per direction from `k` and the salt (`…/lane/h2j`, `…/lane/j2h`), frame index as nonce, call
+  id as AAD. Frames: a `CallPayload`, the sender's group candidates, a ping each second, a bye. A lane silent for
+  5 s is gone. One lane per call.
+- **C-3.10-5** Every signal of the call rides the lane as well as the mesh, queued from the leg's start (the OFFER
+  excepted, which precedes any lane), so what the mesh carried while the radio changed hands reaches the peer again.
+  The copies collapse on `(id, ph, gen)`.
+- **C-3.10-6** A candidate on the group gathered after the description is lane-only, never a CANDS: only a peer
+  inside the group can reach it, and C-3.6-2's one CANDS stands. A remote group candidate that beats the peer's SDP
+  waits for it like a CANDS does.
+- **C-3.10-7** The group is reported to libwebrtc as an Ethernet network (cost 0, against Wi-Fi's 10), so its pair
+  outranks a LAN, IPv6-global, reflexive or relayed one on cost before priority; those stay up as backups, pinged
+  every 5 s.
+- **C-3.10-8** While a leg is still coming up, an ICE `Failed` does not end the call (with no other route ICE fails
+  before the group exists) and C-3.3-3's connect window is 30 s, not 20.
+- **C-3.10-9** Whatever ends the call ends the leg once: the terminal frame down the lane first (≤ 300 ms), then the
+  lane closes and the radio goes back to the mesh. A lost group is not raised again; the call rides on whatever
+  other pair ICE holds, or ends after the disconnect grace (§3.8 is not built).
+
+| Timer | Value | Why |
+|---|---|---|
+| grace + join delay | 0.5 s + 1 s | the RINGING leaves before the radio; the caller's group gets a head start |
+| join window / attempt | 20 s / 10 s | a join is ~4 s of `connect()`, flat; one retry fits |
+| host window | 15 s | the host gives the radio back if no lane arrives |
+| commit age | 8 s | a custody-delayed "joining" is not acted on |
+| lane ping / silence | 1 s / 5 s | a lost group frees the radio fast |
+| connect (direct) | 30 s | C-3.10-8 |
+
+The radio is shared with the direct transfer through one lease (`transfer/DirectWifiLease`): whoever holds it
+first keeps it, the other is refused `Busy`, and neither can release the other's group.
+
 ## 4. Tests this would add
 
 - **knit-spool:**
@@ -300,7 +362,7 @@ background ringing is out of scope until ADR 2026-10.3tee's push question is set
   - Conformance cases: no `turn` in HELLO without config; `not_subscribed` with no sub; `rate` past the
     budget; two issues never share a suffix.
 - **knit-next:**
-  - A `CallPayload` golden vector.
+  - A `CallPayload` golden vector (with `dw`/`dx`).
   - Stale `OFFER` → missed call; `CANCEL` before `OFFER` → no alert.
   - Glare resolution; idempotent duplicates.
   - Relay-only SDP stripping, and fingerprint mismatch → call refused.

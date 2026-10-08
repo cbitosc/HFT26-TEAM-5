@@ -260,8 +260,9 @@ class WifiAwareTransport(
 
     @Volatile private var attachAbandoned = false
 
-    // The radio is lent to another same-app role (a Wi-Fi Direct group, `transfer/`): the session is closed and
-    // attach() refuses until resume(). Never cleared by availability — a same-app hand-over does not flap it.
+    // The radio is lent to another same-app role (a Wi-Fi Direct group: `transfer/`, or a call's `call/DirectCallPath`):
+    // the session is closed and attach() refuses until resume(). Never cleared by availability — a same-app hand-over
+    // does not flap it — nor by stop(), since the group can outlive a mesh restart.
     @Volatile private var paused = false
 
     // The OS refused a publish/subscribe for the foreground-only location app-op (API 29-32, Knit off screen —
@@ -529,7 +530,8 @@ class WifiAwareTransport(
     @Volatile private var responderRefreshes = 0
 
     private var powerJob: Job? = null
-    private var loopJob: Job? = null
+
+    @Volatile private var loopJob: Job? = null
     private var cueJob: Job? = null
     private var cueHeartbeatJob: Job? = null
     private var diagJob: Job? = null
@@ -974,7 +976,9 @@ class WifiAwareTransport(
         clearAttachBackoff()
         responderRefusals = 0
         responderCycles = 0
-        paused = false
+        // [paused] survives a stop on purpose: the radio is still lent (a call's group outlives a mesh restart — a
+        // Pause from the notification, a Stop and Start), and a start that attached now would meet a BUSY radio
+        // and spend the attach budget on it. The lender's resume() lifts it.
         offScreenBlocked = false
         lastLinkEndedAt = 0L
         sessionCycleSettleStartedAt = 0L
@@ -1068,6 +1072,8 @@ class WifiAwareTransport(
         if (!hasHardware || !paused) return
         paused = false
         Log.i(TAG, "resuming Wi-Fi Aware after a same-app hand-over")
+        // A hand-over that outlived a stop() only lifts the hold: the next start() attaches.
+        if (loopJob?.isActive != true) return
         clearAttachBackoff()
         attach()
         healSignal.trySend(Unit)

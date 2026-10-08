@@ -20,6 +20,8 @@ import android.util.Log
 import androidx.annotation.RequiresApi
 import androidx.core.content.ContextCompat
 import app.getknit.knit.mesh.MeshTransport
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.coroutineScope
@@ -31,7 +33,9 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetAddress
 import java.net.NetworkInterface
@@ -101,8 +105,10 @@ class AndroidDirectWifi(
             val ch = prepare(manager)
             val config = config(credentials, band = true, ipv6 = false)
             val formed =
-                withTimeoutOrNull(timeoutMs) {
-                    awaitFormation(manager, ch, credentials.ssid, owner = true) { manager.createGroup(ch, config, it) }
+                undoOnCancel(manager, ch, joining = false) {
+                    withTimeoutOrNull(timeoutMs) {
+                        awaitFormation(manager, ch, credentials.ssid, owner = true) { manager.createGroup(ch, config, it) }
+                    }
                 } ?: throw DirectWifiException("group did not form within ${timeoutMs}ms", TransferRefusal.NoWifiDirect)
             val addresses = addressesOf(formed.group, formed.address)
             Log.i(
@@ -110,32 +116,37 @@ class AndroidDirectWifi(
                 "hosting ${credentials.ssid} on ${addresses.joinToString { "${it.address.hostAddress}/${it.prefixLength}" }} " +
                     "freq=${frequencyOf(formed.group)}",
             )
-            HostedGroup(addresses, frequencyOf(formed.group))
+            HostedGroup(addresses, frequencyOf(formed.group), formed.group.`interface`)
         }
 
     override suspend fun join(
         credentials: GroupCredentials,
         attemptMs: Long,
+        ipv4: Boolean,
     ): JoinedGroup =
         mutex.withLock {
             val manager = ready()
             val ch = prepare(manager)
-            val ipv6 = Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE && ipv6LinkLocalSupported()
+            val ipv6 = !ipv4 && Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE && ipv6LinkLocalSupported()
             val config = config(credentials, band = false, ipv6 = ipv6)
             val formed =
-                withTimeoutOrNull(attemptMs) {
-                    awaitFormation(manager, ch, credentials.ssid, owner = false) { manager.connect(ch, config, it) }
+                undoOnCancel(manager, ch, joining = true) {
+                    withTimeoutOrNull(attemptMs) {
+                        awaitFormation(manager, ch, credentials.ssid, owner = false) { manager.connect(ch, config, it) }
+                    }
                 }
             if (formed == null) {
                 runCatching { act("cancelConnect") { manager.cancelConnect(ch, it) } }
                 throw DirectWifiException("no group formed within ${attemptMs}ms")
             }
+            val name = formed.group.`interface`
+            if (ipv4) undoOnCancel(manager, ch, joining = true) { awaitLease(name) }
             Log.i(
                 TAG,
                 "joined ${credentials.ssid} (${if (ipv6) "IPv6 link-local" else "IPv4 DHCP"}); " +
                     "owner at ${formed.address.hostAddress} freq=${frequencyOf(formed.group)}",
             )
-            JoinedGroup(formed.address)
+            JoinedGroup(formed.address, name)
         }
 
     override suspend fun release() {
@@ -177,6 +188,52 @@ class AndroidDirectWifi(
             }
         }
     }
+
+    /**
+     * Runs one formation step; a cancellation that lands mid-step (the user hung up, the call ended) takes back
+     * what the step may already have asked the framework for — a `connect` still negotiating, a group already
+     * formed — before it propagates, since [release] can run before the framework answers and close the channel
+     * on a group that then forms with no one to remove it.
+     */
+    private suspend fun <T> undoOnCancel(
+        manager: WifiP2pManager,
+        ch: WifiP2pManager.Channel,
+        joining: Boolean,
+        step: suspend () -> T,
+    ): T =
+        try {
+            step()
+        } catch (e: CancellationException) {
+            withContext(NonCancellable) {
+                if (joining) runCatching { withTimeoutOrNull(RELEASE_MS) { act("cancelConnect") { manager.cancelConnect(ch, it) } } }
+                runCatching { withTimeoutOrNull(RELEASE_MS) { act("removeGroup(cancelled)") { manager.removeGroup(ch, it) } } }
+            }
+            throw e
+        }
+
+    /**
+     * Waits for the DHCP lease on the joined group's interface [name]. Formation is reported when the link is up,
+     * which can be before the client holds an address; a caller that asked for IPv4 gets none sooner.
+     */
+    private suspend fun awaitLease(name: String?) {
+        val leased =
+            withTimeoutOrNull(LEASE_WAIT_MS) {
+                while (!hasIpv4(name)) delay(LEASE_POLL_MS)
+                true
+            } == true
+        if (!leased) throw DirectWifiException("no IPv4 lease on the group within ${LEASE_WAIT_MS}ms")
+    }
+
+    private fun hasIpv4(name: String?): Boolean =
+        name != null &&
+            runCatching {
+                NetworkInterface
+                    .getByName(name)
+                    ?.inetAddresses
+                    ?.toList()
+                    .orEmpty()
+            }.getOrDefault(emptyList())
+                .any { it is Inet4Address && !it.isLoopbackAddress }
 
     // ---- setup and teardown ----
 
@@ -423,5 +480,9 @@ class AndroidDirectWifi(
         const val RELEASE_MS = 5_000L
         const val WAKE_LOCK_MAX_MS = 2 * 60 * 60_000L
         const val DEFAULT_PREFIX_LENGTH = 24
+
+        // A DHCP lease on the group normally lands within a second of formation; past this the join is retried.
+        const val LEASE_WAIT_MS = 5_000L
+        const val LEASE_POLL_MS = 100L
     }
 }

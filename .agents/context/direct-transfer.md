@@ -21,6 +21,11 @@ before changing behaviour — this file is the map, they are the reasoning.
   `TransferManager` when detekt's `LargeClass` fired; keep it that way.
 - `AndroidDirectWifi` — **the only `android.net.wifi.p2p.*` importer** (detekt-enforced, exempted by name in
   `config/detekt/detekt.yml`). Hosting, joining, the Aware pause/resume, and the leftover-group sweep.
+- `DirectWifiLease` — **the radio is shared with calls** (ADR 2026-10.kxnw: a call between neighbours rides a group
+  too, `call/DirectCallPath`). Nothing holds `AndroidDirectWifi` directly: the transfer gets the view
+  `leasedTo("transfer")` as its `DirectWifi`, a call the one leased to its call id. The first host or join takes
+  the lease; the other view is refused `TransferRefusal.Busy` and its `release()` is a no-op — which matters,
+  because `TransferManager.finish` releases on every end path, hosted or not.
 - `AndroidTransferFiles` — MediaStore `Downloads/Knit` with `IS_PENDING`, committed only after the trailer
   verifies.
 - Signaling is one sealed DM ctl (`MessageContent.CTL_TRANSFER` + `xf`), gated on
@@ -54,6 +59,15 @@ before changing behaviour — this file is the map, they are the reasoning.
   rather than read off the wire, which is what makes truncation and reordering fail their tags.
 - **`setSmallIcon` is invisible in the Android 12+ shade** — that header circle is the launcher icon. The
   small icon reaches the status bar only.
+- **A call joins with an IPv4 lease, a transfer may not.** `join(ipv4 = true)` skips the IPv6 link-local
+  provisioning and returns only once the DHCP lease is on the interface: libwebrtc never gathers on an IPv6
+  link-local. A transfer keeps the faster link-local path.
+- **A cancelled host or join takes back what it asked for** (`undoOnCancel`): a `connect` still negotiating is
+  cancelled and a group that formed is removed before the cancellation propagates, since `release()` can close the
+  channel before the framework answers and leave a group with no one to remove it.
+- **Aware stays paused across a mesh restart** while the radio is lent: `WifiAwareTransport.stop()` no longer clears
+  `paused`, and `resume()` on a stopped transport only lifts the hold. A call's group easily outlives a notification
+  Pause or a Stop and Start.
 - **A force-stop mid-transfer strands a group on air.** `dumpsys wifip2p` shows `curState=GroupCreatedState`
   with the app dead. The startup sweep in `KnitApplication` clears it 8 s into launch; `…debug.XFER --ez
   sweep true` runs it on demand.

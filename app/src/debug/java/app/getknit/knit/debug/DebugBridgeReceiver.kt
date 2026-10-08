@@ -18,6 +18,8 @@ import androidx.core.graphics.createBitmap
 import app.getknit.knit.BuildConfig
 import app.getknit.knit.call.CallManager
 import app.getknit.knit.call.CallPhase
+import app.getknit.knit.call.DirectCallPath
+import app.getknit.knit.call.DirectMode
 import app.getknit.knit.crash.ProcessExitReasons
 import app.getknit.knit.data.AttachmentIdentities
 import app.getknit.knit.data.AttachmentStore
@@ -46,6 +48,7 @@ import app.getknit.knit.data.settings.KnitBoardSetup
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.data.webp.WebpTranscode
 import app.getknit.knit.debug.call.CallActivity
+import app.getknit.knit.debug.call.DirectNetworkDetector
 import app.getknit.knit.identity.Identity
 import app.getknit.knit.identity.displayNameFor
 import app.getknit.knit.mesh.ForwardStore
@@ -104,6 +107,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
+import org.webrtc.NetworkChangeDetector
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.ByteBuffer
@@ -1955,9 +1959,15 @@ class DebugBridgeReceiver :
 
     /**
      * Drives the experimental voice calls (docs/VOICE_CALLS.md): `--es op` is `state` (the default: the call, its
-     * selected candidate pair as `route`, and the relay-only toggle), `start --es peer <id>`, `answer`, `decline`,
-     * `hangup`, `relay --ez on true|false` (C-3.7-3: every new call through TURN), or `turn --es peer <id>` (asks the
-     * connected spools for a credential and reports its URLs and expiry — never the username or password).
+     * selected candidate pair as `route`, the relay-only toggle and the Wi-Fi Direct leg), `start --es peer <id>`,
+     * `answer`, `decline`, `hangup`, `relay --ez on true|false` (C-3.7-3: every new call through TURN), or
+     * `turn --es peer <id>` (asks the connected spools for a credential and reports its URLs and expiry — never the
+     * username or password).
+     *
+     * The direct leg (§3.10, ADR 2026-10.kxnw): `direct --es mode prewarm|answer|off` (when a call between neighbours
+     * raises its Wi-Fi Direct group), `nettype --es as ethernet|wifi` (what the group is reported to libwebrtc as —
+     * the steering trial's A/B), and `dropgroup` (closes the live leg's lane as if the peer walked away: the radio
+     * goes back and ICE must fail over). A `route` ending `/wifi-direct` is a pair on the group.
      *
      * `start` and `answer` need Knit in the foreground (`am start` it first): the call's microphone service and its
      * screen can only start from there. `answer` opens the call screen, which answers, so it asks for the microphone
@@ -2008,6 +2018,33 @@ class DebugBridgeReceiver :
                 return reply("ok", "relay-only ${calls.relayOnly}")
             }
 
+            "direct" -> {
+                val mode =
+                    when (intent.getStringExtra("mode")) {
+                        "prewarm" -> DirectMode.PREWARM
+                        "answer" -> DirectMode.ANSWER
+                        "off" -> DirectMode.OFF
+                        else -> return reply("error", "mode must be prewarm|answer|off")
+                    }
+                calls.directMode = mode
+                return reply("ok", "direct ${mode.name.lowercase()}")
+            }
+
+            "nettype" -> {
+                DirectNetworkDetector.reportAs =
+                    when (intent.getStringExtra("as")) {
+                        "ethernet" -> NetworkChangeDetector.ConnectionType.CONNECTION_ETHERNET
+                        "wifi" -> NetworkChangeDetector.ConnectionType.CONNECTION_WIFI
+                        else -> return reply("error", "as must be ethernet|wifi")
+                    }
+                return reply("ok", "the group is reported as ${DirectNetworkDetector.reportAs} from the next call on")
+            }
+
+            "dropgroup" -> {
+                val dropped = getKoin().get<DirectCallPath>().dropGroup()
+                return reply(if (dropped) "ok" else "error", if (dropped) "lane closed; the radio goes back" else "no live leg")
+            }
+
             "turn" -> {
                 val peer = intent.getStringExtra("peer") ?: return reply("error", "missing 'peer' extra")
                 val servers = getKoin().get<MeshManager>().turnServers(peer)
@@ -2022,6 +2059,8 @@ class DebugBridgeReceiver :
             .put("status", "ok")
             .put("foreground", foreground)
             .put("relayOnly", calls.relayOnly)
+            .put("directMode", calls.directMode.name.lowercase())
+            .put("direct", getKoin().getOrNull<DirectCallPath>()?.describe() ?: JSONObject.NULL)
             .put(
                 "call",
                 state?.let {

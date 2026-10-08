@@ -194,6 +194,13 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   - Both ends need `CAP_CALL` pinned for each other (`…debug.STATE`); a build that gains it republishes its profile
     at the next mesh start. TURN needs a spool whose HELLO carried `turn`, with the peer's DM scope subscribed. The
     oracle is logcat under `KnitCall` (`call <id> …` and `webrtc: …` lines; credentials are never logged).
+  - **The Wi-Fi Direct leg** (§3.10, ADR 2026-10.kxnw): `state` adds `directMode` and `direct` (the radio's owner,
+    each leg as `<id>:host|join:Starting|Up|Over`, and the group interface), and a `route` ending `/wifi-direct` is a
+    pair on the group. `--es op direct --es mode prewarm|answer|off` sets when a call between neighbours raises its
+    group; `--es op nettype --es as ethernet|wifi` sets what the group is reported to libwebrtc as from the next
+    call on (the steering A/B); `--es op dropgroup` closes the live leg's lane as if the peer walked away, so the
+    radio goes back and ICE must fail over. Logcat lines: `the peer is joining; hosting the group`, `group up on …`,
+    `lane up`, `lane over (…)`, `direct leg over; radio back to the mesh`, `webrtc: the group is a network …`.
 - `…debug.RATCHET` — dumps the **DM ratchet's per-peer state** and, with `--es reset <peerNodeId>`, forces a
   session reset past the heuristic that guards it. Exists because every gate in the recovery path returns
   *silently*: a peer we hold no prekey for (`peerPrekeyPinned:false` — a reset from this side is impossible

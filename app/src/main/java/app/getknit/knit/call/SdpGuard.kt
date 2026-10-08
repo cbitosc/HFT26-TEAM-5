@@ -32,5 +32,20 @@ object SdpGuard {
     /** [lines] (`candidate:` lines, as a CANDS carries them) without the non-relayed ones. */
     fun relayOnly(lines: List<String>): List<String> = lines.filter(::isRelay)
 
+    /**
+     * The connection address of a `candidate:` line (or an SDP's `a=candidate:` one) — RFC 8839's fifth field, after
+     * foundation, component, transport and priority — or null for a line too short to be one.
+     */
+    fun candidateAddress(line: String): String? =
+        line
+            .trim()
+            .removePrefix("a=")
+            .split(' ')
+            .filter { it.isNotEmpty() }
+            .takeIf { it.size > ADDRESS_FIELD && it[0].startsWith("candidate:") }
+            ?.get(ADDRESS_FIELD)
+
+    private const val ADDRESS_FIELD = 4
+
     private fun isRelay(candidate: String): Boolean = " typ relay" in candidate
 }

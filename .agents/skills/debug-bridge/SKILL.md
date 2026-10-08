@@ -82,7 +82,7 @@ done
 | Is a DM session healthy? | `RATCHET` | `hasSession` and `confirmed`; `peerPrekeyPinned` before any reset |
 | LoRa range or airtime? | `LORA` | `loraSent`/`loraReceived`, `loraNakByReason` |
 | Why didn't a transfer start? | `XFER` | `refusal` **first**, then the live transfers |
-| Why didn't a call connect? (experimental) | `CALL` | `call.phase` + `reason`, then `route`; `op=turn` for TURN |
+| Why didn't a call connect? (experimental) | `CALL` | `call.phase` + `reason`, then `route`; `op=turn` for TURN; `direct` for the Wi-Fi Direct leg |
 | Is the mesh paused? | `STATE` | `meshPaused` / `meshPausedUntil` |
 
 Each row's caveats (the `retiring` and `accounted` spool fields, the TTL edge on `allFingerprint`) are in

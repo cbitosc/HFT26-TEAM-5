@@ -3,11 +3,14 @@ package app.getknit.knit.debug.call
 import android.content.Context
 import app.getknit.knit.call.CallMedia
 import app.getknit.knit.call.CallSession
+import app.getknit.knit.call.DirectLink
 import app.getknit.knit.call.MediaEvent
+import app.getknit.knit.call.SdpGuard
 import app.getknit.knit.call.TurnServer
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
@@ -19,6 +22,8 @@ import org.webrtc.IceCandidate
 import org.webrtc.IceCandidateErrorEvent
 import org.webrtc.MediaConstraints
 import org.webrtc.MediaStream
+import org.webrtc.NetworkChangeDetector
+import org.webrtc.NetworkMonitor
 import org.webrtc.PeerConnection
 import org.webrtc.PeerConnectionFactory
 import org.webrtc.SdpObserver
@@ -36,14 +41,24 @@ import kotlin.coroutines.resume
  * first call of a process finished gathering over no network at all and sent an SDP with no candidate on either side
  * (device-observed 2026-10-07: ICE never left NEW, and the call ended no_route). So the description waits for its
  * first candidate, and candidates that come after it ride the one CANDS a few seconds on.
+ *
+ * **A call between neighbours also gathers on its Wi-Fi Direct group** (§3.10, ADR 2026-10.kxnw): the monitor's
+ * detector is [DirectNetworkDetector], which adds the group [link] names as an Ethernet-typed network, so its pair wins
+ * on cost. A group candidate gathered after the description is no CANDS line — only a peer inside the group can reach
+ * it — but a [MediaEvent.DirectCandidates] for the call's lane, as soon as it is gathered.
  */
 internal class WebRtcCallMedia(
     private val context: Context,
     private val audio: CallAudio,
     private val scope: CoroutineScope,
+    private val link: StateFlow<DirectLink?>,
     private val log: (String) -> Unit,
 ) : CallMedia {
     private val factory: PeerConnectionFactory by lazy {
+        // Before the first monitor starts: it builds its detector from this factory, once per start.
+        NetworkMonitor.getInstance().setNetworkChangeDetectorFactory { observer, ctx ->
+            DirectNetworkDetector(observer, ctx, link, scope, log)
+        }
         PeerConnectionFactory.initialize(
             PeerConnectionFactory.InitializationOptions.builder(context.applicationContext).createInitializationOptions(),
         )
@@ -59,14 +74,17 @@ internal class WebRtcCallMedia(
     override fun open(
         servers: List<TurnServer>,
         relayOnly: Boolean,
+        direct: Boolean,
         events: (MediaEvent) -> Unit,
-    ): CallSession = WebRtcSession(factory, servers, relayOnly, events, audio, scope, log)
+    ): CallSession = WebRtcSession(factory, servers, relayOnly, direct, link, events, audio, scope, log)
 }
 
 private class WebRtcSession(
     factory: PeerConnectionFactory,
     servers: List<TurnServer>,
     relayOnly: Boolean,
+    private val direct: Boolean,
+    private val link: StateFlow<DirectLink?>,
     private val events: (MediaEvent) -> Unit,
     private val audio: CallAudio,
     private val scope: CoroutineScope,
@@ -81,6 +99,10 @@ private class WebRtcSession(
     private val late = mutableListOf<String>()
     private var lateReported = false
     private var closed = false
+
+    // Group candidates gathered after the description, waiting out a short debounce for the call's lane.
+    private val directLate = mutableListOf<String>()
+    private var directFlushArmed = false
 
     @Volatile
     private var selected: String? = null
@@ -115,6 +137,10 @@ private class WebRtcSession(
 
             override fun onIceCandidate(candidate: IceCandidate) {
                 firstCandidate.complete(Unit)
+                if (onGroup(candidate.sdp)) {
+                    lateDirect(candidate.sdp)
+                    return
+                }
                 synchronized(lock) { if (described && !lateReported) late += candidate.sdp }
             }
 
@@ -126,7 +152,8 @@ private class WebRtcSession(
             override fun onIceCandidatesRemoved(candidates: Array<out IceCandidate>) = Unit
 
             override fun onSelectedCandidatePairChanged(event: CandidatePairChangeEvent) {
-                selected = "${typeOf(event.local)}/${typeOf(event.remote)}"
+                val group = if (onGroup(event.local.sdp)) "/$ROUTE_DIRECT" else ""
+                selected = "${typeOf(event.local)}/${typeOf(event.remote)}$group"
                 log("webrtc: route $selected")
             }
 
@@ -158,11 +185,19 @@ private class WebRtcSession(
                 continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
                 // C-3.7-3: relay candidates only; SdpGuard strips anything else on the way out as well.
                 iceTransportsType = if (relayOnly) PeerConnection.IceTransportsType.RELAY else PeerConnection.IceTransportsType.ALL
+                if (direct) {
+                    // §3.10: the group's network wins ties too, and the Internet pairs it outranks are pinged often
+                    // enough to take over within seconds of the group going away.
+                    if (DirectNetworkDetector.reportAs == NetworkChangeDetector.ConnectionType.CONNECTION_ETHERNET) {
+                        networkPreference = PeerConnection.AdapterType.ETHERNET
+                    }
+                    iceBackupCandidatePairPingInterval = BACKUP_PING_MS
+                }
             }
         pc = checkNotNull(factory.createPeerConnection(config, observer)) { "no peer connection" }
         pc.addTrack(track, listOf("knit"))
         audio.begin()
-        log("webrtc: opened (${servers.size} TURN, relay=$relayOnly)")
+        log("webrtc: opened (${servers.size} TURN, relay=$relayOnly, direct=$direct)")
     }
 
     override suspend fun offer(): String? {
@@ -214,7 +249,8 @@ private class WebRtcSession(
      * comes after rides one CANDS, [LATE_WINDOW_MS] on.
      */
     private suspend fun gatheredDescription(kind: String): String? {
-        withTimeoutOrNull(FIRST_CANDIDATE_MS) { firstCandidate.await() }
+        // A phone whose only network is the group to come must not hold its offer for one that cannot come yet.
+        withTimeoutOrNull(if (direct) FIRST_CANDIDATE_DIRECT_MS else FIRST_CANDIDATE_MS) { firstCandidate.await() }
         withTimeoutOrNull(GATHER_MS) { gathered.await() }
         synchronized(lock) {
             if (closed) return null
@@ -229,6 +265,38 @@ private class WebRtcSession(
             reportLate()
         }
         return sdp
+    }
+
+    /** Whether [line]'s address sits on the call's Wi-Fi Direct group. */
+    private fun onGroup(line: String): Boolean {
+        if (!direct) return false
+        val address = SdpGuard.candidateAddress(line) ?: return false
+        return link.value?.carries(address) == true
+    }
+
+    /**
+     * A group candidate: in the description when it came before it, else for the lane after a short debounce, so
+     * the candidates of one new network go as one frame.
+     */
+    private fun lateDirect(line: String) {
+        val arm =
+            synchronized(lock) {
+                if (!described || closed) return
+                directLate += line
+                !directFlushArmed.also { directFlushArmed = true }
+            }
+        if (!arm) return
+        scope.launch {
+            delay(DIRECT_DEBOUNCE_MS)
+            val lines =
+                synchronized(lock) {
+                    directFlushArmed = false
+                    if (closed) return@launch
+                    directLate.toList().also { directLate.clear() }
+                }
+            log("webrtc: group ${summary(lines)}")
+            if (lines.isNotEmpty()) events(MediaEvent.DirectCandidates(lines))
+        }
     }
 
     /** The candidates gathered since the description, once: the one CANDS this side sends (C-3.6-2). */
@@ -285,6 +353,10 @@ private class WebRtcSession(
 
     private companion object {
         const val FIRST_CANDIDATE_MS = 5_000L
+        const val FIRST_CANDIDATE_DIRECT_MS = 1_000L
+        const val DIRECT_DEBOUNCE_MS = 250L
+        const val BACKUP_PING_MS = 5_000
+        const val ROUTE_DIRECT = "wifi-direct"
         const val GATHER_MS = 1_500L
         const val LATE_WINDOW_MS = 4_000L
         const val SDP_MS = 10_000L

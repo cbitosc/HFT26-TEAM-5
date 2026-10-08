@@ -89,14 +89,21 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   `TransferManager`/`TransferStream` are pure behind the `DirectWifi`/`TransferFiles`/`TransferSignals` seams,
   and `AndroidDirectWifi` is the one
   `android.net.wifi.p2p` importer. Wi-Fi Aware does **not** yield to our own P2P on Android 12+, so it must
-  be paused explicitly — that is what `pause`/`resume` are for.
+  be paused explicitly — that is what `pause`/`resume` are for. The radio is shared with calls through
+  `DirectWifiLease` (ADR 2026-10.kxnw): every user holds a leased view, never `AndroidDirectWifi` itself.
 - **When touching `call/`, `MessageContent.CTL_CALL` / `cl`, `CallPayload`, `Protocol.CAP_CALL`,
   `MeshManager.extraCapabilities`, the spool's `turnreq`/`turncred` (`SpoolConnection.turnCredential`,
   `ScopeSync.turnCredentials`), `di/CallWiring`, or `debug/call/`:** READ `docs/VOICE_CALLS.md` and ADR 2026-10.3tee
   (its 2026-10-07 amendment is this branch's minimal build). Experimental and debug-only: WebRTC is
   `debugImplementation`, so every `org.webrtc` import stays in `src/debug` and release advertises no `CAP_CALL`.
   `CallManager.onSignal` runs on the inbound path — never make it wait on TURN or the media — and a TURN credential is
-  never logged or put in a frame.
+  never logged or put in a frame. **Before touching `CallPayload.dw` / `dx`, `call/CallDirect`, `DirectCallPath`,
+  `CallLane`, `MediaEvent.DirectCandidates`, `debug/call/DirectNetworkDetector`, `transfer/DirectWifiLease` or
+  `DirectWifi.join`'s `ipv4`:** READ ADR 2026-10.kxnw and `docs/VOICE_CALLS.md` §3.10 — a call to a mesh neighbour
+  rides a Wi-Fi Direct group: the caller offers, the callee says it is joining (and joins while it rings, with an
+  IPv4 lease), the caller hosts only then; the group reaches libwebrtc through our own detector as an Ethernet-typed
+  network (never `setIncludeWifiDirect`, which leaks a P2P channel), and a sealed lane over it carries every signal
+  beside the mesh, since Wi-Fi Aware is paused while the group is up. Relay-only goes direct nowhere.
 - **When touching `location/`, the chat overflow's "Send location" item, or anything that reads the device's
   position:** READ ADR 2026-09.tss4. A shared position is a `geo:` line in the message body (no wire field,
   no capability bit); it is read only between the pin tap and the send, by `ChatViewModel.startLocation`,

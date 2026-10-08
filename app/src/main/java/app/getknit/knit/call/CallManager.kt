@@ -1,6 +1,7 @@
 package app.getknit.knit.call
 
 import app.getknit.knit.mesh.protocol.CallPayload
+import app.getknit.knit.mesh.protocol.DirectInvite
 import app.getknit.knit.mesh.protocol.FrameId
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -58,6 +59,11 @@ data class CallTimings(
     val disconnectGraceMs: Long = 10_000L,
     // C-3.4-1: an OFFER whose signed sentAt is further than this from now never alerts.
     val staleOfferMs: Long = 60_000L,
+    // §3.10: a callee's "joining" older than this on arrival is not acted on — custody can hand the caller a RINGING
+    // that was lost to the callee's own radio hand-over long after the callee gave its join up.
+    val directCommitMaxAgeMs: Long = 8_000L,
+    // C-3.3-3 for a call whose Wi-Fi Direct leg is on its way: a join takes ~6 s, a retried one longer.
+    val directConnectMs: Long = 30_000L,
 )
 
 /**
@@ -73,7 +79,14 @@ data class CallTimings(
  * reader, or the router's single collector — so it decides under [mutex], sends the small replies (RINGING, a busy
  * DECLINE) and returns; a TURN fetch and every media step run on [scope]. A `turncred` the spool sends back could
  * otherwise never be read by the reader that is waiting for it.
+ *
+ * **A call between neighbours can ride a Wi-Fi Direct group** ([direct], §3.10): the caller's OFFER names a group it
+ * will host, the callee answers that it is joining, and the caller hosts only then, so a callee that cannot (or an
+ * older build) costs nothing. The group is one more network the media prefers; the Internet path, when there is one,
+ * stays its fallback. While the leg is up its lane carries every signal beside the mesh, so a pair whose only mesh
+ * link was the Wi-Fi Aware radio the group took over still hears ANSWER, CANDS and END.
  */
+@Suppress("LargeClass") // one call's whole state machine, its direct leg's four decisions included; pure and two-sided tested
 class CallManager(
     private val signals: CallSignals,
     private val turn: TurnSource,
@@ -84,6 +97,7 @@ class CallManager(
     private val timings: CallTimings = CallTimings(),
     private val newId: () -> String = { FrameId.new() },
     private val log: (String) -> Unit = {},
+    private val direct: CallDirect = CallDirect.None,
 ) {
     private class Live(
         val id: String,
@@ -115,6 +129,11 @@ class CallManager(
         // Whether the peer's SDP is applied; a CANDS that beats it waits here (bounded).
         var remoteApplied = false
         val earlyCands = mutableListOf<String>()
+
+        // §3.10: the group this call may ride — the one we offered to host, or the caller's on the callee — and
+        // whether this side has committed to it (the callee is joining, the caller hosting). One attempt per call.
+        var invite: DirectInvite? = null
+        var directCommitted = false
     }
 
     private class Send(
@@ -150,9 +169,19 @@ class CallManager(
     @Volatile
     var relayOnly: Boolean = false
 
+    /** When a call between neighbours raises its Wi-Fi Direct group (§3.10); a debug-bridge toggle, in memory. */
+    @Volatile
+    var directMode: DirectMode = DirectMode.PREWARM
+
     // The last TURN credentials a spool issued, for a call dialled while the spool is unreachable (see [servers]).
     @Volatile
     private var lastServers: List<TurnServer> = emptyList()
+
+    init {
+        // What a call's lane carries in: the same signals as the mesh (deduplicated with their mesh copies), and the
+        // peer's group candidates. Declared last, so the collector never sees a field before it is set.
+        scope.launch { direct.inbound.collect { onLane(it) } }
+    }
 
     // ---- user actions ----
 
@@ -241,8 +270,8 @@ class CallManager(
                 if (seen.put("${payload.id}/${payload.ph}/${payload.gen}", Unit) != null) return
                 when (payload.ph) {
                     CallPayload.PHASE_OFFER -> onOffer(senderId, payload, sentAt, me)
-                    CallPayload.PHASE_RINGING -> onRinging(senderId, payload)
-                    CallPayload.PHASE_ANSWER -> onAnswer(senderId, payload)
+                    CallPayload.PHASE_RINGING -> onRinging(senderId, payload, sentAt)
+                    CallPayload.PHASE_ANSWER -> onAnswer(senderId, payload, sentAt)
                     CallPayload.PHASE_DECLINE, CallPayload.PHASE_CANCEL, CallPayload.PHASE_END -> onTerminal(senderId, payload)
                     CallPayload.PHASE_CANDS -> onCands(senderId, payload)
                     else -> emptyList()
@@ -269,14 +298,55 @@ class CallManager(
         live?.takeIf { it.phase != CallPhase.Ended }?.let { return onOfferWhileLive(it, sender, p, sdp, me, now) }
         val l = Live(p.id, sender, outgoing = false, startedAt = now, phase = CallPhase.Alerting, remoteOffer = sdp)
         live = l
+        l.invite = directInviteOf(p)
         l.servers = scope.async { servers(sender) }
         armTimer(l, timings.alertMs) {
             missedCalls.trySend(MissedCall(it.peerId, it.startedAt))
             finish(it, CallPayload.REASON_TIMEOUT)
         }
+        // §3.10: join the caller's group while this rings, so an answer connects over it at once. The RINGING that
+        // says so leaves before the join takes the radio from the mesh (the leg waits out a grace first).
+        val joining = directMode == DirectMode.PREWARM && commitJoin(l, prewarm = true)
         publish()
-        log("call ${p.id} from $sender: alerting")
-        return listOf(Send(sender, CallPayload(id = p.id, ph = CallPayload.PHASE_RINGING)))
+        log("call ${p.id} from $sender: alerting${if (joining) ", joining its group" else ""}")
+        return listOf(Send(sender, CallPayload(id = p.id, ph = CallPayload.PHASE_RINGING, dx = directVerdict(l))))
+    }
+
+    /** [p]'s Wi-Fi Direct invite, when this side may take it up at all and every part of it is usable. */
+    private fun directInviteOf(p: CallPayload): DirectInvite? = p.dw?.takeIf { directMode != DirectMode.OFF && !relayOnly && it.isUsable() }
+
+    /** The callee's side: joins [l]'s group now, when it was offered one and this phone can. True when it did. */
+    private fun commitJoin(
+        l: Live,
+        prewarm: Boolean,
+    ): Boolean {
+        val invite = l.invite ?: return false
+        if (l.directCommitted || !direct.canJoin(l.peerId, prewarm)) return false
+        l.directCommitted = true
+        direct.join(l.id, l.peerId, invite)
+        return true
+    }
+
+    private fun directVerdict(l: Live): Int? = if (l.directCommitted) CallPayload.DIRECT_JOINING else null
+
+    /**
+     * The caller's side: hosts [l]'s group on the callee's first fresh "joining" ([p] a RINGING or an ANSWER). Only
+     * then: an older build, a callee that could not join, or a glare loser never says it, and nothing is raised.
+     */
+    private fun commitHost(
+        l: Live,
+        p: CallPayload,
+        sentAt: Long,
+    ) {
+        val invite = l.invite ?: return
+        if (p.dx != CallPayload.DIRECT_JOINING || l.directCommitted) return
+        if (clock() - sentAt > timings.directCommitMaxAgeMs) {
+            log("call ${l.id}: the peer's join is stale; not hosting")
+            return
+        }
+        l.directCommitted = true
+        log("call ${l.id}: the peer is joining; hosting the group")
+        direct.host(l.id, l.peerId, invite)
     }
 
     /**
@@ -327,6 +397,7 @@ class CallManager(
         drop(current)
         val l = Live(p.id, sender, outgoing = false, startedAt = now, phase = CallPhase.Connecting, remoteOffer = sdp)
         live = l
+        l.invite = directInviteOf(p)
         armConnect(l)
         publish()
         setup(l) { answerCall(l) }
@@ -336,23 +407,28 @@ class CallManager(
     private fun onRinging(
         sender: String,
         p: CallPayload,
+        sentAt: Long,
     ): List<Send> {
         val l = live?.takeIf { it.id == p.id && it.peerId == sender && it.outgoing } ?: return emptyList()
+        if (l.phase == CallPhase.Ended) return emptyList()
         if (l.phase == CallPhase.Calling) {
             l.phase = CallPhase.Ringing
             publish()
         }
+        commitHost(l, p, sentAt)
         return emptyList()
     }
 
     private fun onAnswer(
         sender: String,
         p: CallPayload,
+        sentAt: Long,
     ): List<Send> {
         val l = live?.takeIf { it.id == p.id && it.peerId == sender && it.outgoing } ?: return emptyList()
         if (p.gen != 0 || (l.phase != CallPhase.Calling && l.phase != CallPhase.Ringing)) return emptyList()
         val sdp = p.sdp
         if (sdp == null || !SdpGuard.accepts(sdp)) return finish(l, CallPayload.REASON_MEDIA, CallPayload.PHASE_END)
+        commitHost(l, p, sentAt)
         l.phase = CallPhase.Connecting
         armConnect(l)
         publish()
@@ -385,13 +461,39 @@ class CallManager(
         val l = live?.takeIf { it.id == p.id && it.peerId == sender && it.phase != CallPhase.Ended } ?: return emptyList()
         val lines = p.cand.orEmpty().filter { it.isNotBlank() }
         if (p.gen != 0 || lines.isEmpty()) return emptyList()
+        addOrHold(l, lines)
+        return emptyList()
+    }
+
+    /** The peer's candidate lines into [l]'s media, or held (bounded) until the peer's SDP is applied. */
+    private fun addOrHold(
+        l: Live,
+        lines: List<String>,
+    ) {
         val session = l.session
         if (session != null && l.remoteApplied) {
             session.addCandidates(lines)
         } else {
             l.earlyCands += lines.take((MAX_EARLY_CANDS - l.earlyCands.size).coerceAtLeast(0))
         }
-        return emptyList()
+    }
+
+    /** One event off a call's lane (§3.10): a signal goes the mesh's way in, candidates straight to the media. */
+    private suspend fun onLane(event: LaneEvent) {
+        when (event) {
+            // An OFFER never rides a lane: the lane exists only once an offer was answered.
+            is LaneEvent.Signal -> {
+                if (event.payload.ph != CallPayload.PHASE_OFFER) onSignal(event.peerId, event.payload, clock())
+            }
+
+            is LaneEvent.Candidates -> {
+                mutex.withLock {
+                    val l = live?.takeIf { it.id == event.callId && it.peerId == event.peerId && it.phase != CallPhase.Ended }
+                    val lines = event.lines.filter { it.isNotBlank() }
+                    if (l != null && lines.isNotEmpty()) addOrHold(l, lines)
+                }
+            }
+        }
     }
 
     // ---- setup, off the caller's and the inbound path ----
@@ -451,7 +553,14 @@ class CallManager(
         }
     }
 
+    @Suppress("ReturnCount") // a ladder of exits: the call ended under each slow step
     private suspend fun dial(l: Live) {
+        // §3.10: a group we would host for a neighbour. Minting raises nothing; the callee's "joining" does.
+        val invite = if (directMode != DirectMode.OFF && !relayOnly) direct.invite(l.id, l.peerId) else null
+        mutex.withLock {
+            if (!current(l)) return
+            l.invite = invite
+        }
         val servers = servers(l.peerId)
         val session = openFor(l, servers) ?: return
         val sdp = session.offer()?.let { if (l.relay) SdpGuard.stripToRelay(it) else it }
@@ -463,9 +572,11 @@ class CallManager(
                     finish(l, CallPayload.REASON_MEDIA)
                     return
                 }
-                CallPayload(id = l.id, ph = CallPayload.PHASE_OFFER, sdp = sdp)
+                // A relay-only call goes direct nowhere: a group pair would show the peer our real address.
+                if (l.relay) l.invite = null
+                CallPayload(id = l.id, ph = CallPayload.PHASE_OFFER, sdp = sdp, dw = l.invite)
             }
-        log("call ${l.id}: offering (${servers.size} TURN, relay=${l.relay})")
+        log("call ${l.id}: offering (${servers.size} TURN, relay=${l.relay}, direct=${offer.dw != null})")
         if (!signals.sendCallSignal(l.peerId, offer)) {
             mutex.withLock { if (current(l)) finish(l, CallPayload.REASON_ERROR) }
             return
@@ -474,6 +585,12 @@ class CallManager(
     }
 
     private suspend fun answerCall(l: Live) {
+        mutex.withLock {
+            if (!current(l)) return
+            // §3.10: a callee that did not join while it rang (answer mode, or a phone that may not join off screen)
+            // joins now. A relay-only answer never does.
+            if (directMode != DirectMode.OFF && !relayOnly) commitJoin(l, prewarm = false)
+        }
         val servers = l.servers?.await() ?: servers(l.peerId)
         val session = openFor(l, servers) ?: return
         val sdp = session.answer(checkNotNull(l.remoteOffer))?.let { if (l.relay) SdpGuard.stripToRelay(it) else it }
@@ -484,7 +601,7 @@ class CallManager(
                     return@withLock finish(l, CallPayload.REASON_MEDIA, CallPayload.PHASE_DECLINE)
                 }
                 remoteApplied(l, session)
-                listOf(Send(l.peerId, CallPayload(id = l.id, ph = CallPayload.PHASE_ANSWER, sdp = sdp)))
+                listOf(Send(l.peerId, CallPayload(id = l.id, ph = CallPayload.PHASE_ANSWER, sdp = sdp, dx = directVerdict(l))))
             }
         if (!deliver(sends)) {
             mutex.withLock { if (current(l)) finish(l, CallPayload.REASON_ERROR) }
@@ -515,7 +632,8 @@ class CallManager(
         servers: List<TurnServer>,
     ): CallSession? {
         val relay = relayOnly
-        val session = media.open(servers, relay) { event -> scope.launch { onMedia(l, event) } }
+        val goesDirect = !relay && mutex.withLock { l.invite != null }
+        val session = media.open(servers, relay, goesDirect) { event -> scope.launch { onMedia(l, event) } }
         val kept =
             mutex.withLock {
                 if (!current(l)) return@withLock false
@@ -570,11 +688,22 @@ class CallManager(
                     }
 
                     MediaEvent.Failed -> {
-                        finish(l, CallPayload.REASON_NO_ROUTE, CallPayload.PHASE_END)
+                        if (l.phase == CallPhase.Connecting && direct.pending(l.id)) {
+                            // With no other route ICE gives up before the group is there; its candidates revive it.
+                            log("call ${l.id}: ICE failed while the direct leg comes up; waiting for it")
+                            emptyList()
+                        } else {
+                            finish(l, CallPayload.REASON_NO_ROUTE, CallPayload.PHASE_END)
+                        }
                     }
 
                     is MediaEvent.LateCandidates -> {
                         if (l.described) cands(l, event.lines) else emptyList<Send>().also { l.lateCands = event.lines }
+                    }
+
+                    is MediaEvent.DirectCandidates -> {
+                        direct.candidates(l.id, event.lines)
+                        emptyList()
                     }
                 }
             }
@@ -623,7 +752,7 @@ class CallManager(
         }
 
     private fun armConnect(l: Live) =
-        armTimer(l, timings.connectMs) {
+        armTimer(l, if (l.directCommitted || (!l.outgoing && l.invite != null)) timings.directConnectMs else timings.connectMs) {
             if (it.phase == CallPhase.Connecting) finish(it, CallPayload.REASON_NO_ROUTE, CallPayload.PHASE_END) else emptyList()
         }
 
@@ -656,21 +785,30 @@ class CallManager(
         reason: Int,
         tellPhase: Int? = null,
     ): List<Send> {
-        drop(l)
+        val tell = tellPhase?.let { CallPayload(id = l.id, ph = it, rsn = reason) }
+        drop(l, tell)
         l.phase = CallPhase.Ended
         l.reason = reason
         publish()
         log("call ${l.id}: ended ($reason${tellPhase?.let { ", telling the peer with $it" }.orEmpty()})")
-        return tellPhase?.let { listOf(Send(l.peerId, CallPayload(id = l.id, ph = it, rsn = reason))) }.orEmpty()
+        return tell?.let { listOf(Send(l.peerId, it)) }.orEmpty()
     }
 
-    /** Releases everything [l] holds; the setup coroutines see it gone at their next step. */
-    private fun drop(l: Live) {
+    /**
+     * Releases everything [l] holds; the setup coroutines see it gone at their next step. Its direct leg ends too,
+     * [terminal] down its lane first — the radio goes back to the mesh right after, and the mesh copy of it may be
+     * slower than the group was.
+     */
+    private fun drop(
+        l: Live,
+        terminal: CallPayload? = null,
+    ) {
         l.timer?.cancel()
         l.timer = null
         l.servers?.cancel()
         l.session?.close()
         l.session = null
+        direct.end(l.id, terminal)
         if (l.id !in tombstones) tombstones[l.id] = Tomb(CallPayload.PHASE_END, null)
     }
 
@@ -694,6 +832,8 @@ class CallManager(
     private suspend fun deliver(sends: List<Send>): Boolean {
         var all = true
         for (send in sends) {
+            // The lane too, when the call has one (§3.10): the mesh may have lost the radio its only link rode.
+            direct.mirror(send.payload.id, send.payload)
             if (!signals.sendCallSignal(send.peerId, send.payload)) {
                 log("call ${send.payload.id}: phase ${send.payload.ph} could not be sealed to ${send.peerId}")
                 all = false

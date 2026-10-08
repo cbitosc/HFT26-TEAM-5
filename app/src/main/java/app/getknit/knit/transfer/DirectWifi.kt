@@ -63,16 +63,22 @@ data class GroupAddress(
  * group-owner address, and the IPv6 link-local the kernel puts on any interface. The listener binds all of
  * them and admits only clients arriving from one of their subnets, because which family a client turns up
  * on is the *client's* choice: a receiver on Android 13+ may join with IPv6 link-local provisioning and
- * never take a DHCP lease at all.
+ * never take a DHCP lease at all. [interfaceName] is the group interface (`p2p-wlan0-0`), when it could be read
+ * — what a call hands libwebrtc as the group's network.
  */
 class HostedGroup(
     val addresses: List<GroupAddress>,
     val frequencyMhz: Int,
+    val interfaceName: String? = null,
 )
 
-/** A group this device has joined: where the host listens (IPv4, or a scoped IPv6 link-local). */
+/**
+ * A group this device has joined: where the host listens (IPv4, or a scoped IPv6 link-local), and the group
+ * interface it joined on, when it could be read.
+ */
 class JoinedGroup(
     val ownerAddress: InetAddress,
+    val interfaceName: String? = null,
 )
 
 /** A host/join attempt that did not produce a group; [refusal] names a user-facing cause when there is one. */
@@ -97,10 +103,15 @@ interface DirectWifi {
         timeoutMs: Long,
     ): HostedGroup
 
-    /** One attempt to join [credentials] (within [attemptMs]); throws [DirectWifiException] when it does not form. */
+    /**
+     * One attempt to join [credentials] (within [attemptMs]); throws [DirectWifiException] when it does not form.
+     * [ipv4] takes a DHCP lease even where IPv6 link-local provisioning is offered, and returns only once the lease
+     * is on the interface: libwebrtc never gathers on an IPv6 link-local address, so a call joins this way.
+     */
     suspend fun join(
         credentials: GroupCredentials,
         attemptMs: Long,
+        ipv4: Boolean = false,
     ): JoinedGroup
 
     /** Leaves/removes whatever group is up and hands the radio back. Idempotent; called from every terminal path. */
