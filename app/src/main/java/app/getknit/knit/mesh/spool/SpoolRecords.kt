@@ -43,6 +43,10 @@ object SpoolRecordType {
     // HELLO carried `turn` (C-7.6-3), for the attachment family's reason.
     const val TURNREQ = "turnreq"
     const val TURNCRED = "turncred"
+
+    // Entitlement tickets (experimental; docs/VOICE_CALLS.md §2.6). Sent only to a spool whose HELLO carried `ent`,
+    // and only a ticket whose `aud` is that spool's host.
+    const val ENT = "ent"
 }
 
 /** Error codes a spool may return; the registry is append-only (unknown codes are terminal-generic). */
@@ -60,6 +64,13 @@ object SpoolErrCode {
 
     /** An APUT whose `cid` differs from the chunk already stored at that position (§7.3, first write wins). */
     const val CONFLICT = "conflict"
+
+    /**
+     * An `ent` the spool will not accept, or a `turnreq` on an `ent` spool without a live ticket that grants TURN
+     * (experimental, docs/VOICE_CALLS.md §2.6). `msg` carries one word: `malformed`, `key`, `signature`, `audience`,
+     * `early` or `expired` for an `ent`; `missing`, `expired` or `flags` for a `turnreq`. Never a strike.
+     */
+    const val TICKET = "ticket"
 }
 
 /** WebSocket close codes for failures that happen before or outside the record layer. */
@@ -178,6 +189,9 @@ class ScopeSub(
  * First record in each direction. Spool→client: [v] is the highest supported version, with [min],
  * [limits], [powBits] (0 = PoW off), [commons] when the spool runs one (§7.4), and [turn] when it issues
  * TURN credentials (experimental, docs/VOICE_CALLS.md §2.1: presence is the signal, `false` is never sent).
+ * [ent] says the spool takes entitlement tickets ([SpoolEnt]) and that a `turnreq` here needs one; [stun] lists up
+ * to four `stun:`/`stuns:` URIs anyone may gather from with no credential (experimental, docs/VOICE_CALLS.md §2.6).
+ * Both are absent when off: `false` and an empty list are never sent.
  * Client→spool: [v] is the chosen version, everything else omitted — a client identifies itself no further
  * than that.
  */
@@ -190,6 +204,8 @@ class SpoolHello(
     val powBits: Int? = null,
     val commons: SpoolCommonsInfo? = null,
     val turn: Boolean? = null,
+    val ent: Boolean? = null,
+    val stun: List<String>? = null,
 )
 
 /** Client→spool: subscribe to scopes (responded to with one DIGEST or scoped ERR each). */
@@ -302,6 +318,45 @@ class SpoolTurnCred(
     val pass: String,
     val exp: Long,
 )
+
+/**
+ * Client→spool: present an entitlement ticket (experimental, docs/VOICE_CALLS.md §2.6). [tk] is the CBOR [SpoolTicket]
+ * exactly as the issuer signed it, [sig] the 64-byte Ed25519 signature over `"knit/spool/v1/ticket" ‖ tk`, which only
+ * the spool checks. Answered by `ok` or `err ticket`; a later accepted `ent` on the same connection replaces the
+ * claims. Never logged: the bytes are a bearer grant.
+ */
+@Serializable
+class SpoolEnt(
+    val t: String,
+    val q: Long,
+    val tk: ByteArray,
+    val sig: ByteArray,
+)
+
+/**
+ * The claims of a ticket's `tk`, as far as a client reads them (experimental, docs/VOICE_CALLS.md §2.6): [aud] is the
+ * one spool host it is good for, [nbf] and [exp] are Unix **seconds**, and bit 0 of [fl] lets it ask for TURN. The
+ * wire also carries `kid` and `ps`, the holder's daily pseudonym; neither is declared here, so the codec skips both
+ * and a client never holds the pseudonym in a field it could log or show. Unknown keys are ignored, so later claims
+ * add without a version bump.
+ */
+@Serializable
+class SpoolTicket(
+    val v: Int,
+    val aud: String,
+    val nbf: Long,
+    val exp: Long,
+    val fl: Long,
+) {
+    override fun toString(): String = "SpoolTicket(aud=$aud, nbf=$nbf, exp=$exp, fl=$fl)"
+
+    companion object {
+        const val VERSION = 1
+
+        /** [fl] bit: the holder may ask for TURN credentials. */
+        const val FL_TURN = 1L
+    }
+}
 
 /**
  * Spool→client: one attachment's presence. [total] is 0 when the spool has never seen it; [dead] marks
