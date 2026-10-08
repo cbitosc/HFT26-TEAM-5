@@ -1,5 +1,6 @@
 package app.getknit.knit.di
 
+import androidx.compose.runtime.Composable
 import org.koin.core.Koin
 import org.koin.core.module.Module
 
@@ -10,3 +11,7 @@ fun callModule(): Module? = null
 
 @Suppress("UNUSED_PARAMETER")
 fun startCallsIfWired(koin: Koin) = Unit
+
+/** No calls, so no bar: the app's screens as they are. */
+@Composable
+fun WithCallBar(content: @Composable () -> Unit) = content()

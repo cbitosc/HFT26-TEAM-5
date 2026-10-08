@@ -9,14 +9,13 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.RingtoneManager
-import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import androidx.core.app.NotificationChannelCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
-import androidx.core.app.Person
 import androidx.core.content.ContextCompat
+import androidx.core.net.toUri
 import app.getknit.knit.MainActivity
 import app.getknit.knit.R
 import app.getknit.knit.call.CallManager
@@ -37,7 +36,7 @@ internal class CallController(
     private val context: Context,
     private val calls: CallManager,
     private val scope: CoroutineScope,
-    private val peers: () -> PeerRepository,
+    private val faces: CallFaces,
     private val alertMs: Long,
 ) {
     @Volatile
@@ -79,13 +78,7 @@ internal class CallController(
     }
 
     private suspend fun ring(state: CallState) {
-        val name = callerName(peers(), state.peerId)
-        val person =
-            Person
-                .Builder()
-                .setName(name)
-                .setImportant(true)
-                .build()
+        val face = faces.of(state.peerId)
         val screen = PendingIntent.getActivity(context, 0, CallActivity.intent(context, state.id), CallNotifications.FLAGS)
         val answer =
             PendingIntent.getActivity(
@@ -99,7 +92,7 @@ internal class CallController(
             NotificationCompat
                 .Builder(context, CallNotifications.CHANNEL_RING)
                 .setSmallIcon(R.drawable.ic_stat_mesh)
-                .setContentTitle(name)
+                .setContentTitle(face.name)
                 .setContentText("Knit voice call")
                 .setCategory(NotificationCompat.CATEGORY_CALL)
                 .setPriority(NotificationCompat.PRIORITY_MAX)
@@ -108,7 +101,7 @@ internal class CallController(
                 .setFullScreenIntent(screen, true)
                 // A lost CANCEL and a dead process must not leave the phone ringing (the manager's alert timeout).
                 .setTimeoutAfter(alertMs)
-                .setStyle(NotificationCompat.CallStyle.forIncomingCall(person, decline, answer))
+                .setStyle(NotificationCompat.CallStyle.forIncomingCall(face.person, decline, answer))
                 .build()
                 .apply { flags = flags or Notification.FLAG_INSISTENT }
         CallNotifications.post(context, CallNotifications.TAG_RING, notification)
@@ -124,7 +117,7 @@ internal class CallController(
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return
         if (context.getSystemService(NotificationManager::class.java)?.canUseFullScreenIntent() != false) return
         val settings =
-            Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT, Uri.parse("package:${context.packageName}"))
+            Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT, "package:${context.packageName}".toUri())
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         val notification =
             NotificationCompat
@@ -139,7 +132,7 @@ internal class CallController(
     }
 
     private suspend fun onMissed(missed: MissedCall) {
-        val name = callerName(peers(), missed.peerId)
+        val face = faces.of(missed.peerId)
         val open =
             Intent(context, MainActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
@@ -149,7 +142,8 @@ internal class CallController(
                 .Builder(context, CallNotifications.CHANNEL_STATUS)
                 .setSmallIcon(R.drawable.ic_stat_mesh)
                 .setContentTitle("Missed call")
-                .setContentText(name)
+                .setContentText(face.name)
+                .setLargeIcon(face.icon.toIcon(context))
                 .setCategory(NotificationCompat.CATEGORY_MISSED_CALL)
                 .setWhen(missed.at)
                 .setShowWhen(true)

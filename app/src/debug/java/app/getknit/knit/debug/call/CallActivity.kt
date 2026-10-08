@@ -208,7 +208,7 @@ class CallActivity :
 }
 
 // Red and green as every phone's call screen draws them, whatever the theme: the hang-up must read as one at a glance.
-private val HangUpRed = Color(0xFFD93025)
+internal val HangUpRed = Color(0xFFD93025)
 private val AnswerGreen = Color(0xFF1E8E3E)
 private val AvatarSize = 144.dp
 private val RingReach = 40.dp
@@ -437,7 +437,7 @@ private fun RoutePill(route: String) {
 }
 
 @Composable
-private fun statusOf(
+internal fun statusOf(
     state: CallState?,
     clock: () -> Long,
 ): String {

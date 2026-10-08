@@ -1,13 +1,16 @@
 package app.getknit.knit.di
 
 import android.util.Log
+import androidx.compose.runtime.Composable
 import app.getknit.knit.call.CallManager
 import app.getknit.knit.call.CallMedia
 import app.getknit.knit.call.CallSignals
 import app.getknit.knit.call.CallTimings
 import app.getknit.knit.call.TurnSource
 import app.getknit.knit.debug.call.CallAudio
+import app.getknit.knit.debug.call.CallBarHost
 import app.getknit.knit.debug.call.CallController
+import app.getknit.knit.debug.call.CallFaces
 import app.getknit.knit.debug.call.WebRtcCallMedia
 import app.getknit.knit.identity.Identity
 import app.getknit.knit.mesh.MeshManager
@@ -44,12 +47,13 @@ fun callModule(): Module? =
                 log = { Log.i(TAG, it) },
             )
         }
+        single { CallFaces(androidContext(), peers = { get() }, blobs = { get() }, theme = { get() }) }
         single {
             CallController(
                 context = androidContext(),
                 calls = get(),
                 scope = get<CoroutineScope>(),
-                peers = { get() },
+                faces = get(),
                 alertMs = CallTimings().alertMs,
             )
         }
@@ -61,5 +65,9 @@ fun startCallsIfWired(koin: Koin) {
         runCatching { koin.get<CallController>().start() }.onFailure { Log.w(TAG, "calls not started", it) }
     }
 }
+
+/** The app's screens, under a bar that leads back to a live call ([CallBarHost]). */
+@Composable
+fun WithCallBar(content: @Composable () -> Unit) = CallBarHost(content)
 
 private const val TAG = "KnitCall"

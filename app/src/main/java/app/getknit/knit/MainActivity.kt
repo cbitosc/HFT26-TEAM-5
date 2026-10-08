@@ -18,6 +18,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
+import app.getknit.knit.di.WithCallBar
 import app.getknit.knit.notifications.ConversationShortcutSync
 import app.getknit.knit.ui.KnitApp
 import app.getknit.knit.ui.RouteInbox
@@ -93,7 +94,8 @@ class MainActivity : ComponentActivity() {
             KnitTheme(dynamicColor = dynamicColor) {
                 when (val state = storage) {
                     StorageGate.State.Ready -> {
-                        KnitApp(startRoute = startRoute)
+                        // Debug builds put a way back to a live call above every screen (experimental voice calls).
+                        WithCallBar { KnitApp(startRoute = startRoute) }
                     }
 
                     is StorageGate.State.Unavailable -> {
