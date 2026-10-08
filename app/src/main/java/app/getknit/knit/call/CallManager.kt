@@ -150,6 +150,10 @@ class CallManager(
     @Volatile
     var relayOnly: Boolean = false
 
+    // The last TURN credentials a spool issued, for a call dialled while the spool is unreachable (see [servers]).
+    @Volatile
+    private var lastServers: List<TurnServer> = emptyList()
+
     // ---- user actions ----
 
     /** Dials [peerId]. Null once the call is under way; the setup runs on [scope], never the caller's. */
@@ -265,7 +269,7 @@ class CallManager(
         live?.takeIf { it.phase != CallPhase.Ended }?.let { return onOfferWhileLive(it, sender, p, sdp, me, now) }
         val l = Live(p.id, sender, outgoing = false, startedAt = now, phase = CallPhase.Alerting, remoteOffer = sdp)
         live = l
-        l.servers = scope.async { turn.turnServers(sender) }
+        l.servers = scope.async { servers(sender) }
         armTimer(l, timings.alertMs) {
             missedCalls.trySend(MissedCall(it.peerId, it.startedAt))
             finish(it, CallPayload.REASON_TIMEOUT)
@@ -393,6 +397,39 @@ class CallManager(
     // ---- setup, off the caller's and the inbound path ----
 
     /**
+     * The TURN servers a call gathers from: fresh credentials when a spool issues them; else the last ones while they
+     * can still start an allocation; else those servers as plain STUN, which needs no credential. A phone that just
+     * changed networks dials before its spool has reconnected, and with no STUN either its offer carries only
+     * addresses nothing outside its carrier can reach — and the peer's relay accepts traffic only from addresses the
+     * offer named (device-observed 2026-10-07, a Pixel 9 seconds onto LTE). Reusing a live credential bends C-7.6-11's
+     * fetch-per-call SHOULD only when fetching has just failed.
+     */
+    private suspend fun servers(peerId: String): List<TurnServer> {
+        val fresh = turn.turnServers(peerId)
+        if (fresh.isNotEmpty()) return fresh.also { lastServers = it }
+        val nowS = clock() / MS_PER_S
+        val cached = lastServers
+        val live = cached.filter { (it.user.substringBefore(':').toLongOrNull() ?: 0L) - CREDENTIAL_MARGIN_S > nowS }
+        if (live.isNotEmpty()) {
+            log("call TURN: none issued, reusing ${live.size} live credential(s)")
+            return live
+        }
+        val stun = cached.mapNotNull(::stunOnly)
+        if (stun.isNotEmpty()) log("call TURN: none issued, STUN only from ${stun.size} known server(s)")
+        return stun
+    }
+
+    /** [server]'s UDP URLs as `stun:` ones, without the credential — what a binding request needs. */
+    private fun stunOnly(server: TurnServer): TurnServer? {
+        val urls =
+            server.urls
+                .filter { it.startsWith("turn:") && !it.contains("transport=tcp") }
+                .map { "stun:" + it.removePrefix("turn:").substringBefore('?') }
+                .distinct()
+        return if (urls.isEmpty()) null else TurnServer(urls = urls, user = "", pass = "")
+    }
+
+    /**
      * Runs one setup step of [l] on [scope]. A step that throws (the media layer, a TURN fetch) ends the call at once
      * and tells the peer, rather than leaving it to its phase timer.
      */
@@ -415,7 +452,7 @@ class CallManager(
     }
 
     private suspend fun dial(l: Live) {
-        val servers = turn.turnServers(l.peerId)
+        val servers = servers(l.peerId)
         val session = openFor(l, servers) ?: return
         val sdp = session.offer()?.let { if (l.relay) SdpGuard.stripToRelay(it) else it }
         val offer =
@@ -437,7 +474,7 @@ class CallManager(
     }
 
     private suspend fun answerCall(l: Live) {
-        val servers = l.servers?.await() ?: turn.turnServers(l.peerId)
+        val servers = l.servers?.await() ?: servers(l.peerId)
         val session = openFor(l, servers) ?: return
         val sdp = session.answer(checkNotNull(l.remoteOffer))?.let { if (l.relay) SdpGuard.stripToRelay(it) else it }
         val sends =
@@ -673,6 +710,11 @@ class CallManager(
         const val MAX_EARLY_CANDS = 64
 
         const val MISSED_BUFFER = 16
+
+        const val MS_PER_S = 1_000L
+
+        // A cached credential is reused only while it can still start an allocation with time to spare.
+        const val CREDENTIAL_MARGIN_S = 60L
 
         fun <K, V> bounded(): MutableMap<K, V> =
             object : LinkedHashMap<K, V>() {

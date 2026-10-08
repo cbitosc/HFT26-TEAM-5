@@ -6,6 +6,9 @@ import app.getknit.knit.call.CallSession
 import app.getknit.knit.call.MediaEvent
 import app.getknit.knit.call.TurnServer
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
 import org.webrtc.AudioSource
@@ -13,6 +16,7 @@ import org.webrtc.AudioTrack
 import org.webrtc.CandidatePairChangeEvent
 import org.webrtc.DataChannel
 import org.webrtc.IceCandidate
+import org.webrtc.IceCandidateErrorEvent
 import org.webrtc.MediaConstraints
 import org.webrtc.MediaStream
 import org.webrtc.PeerConnection
@@ -26,10 +30,17 @@ import kotlin.coroutines.resume
  * [CallMedia] over libwebrtc (experimental, debug only — the dependency is `debugImplementation`): one audio-only
  * Unified Plan peer connection per call, Opus over DTLS-SRTP, bundled and RTCP-muxed (C-3.7-4). The factory and its
  * audio device module are built on the first call and kept for the process.
+ *
+ * **Gathering is continual, and a description never leaves without a candidate.** libwebrtc's Android network monitor
+ * starts with the first allocation and reports the phone's networks a few milliseconds later; gathering once, the
+ * first call of a process finished gathering over no network at all and sent an SDP with no candidate on either side
+ * (device-observed 2026-10-07: ICE never left NEW, and the call ended no_route). So the description waits for its
+ * first candidate, and candidates that come after it ride the one CANDS a few seconds on.
  */
 internal class WebRtcCallMedia(
     private val context: Context,
     private val audio: CallAudio,
+    private val scope: CoroutineScope,
     private val log: (String) -> Unit,
 ) : CallMedia {
     private val factory: PeerConnectionFactory by lazy {
@@ -49,7 +60,7 @@ internal class WebRtcCallMedia(
         servers: List<TurnServer>,
         relayOnly: Boolean,
         events: (MediaEvent) -> Unit,
-    ): CallSession = WebRtcSession(factory, servers, relayOnly, events, audio, log)
+    ): CallSession = WebRtcSession(factory, servers, relayOnly, events, audio, scope, log)
 }
 
 private class WebRtcSession(
@@ -58,10 +69,12 @@ private class WebRtcSession(
     relayOnly: Boolean,
     private val events: (MediaEvent) -> Unit,
     private val audio: CallAudio,
+    private val scope: CoroutineScope,
     private val log: (String) -> Unit,
 ) : CallSession {
     private val lock = Any()
     private val gathered = CompletableDeferred<Unit>()
+    private val firstCandidate = CompletableDeferred<Unit>()
 
     // Set when our description is handed to the call layer: a candidate after it is a late one (C-3.6-2).
     private var described = false
@@ -79,7 +92,7 @@ private class WebRtcSession(
         object : PeerConnection.Observer {
             override fun onSignalingChange(state: PeerConnection.SignalingState) = Unit
 
-            override fun onIceConnectionChange(state: PeerConnection.IceConnectionState) = Unit
+            override fun onIceConnectionChange(state: PeerConnection.IceConnectionState) = log("webrtc: ice $state")
 
             override fun onConnectionChange(state: PeerConnection.PeerConnectionState) {
                 log("webrtc: connection $state")
@@ -94,19 +107,20 @@ private class WebRtcSession(
             override fun onIceConnectionReceivingChange(receiving: Boolean) = Unit
 
             override fun onIceGatheringChange(state: PeerConnection.IceGatheringState) {
+                // Gathering continually, libwebrtc never reports COMPLETE; kept for a policy that does.
                 if (state != PeerConnection.IceGatheringState.COMPLETE) return
                 gathered.complete(Unit)
-                val lines =
-                    synchronized(lock) {
-                        if (!described || lateReported) return
-                        lateReported = true
-                        late.toList()
-                    }
-                if (lines.isNotEmpty()) events(MediaEvent.LateCandidates(lines))
+                reportLate()
             }
 
             override fun onIceCandidate(candidate: IceCandidate) {
+                firstCandidate.complete(Unit)
                 synchronized(lock) { if (described && !lateReported) late += candidate.sdp }
+            }
+
+            override fun onIceCandidateError(event: IceCandidateErrorEvent) {
+                // The server's URL and its answer only: the local address is ours to keep out of the log.
+                log("webrtc: candidate error ${event.errorCode} ${event.errorText} from ${event.url}")
             }
 
             override fun onIceCandidatesRemoved(candidates: Array<out IceCandidate>) = Unit
@@ -130,18 +144,18 @@ private class WebRtcSession(
     init {
         val ice =
             servers.map {
-                PeerConnection.IceServer
-                    .builder(it.urls)
-                    .setUsername(it.user)
-                    .setPassword(it.pass)
-                    .createIceServer()
+                val builder = PeerConnection.IceServer.builder(it.urls)
+                // A STUN-only fallback carries no credential (CallManager.servers).
+                if (it.user.isNotEmpty()) builder.setUsername(it.user).setPassword(it.pass)
+                builder.createIceServer()
             }
         val config =
             PeerConnection.RTCConfiguration(ice).apply {
                 sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
                 bundlePolicy = PeerConnection.BundlePolicy.MAXBUNDLE
                 rtcpMuxPolicy = PeerConnection.RtcpMuxPolicy.REQUIRE
-                continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_ONCE
+                // Continual, so a network the monitor reports after the first allocation is still gathered (see above).
+                continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
                 // C-3.7-3: relay candidates only; SdpGuard strips anything else on the way out as well.
                 iceTransportsType = if (relayOnly) PeerConnection.IceTransportsType.RELAY else PeerConnection.IceTransportsType.ALL
             }
@@ -154,14 +168,14 @@ private class WebRtcSession(
     override suspend fun offer(): String? {
         val description = create { pc.createOffer(it, MediaConstraints()) } ?: return null
         if (!apply { pc.setLocalDescription(it, description) }) return null
-        return gatheredDescription()
+        return gatheredDescription("offer")
     }
 
     override suspend fun answer(remoteOffer: String): String? {
         if (!apply { pc.setRemoteDescription(it, SessionDescription(SessionDescription.Type.OFFER, remoteOffer)) }) return null
         val description = create { pc.createAnswer(it, MediaConstraints()) } ?: return null
         if (!apply { pc.setLocalDescription(it, description) }) return null
-        return gatheredDescription()
+        return gatheredDescription("answer")
     }
 
     override suspend fun accept(remoteAnswer: String): Boolean =
@@ -194,8 +208,13 @@ private class WebRtcSession(
         log("webrtc: closed")
     }
 
-    /** Waits for gathering (C-3.6-1: up to [GATHER_MS]), then hands over the description with what was gathered. */
-    private suspend fun gatheredDescription(): String? {
+    /**
+     * Waits for the first candidate (up to [FIRST_CANDIDATE_MS] — the network monitor may not have reported a network
+     * yet), then gathers on for [GATHER_MS] (C-3.6-1), and hands over the description with what was gathered. What
+     * comes after rides one CANDS, [LATE_WINDOW_MS] on.
+     */
+    private suspend fun gatheredDescription(kind: String): String? {
+        withTimeoutOrNull(FIRST_CANDIDATE_MS) { firstCandidate.await() }
         withTimeoutOrNull(GATHER_MS) { gathered.await() }
         synchronized(lock) {
             if (closed) return null
@@ -203,7 +222,25 @@ private class WebRtcSession(
             // Gathering already finished: nothing can be late.
             if (gathered.isCompleted) lateReported = true
         }
-        return pc.localDescription?.description
+        val sdp = pc.localDescription?.description
+        log("webrtc: $kind carries ${summary(sdp.orEmpty().lines().filter { it.startsWith("a=candidate:") })}")
+        scope.launch {
+            delay(LATE_WINDOW_MS)
+            reportLate()
+        }
+        return sdp
+    }
+
+    /** The candidates gathered since the description, once: the one CANDS this side sends (C-3.6-2). */
+    private fun reportLate() {
+        val lines =
+            synchronized(lock) {
+                if (!described || lateReported || closed) return
+                lateReported = true
+                late.toList()
+            }
+        log("webrtc: late ${summary(lines)}")
+        if (lines.isNotEmpty()) events(MediaEvent.LateCandidates(lines))
     }
 
     private suspend fun create(call: (SdpObserver) -> Unit): SessionDescription? =
@@ -247,9 +284,24 @@ private class WebRtcSession(
         } == true
 
     private companion object {
+        const val FIRST_CANDIDATE_MS = 5_000L
         const val GATHER_MS = 1_500L
+        const val LATE_WINDOW_MS = 4_000L
         const val SDP_MS = 10_000L
 
-        fun typeOf(candidate: IceCandidate): String = candidate.sdp.substringAfter(" typ ", "?").substringBefore(' ')
+        fun typeOf(candidate: IceCandidate): String = typeOf(candidate.sdp)
+
+        fun typeOf(line: String): String = line.substringAfter(" typ ", "?").substringBefore(' ')
+
+        /** "3 candidates (host 1, srflx 1, relay 1)" — the types only, never an address. */
+        fun summary(lines: List<String>): String {
+            val types =
+                lines
+                    .groupingBy(::typeOf)
+                    .eachCount()
+                    .entries
+                    .joinToString { "${it.key} ${it.value}" }
+            return "${lines.size} candidates${if (types.isEmpty()) "" else " ($types)"}"
+        }
     }
 }

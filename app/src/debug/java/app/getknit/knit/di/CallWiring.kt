@@ -33,7 +33,7 @@ const val CALLS_WIRED: Boolean = true
 fun callModule(): Module? =
     module {
         single { CallAudio(androidContext()) }
-        single<CallMedia> { WebRtcCallMedia(androidContext(), get(), log = { Log.i(TAG, it) }) }
+        single<CallMedia> { WebRtcCallMedia(androidContext(), get(), get<CoroutineScope>(), log = { Log.i(TAG, it) }) }
         single {
             CallManager(
                 signals = CallSignals { peerId, payload -> get<MeshManager>().sendCallSignal(peerId, payload) },

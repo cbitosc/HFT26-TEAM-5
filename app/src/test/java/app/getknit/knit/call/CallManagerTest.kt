@@ -440,6 +440,43 @@ class CallManagerTest {
         }
 
     @Test
+    fun aCallDialledWhileTheSpoolIsAwayReusesALiveCredentialThenFallsBackToStun() =
+        runTest {
+            val (_, alice, _) = pair()
+            // exp is Unix seconds; virtual time starts at 0, so this one is good for 300 s.
+            val server =
+                TurnServer(
+                    listOf("turn:lab.example:3478?transport=udp", "turns:lab.example:5349?transport=tcp"),
+                    "300:abc",
+                    "secret",
+                )
+            alice.turn = { listOf(server) }
+            alice.manager.start(BOB)
+            runCurrent()
+            alice.manager.hangUp()
+            runCurrent()
+
+            // The spool is unreachable (a network change): the credential still has minutes to run, so it is reused.
+            alice.turn = { emptyList() }
+            alice.manager.start(BOB)
+            runCurrent()
+            assertEquals(listOf(server), alice.media.last.servers)
+            alice.manager.hangUp()
+            runCurrent()
+
+            // Past its expiry (less the margin) only the servers' STUN half is left, with no credential.
+            advanceTimeBy(250_000)
+            alice.manager.start(BOB)
+            runCurrent()
+            val stun =
+                alice.media.last.servers
+                    .single()
+            assertEquals(listOf("stun:lab.example:3478"), stun.urls)
+            assertEquals("", stun.user)
+            assertEquals("", stun.pass)
+        }
+
+    @Test
     fun anOfferIsHandledWithoutWaitingOnTurnOrTheMedia() =
         runTest {
             val (_, _, bob) = pair()

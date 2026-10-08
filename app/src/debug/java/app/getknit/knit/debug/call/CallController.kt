@@ -2,12 +2,16 @@ package app.getknit.knit.debug.call
 
 import android.Manifest
 import android.app.Notification
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.RingtoneManager
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings
 import androidx.core.app.NotificationChannelCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
@@ -44,6 +48,7 @@ internal class CallController(
 
     fun start() {
         CallNotifications.ensureChannels(context)
+        askForFullScreen()
         scope.launch { calls.state.collect { onState(it) } }
         scope.launch { calls.missed.collect { onMissed(it) } }
     }
@@ -109,6 +114,30 @@ internal class CallController(
         CallNotifications.post(context, CallNotifications.TAG_RING, notification)
     }
 
+    /**
+     * Android 14+ grants a sideloaded build no full-screen intents, and nothing an app does can grant it: without it an
+     * incoming call is a heads-up the locked phone never shows. So the status channel says so once per process, and
+     * its tap opens the one system page that can allow it (or `adb shell appops set app.getknit.knit
+     * USE_FULL_SCREEN_INTENT allow`).
+     */
+    private fun askForFullScreen() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return
+        if (context.getSystemService(NotificationManager::class.java)?.canUseFullScreenIntent() != false) return
+        val settings =
+            Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT, Uri.parse("package:${context.packageName}"))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val notification =
+            NotificationCompat
+                .Builder(context, CallNotifications.CHANNEL_STATUS)
+                .setSmallIcon(R.drawable.ic_stat_mesh)
+                .setContentTitle("Allow full-screen calls")
+                .setContentText("Without it a call can't ring on the lock screen")
+                .setAutoCancel(true)
+                .setContentIntent(PendingIntent.getActivity(context, 3, settings, CallNotifications.FLAGS))
+                .build()
+        CallNotifications.post(context, CallNotifications.TAG_FULL_SCREEN, notification)
+    }
+
     private suspend fun onMissed(missed: MissedCall) {
         val name = callerName(peers(), missed.peerId)
         val open =
@@ -143,6 +172,7 @@ internal object CallNotifications {
     const val CHANNEL_STATUS = "knit_call_status"
     const val TAG_RING = "call:ring"
     const val TAG_MISSED = "call:missed:"
+    const val TAG_FULL_SCREEN = "call:fullscreen"
     const val ID = 4_100
     const val FLAGS = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
 
