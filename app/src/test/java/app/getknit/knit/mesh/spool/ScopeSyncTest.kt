@@ -101,8 +101,12 @@ class ScopeSyncTest {
         dialer: SpoolDialer = spool,
         // The present-set callback (ADR 2026-09.y5f3); the default drops it, as every earlier test did.
         presence: (Set<String>) -> Unit = {},
-        // The configured relay list, read live so a test can switch the relays off mid-run.
-        urls: () -> List<String> = { listOf(url) },
+        // The relays this member dials, and the tickets it holds for them (VOICE_CALLS.md §2.6);
+        // [liveUrls] reads the list live instead, so a test can switch the relays off mid-run.
+        urls: List<String> = listOf(url),
+        liveUrls: () -> List<String> = { urls },
+        tickets: SpoolTickets? = null,
+        log: (String) -> Unit = {},
     ): Member {
         val metrics = MeshMetrics()
         val delivered = mutableListOf<RelayEnvelope>()
@@ -119,7 +123,7 @@ class ScopeSyncTest {
                 dialer = dialer,
                 store = custody,
                 selfId = { self },
-                urls = urls,
+                urls = liveUrls,
                 canCarry = carryGate,
                 // Stands in for MeshRouter.handleInbound: deliver, then capture into custody exactly as
                 // InboundPipeline.onDeliver does, so the next heal round folds the frame into our digest.
@@ -134,6 +138,8 @@ class ScopeSyncTest {
                 metrics = metrics,
                 clock = clock,
                 jitter = { 0L },
+                tickets = tickets,
+                log = log,
             )
         return Member(custody, sync, metrics, delivered, blobs, obtained)
     }
@@ -292,6 +298,143 @@ class ScopeSyncTest {
             assertTrue(other.sync.turnCredentials(bob).isEmpty())
             assertFalse(SpoolRecordType.TURNREQ in older.skippedRecords)
             other.sync.stop()
+        }
+
+    /** Dials each relay URL to its own [FakeSpool]: several spools, one member. */
+    private class Relays(
+        val byUrl: Map<String, FakeSpool>,
+    ) : SpoolDialer {
+        override suspend fun dial(url: String): SpoolSocket = byUrl.getValue(url).dial(url)
+    }
+
+    @Test
+    fun `a ticketed spool is asked for turn on every call and first, and an unticketed ent spool not at all`() =
+        runTest {
+            // Two plain relays carry the peer's scope; the lab relay takes tickets, and holds nothing of Bob's.
+            val plain1 = FakeSpool(turn = true)
+            val plain2 = FakeSpool(turn = true)
+            val lab = FakeSpool(turn = true, ent = true, stun = listOf("stun:lab.example:3478"))
+            val urls = listOf("ws://one.test/spool/v1", "ws://two.test/spool/v1", "ws://lab.example:9480/spool/v1?k=t")
+            val relays = Relays(mapOf(urls[0] to plain1, urls[1] to plain2, urls[2] to lab))
+            val journal = SpoolTicketsTest.MemoryJournal()
+            val tickets = SpoolTickets(journal) { now }
+            val lines = mutableListOf<String>()
+            val caller = member(plain1, alice, bob, dialer = relays, urls = urls, tickets = tickets, log = { lines += it })
+            caller.sync.start(backgroundScope)
+            pump()
+
+            // No ticket yet: S-7.6-16 would refuse a turnreq there, so none goes, and the log says it was skipped.
+            assertEquals(2, caller.sync.turnCredentials(bob).size)
+            assertEquals(0, lab.turnIssued)
+            assertTrue(lab.turnRefusals.isEmpty())
+            assertTrue(lines.any { it.startsWith("lab.example:9480: TURN ask skipped") })
+
+            // Imported mid-connection, the ticket goes out at once and is accepted.
+            assertTrue(tickets.import(urls[2], SpoolTicketsTest.TEXT) is SpoolTickets.Import.Held)
+            pump(2)
+            assertEquals(1, lab.ents.size)
+            val status = caller.sync.status().single { it.url == urls[2] }
+            assertTrue(status.ent)
+            assertEquals(listOf("stun:lab.example:3478"), status.stun)
+            assertEquals(SpoolTicketState.Accepted(exp = 1_800_086_400L, fl = SpoolTicket.FL_TURN), status.ticket)
+
+            // C-7.6-21: asked with no answered SUB for the peer (a peer this phone shares no scope with)...
+            assertEquals(1, caller.sync.turnCredentials("nobody").size)
+            assertEquals(1, lab.turnIssuedTicketed)
+            // ...and first: three candidates, two asked, and the ticketed one is always among them.
+            val before = plain1.turnIssued + plain2.turnIssued
+            assertEquals(2, caller.sync.turnCredentials(bob).size)
+            assertEquals(2, lab.turnIssuedTicketed)
+            assertEquals(before + 1, plain1.turnIssued + plain2.turnIssued)
+            assertEquals(listOf("stun:lab.example:3478"), caller.sync.stunUrls())
+            caller.sync.stop()
+        }
+
+    @Test
+    fun `a refused ticket is not presented again on every round, and only early earns a second connection`() =
+        runTest {
+            val lab = FakeSpool(turn = true, ent = true)
+            val labUrl = "ws://lab.example:9480/spool/v1"
+            val journal = SpoolTicketsTest.MemoryJournal()
+            val tickets = SpoolTickets(journal) { now }
+            tickets.import(labUrl, SpoolTicketsTest.TEXT)
+            lab.entAnswer = { "early" }
+            val member = member(lab, alice, bob, urls = listOf(labUrl), tickets = tickets)
+            member.sync.start(backgroundScope)
+            pump()
+            // Right after the hello, once — the verdict it left changes the store, and that does not re-send it.
+            assertEquals(1, lab.ents.size)
+            assertEquals(
+                SpoolTicketState.Refused("early"),
+                member.sync
+                    .status()
+                    .single()
+                    .ticket,
+            )
+            pump(70)
+            assertEquals(1, lab.ents.size)
+
+            lab.dropSockets()
+            pump(30)
+            assertEquals("early's one retry, on the next connection", 2, lab.ents.size)
+            lab.dropSockets()
+            pump(30)
+            assertEquals(2, lab.ents.size)
+            assertEquals(
+                "early",
+                journal.state.value
+                    .getValue("lab.example")
+                    .verdict,
+            )
+
+            // A different ticket is a fresh start; `expired` drops it, so the next connection presents nothing.
+            tickets.import(labUrl, SpoolTicketsTest.ticket(sigByte = 3).text)
+            lab.entAnswer = { "expired" }
+            pump(2)
+            assertEquals(3, lab.ents.size)
+            assertTrue(journal.state.value.isEmpty())
+            lab.dropSockets()
+            pump(30)
+            assertEquals(3, lab.ents.size)
+
+            // `signature` keeps the bytes but never presents them again, a reconnect included.
+            tickets.import(labUrl, SpoolTicketsTest.ticket(sigByte = 4).text)
+            lab.entAnswer = { "signature" }
+            pump(2)
+            assertEquals(4, lab.ents.size)
+            lab.dropSockets()
+            pump(30)
+            assertEquals(4, lab.ents.size)
+            // And none of it ever cost the connection a strike.
+            assertTrue(
+                member.sync
+                    .status()
+                    .single()
+                    .connected,
+            )
+            member.sync.stop()
+        }
+
+    @Test
+    fun `no log line the plane writes carries a ticket`() =
+        runTest {
+            val lab = FakeSpool(turn = true, ent = true, stun = listOf("stun:lab.example:3478"))
+            val labUrl = "ws://lab.example:9480/spool/v1"
+            val tickets = SpoolTickets(SpoolTicketsTest.MemoryJournal()) { now }
+            tickets.import(labUrl, SpoolTicketsTest.TEXT)
+            val lines = mutableListOf<String>()
+            val member = member(lab, alice, bob, urls = listOf(labUrl), tickets = tickets, log = { lines += it })
+            member.sync.start(backgroundScope)
+            pump()
+            member.sync.turnCredentials(bob)
+            lab.entAnswer = { "signature" }
+            tickets.import(labUrl, SpoolTicketsTest.ticket(sigByte = 6).text)
+            pump(2)
+            member.sync.stop()
+
+            assertTrue(lines.toString(), lines.any { "ticket accepted" in it } && lines.any { "ticket refused: signature" in it })
+            assertTrue(lines.any { "TURN ask (ticketed): credential" in it })
+            for (line in lines) assertFalse(line, SpoolTicketsTest.leaks(line) || "fake-pass" in line)
         }
 
     /**
@@ -466,7 +609,7 @@ class ScopeSyncTest {
             val seen = mutableListOf<Set<String>>()
             var relays = listOf(url)
             val sender = member(spool, alice, bob)
-            val receiver = member(spool, bob, alice, presence = { seen += it }, urls = { relays })
+            val receiver = member(spool, bob, alice, presence = { seen += it }, liveUrls = { relays })
             sender.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
             receiver.sync.start(backgroundScope)
             sender.sync.start(backgroundScope)

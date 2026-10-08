@@ -90,6 +90,7 @@ import app.getknit.knit.mesh.spool.ScopeRoots
 import app.getknit.knit.mesh.spool.ScopeSync
 import app.getknit.knit.mesh.spool.SpoolDialer
 import app.getknit.knit.mesh.spool.SpoolStatus
+import app.getknit.knit.mesh.spool.SpoolTickets
 import app.getknit.knit.moderation.ImageScreeningService
 import app.getknit.knit.moderation.ScopedTextModerator
 import app.getknit.knit.normalizeSingleLine
@@ -632,6 +633,10 @@ class MeshManager(
                 clock = clock,
                 tickIntervalMs = spoolTickMs,
                 attachmentRetryMs = spoolAttachmentRetryMs,
+                // Entitlement tickets (experimental, docs/VOICE_CALLS.md §2.6, ADR 2026-10.xkp4), held beside the relay
+                // list. Imported only through the debug bridge until a storefront hands them out.
+                tickets = SpoolTickets(settings, clock),
+                log = { Log.i(SPOOL_TAG, it) },
             )
         }
 
@@ -3763,6 +3768,9 @@ class MeshManager(
 
         const val TAG = "MeshManager"
         const val TEXT_MODERATION_TAG = "TextModeration"
+
+        /** The Internet plane's logcat tag, shared with `OkHttpSpoolDialer`. */
+        const val SPOOL_TAG = "ScopeSync"
         const val METRICS_LOG_INTERVAL_MS = 60_000L
         const val FORWARD_SWEEP_INTERVAL_MS = 10 * 60_000L
 

@@ -178,6 +178,24 @@ class SpoolStatus(
      * `dialFailures` alone cannot say. Diagnostics only.
      */
     val lastDialAt: Long? = null,
+    /**
+     * What this connection's HELLO said about entitlement tickets and STUN (experimental, docs/VOICE_CALLS.md §2.6):
+     * whether it takes tickets, the STUN URIs it advertised (as [SpoolConnection.stun] holds them), and where this
+     * connection stands with a ticket. Facts about the live connection, so none while disconnected.
+     */
+    val ent: Boolean = false,
+    val stun: List<String> = emptyList(),
+    val ticket: SpoolTicketState = SpoolTicketState.None,
+)
+
+/**
+ * One spool's part in a call's TURN ask: its [host] for the log, the [connection] to ask (null when it is an `ent`
+ * spool with no ticket and is skipped), and whether the ask rides a ticket — those go first.
+ */
+internal class TurnAsk(
+    val host: String,
+    val connection: SpoolConnection?,
+    val ticketed: Boolean,
 )
 
 /**
@@ -253,6 +271,13 @@ class ScopeSync(
     // production wiring takes the defaults.
     private val tickIntervalMs: Long = TICK_INTERVAL_MS,
     private val attachmentRetryMs: Long = ATTACHMENT_RETRY_MS,
+    // The entitlement tickets this device holds (experimental, docs/VOICE_CALLS.md §2.6, ADR 2026-10.xkp4): each
+    // connection to an `ent` spool presents its host's ticket right after the hello, and again the moment a different
+    // one is imported. Null presents nothing — every build without the store, and every test that does not ask.
+    private val tickets: SpoolTickets? = null,
+    // Where the plane says what it did with a ticket and a TURN ask (the app's `ScopeSync` logcat tag). Never handed
+    // a ticket, a credential or a token: hosts, outcome words and counts only.
+    private val log: (String) -> Unit = {},
 ) {
     private val workers = ConcurrentHashMap<String, Worker>()
     private val sealCache = SealCache(SEAL_CACHE_MAX)
@@ -334,18 +359,43 @@ class ScopeSync(
 
     /**
      * TURN credentials for a call with [peerId] (experimental, docs/VOICE_CALLS.md §2, C-7.6-12): one from each of
-     * at most [MAX_TURN_SPOOLS] connected spools that advertised `turn` and have answered the SUB of a live scope
-     * shared with the peer — the daemon's own gate is any subscription (S-7.6-4), and these are the spools the call
-     * would be relayed beside anyway. Asked in parallel, each for at most [TURN_ASK_MS], on the connection directly
-     * and never under a worker's round lock: a call is waiting. A refusal or a silence just leaves that spool out.
+     * at most [MAX_TURN_SPOOLS] connected spools that advertised `turn` and would issue one here — the daemon's own
+     * gate is any subscription (S-7.6-4), so a spool that has answered the SUB of a live scope shared with the peer,
+     * the spools the call would be relayed beside anyway. A spool where this connection holds a ticket that grants TURN
+     * (accepted, or on its way) is asked on every call whether or not the peer's scope is there (C-7.6-21), and goes
+     * **first**: it is the one a payer's relay is on, and the cap must not crowd it out. An `ent` spool with no such
+     * ticket is not asked at all — S-7.6-16 would refuse it, from the per-IP bucket (ADR 2026-10.xkp4). Asked in
+     * parallel, each for at most [TURN_ASK_MS], on the connection directly and never under a worker's round lock: a
+     * call is waiting. A refusal or a silence just leaves that spool out.
      */
     suspend fun turnCredentials(peerId: String): List<SpoolReply.Turn> {
         val hexes = scopes.filter { it.peerId == peerId && !it.retiring }.map { it.idHex }
-        if (hexes.isEmpty()) return emptyList()
-        val connections = workers.values.mapNotNull { it.turnConnection(hexes) }.take(MAX_TURN_SPOOLS)
-        return coroutineScope { connections.map { async { it.turnCredential(TURN_ASK_MS) } }.awaitAll() }
-            .filterIsInstance<SpoolReply.Turn>()
+        val asks = workers.values.mapNotNull { it.turnAsk(hexes) }
+        asks.filter { it.connection == null }.forEach { log("${it.host}: TURN ask skipped, no ticket (ent)") }
+        val chosen =
+            asks
+                .mapNotNull { ask ->
+                    ask.connection?.let { ask to it }
+                }.sortedByDescending { it.first.ticketed }
+                .take(MAX_TURN_SPOOLS)
+        val replies = coroutineScope { chosen.map { (ask, conn) -> async { ask to conn.turnCredential(TURN_ASK_MS) } }.awaitAll() }
+        for ((ask, reply) in replies) log("${ask.host}: TURN ask${if (ask.ticketed) " (ticketed)" else ""}: ${describeTurn(reply)}")
+        return replies.mapNotNull { it.second as? SpoolReply.Turn }
     }
+
+    /**
+     * The credential-free STUN URIs every connected spool advertised in its HELLO (C-7.6-20), in worker order and
+     * without repeats. Not capped here: the call picks from these and what its TURN servers reduce to
+     * (`call/StunServers`). Lock-free and synchronous — the hellos are already in memory.
+     */
+    fun stunUrls(): List<String> = workers.values.flatMap { it.stunUrls() }.distinct()
+
+    private fun describeTurn(reply: SpoolReply): String =
+        when (reply) {
+            is SpoolReply.Turn -> "credential, ${reply.urls.size} url(s)"
+            is SpoolReply.Failed -> "refused ${reply.code}${reply.msg?.let { "/$it" }.orEmpty()}"
+            else -> "no answer"
+        }
 
     /** Fires [onPresenceChanged] when the present set differs from what was last published. */
     @Synchronized
@@ -586,6 +636,12 @@ class ScopeSync(
         @Volatile
         private var connection: SpoolConnection? = null
 
+        // The ticket presented on the current connection, so a store change that is not a new import (an answer's
+        // verdict, a clear) never sends the same bytes twice on one connection. Reset with every session.
+        @Volatile
+        private var presented: HeldTicket? = null
+        private val presentLock = Mutex()
+
         // The most recent `err` code this spool answered with, for diagnostics. Cleared on a clean
         // connect so a stale refusal doesn't outlive the condition that caused it — and only then, so a
         // dial verdict (`unreachable`, `no_hello`) holds through the next attempt rather than flickering
@@ -706,12 +762,70 @@ class ScopeSync(
         }
 
         /**
-         * This worker's live connection when it may be asked for a TURN credential: a completed hello that carried
-         * `turn`, and an answered SUB for one of [hexes] (a digest arrived, so the spool counts the subscription).
-         * Lock-free like [status]; the connection is concurrency-safe for requests.
+         * Whether, and how, this worker's live connection may be asked for a TURN credential, or null when it is no
+         * candidate at all: no completed hello that carried `turn`, or (without a ticket) no answered SUB for one of
+         * [hexes] — a digest arrived, so the spool counts the subscription. A ticket that grants TURN, accepted or
+         * on its way, qualifies on its own (C-7.6-21). An `ent` spool without one is a [TurnAsk] with no connection:
+         * a skip worth saying, since S-7.6-16 would only refuse it. Lock-free like [status]; the connection is
+         * concurrency-safe for requests.
          */
-        fun turnConnection(hexes: Collection<String>): SpoolConnection? =
-            connection?.takeIf { conn -> conn.isReady && conn.turn && hexes.any(spoolDigests::containsKey) }
+        fun turnAsk(hexes: Collection<String>): TurnAsk? {
+            val conn = connection?.takeIf { it.isReady && it.turn } ?: return null
+            val host = SpoolUrl.host(url)
+            return when {
+                conn.ticketedTurn -> TurnAsk(host, conn, ticketed = true)
+                conn.ent -> TurnAsk(host, connection = null, ticketed = false)
+                hexes.any(spoolDigests::containsKey) -> TurnAsk(host, conn, ticketed = false)
+                else -> null
+            }
+        }
+
+        /** The STUN URIs this worker's live connection advertised; none while it has no completed hello. */
+        fun stunUrls(): List<String> = connection?.takeIf { it.isReady }?.stun.orEmpty()
+
+        /**
+         * Presents this host's ticket on [conn] if one is held and presentable and it is not the ticket already
+         * presented on this connection — so an import shows up at once (and replaces the accepted one), while a
+         * refusal or an answer's own verdict write never re-sends the same bytes on the same connection (C-7.6-19).
+         * The connection itself refuses a spool that never advertised `ent` and a ticket for another host.
+         */
+        private suspend fun presentTicket(conn: SpoolConnection) {
+            val store = tickets ?: return
+            if (!conn.ent || !conn.isReady) return
+            // The session and the store watch both call this; one at a time, or both could send the same bytes.
+            presentLock.withLock {
+                val ticket = store.presentable(url) ?: return
+                if (presented?.sameAs(ticket) == true) return
+                presented = ticket
+                if (conn.present(ticket)) log("${SpoolUrl.host(url)}: ticket presented (exp ${ticket.claims.exp})")
+            }
+        }
+
+        /** The spool answered a ticket this worker presented: apply the refusal policy and say what came back. */
+        private suspend fun ticketAnswered(
+            ticket: HeldTicket,
+            reply: SpoolReply,
+        ) {
+            val host = SpoolUrl.host(url)
+            val failed = reply as? SpoolReply.Failed
+            when {
+                failed == null -> {
+                    log("$host: ticket accepted (exp ${ticket.claims.exp}, fl ${ticket.claims.fl})")
+                    tickets?.answered(url, ticket, refusal = null)
+                }
+
+                failed.code == SpoolErrCode.TICKET -> {
+                    val word = failed.msg ?: failed.code
+                    log("$host: ticket refused: $word")
+                    tickets?.answered(url, ticket, refusal = word)
+                }
+
+                // `rate`, `internal`: no verdict on the ticket. The next connection presents it again.
+                else -> {
+                    log("$host: ticket not answered: ${failed.code}")
+                }
+            }
+        }
 
         fun status(all: List<Scope>): SpoolStatus =
             SpoolStatus(
@@ -727,6 +841,9 @@ class ScopeSync(
                 maxAttachBytes = connection?.limits?.takeIf { it.attachments }?.maxAttachBytes,
                 commons = connection?.commons,
                 software = connection?.let { software },
+                ent = connection?.takeIf { it.isReady }?.ent == true,
+                stun = stunUrls(),
+                ticket = connection?.takeIf { it.isReady }?.ticketState() ?: SpoolTicketState.None,
                 scopes =
                     mine(all, connection).map { scope ->
                         ScopeStatus(
@@ -806,6 +923,7 @@ class ScopeSync(
             }
             val conn = connect(socket)
             software = null
+            presented = null
             connection = conn
             val pump = host.launch { for (bytes in socket.incoming) conn.onMessage(bytes) }
             // The socket dying before (or instead of) the spool's hello must resolve the handshake rather
@@ -838,6 +956,13 @@ class ScopeSync(
                 // Off the session's own path: this is one diagnostics row, and a spool that is slow to serve
                 // an HTTP route must not hold up the heal loop it answers records on.
                 host.launch { readSoftware(conn) }
+                // C-7.6-19: the ticket goes right after the hello, ahead of the first SUB, and again whenever a
+                // different one is imported while this connection lives. Only an `ent` spool is watched for one.
+                presentTicket(conn)
+                val ticketWatch =
+                    tickets?.takeIf { conn.ent }?.let { store ->
+                        host.launch { store.changes.collect { presentTicket(conn) } }
+                    }
                 subscribe(conn, mine(scopes, conn))
                 republishPresence() // a connected spool is what makes a stamped peer count
                 // The tick is a mark like any other, so a scope busy with events still gets its full pass and
@@ -862,6 +987,7 @@ class ScopeSync(
                     }
                 } finally {
                     ticker.cancel()
+                    ticketWatch?.cancel()
                 }
             }
             pump.cancel()
@@ -917,6 +1043,8 @@ class ScopeSync(
                 onDigest = { handleDigest(it) },
                 onEvent = { handleEvent(it) },
                 onScopeError = { scopeHex, code, retryMs -> handleScopeError(scopeHex, code, retryMs) },
+                onTicketAnswer = { ticket, reply -> ticketAnswered(ticket, reply) },
+                clock = clock,
             )
 
         /**
