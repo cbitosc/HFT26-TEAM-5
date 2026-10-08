@@ -52,6 +52,14 @@ data class PaceConfig(
      * the feed side. Capped at [LinkFraming.FILE_CHUNK_BYTES]; a Coded link takes smaller chunks (ADR 2026-10.yvn6).
      */
     val chunkBytes: Int = LinkFraming.FILE_CHUNK_BYTES,
+    /**
+     * Clock the feed by the receiver's progress reports instead ([FeedWindow], ADR 2026-10.nsr7's phase 2): the
+     * [bytesPerSec] and [chunkBytes] above are then the fallback for a receiver that has not reported for
+     * [FeedWindow.NO_REPORT_MS].
+     */
+    val windowed: Boolean = false,
+    /** The queue a windowed feed keeps ahead of its receiver ([FeedWindow.queueMs]); `…debug.LINKTUNE --ei windowQueueMs`. */
+    val windowQueueMs: Long = FeedWindow.QUEUE_MS,
 )
 
 /**
@@ -73,6 +81,16 @@ class PaceWindow(
         now: Long,
     ) {
         if (current == config) return
+        config = current
+        startedAt = now
+        fed = 0L
+    }
+
+    /** Restarts the window at [now] under [current], whatever it ran under: the feed comes back to its pace from a window. */
+    fun restart(
+        current: PaceConfig,
+        now: Long,
+    ) {
         config = current
         startedAt = now
         fed = 0L

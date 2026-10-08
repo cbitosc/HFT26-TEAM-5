@@ -11,6 +11,7 @@ import app.getknit.knit.mesh.ReceivedDigest
 import app.getknit.knit.mesh.ReceivedFile
 import app.getknit.knit.mesh.link.DigestWire
 import app.getknit.knit.mesh.link.FeedMeter
+import app.getknit.knit.mesh.link.FeedWindow
 import app.getknit.knit.mesh.link.FramedLink
 import app.getknit.knit.mesh.link.LinkCallbacks
 import app.getknit.knit.mesh.link.LinkFraming
@@ -109,6 +110,7 @@ class FramedLinkTest {
         onFeedChanged: () -> Unit = {},
         now: () -> Long = { 0L },
         onRxProgress: (String, Long, Long) -> Unit = { _, _, _ -> },
+        windowedReports: Boolean = false,
     ): Harness {
         val toLink = PipedOutputStream()
         val linkInput = PipedInputStream(toLink, 1 shl 18)
@@ -140,6 +142,7 @@ class FramedLinkTest {
                 onBusy = onBusy,
                 onFeedChanged = onFeedChanged,
                 onRxProgress = onRxProgress,
+                windowedReports = { windowedReports },
             )
         link.start()
         return Harness(link, toLink, fromLink, callbacks)
@@ -410,6 +413,109 @@ class FramedLinkTest {
         h.link.close()
     }
 
+    /** Reads the FILE_CHUNK records that arrive within [quietMs] of each other, and returns their sizes. */
+    private fun chunksUntilQuiet(
+        fromLink: PipedInputStream,
+        quietMs: Long = 700,
+    ): List<Int> {
+        val sizes = ArrayList<Int>()
+        while (true) {
+            val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(quietMs)
+            while (fromLink.available() == 0 && System.nanoTime() < deadline) Thread.sleep(5)
+            if (fromLink.available() == 0) return sizes
+            val rec = LinkFraming.read(fromLink)!!
+            if (rec.type == LinkFraming.Type.FILE_CHUNK) sizes += rec.payload.size
+        }
+    }
+
+    @Test
+    fun aWindowedFeedHoldsAtItsWindowUntilAReportFreesIt() {
+        // ADR 2026-10.nsr7's phase 2: before any report only the starting window goes; a report measuring the drain
+        // lets the writer refill to half a second of it at once, without waiting out its timeout.
+        val h = harness(pace = { PaceConfig(bytesPerSec = 4_096, chunkBytes = 2_048, windowed = true) })
+        val key = "a1".repeat(32)
+        val file = tmp.newFile("windowed.bin").apply { writeBytes(ByteArray(1024 * 1024)) }
+        assertTrue(h.link.sendFile(file, FileMeta(FileKind.ATTACHMENT, key, "image/jpeg")))
+        assertEquals(LinkFraming.Type.FILE_HEADER, LinkFraming.read(h.fromLink)!!.type)
+        val first = chunksUntilQuiet(h.fromLink)
+        assertEquals("the starting window, in starting chunks", FeedWindow.INITIAL_WINDOW, first.sum().toLong())
+        assertTrue(first.all { it == FeedWindow.INITIAL_CHUNK_BYTES })
+        assertTrue(h.link.txWindowed)
+
+        h.link.onProgress(key, 8_192, FramedLink.WINDOWED_PROGRESS_EVERY_MS) // all of it by the first report: 16 KiB/s
+        val refill = chunksUntilQuiet(h.fromLink)
+        assertEquals("half a second of 16 KiB/s, in quarter-second chunks", 8_192, refill.sum())
+        assertTrue(refill.all { it == 4_096 })
+        h.link.close()
+    }
+
+    @Test
+    fun aWindowedFeedWhoseReceiverIsSilentIsPacedUntilItReports() {
+        // A peer that carries the bit but never reports (or whose reports stopped) gets the old pace, not a stopped feed.
+        // On a real clock: a test clock jumping past the writer's wait would read as the writer asleep, not the receiver
+        // silent.
+        val t0 = System.nanoTime()
+        val h =
+            harness(
+                pace = { PaceConfig(bytesPerSec = 1024 * 1024, chunkBytes = 2_048, windowed = true) },
+                now = { TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0) },
+            )
+        val key = "b2".repeat(32)
+        val file = tmp.newFile("silent.bin").apply { writeBytes(ByteArray(64 * 1024)) }
+        assertTrue(h.link.sendFile(file, FileMeta(FileKind.ATTACHMENT, key, "image/jpeg")))
+        assertEquals(LinkFraming.Type.FILE_HEADER, LinkFraming.read(h.fromLink)!!.type)
+        assertEquals(FeedWindow.INITIAL_WINDOW, chunksUntilQuiet(h.fromLink).sum().toLong())
+
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(FeedWindow.NO_REPORT_MS + 2_000)
+        while (h.fromLink.available() == 0 && System.nanoTime() < deadline) Thread.sleep(20)
+        assertTrue("paced from its pace's chunks once the receiver was silent", h.fromLink.available() > 0)
+        assertEquals(2_048, LinkFraming.read(h.fromLink)!!.payload.size)
+        assertFalse(h.link.txWindowed)
+        assertArrayEquals(ByteArray(64 * 1024 - FeedWindow.INITIAL_WINDOW.toInt() - 2_048), readFileBody(h.fromLink))
+        h.link.close()
+    }
+
+    @Test
+    fun framesQueuedDuringAWindowedFeedsFallbackDoNotHurryItsPace() {
+        // A silent receiver's feed is paced; a frame's wake drains the frame but must not end the pace's wait, or the pace
+        // follows the link's frames (the bluetooth-reviewer's finding). On a real clock, as the silent-receiver case.
+        val t0 = System.nanoTime()
+        val h =
+            harness(
+                pace = { PaceConfig(bytesPerSec = 4_096, chunkBytes = 2_048, windowed = true) },
+                now = { TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0) },
+            )
+        val key = "c3".repeat(32)
+        val file = tmp.newFile("fallback.bin").apply { writeBytes(ByteArray(256 * 1024)) }
+        assertTrue(h.link.sendFile(file, FileMeta(FileKind.ATTACHMENT, key, "image/jpeg")))
+        assertEquals(LinkFraming.Type.FILE_HEADER, LinkFraming.read(h.fromLink)!!.type)
+        assertEquals(FeedWindow.INITIAL_WINDOW, chunksUntilQuiet(h.fromLink).sum().toLong())
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(FeedWindow.NO_REPORT_MS + 2_000)
+        while (h.fromLink.available() == 0 && System.nanoTime() < deadline) Thread.sleep(20)
+        assertTrue("paced once the receiver was silent", h.fromLink.available() > 0)
+
+        val frame = frameBytes(id = "busy", senderId = "sender01")
+        val chunks = AtomicInteger()
+        val reader =
+            Thread {
+                runCatching {
+                    while (true) {
+                        val rec = LinkFraming.read(h.fromLink) ?: break
+                        if (rec.type == LinkFraming.Type.FILE_CHUNK) chunks.incrementAndGet()
+                    }
+                }
+            }.apply { start() }
+        val end = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+        while (System.nanoTime() < end) {
+            h.link.send(frame)
+            Thread.sleep(50)
+        }
+        // Two seconds at 4 KiB/s in 2 KiB chunks is four, give or take the one paced as the window fell back.
+        assertTrue("paced, not hurried by 40 frames: ${chunks.get()} chunks", chunks.get() <= 6)
+        h.link.close()
+        reader.join(2_000)
+    }
+
     @Test
     fun aQueuedFileThePeerWithdrawsIsSkippedButAStreamingOneIsNot() {
         // ADR 2026-10.nsr7's cancel: a copy queued behind another file is taken off the link; one streaming goes on.
@@ -509,7 +615,7 @@ class FramedLinkTest {
     }
 
     @Test
-    fun aFileStreamingInIsReportedEveryTwoSecondsOfChunks() {
+    fun aFileStreamingInIsReportedEveryReportIntervalOfChunks() {
         // ADR 2026-10.nsr7: the receive side tells its owner how much it holds, by its own clock since the header, every
         // FramedLink.PROGRESS_EVERY_MS of chunks; a stall reports nothing.
         val t = AtomicLong(0)
@@ -519,11 +625,66 @@ class FramedLinkTest {
         writeRecord(h.toLink, LinkFraming.Type.FILE_HEADER, LinkFraming.encodeFileHeader(hdr("ATTACHMENT", key, size = 8_192)))
         writeRecord(h.toLink, LinkFraming.Type.FILE_CHUNK, ByteArray(1_024))
         assertTrue(awaitUntil { h.link.rxFile?.bytes == 1_024L })
-        assertTrue("not yet two seconds in", reports.isEmpty())
+        assertTrue("not yet an interval in", reports.isEmpty())
         t.set(FramedLink.PROGRESS_EVERY_MS)
         writeRecord(h.toLink, LinkFraming.Type.FILE_CHUNK, ByteArray(1_024))
         assertTrue(awaitUntil { reports.isNotEmpty() })
         assertEquals(Triple(key, 2_048L, FramedLink.PROGRESS_EVERY_MS), reports.single())
+        h.link.close()
+    }
+
+    @Test
+    fun aWindowedSenderIsReportedToOnceMoreAfterChunksThatAllLandedInsideOneInterval() {
+        // ADR 2026-10.5buf: a windowed sender writes nothing more until it hears, so a fast pair's starting window lands
+        // inside one interval and no later chunk carries the report. The trailing report does; a stall sends nothing.
+        val t = AtomicLong(0)
+        val reports = CopyOnWriteArrayList<Triple<String, Long, Long>>()
+        val h =
+            harness(
+                now = { t.get() },
+                onRxProgress = { k, held, ms -> reports += Triple(k, held, ms) },
+                windowedReports = true,
+            )
+        val key = "f6".repeat(32)
+        writeRecord(h.toLink, LinkFraming.Type.FILE_HEADER, LinkFraming.encodeFileHeader(hdr("ATTACHMENT", key, size = 64_000)))
+        writeRecord(h.toLink, LinkFraming.Type.FILE_CHUNK, ByteArray(2_048))
+        writeRecord(h.toLink, LinkFraming.Type.FILE_CHUNK, ByteArray(2_048))
+        assertTrue(awaitUntil { h.link.rxFile?.bytes == 4_096L })
+        t.set(FramedLink.WINDOWED_PROGRESS_EVERY_MS)
+        assertTrue("the trailing report", awaitUntil { reports.isNotEmpty() })
+        assertEquals(Triple(key, 4_096L, FramedLink.WINDOWED_PROGRESS_EVERY_MS), reports.single())
+
+        writeRecord(h.toLink, LinkFraming.Type.FILE_CHUNK, ByteArray(1_024)) // inside the next interval: owed at it
+        assertTrue(awaitUntil { h.link.rxFile?.bytes == 5_120L })
+        Thread.sleep(FramedLink.WINDOWED_PROGRESS_EVERY_MS + 200)
+        assertEquals("not before its interval", 1, reports.size)
+        t.set(2 * FramedLink.WINDOWED_PROGRESS_EVERY_MS)
+        assertTrue("the chunk is owed at its interval", awaitUntil { reports.size == 2 })
+        assertEquals(5_120L, reports[1].second)
+        Thread.sleep(2 * FramedLink.WINDOWED_PROGRESS_EVERY_MS + 200)
+        assertEquals("nothing more landed: a stall says nothing", 2, reports.size)
+        h.link.close()
+    }
+
+    @Test
+    fun aWindowsWorthLandedIsReportedOnTheChunkThatCompletesIt() {
+        // ADR 2026-10.5buf: on the reader, awake for the chunk, not on a timer a dark receiver may sleep through.
+        val reports = CopyOnWriteArrayList<Triple<String, Long, Long>>()
+        val t = AtomicLong(0)
+        val h =
+            harness(
+                now = { t.get() },
+                onRxProgress = { k, held, ms -> reports += Triple(k, held, ms) },
+                windowedReports = true,
+            )
+        val key = "f7".repeat(32)
+        writeRecord(h.toLink, LinkFraming.Type.FILE_HEADER, LinkFraming.encodeFileHeader(hdr("ATTACHMENT", key, size = 64_000)))
+        writeRecord(h.toLink, LinkFraming.Type.FILE_CHUNK, ByteArray(4_096))
+        assertTrue(awaitUntil { h.link.rxFile?.bytes == 4_096L })
+        t.set(100)
+        writeRecord(h.toLink, LinkFraming.Type.FILE_CHUNK, ByteArray(4_096))
+        assertTrue(awaitUntil { reports.isNotEmpty() })
+        assertEquals(Triple(key, 8_192L, 100L), reports.first())
         h.link.close()
     }
 

@@ -18,12 +18,14 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.IOException
 import java.io.OutputStream
 import java.util.concurrent.atomic.AtomicReference
+import kotlin.math.abs
 
 /**
  * Callbacks a [FramedLink] raises up to its owning transport. Kept transport-neutral (no radio types) so
@@ -85,6 +87,10 @@ class FramedLink(
     // Called on the reader every [PROGRESS_EVERY_MS] of chunks of a file streaming in, with its key, the bytes held
     // and the ms since its header, outside every lock: the owner sends it back to the sender (ADR 2026-10.nsr7).
     private val onRxProgress: (key: String, held: Long, ms: Long) -> Unit = { _, _, _ -> },
+    // Whether this side reports a file streaming in the way a windowed sender needs (ADR 2026-10.5buf): every
+    // [WINDOWED_PROGRESS_EVERY_MS], and once more that long after the last chunk if no other came. Off, every
+    // [PROGRESS_EVERY_MS] of chunks only, as nsr7 shipped it. Read at each report.
+    private val windowedReports: () -> Boolean = { false },
 ) {
     private val outbound = Channel<Outbound>(Channel.UNLIMITED)
 
@@ -131,9 +137,23 @@ class FramedLink(
     // The stream's measured progress, from the receiver's `blobprog` reports (ADR 2026-10.nsr7). Guarded by [pendingLock].
     private val meter = FeedMeter(now)
 
-    // The receive side's reports: when the file streaming in began, and when it was last reported. Reader thread only.
+    // The in-flight window a windowed feed is clocked by, from the same reports (nsr7's phase 2). Guarded by
+    // [pendingLock]. A report, or a frame queued to go out, wakes the writer out of its wait through [wake]: the frame
+    // may be our own report on the peer's feed to us, which held there would starve its window (the bluetooth-reviewer's
+    // finding: two feeds crossing on one link).
+    private val inFlight = FeedWindow()
+    private val wake = Channel<Unit>(Channel.CONFLATED)
+
+    /** Whether the stream going now is clocked by its receiver's reports ([FeedWindow]) rather than paced. */
+    @Volatile
+    var txWindowed = false
+        private set
+
+    // When the file streaming in began, on the reader.
     @Volatile private var rxStartedAt = 0L
-    private var rxReportedAt = 0L
+
+    // The receive side's reports back to the sender (ADR 2026-10.nsr7, 2026-10.5buf).
+    private val rxReports = RxReports(scope, now, windowedReports, { rxFile.takeIf { !closed } }, onRxProgress)
 
     // How much of the file streaming in was held when its header came: a resume's kept prefix, which [rxEtaMs] does not
     // count as streamed.
@@ -220,6 +240,7 @@ class FramedLink(
     fun send(bytes: ByteArray) {
         outbound.trySend(Outbound.Frame(bytes))
         metrics.onBytesSent(bytes.size.toLong())
+        wake.trySend(Unit) // a windowed writer waiting for room drains it first
     }
 
     /**
@@ -233,6 +254,7 @@ class FramedLink(
     fun sendDigest(ids: List<String>) {
         if (pendingDigest.getAndSet(ids) == null) {
             outbound.trySend(Outbound.DigestDue)
+            wake.trySend(Unit)
         } else {
             metrics.onDigestReplaced()
         }
@@ -336,6 +358,55 @@ class FramedLink(
         }
     }
 
+    /**
+     * A windowed feed's wait for room (nsr7's phase 2): until a report comes or [ms] runs out, whichever is first. Marked
+     * for the meter like a pace wait, and whatever it runs past [ms] the writer slept, which the window's silence does
+     * not count either.
+     */
+    private suspend fun awaitReport(ms: Long) {
+        val began = now()
+        synchronized(pendingLock) { meter.pausing(ms) }
+        try {
+            // stretches: like the pace wait, a sleeping writer sends nothing, and the meter and window discount it.
+            withTimeoutOrNull(ms) { wake.receive() }
+        } finally {
+            synchronized(pendingLock) {
+                meter.resumed()
+                inFlight.slept(now() - began - ms, now())
+            }
+        }
+    }
+
+    /**
+     * A windowed feed's pace wait while its receiver is silent: [ms], cut short only by the receiver's report, which
+     * gives it its window back. A queued frame's wake must not end it, or the pace would follow the link's frames (the
+     * bluetooth-reviewer's finding).
+     */
+    private suspend fun awaitPaceOrReport(ms: Long) {
+        val until = now() + ms
+        while (true) {
+            val left = until - now()
+            if (left <= 0 || !synchronized(pendingLock) { inFlight.pacing(now()) }) return
+            awaitReport(left)
+        }
+    }
+
+    /**
+     * The pace a windowed chunk is noted at for the meter: the window's rate, or [fallback] before one. It moves only
+     * past a quarter of the last, since a pace move resets the meter's measured rate and the window's moves every report.
+     */
+    private fun windowedPace(fallback: Int): Int {
+        val r = synchronized(pendingLock) { inFlight.rate }.takeIf { it > 0 } ?: fallback
+        val last = txPace
+        return if (last > 0 && abs(r - last) * PACE_MOVE_DEN < last) last else r
+    }
+
+    /** The window's reading, when its noted rate moves: the device oracle beside the receiver's `rx … in` line. */
+    private fun logWindow(rate: Int) {
+        val (target, queued) = synchronized(pendingLock) { inFlight.target() to inFlight.queued(now()) }
+        log("bt file window rate=$rate target=$target queued=$queued → $nodeId")
+    }
+
     /** The peer holds [held] bytes of the file under [key], [ms] after its header arrived (a `blobprog`, ADR 2026-10.nsr7). */
     fun onProgress(
         key: String,
@@ -345,13 +416,19 @@ class FramedLink(
         val measured =
             synchronized(pendingLock) {
                 val before = meter.measured
-                meter.report(key, held, ms) && !before && meter.measured
+                val ours = meter.report(key, held, ms)
+                if (ours) inFlight.report(held, ms, now())
+                ours && !before && meter.measured
             }
+        wake.trySend(Unit) // a windowed writer waiting for room reads it again
         if (measured) onFeedChanged() // its first rate: the feed's ETA is the drain's from now
     }
 
     /** The share of its pace this link's last measured stream drained, when that fell short; 1.0 else (ADR 2026-10.nsr7). */
     val drainRatio: Double get() = synchronized(pendingLock) { meter.drainRatio }
+
+    /** The drain this link's last measured stream ran at, in bytes a second; 0 before one, or since a PHY step. */
+    val lastDrain: Int get() = synchronized(pendingLock) { meter.lastRate }
 
     /** The link's PHY stepped: what its last stream measured says nothing of the new one. */
     fun forgetDrain() {
@@ -425,6 +502,7 @@ class FramedLink(
     fun close() {
         readerJob?.cancel()
         writerJob?.cancel()
+        rxReports.close()
         outbound.close()
         synchronized(rxLock) {
             closed = true
@@ -459,7 +537,7 @@ class FramedLink(
                     LinkFraming.Type.FILE_HEADER -> {
                         touch()
                         rxStartedAt = now()
-                        rxReportedAt = rxStartedAt
+                        rxReports.started(rxStartedAt)
                         beginRxFile(msg.payload)
                         rxBase = rxFile?.bytes ?: 0L
                         noteBusy()
@@ -469,7 +547,7 @@ class FramedLink(
                         touch()
                         appendRxFile(msg.payload)
                         noteBusy() // a chunk past the ceiling aborts the file
-                        reportRx()
+                        rxReports.chunk()
                     }
 
                     LinkFraming.Type.FILE_END -> {
@@ -583,6 +661,88 @@ class FramedLink(
         }
     }
 
+    /** How a stream's feed ended: the pace it last read, and whether its window clocked it (its `file …` line names both). */
+    private class FeedEnd(
+        val pace: PaceConfig,
+        val windowed: Boolean,
+    )
+
+    /**
+     * Feeds [input]'s chunks to [out] to its end, with live frames between them. A windowed feed writes while its
+     * receiver's reports leave room (ADR 2026-10.nsr7's phase 2) and is paced the old way while the receiver is silent;
+     * coming back to the pace restarts its window.
+     */
+    private suspend fun feedChunks(
+        out: OutputStream,
+        input: FileInputStream,
+    ): FeedEnd {
+        var cfg = PaceConfig() // read before every chunk below; the window rebases onto the first
+        val window = PaceWindow(cfg, now())
+        val buf = ByteArray(LinkFraming.FILE_CHUNK_BYTES)
+        var windowed = false
+        while (true) {
+            // Interleave live frames between chunks — and flush them NOW so they ride the pace gap ahead
+            // of the next chunk instead of trailing behind it in the socket buffer.
+            if (drainFramesInto(out)) out.flush()
+            cfg = pace()
+            val wasWindowed = windowed
+            val wait =
+                synchronized(pendingLock) {
+                    inFlight.queueMs = cfg.windowQueueMs
+                    windowed = cfg.windowed && !inFlight.pacing(now())
+                    if (windowed) inFlight.waitMs(now()) else 0L
+                }
+            txWindowed = windowed
+            if (wasWindowed && !windowed) window.restart(cfg, now())
+            // Waiting for room, frames queued meanwhile go first and the window is read again.
+            if (wait > 0) {
+                awaitReport(wait)
+            } else if (!feedChunk(out, input, buf, cfg, windowed, window)) {
+                return FeedEnd(cfg, windowed)
+            }
+        }
+    }
+
+    /** Writes [input]'s next chunk to [out] and paces it (a paced feed); false at its end. */
+    @Suppress("LongParameterList") // one chunk: its sink, source, buffer, pace, clocking and pace window
+    private suspend fun feedChunk(
+        out: OutputStream,
+        input: FileInputStream,
+        buf: ByteArray,
+        cfg: PaceConfig,
+        windowed: Boolean,
+        window: PaceWindow,
+    ): Boolean {
+        val chunk = if (windowed) synchronized(pendingLock) { inFlight.chunkBytes() } else cfg.chunkBytes
+        val paceNow = if (windowed) windowedPace(cfg.bytesPerSec) else cfg.bytesPerSec
+        if (windowed && paceNow != txPace) logWindow(paceNow)
+        notePaced(paceNow) // known before this chunk's write, which may block
+        if (!windowed) window.rebase(cfg, now())
+        val n = input.read(buf, 0, chunk.coerceIn(1, buf.size))
+        if (n == -1) return false
+        LinkFraming.write(out, LinkFraming.Type.FILE_CHUNK, if (n == buf.size) buf else buf.copyOf(n))
+        synchronized(pendingLock) { inFlight.wrote(n) }
+        txLeft -= n
+        txWroteAt = now()
+        outAt = txWroteAt
+        out.flush() // hand the chunk to the stack so the pace below measures real fed bytes
+        touch()
+        // On a paced (BLE) link, hold the feed at ~link capacity so the stack TX queue stays shallow:
+        // interleaved frames sit near the wire head and the freed ACL budget carries reverse traffic.
+        if (!windowed) {
+            val paced = window.fed(n, now())
+            // A windowed feed paced while its receiver is silent goes back to its window at the receiver's report.
+            if (paced > 0) {
+                if (cfg.windowed) {
+                    awaitPaceOrReport(paced)
+                } else {
+                    pauseFor(paced)
+                }
+            }
+        }
+        return true
+    }
+
     @Suppress("NestedBlockDepth") // open → header → (drain frames → read chunk → write chunk → pace) loop → end
     private suspend fun streamFile(
         out: OutputStream,
@@ -596,8 +756,6 @@ class FramedLink(
         // [txKey] and the meter were set by [beginOrSkip].
         val startedAt = now()
         val meta = item.meta
-        var cfg = PaceConfig() // read before every chunk below; the window rebases onto the first
-        val window = PaceWindow(cfg, startedAt)
         var fed = false // its end went to the socket
         try {
             // Opened before the header goes out: a source that has gone costs this one file, not the link, and the
@@ -612,32 +770,15 @@ class FramedLink(
                 if (offset > 0) input.channel.position(offset)
                 val bytes = length - offset
                 txLeft = bytes
-                synchronized(pendingLock) { meter.sized(offset, bytes) }
+                synchronized(pendingLock) {
+                    meter.sized(offset, bytes)
+                    inFlight.start(offset, now())
+                }
                 // The stream's length rides the header so the receiver can show how far it has got (#115), and so
                 // does the byte it starts at when it is the rest of a cut transfer.
                 val header = FileHeaderWire(meta.kind.wire, meta.key, meta.mime, size = bytes, offset = offset.takeIf { it > 0 })
                 LinkFraming.write(out, LinkFraming.Type.FILE_HEADER, LinkFraming.encodeFileHeader(header))
-                val buf = ByteArray(LinkFraming.FILE_CHUNK_BYTES)
-                while (true) {
-                    // Interleave live frames between chunks — and flush them NOW so they ride the pace gap ahead
-                    // of the next chunk instead of trailing behind it in the socket buffer.
-                    if (drainFramesInto(out)) out.flush()
-                    cfg = pace()
-                    notePaced(cfg.bytesPerSec) // known before this chunk's write, which may block
-                    window.rebase(cfg, now())
-                    val n = input.read(buf, 0, cfg.chunkBytes.coerceIn(1, buf.size))
-                    if (n == -1) break
-                    LinkFraming.write(out, LinkFraming.Type.FILE_CHUNK, if (n == buf.size) buf else buf.copyOf(n))
-                    txLeft -= n
-                    txWroteAt = now()
-                    outAt = txWroteAt
-                    out.flush() // hand the chunk to the stack so the pace below measures real fed bytes
-                    touch()
-                    // On a paced (BLE) link, hold the feed at ~link capacity so the stack TX queue stays shallow:
-                    // interleaved frames sit near the wire head and the freed ACL budget carries reverse traffic.
-                    val wait = window.fed(n, now())
-                    if (wait > 0) pauseFor(wait)
-                }
+                val end = feedChunks(out, input)
                 LinkFraming.write(out, LinkFraming.Type.FILE_END)
                 out.flush()
                 fed = true
@@ -648,10 +789,16 @@ class FramedLink(
                 // the receiver's `rx … in <ms>ms` line is the drain (#117). A resume's offset rides last, so every parse of the line
                 // before it holds — and `file <KIND>/<hash>` still counts the serves (ADR 2026-09.4tx5).
                 val from = if (offset > 0) " from $offset" else ""
-                log("file ${meta.kind.wire}/${meta.key} ${bytes}B in ${now() - startedAt}ms @${cfg.bytesPerSec} → $nodeId$from")
+                // A windowed feed names the rate its window last measured where a paced one names its pace, and says so
+                // last, so every parse of the line before it holds.
+                val measured = if (end.windowed) synchronized(pendingLock) { inFlight.rate } else 0
+                val rate = measured.takeIf { it > 0 } ?: end.pace.bytesPerSec
+                val clocked = if (end.windowed) " window" else ""
+                log("file ${meta.kind.wire}/${meta.key} ${bytes}B in ${now() - startedAt}ms @$rate → $nodeId$from$clocked")
             }
         } finally {
             txInProgress = false
+            txWindowed = false
             // One hold: a cancel never reads this stream as over and its count as still queued, or the reverse.
             synchronized(pendingLock) {
                 txKey = null
@@ -732,18 +879,6 @@ class FramedLink(
         if (installed) metrics.onFileResumedIn()
     }
 
-    /**
-     * Every [PROGRESS_EVERY_MS] of chunks of a file streaming in, how much of it is held, to the owner, which sends it
-     * back to the sender (ADR 2026-10.nsr7). On the reader, after the chunk is written: a stall sends nothing.
-     */
-    private fun reportRx() {
-        val f = rxFile ?: return
-        val t = now()
-        if (t - rxReportedAt < PROGRESS_EVERY_MS) return
-        rxReportedAt = t
-        onRxProgress(f.key, f.bytes, t - rxStartedAt)
-    }
-
     private fun appendRxFile(chunk: ByteArray) = synchronized(rxLock) { if (!closed) intake.chunk(chunk) }
 
     private fun endRxFile() {
@@ -776,8 +911,11 @@ class FramedLink(
         // How long a feed whose link is still earning its boost may be read at the settling pace: about 16 s at the base.
         private const val SETTLE_MAX_CHUNKS = 8
 
-        // How often a file streaming in is reported back to its sender (ADR 2026-10.nsr7): often enough that a stall
-        // shows inside FeedMeter.STALL_MS, rarely enough that the report costs nothing beside the file.
-        const val PROGRESS_EVERY_MS = 2_000L
+        // How often a file streaming in is reported back to its sender: [RxReports].
+        const val PROGRESS_EVERY_MS = RxReports.EVERY_MS
+        const val WINDOWED_PROGRESS_EVERY_MS = RxReports.WINDOWED_EVERY_MS
+
+        // A windowed feed's noted pace moves only past 1/PACE_MOVE_DEN of the last ([windowedPace]).
+        private const val PACE_MOVE_DEN = 4
     }
 }

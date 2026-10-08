@@ -25,6 +25,13 @@ internal class FeedMeter(
     var drainRatio = 1.0
         private set
 
+    /**
+     * The rate the last measured stream on this link drained at, in bytes a second: 0 before one, or since a PHY step.
+     * A windowed feed runs at the drain, so this is what the next one is expected to take (nsr7's phase 2).
+     */
+    var lastRate = 0
+        private set
+
     /** Whether the stream going now has a rate measured from its reports. */
     val measured: Boolean get() = rate > 0
 
@@ -34,6 +41,11 @@ internal class FeedMeter(
     private var startedAt = 0L
     private var lastHeld = -1L
     private var lastMs = 0L
+
+    // Where the next sample is measured from. A report under [MIN_SAMPLE_MS] after it takes no sample: a receiver's reader
+    // catching up a burst reports bytes ms apart (ADR 2026-10.5buf's byte rule), and the sample would read MB/s.
+    private var sampleHeld = -1L
+    private var sampleMs = 0L
     private var advancedAt = 0L
     private var reportAt = 0L
     private var rate = 0
@@ -65,6 +77,8 @@ internal class FeedMeter(
         startedAt = now()
         lastHeld = -1L
         lastMs = 0L
+        sampleHeld = -1L
+        sampleMs = 0L
         paceMoved = false
         advancedAt = startedAt
         rate = 0
@@ -127,6 +141,7 @@ internal class FeedMeter(
     /** The stream is over: the shortfall it measured, if any, stays as the link's [drainRatio]. */
     fun end() {
         if (ratio >= 0) drainRatio = if (ratio < KEPT_UP) ratio else 1.0
+        if (rate > 0) lastRate = rate
         key = null
         pauseAt = -1L
     }
@@ -134,6 +149,7 @@ internal class FeedMeter(
     /** The link's PHY stepped: what its last stream measured says nothing of the new one. */
     fun forgetDrain() {
         drainRatio = 1.0
+        lastRate = 0
     }
 
     /**
@@ -146,11 +162,13 @@ internal class FeedMeter(
         ms: Long,
     ): Boolean {
         if (key != this.key || length < 0) return false
-        val (fromHeld, fromMs) = if (lastHeld < 0) offset to 0L else lastHeld to lastMs
+        val (fromHeld, fromMs) = if (sampleHeld < 0) offset to 0L else sampleHeld to sampleMs
         if (paceMoved) {
             paceMoved = false
             steadyReports++
-        } else if (ms > fromMs && held >= fromHeld) {
+            sampleHeld = held
+            sampleMs = ms
+        } else if (ms - fromMs >= MIN_SAMPLE_MS && held >= fromHeld) {
             val sample = ((held - fromHeld) * MS_PER_SECOND / (ms - fromMs)).coerceIn(0L, Int.MAX_VALUE.toLong()).toInt()
             rate = if (rate == 0) sample else (rate * (SMOOTHING - 1) + sample) / SMOOTHING
             if (steadyReports >= STEADY_REPORTS && pace > 0) {
@@ -158,6 +176,8 @@ internal class FeedMeter(
                 ratio = if (ratio < 0) r else (ratio * (SMOOTHING - 1) + r) / SMOOTHING
             }
             steadyReports++
+            sampleHeld = held
+            sampleMs = ms
         }
         if (held > maxOf(lastHeld, offset)) {
             advancedAt = now()
@@ -264,6 +284,9 @@ internal class FeedMeter(
         // Reports skipped after a pace change or an overslept wait before one is read against the pace: the bytes a
         // report counts were written up to the stack's queue earlier.
         private const val STEADY_REPORTS = 2
+
+        // The shortest span, on the receiver's clock, a sample is measured over.
+        const val MIN_SAMPLE_MS = 250L
 
         // A new sample counts a quarter: a connection event or a report's batching moves the rate little.
         private const val SMOOTHING = 4

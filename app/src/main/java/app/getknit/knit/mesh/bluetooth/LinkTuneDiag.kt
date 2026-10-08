@@ -1,5 +1,7 @@
 package app.getknit.knit.mesh.bluetooth
 
+import app.getknit.knit.BuildConfig
+
 /** The connection priority a link is asked for: AOSP's HIGH (11.25–15 ms), BALANCED (30–50 ms), LOW_POWER. */
 internal enum class TunePriority { HIGH, BALANCED, LOW_POWER }
 
@@ -70,4 +72,11 @@ internal object LinkTuneDiag {
     @Volatile var tune: (suspend (LinkTuneRequest) -> LinkTuneReport)? = null
 
     @Volatile var boostOn: Boolean = true
+
+    /**
+     * The feed window's A/B switch (nsr7's phase 2): on, a 1M/2M file to an Android peer that reports its progress is
+     * clocked by those reports; off, it is paced as before (`…debug.LINKTUNE --es feed window|pace`). Starts at the
+     * build's default, so a release build, which binds no bridge, keeps it.
+     */
+    @Volatile var feedWindow: Boolean = BuildConfig.BLE_FEED_WINDOW
 }

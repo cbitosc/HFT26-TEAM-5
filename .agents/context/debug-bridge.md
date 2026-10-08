@@ -337,7 +337,10 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   then `--ez read true` reads the PHY and link RSSI back; `--ez close true` lets the clients go. `--ei filePace N` sets
   the 1M/2M file budget as `…debug.PHY`'s does (until the process dies; 0 unbounded), `--ei boostPace N` the budget a
   boosted link earns (ADR 2026-10.2da4), `--ei crowdedPace N` that budget past four LE connections, and `--ez resetPace
-  true` restores all three (4096, 18432, 12288). `--ez boost false` stops the link boost in this process — every boost
+  true` restores all three (4096, 18432, 12288), the feed window's switch and its queue. `--es feed window|pace` switches
+  the feed window (ADR 2026-10.5buf: a 1M/2M file to an Android peer clocked by its progress reports, the budgets then
+  only its fallback) in this process, and `--ei windowQueueMs N` (100..5000) sets the queue it keeps ahead of the
+  receiver; a build without `BLE_FEED_WINDOW` starts with it off. `--ez boost false` stops the link boost in this process — every boost
   lets go at once, asks nothing and attaches no new client until `--ez boost true` (a client already attached stays:
   relink between cells) — the A/B switch on one build (a build without `BLE_LINK_BOOST` never boosts, and its reply
   says `boost: false`). The client a
@@ -349,7 +352,8 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   before a PHY ask; `codedOwned` says a Coded handle steps the link here. From Android 14 the first `mtu` ask on an ACL
   exchanges 517 whatever it names and a later one exchanges nothing, so read `mtu` (settled) against `mtuAsked`, and
   judge that lever by the snoop's data-length change, not the ATT MTU (which does not bound an L2CAP channel). The
-  reply: `filePace`, `fileChunk`, `boostPace`, `crowdedPace`, `leLinks` (this phone's LE connections), `boost`,
+  reply: `filePace`, `fileChunk`, `boostPace`, `crowdedPace`, `leLinks` (this phone's LE connections), `boost`, `feed`,
+  `windowQueueMs`,
   `feeding` (links feeding a file now), `earned` (every one of them earned the boost) and `links[]` (`nodeId`,
   `address`, `attached`,
   `txPhy` / `rxPhy` ONE_M|TWO_M|CODED, `intervalUs` / `latency` / `timeoutMs` — the framework reports them only on a

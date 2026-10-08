@@ -712,6 +712,8 @@ class BluetoothMeshTransport(
         key: String,
     ): FileFeed? {
         val link = links[nodeId]?.takeIf { linkPhy[it] != LinkPhy.CODED } ?: return null
+        // A windowed feed runs at the drain its reports measure, not at a pace a boost may raise: no settle to read.
+        if (windowed(link)) return link.feed(key)
         val settling = boostedShare(link, joining = false, settling = true)
         return link.feed(key, settlingPace = settling, earning = settling > 0 && !earned(link))
     }
@@ -725,12 +727,20 @@ class BluetoothMeshTransport(
         val link = links[nodeId] ?: return 0
         val phy = linkPhy[link] ?: LinkPhy.UNKNOWN
         if (phy == LinkPhy.CODED) return CodedPhyPolicy.pace(phy, CodedPhyDiag.tuning).bytesPerSec
+        // A windowed feed takes what the air gives it, so the last stream's drain is the best guess, shared with the
+        // feeds going beside it on this phone's one controller. Before one, the pace's share below.
+        val drained = link.lastDrain
+        if (drained > 0 && windowed(link, phy)) {
+            // Shared only with the other windowed feeds going now; the last stream measured whatever sharing it had.
+            val others = feedingLinks().count { it !== link && it.txWindowed }
+            return drained / (others + 1)
+        }
         val boosted = boostedShare(link, joining = !link.txInProgress)
         val share =
             if (boosted > 0) {
                 boosted
             } else {
-                val feeding = feedingLinks().size + if (link.txInProgress) 0 else 1
+                val feeding = pacedFeedingLinks().size + if (link.txInProgress) 0 else 1
                 CodedPhyPolicy.pace(phy, CodedPhyDiag.tuning, feeding, earned = false, leLinks = links.size).bytesPerSec
             }
         return (share * link.drainRatio).toInt()
@@ -764,7 +774,7 @@ class BluetoothMeshTransport(
     }
 
     // Every link's receive-side reports (FramedLink's onRxProgress), for BlobExchange to send back. Lossy past a few: a
-    // dropped one is the next one's sample, two seconds later.
+    // dropped one is the next one's sample, one report interval later.
     private val rxProgress =
         MutableSharedFlow<FileProgress>(extraBufferCapacity = PROGRESS_BUFFER, onBufferOverflow = BufferOverflow.DROP_OLDEST)
     override val fileProgress: Flow<FileProgress> = rxProgress.asSharedFlow()
@@ -783,7 +793,7 @@ class BluetoothMeshTransport(
         settling: Boolean = false,
     ): Int {
         if (!(if (settling) canEarn(link) else willEarn(link))) return 0
-        val feeding = (feedingLinks().size + if (joining) 1 else 0).coerceAtLeast(1)
+        val feeding = (pacedFeedingLinks().size + if (joining) 1 else 0).coerceAtLeast(1)
         val phy = linkPhy[link] ?: LinkPhy.UNKNOWN
         return CodedPhyPolicy.pace(phy, CodedPhyDiag.tuning, feeding, earned = true, leLinks = leLinkCount()).bytesPerSec
     }
@@ -1160,11 +1170,13 @@ class BluetoothMeshTransport(
      */
     private fun paceFor(link: FramedLink): PaceConfig {
         val phy = linkPhy[link] ?: LinkPhy.UNKNOWN
-        val feeding = feedingLinks().size
+        val feeding = pacedFeedingLinks().size
         val earned = earned(link)
         val le = if (earned) leLinkCount() else links.size
         val tuning = CodedPhyDiag.tuning
-        val pace = CodedPhyPolicy.pace(phy, tuning, feeding, earned, le)
+        val base = CodedPhyPolicy.pace(phy, tuning, feeding, earned, le)
+        // A windowed feed is clocked by its receiver's reports; the pace above is its fallback while the receiver is silent.
+        val pace = if (windowed(link, phy)) base.copy(windowed = true, windowQueueMs = tuning.feedWindowQueueMs) else base
         // Recorded only for the live link: a writer still finishing a chunk on a link torn down meanwhile would put it
         // back into the map after its teardown removed it, and pin it there.
         if (phy != LinkPhy.CODED && links[link.nodeId] === link && lastPace.put(link, feeding to earned) != feeding to earned) {
@@ -1200,6 +1212,26 @@ class BluetoothMeshTransport(
 
     /** The links sharing the 1M/2M file budget right now: every one streaming a file and not on Coded. */
     private fun feedingLinks(): List<FramedLink> = links.values.filter { it.txInProgress && linkPhy[it] != LinkPhy.CODED }
+
+    // The feeding links that share the 1M/2M budget: a windowed feed takes none of it (ADR 2026-10.5buf), and counted
+    // there it halved an iPhone's pull beside it (the bluetooth-reviewer's finding).
+    private fun pacedFeedingLinks(): List<FramedLink> = feedingLinks().filter { !it.txWindowed }
+
+    /**
+     * Whether a file to [link] is clocked by its receiver's reports (ADR 2026-10.nsr7's phase 2): the switch on, a 1M/2M
+     * link, and a peer that reports — an Android build carrying [Protocol.CAP_BLOB_HAVE]. Never an iPhone
+     * ([DoorbellPolicy.serves]): nothing sends it a report to answer, and its own reports are not measured yet.
+     */
+    private fun windowed(
+        link: FramedLink,
+        phy: LinkPhy = linkPhy[link] ?: LinkPhy.UNKNOWN,
+    ): Boolean {
+        val caps = link.peer.capabilities
+        return LinkTuneDiag.feedWindow &&
+            phy != LinkPhy.CODED &&
+            caps and Protocol.CAP_BLOB_HAVE != 0L &&
+            !DoorbellPolicy.serves(caps)
+    }
 
     /**
      * Whether every one of [feedingLinks] has earned the boosted budget (none feeding earns nothing): the debug bridge's
@@ -2137,6 +2169,8 @@ class BluetoothMeshTransport(
                 onBusy = { boostPoke(events.link) },
                 onFeedChanged = { feedChanges.tryEmit(Unit) },
                 onRxProgress = { key, held, ms -> rxProgress.tryEmit(FileProgress(nodeId, key, held, ms)) },
+                // A sender of ours windows only while our own switch is on: the lab's builds share it (ADR 2026-10.5buf).
+                windowedReports = { LinkTuneDiag.feedWindow },
             )
         events.link = framed
         crossings.forget(nodeId) // a fresh stream starts clean: the peer may have restarted with an empty SeenSet

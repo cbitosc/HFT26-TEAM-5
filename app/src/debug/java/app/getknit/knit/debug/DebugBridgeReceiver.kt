@@ -233,12 +233,16 @@ import java.nio.ByteBuffer
  *   true` reads the PHY and link RSSI back; `--ez close true` lets the clients go. `--ei filePace N` sets the 1M/2M file
  *   budget (as `…debug.PHY`'s, until the process dies), `--ei boostPace N` the budget while every feeding link has earned
  *   its boost, `--ei crowdedPace N` that budget on a phone holding more than four LE connections, and `--ez resetPace
- *   true` restores all three (4096, 18432, 12288). `--ez boost false` stops the link boost in this
+ *   true` restores all three (4096, 18432, 12288), the feed window's switch and its queue. `--es feed window|pace` switches
+ *   the feed window (ADR 2026-10.nsr7's phase 2: a 1M/2M file to an Android peer clocked by its progress reports) on or
+ *   off in this process, and `--ei windowQueueMs N` (100..5000) sets the queue it keeps ahead of the receiver; a build
+ *   without `BLE_FEED_WINDOW` starts with it off. `--ez boost false` stops the link boost in this
  *   process — every boost lets go and asks nothing until `--ez boost true` — the A/B switch on one build (a build
  *   without `BLE_LINK_BOOST` never boosts). An iPhone link is refused
  *   (its doorbell owns the parameters), and no PHY is asked while the Coded experiment runs here (a mask lasts the link's
  *   life, so it would block either side's stepper: set `…debug.PHY --es mode off` on both phones first). The reply:
- *   `filePace`, `fileChunk`, `boostPace`, `crowdedPace`, `leLinks` (this phone's LE connections), `boost`, `feeding`
+ *   `filePace`, `fileChunk`, `boostPace`, `crowdedPace`, `leLinks` (this phone's LE connections), `boost`, `feed`,
+ *   `windowQueueMs`, `feeding`
  *   (links feeding a file now), `earned` (every one of them earned the boost) and `links[]` (nodeId, address, attached, txPhy, rxPhy, intervalUs / latency / timeoutMs —
  *   reported only on a change after the client attached — paramsStatus, mtu and mtuAsked — from Android 14 the first
  *   ask on an ACL settles on 517 whatever it names — rssi, codedOwned, refused, and the link's boost's boosting and
@@ -2333,7 +2337,9 @@ class DebugBridgeReceiver :
                     filePaceBytesPerSec = defaults.filePaceBytesPerSec,
                     boostPaceBytesPerSec = defaults.boostPaceBytesPerSec,
                     crowdedBoostPaceBytesPerSec = defaults.crowdedBoostPaceBytesPerSec,
+                    feedWindowQueueMs = defaults.feedWindowQueueMs,
                 )
+            LinkTuneDiag.feedWindow = BuildConfig.BLE_FEED_WINDOW
         }
         if (intent.hasExtra("filePace")) {
             CodedPhyDiag.tuning = CodedPhyDiag.tuning.copy(filePaceBytesPerSec = intent.getIntExtra("filePace", 0))
@@ -2345,6 +2351,20 @@ class DebugBridgeReceiver :
             CodedPhyDiag.tuning = CodedPhyDiag.tuning.copy(crowdedBoostPaceBytesPerSec = intent.getIntExtra("crowdedPace", 0))
         }
         if (intent.hasExtra("boost")) LinkTuneDiag.boostOn = intent.getBooleanExtra("boost", true)
+        intent.getStringExtra("feed")?.let { raw ->
+            LinkTuneDiag.feedWindow =
+                when (raw.lowercase()) {
+                    "window" -> true
+                    "pace" -> false
+                    else -> return reply("error", "feed must be window|pace")
+                }
+        }
+        if (intent.hasExtra("windowQueueMs")) {
+            val ms =
+                intent.getIntExtra("windowQueueMs", 0).takeIf { it in MIN_WINDOW_QUEUE_MS..MAX_WINDOW_QUEUE_MS }
+                    ?: return reply("error", "windowQueueMs must be $MIN_WINDOW_QUEUE_MS..$MAX_WINDOW_QUEUE_MS")
+            CodedPhyDiag.tuning = CodedPhyDiag.tuning.copy(feedWindowQueueMs = ms.toLong())
+        }
         val report = tune(request) // pokes every boost, so a switch just flipped takes at once
         val tuned = CodedPhyDiag.tuning
         return JSONObject()
@@ -2355,6 +2375,8 @@ class DebugBridgeReceiver :
             .put("crowdedPace", tuned.crowdedBoostPaceBytesPerSec)
             .put("leLinks", report.leLinks)
             .put("boost", BuildConfig.BLE_LINK_BOOST && LinkTuneDiag.boostOn)
+            .put("feed", if (LinkTuneDiag.feedWindow) "window" else "pace")
+            .put("windowQueueMs", tuned.feedWindowQueueMs)
             .put("feeding", report.feeding)
             .put("earned", report.earned)
             .put(
@@ -2546,6 +2568,10 @@ class DebugBridgeReceiver :
 
         // How long `…debug.PHY` waits after storing a mode before reading the status back: the transport collects it.
         const val PHY_SETTLE_MS = 300L
+
+        // The queue a `…debug.LINKTUNE --ei windowQueueMs` may set a windowed feed to keep ahead of its receiver.
+        const val MIN_WINDOW_QUEUE_MS = 100
+        const val MAX_WINDOW_QUEUE_MS = 5_000
 
         // The ATT MTU range a `…debug.LINKTUNE` ask may name: the spec's default up to Android's own ceiling.
         const val MIN_ATT_MTU = 23

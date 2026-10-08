@@ -1,5 +1,6 @@
 package app.getknit.knit.mesh.bluetooth
 
+import app.getknit.knit.mesh.link.FeedWindow
 import app.getknit.knit.mesh.link.LinkFraming
 import app.getknit.knit.mesh.link.PaceConfig
 import kotlin.math.roundToInt
@@ -109,6 +110,11 @@ data class PhyTuning(
     val crowdedBoostPaceBytesPerSec: Int = CodedPhyPolicy.CROWDED_BOOST_PACE_BYTES_PER_SEC,
     /** The most LE connections (the mesh's and every other app's) at which [boostPaceBytesPerSec] holds. */
     val boostFullLeLinks: Int = CodedPhyPolicy.BOOST_FULL_LE_LINKS,
+    /**
+     * The queue, in ms of the measured drain, a windowed feed keeps ahead of its receiver ([FeedWindow], ADR
+     * 2026-10.nsr7's phase 2): the wait a frame behind a file sees. `…debug.LINKTUNE --ei windowQueueMs` sweeps it.
+     */
+    val feedWindowQueueMs: Long = FeedWindow.QUEUE_MS,
 ) {
     private companion object {
         // Negative defaults can't be inlined without tripping MagicNumber (as PromotionConfig's floor).

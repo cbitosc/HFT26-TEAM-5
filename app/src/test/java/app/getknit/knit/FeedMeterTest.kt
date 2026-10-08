@@ -176,6 +176,19 @@ class FeedMeterTest {
         assertEquals(96_300L, meter.feed(0, t, 20_000, settled = true).etaMs)
     }
 
+    @Test
+    fun aBurstReadBackToBackTakesNoSample() {
+        // ADR 2026-10.5buf: a receiver reports on a window's worth of bytes, so a reader catching up a burst reports ms
+        // apart. That span measures nothing: the rate stays, and the next sample runs from the last one.
+        streaming()
+        meter.paced(8_192)
+        meter.report(KEY, 8_192, 1_000) // 8 KiB/s
+        meter.report(KEY, 16_384, 1_003)
+        assertEquals("not 2.7 MB/s", (MIB - 16_384) * 1_000 / 8_192, meter.feed(0, t, 8_192, settled = true).etaMs)
+        meter.report(KEY, 20_480, 1_500) // 12 KiB over 500 ms from the last sample, smoothed a quarter in
+        assertEquals((MIB - 20_480) * 1_000 / 12_288, meter.feed(0, t, 8_192, settled = true).etaMs)
+    }
+
     private companion object {
         const val KEY = "k"
         const val MIB = 1L shl 20

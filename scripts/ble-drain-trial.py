@@ -2,7 +2,7 @@
 """Time a file across one Bluetooth link, and the texts sent behind it, rep after rep (#120).
 
     python3 scripts/ble-drain-trial.py run --sender p9=SERIAL --receiver p8=SERIAL --cell NAME \\
-        [--pace 16384] [--boost on|off] [--boost-pace 18432] [--reps 3] [--size 700000] [--image PATH] \\
+        [--pace 16384] [--boost on|off] [--boost-pace 18432] [--feed window|pace] [--window-queue-ms 500] [--reps 3] [--size 700000] [--image PATH] \\
         [--texts 5,15,30,60] [--relink] [--tune SIDE:ASK[,ASK…]] [--quiet 60] [--timeout 900] [--out DIR]
     python3 scripts/ble-drain-trial.py summary DIR [DIR ...]
 
@@ -12,7 +12,11 @@ paused, per the trial recipe on #120):
 1. Sets the sender's 1M/2M file budget with `…debug.LINKTUNE --ei filePace` (`--pace`, 0 unbounded) and checks it.
    With `--boost on|off`, switches the link boost (Phase 2 of #120) on or off on both phones (`--ez boost`), so one
    debug build gives both halves of an A/B; `--boost-pace` sets the budget a boosted link earns (`--ei boostPace`).
-   `--pace` then defaults to the shipped 4096, since the boost is what the cell measures.
+   `--pace` then defaults to the shipped 4096, since the boost is what the cell measures. With `--feed window|pace`,
+   switches the sender's feed window (ADR 2026-10.nsr7's phase 2: the feed clocked by the receiver's progress reports,
+   `--es feed`) on both phones (the receiver's switch picks its report cadence; `--rx-feed` sets it apart), and
+   `--window-queue-ms` sets the queue it keeps ahead (`--ei windowQueueMs`); `--pace` is then the fallback for a silent
+   receiver.
 2. With `--relink`, sheds the link (`…debug.BLECAP --ei max 0` on the sender) and waits for it back, so asks made of
    the old link (a PHY, a priority) are gone. With `--tune`, asks the fresh link for them: `sender:phy=2m,priority=high`
    or `receiver:mtu=517` — the keys are LINKTUNE's extras (`phy`, `priority`, `mtu`).
@@ -64,7 +68,7 @@ TX_DONE = re.compile(r"^file (\S+) (\d+)B in (\d+)ms @(-?\d+) → (\S+)")
 STREAM = re.compile(r"^(rx|file) ")
 LINK_UP = re.compile(r"^bt link up: (\S+) \(")
 LINK_DOWN = re.compile(r"^bt link down: (\S+) \(")
-KEPT = re.compile(r"^(bt file pace |bt tune |bt boost |bt conn params |bt phy |bt link )")
+KEPT = re.compile(r"^(bt file pace |bt file window |bt tune |bt boost |bt conn params |bt phy |bt link )")
 # Per link since ADR 2026-10.g24x (the line ends `→ <node>`): the rep is earned when the receiver's own feed was.
 # A line with no node is an older build's, written only when every feeding link had earned.
 EARNED = re.compile(r"^bt file pace .* earned=true le=\d+(?: → (\S+))?$")
@@ -259,7 +263,21 @@ class Trial:
             boost += ["--ei", "boostPace", str(a.boost_pace)]
         if a.boost:
             self.rx.bridge("LINKTUNE", *boost)
-        reply = self.tx.bridge("LINKTUNE", "--ei", "filePace", str(a.pace), *boost)
+        feed = []
+        if a.feed:
+            feed += ["--es", "feed", a.feed]
+        if a.window_queue_ms is not None:
+            feed += ["--ei", "windowQueueMs", str(a.window_queue_ms)]
+        # The receiver's own switch picks how often it reports (every 500 ms for a windowed sender, else 2 s), so both
+        # phones take it; `--rx-feed` sets the receiver apart, to measure a windowed sender against a 2 s reporter.
+        rx_feed = a.rx_feed or a.feed
+        if rx_feed:
+            rx_reply = self.rx.bridge("LINKTUNE", "--es", "feed", rx_feed)
+            if rx_reply.get("feed") != rx_feed:
+                raise RuntimeError(f"receiver's feed reads {rx_reply.get('feed')}, not {rx_feed}")
+        reply = self.tx.bridge("LINKTUNE", "--ei", "filePace", str(a.pace), *boost, *feed)
+        if a.feed and reply.get("feed") != a.feed:
+            raise RuntimeError(f"feed reads {reply.get('feed')}, not {a.feed} (a build without the feed window?)")
         if reply["filePace"] != a.pace:
             raise RuntimeError(f"filePace reads {reply['filePace']}, not {a.pace}")
         if a.boost and reply.get("boost") != (a.boost == "on"):
@@ -321,6 +339,9 @@ class Trial:
             "pace": a.pace,
             "boost": a.boost,
             "boostPace": reply.get("boostPace"),
+            "feed": reply.get("feed"),
+            "rxFeed": rx_feed,
+            "windowQueueMs": reply.get("windowQueueMs"),
             "earned": any((m := EARNED.match(msg)) and (m.group(1) is None or m.group(1).startswith(self.rx.node_id[:8]))
                           for _, msg in tx_lines),
             "releaseAfterS": round(released_at - fed_at, 1) if released_at and fed_at else None,
@@ -360,7 +381,8 @@ def summary(dirs: list[str]) -> None:
         for line in (Path(d) / "reps.jsonl").read_text().splitlines():
             r = json.loads(line)
             boost = f" boost={r['boost']}" if r.get("boost") else ""
-            cells.setdefault(f"{r['cell']} {r.get('sender')}→{r.get('receiver')} pace={r.get('pace')}{boost}", []).append(r)
+            feed = f" feed={r['feed']}" if r.get("feed") == "window" else ""
+            cells.setdefault(f"{r['cell']} {r.get('sender')}→{r.get('receiver')} pace={r.get('pace')}{boost}{feed}", []).append(r)
     for cell, reps in sorted(cells.items()):
         drains = [r["drainBps"] for r in reps if r.get("drainBps")]
         held = [r["fileHeldS"] for r in reps if r.get("fileHeldS")]
@@ -386,6 +408,9 @@ def main() -> None:
     r.add_argument("--pace", type=int, help="the sender's file budget, B/s (0 unbounded); 16384, or 4096 with --boost")
     r.add_argument("--boost", choices=("on", "off"), help="switch the link boost on or off on both phones")
     r.add_argument("--boost-pace", type=int, help="the budget a boosted link earns, B/s (0 unbounded)")
+    r.add_argument("--feed", choices=("window", "pace"), help="clock the sender's feed by the receiver's reports, or pace it")
+    r.add_argument("--rx-feed", choices=("window", "pace"), help="the receiver's switch, if not --feed's (its report cadence)")
+    r.add_argument("--window-queue-ms", type=int, help="the queue a windowed feed keeps ahead of the receiver, ms")
     r.add_argument("--reps", type=int, default=3)
     r.add_argument("--size", type=int, default=700_000, help="random bytes per file (ignored with --image)")
     r.add_argument("--image", help="send a copy of this picture instead of random bytes")

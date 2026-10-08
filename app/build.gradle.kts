@@ -130,6 +130,13 @@ val bleCodedPhy = (project.findProperty("bleCodedPhy") as? String)?.toBoolean()
 // stays identical. Flip the release default after the device trial.
 val bleLinkBoost = (project.findProperty("bleLinkBoost") as? String)?.toBoolean()
 
+// The Bluetooth feed window (ADR 2026-10.nsr7's phase 2): a file to an Android peer that reports its progress is
+// clocked by those reports, keeping about half a second queued ahead of the receiver, instead of the fixed pace
+// budgets — ON in debug, OFF in a shipped artifact, overridable with `-PbleFeedWindow=true|false`, and switchable at
+// run time on a debug build (`…debug.LINKTUNE --es feed window|pace`). Not a code strip, and the defaults live in
+// source so F-Droid's -P-free rebuild stays identical. Flip the release default after the device A/B.
+val bleFeedWindow = (project.findProperty("bleFeedWindow") as? String)?.toBoolean()
+
 // The Wear OS status service (a read-only GATT characteristic a bonded watch reads the mesh state from; the
 // watch app is the opt-in `:wear` module) — a prototype: ON in debug, OFF in a shipped artifact, overridable
 // with `-PwearStatus=true|false`. It gates the one seam, the `WearStatusServer` definition in the DI graph
@@ -282,6 +289,8 @@ android {
         buildConfigField("boolean", "BLE_CODED_PHY", (bleCodedPhy ?: true).toString())
         // The Bluetooth link boost is ON in debug so a lab build asks for HIGH while it feeds; see `bleLinkBoost` above.
         buildConfigField("boolean", "BLE_LINK_BOOST", (bleLinkBoost ?: true).toString())
+        // The Bluetooth feed window is ON in debug so a lab build feeds by its receiver's reports; see `bleFeedWindow` above.
+        buildConfigField("boolean", "BLE_FEED_WINDOW", (bleFeedWindow ?: true).toString())
         // The Wear OS status service is ON in debug so a lab phone serves a paired watch; see `wearStatus` above.
         buildConfigField("boolean", "WEAR_STATUS", (wearStatus ?: true).toString())
         // Fault injection for the model poison-pill's acceptance test (ADR 037):
@@ -388,6 +397,8 @@ android {
             buildConfigField("boolean", "BLE_CODED_PHY", (bleCodedPhy ?: false).toString())
             // The Bluetooth link boost is not introduced yet: a shipped artifact feeds at the base budget until its trial.
             buildConfigField("boolean", "BLE_LINK_BOOST", (bleLinkBoost ?: false).toString())
+            // The Bluetooth feed window is not introduced yet: a shipped artifact paces every feed until its A/B.
+            buildConfigField("boolean", "BLE_FEED_WINDOW", (bleFeedWindow ?: false).toString())
             // The Wear OS status service is a prototype: dark in a shipped artifact.
             buildConfigField("boolean", "WEAR_STATUS", (wearStatus ?: false).toString())
             // Never ship a fault injector, whatever `-PmodelFaultOnLoad` said.
