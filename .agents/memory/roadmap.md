@@ -617,6 +617,13 @@ doc). **Don't start a deferred item without explicit direction.**
   Wi-Fi Aware on, the Moto, screen-off, a mixed build. Deferred: a file between two dark phones (the linger's wait
   cannot wake the CPU, and an alarm costs more than it saves), iPhone links (the doorbell's BALANCED owns them; the port would need
   its own ask), and a 2M step (≈10% with HIGH).
+- **Bluetooth feed window: the release flag** — BUILT 2026-10-07 on `feat/ble-feed-window` (ADR 2026-10.5buf, nsr7's
+  phase 2): a 1M/2M file to a reporting Android peer is clocked by its `blobprog` reports, about 500 ms queued ahead of
+  the measured drain, instead of the 8jwn/2da4 budgets. Dark in a shipped artifact (`BuildConfig.BLE_FEED_WINDOW`,
+  debug on / release off) until its device A/B (v2.8.0, today's caps with the boost off, the window with the boost off
+  and on; texts behind a photo; the burst, mixed-switch and dark-receiver cells). **It ships on in the same release as
+  nsr7's `blobprog`, never after it**: a release reporting every 2 s would leave its installs feeding in fits to every
+  later windowed sender. Deferred: the window on Coded (walk trial first) and on iPhone links (the port must report).
 - **Blob holder query: the release flag, the iOS responder, partial fetch** — BUILT 2026-10-05 on `feat/blob-have`
   (ADR 2026-10.6e5t): a `blobhave` query to every neighbour whose link carries `CAP_BLOB_HAVE`, the best holder by
   plane and load asked alone, confirm then fall back, f7gg's round for the rest. Every build answers; asking is

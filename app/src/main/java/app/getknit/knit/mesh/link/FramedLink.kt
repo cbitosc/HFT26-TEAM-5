@@ -359,19 +359,24 @@ class FramedLink(
     }
 
     /**
-     * A windowed feed's wait for room (nsr7's phase 2): until a report comes or [ms] runs out, whichever is first. Marked
-     * for the meter like a pace wait, and whatever it runs past [ms] the writer slept, which the window's silence does
-     * not count either.
+     * A windowed feed's wait: until a report comes or [ms] runs out, whichever is first. A [paced] wait (the fallback's)
+     * is marked for the meter like any pace wait: whatever it runs past [ms] the writer slept, and neither the meter's
+     * stall nor the window's silence counts it. A wait for room is not: the receiver owes a report on the window out,
+     * so its silence and the feed's stall count while the writer sleeps (the bluetooth-reviewer's finding).
      */
-    private suspend fun awaitReport(ms: Long) {
+    private suspend fun awaitReport(
+        ms: Long,
+        paced: Boolean = false,
+    ) {
         val began = now()
-        synchronized(pendingLock) { meter.pausing(ms) }
+        if (paced) synchronized(pendingLock) { meter.pausing(ms) }
         try {
-            // stretches: like the pace wait, a sleeping writer sends nothing, and the meter and window discount it.
+            // stretches: a sleeping writer is woken by the report it waits on; what it sleeps past is discounted only
+            // when nothing was owed.
             withTimeoutOrNull(ms) { wake.receive() }
         } finally {
             synchronized(pendingLock) {
-                meter.resumed()
+                if (paced) meter.resumed()
                 inFlight.slept(now() - began - ms, now())
             }
         }
@@ -387,7 +392,7 @@ class FramedLink(
         while (true) {
             val left = until - now()
             if (left <= 0 || !synchronized(pendingLock) { inFlight.pacing(now()) }) return
-            awaitReport(left)
+            awaitReport(left, paced = true)
         }
     }
 
@@ -403,8 +408,8 @@ class FramedLink(
 
     /** The window's reading, when its noted rate moves: the device oracle beside the receiver's `rx … in` line. */
     private fun logWindow(rate: Int) {
-        val (target, queued) = synchronized(pendingLock) { inFlight.target() to inFlight.queued(now()) }
-        log("bt file window rate=$rate target=$target queued=$queued → $nodeId")
+        val (target, queued, rtt) = synchronized(pendingLock) { Triple(inFlight.target(), inFlight.queued(), inFlight.rttMs) }
+        log("bt file window rate=$rate target=$target queued=$queued rtt=$rtt → $nodeId")
     }
 
     /** The peer holds [held] bytes of the file under [key], [ms] after its header arrived (a `blobprog`, ADR 2026-10.nsr7). */
@@ -432,7 +437,10 @@ class FramedLink(
 
     /** The link's PHY stepped: what its last stream measured says nothing of the new one. */
     fun forgetDrain() {
-        synchronized(pendingLock) { meter.forgetDrain() }
+        synchronized(pendingLock) {
+            meter.forgetDrain()
+            inFlight.forgetRtt()
+        }
     }
 
     private fun notePending(
@@ -690,7 +698,7 @@ class FramedLink(
                 synchronized(pendingLock) {
                     inFlight.queueMs = cfg.windowQueueMs
                     windowed = cfg.windowed && !inFlight.pacing(now())
-                    if (windowed) inFlight.waitMs(now()) else 0L
+                    if (windowed) inFlight.waitMs() else 0L
                 }
             txWindowed = windowed
             if (wasWindowed && !windowed) window.restart(cfg, now())
@@ -721,7 +729,7 @@ class FramedLink(
         val n = input.read(buf, 0, chunk.coerceIn(1, buf.size))
         if (n == -1) return false
         LinkFraming.write(out, LinkFraming.Type.FILE_CHUNK, if (n == buf.size) buf else buf.copyOf(n))
-        synchronized(pendingLock) { inFlight.wrote(n) }
+        synchronized(pendingLock) { inFlight.wrote(n, now()) }
         txLeft -= n
         txWroteAt = now()
         outAt = txWroteAt

@@ -9,7 +9,9 @@ import org.junit.Test
 /** ADR 2026-10.nsr7: a feed's ETA, stall and deadline, from the receiver's progress reports or, before them, the pace. */
 class FeedMeterTest {
     private var t = 0L
-    private val meter = FeedMeter { t }
+
+    // The arithmetic with no sample floor: these cases report a second or less apart.
+    private val meter = FeedMeter({ t }, minSampleMs = 0)
 
     private fun streaming(
         key: String = KEY,
@@ -177,16 +179,20 @@ class FeedMeterTest {
     }
 
     @Test
-    fun aBurstReadBackToBackTakesNoSample() {
-        // ADR 2026-10.5buf: a receiver reports on a window's worth of bytes, so a reader catching up a burst reports ms
-        // apart. That span measures nothing: the rate stays, and the next sample runs from the last one.
-        streaming()
+    fun aMeterSamplesAboutEveryTwoSecondsHoweverOftenTheReceiverReports() {
+        // ADR 2026-10.5buf: a windowed sender's receiver reports on every chunk, and a reader catching up a burst reports
+        // bytes ms apart. The meter's settle, smoothing and first-rate deadline count samples tuned to two-second reports,
+        // so a report sooner than that after the last sample takes none.
+        val meter = FeedMeter({ t })
+        meter.start(KEY)
+        meter.sized(0, MIB)
         meter.paced(8_192)
-        meter.report(KEY, 8_192, 1_000) // 8 KiB/s
-        meter.report(KEY, 16_384, 1_003)
-        assertEquals("not 2.7 MB/s", (MIB - 16_384) * 1_000 / 8_192, meter.feed(0, t, 8_192, settled = true).etaMs)
-        meter.report(KEY, 20_480, 1_500) // 12 KiB over 500 ms from the last sample, smoothed a quarter in
-        assertEquals((MIB - 20_480) * 1_000 / 12_288, meter.feed(0, t, 8_192, settled = true).etaMs)
+        meter.report(KEY, 4_096, 250)
+        meter.report(KEY, 1_000_000, 253) // a burst: 2.7 GB/s for 3 ms
+        assertFalse("no sample yet", meter.measured)
+        meter.report(KEY, 1_016_384, FeedMeter.MIN_SAMPLE_MS)
+        assertTrue(meter.measured)
+        assertEquals("one sample over two seconds", (MIB - 1_016_384) * 1_000 / 508_192, meter.feed(0, t, 8_192, settled = true).etaMs)
     }
 
     private companion object {

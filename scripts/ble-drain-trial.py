@@ -255,6 +255,11 @@ class Trial:
 
     def rep(self, n: int) -> dict:
         a = self.args
+        # The texts must cross the Bluetooth link: with the Internet (spool) plane on, a DM goes by the relay in about
+        # 2 s whatever is queued on the link, and every text reads as unblocked (2026-10-07: every cell's texts did).
+        for p in (self.tx, self.rx):
+            if p.bridge("SPOOL").get("enabled"):
+                raise RuntimeError(f"{p.label} has the Internet plane on: `…debug.SPOOL --ez on false` first")
         tag = f"drain {a.cell} {n} {int(time.time())}"
         boost = []
         if a.boost:
@@ -268,7 +273,7 @@ class Trial:
             feed += ["--es", "feed", a.feed]
         if a.window_queue_ms is not None:
             feed += ["--ei", "windowQueueMs", str(a.window_queue_ms)]
-        # The receiver's own switch picks how often it reports (every 500 ms for a windowed sender, else 2 s), so both
+        # The receiver's own switch picks how often it reports (every 2 KiB record for a windowed sender, every 500 ms at the least, else 2 s), so both
         # phones take it; `--rx-feed` sets the receiver apart, to measure a windowed sender against a 2 s reporter.
         rx_feed = a.rx_feed or a.feed
         if rx_feed:

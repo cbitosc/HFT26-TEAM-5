@@ -17,6 +17,9 @@ import app.getknit.knit.mesh.FileFeed
  */
 internal class FeedMeter(
     private val now: () -> Long,
+    // The shortest span, on the receiver's clock, a sample is measured over ([MIN_SAMPLE_MS]); a test of the arithmetic
+    // alone sets it lower.
+    private val minSampleMs: Long = MIN_SAMPLE_MS,
 ) {
     /**
      * The share of its pace the last measured stream on this link drained, when that fell short of the pace: 1.0 when
@@ -42,8 +45,11 @@ internal class FeedMeter(
     private var lastHeld = -1L
     private var lastMs = 0L
 
-    // Where the next sample is measured from. A report under [MIN_SAMPLE_MS] after it takes no sample: a receiver's reader
-    // catching up a burst reports bytes ms apart (ADR 2026-10.5buf's byte rule), and the sample would read MB/s.
+    // Where the next sample is measured from. A report under [minSampleMs] after it takes no sample, so the meter samples
+    // about every two seconds however often the receiver reports: its settle, smoothing and first-rate deadline count
+    // samples and were tuned to nsr7's two-second reports, and a windowed sender's receiver reports on every chunk (ADR
+    // 2026-10.5buf), whose single quarter-second sample could set a deadline that lapses mid-file and serves a second copy
+    // beside it. A reader catching up a burst reports bytes ms apart, too, which would read MB/s.
     private var sampleHeld = -1L
     private var sampleMs = 0L
     private var advancedAt = 0L
@@ -168,7 +174,7 @@ internal class FeedMeter(
             steadyReports++
             sampleHeld = held
             sampleMs = ms
-        } else if (ms - fromMs >= MIN_SAMPLE_MS && held >= fromHeld) {
+        } else if (ms - fromMs >= minSampleMs && held >= fromHeld) {
             val sample = ((held - fromHeld) * MS_PER_SECOND / (ms - fromMs)).coerceIn(0L, Int.MAX_VALUE.toLong()).toInt()
             rate = if (rate == 0) sample else (rate * (SMOOTHING - 1) + sample) / SMOOTHING
             if (steadyReports >= STEADY_REPORTS && pace > 0) {
@@ -285,8 +291,9 @@ internal class FeedMeter(
         // report counts were written up to the stack's queue earlier.
         private const val STEADY_REPORTS = 2
 
-        // The shortest span, on the receiver's clock, a sample is measured over.
-        const val MIN_SAMPLE_MS = 250L
+        // The shortest span, on the receiver's clock, a sample is measured over: a paced feed's report interval
+        // (RxReports.EVERY_MS), so a windowed feed's meter samples as nsr7 tuned it.
+        const val MIN_SAMPLE_MS = 2_000L
 
         // A new sample counts a quarter: a connection event or a report's batching moves the rate little.
         private const val SMOOTHING = 4

@@ -401,14 +401,14 @@ class FramedLinkTest {
 
         h.link.onProgress("d".repeat(64), 1_000_000, 1_000) // another file's: ignored
         assertFalse(h.link.feed(key)!!.measured)
-        h.link.onProgress(key, 1024 * 1024, 1_000) // 1 MiB in its first second
+        h.link.onProgress(key, 2 * 1024 * 1024, 2_000) // 2 MiB in its first two seconds (the meter samples over two)
         val measured = h.link.feed(key)!!
         assertTrue(measured.measured)
-        assertEquals("3 MiB left at 1 MiB/s", 3_000L, measured.etaMs)
+        assertEquals("2 MiB left at 1 MiB/s", 2_000L, measured.etaMs)
 
         t.addAndGet(FeedMeter.STALL_MS + 1) // no report moved
         assertFalse("stalled: it holds nobody", h.link.feed(key)!!.live)
-        h.link.onProgress(key, 2 * 1024 * 1024, 2_000)
+        h.link.onProgress(key, 3 * 1024 * 1024, 4_000)
         assertTrue("moving again", h.link.feed(key)!!.live)
         h.link.close()
     }
@@ -431,7 +431,7 @@ class FramedLinkTest {
     @Test
     fun aWindowedFeedHoldsAtItsWindowUntilAReportFreesIt() {
         // ADR 2026-10.nsr7's phase 2: before any report only the starting window goes; a report measuring the drain
-        // lets the writer refill to half a second of it at once, without waiting out its timeout.
+        // lets the writer refill its window at once, without waiting out its timeout.
         val h = harness(pace = { PaceConfig(bytesPerSec = 4_096, chunkBytes = 2_048, windowed = true) })
         val key = "a1".repeat(32)
         val file = tmp.newFile("windowed.bin").apply { writeBytes(ByteArray(1024 * 1024)) }
@@ -443,8 +443,10 @@ class FramedLinkTest {
         assertTrue(h.link.txWindowed)
 
         h.link.onProgress(key, 8_192, FramedLink.WINDOWED_PROGRESS_EVERY_MS) // all of it by the first report: 16 KiB/s
+        // The harness clock stands still, so the round trip reads as its 50 ms floor: the window is 16 KiB/s over
+        // 50 + 250 ms, 4915 B, and refills in quarter-second chunks.
         val refill = chunksUntilQuiet(h.fromLink)
-        assertEquals("half a second of 16 KiB/s, in quarter-second chunks", 8_192, refill.sum())
+        assertEquals(8_192, refill.sum())
         assertTrue(refill.all { it == 4_096 })
         h.link.close()
     }
@@ -586,9 +588,9 @@ class FramedLinkTest {
         assertEquals(LinkFraming.Type.FILE_HEADER, LinkFraming.read(h.fromLink)!!.type)
         assertEquals(LinkFraming.Type.FILE_CHUNK, LinkFraming.read(h.fromLink)!!.type)
         assertTrue("the second chunk's pace settles the feed", awaitUntil { pokes.get() == 1 })
-        h.link.onProgress(key, 2_048, 1_000)
-        assertEquals("its first report measures it", 2, pokes.get())
-        h.link.onProgress(key, 4_096, 2_000)
+        h.link.onProgress(key, 2_048, 2_000)
+        assertEquals("its first sampling report measures it", 2, pokes.get())
+        h.link.onProgress(key, 4_096, 4_000)
         assertEquals("a later one changes nothing the holder reads at once", 2, pokes.get())
         h.link.close()
     }
@@ -647,27 +649,26 @@ class FramedLinkTest {
             )
         val key = "f6".repeat(32)
         writeRecord(h.toLink, LinkFraming.Type.FILE_HEADER, LinkFraming.encodeFileHeader(hdr("ATTACHMENT", key, size = 64_000)))
-        writeRecord(h.toLink, LinkFraming.Type.FILE_CHUNK, ByteArray(2_048))
-        writeRecord(h.toLink, LinkFraming.Type.FILE_CHUNK, ByteArray(2_048))
-        assertTrue(awaitUntil { h.link.rxFile?.bytes == 4_096L })
+        writeRecord(h.toLink, LinkFraming.Type.FILE_CHUNK, ByteArray(1_024)) // under a sender's smallest chunk
+        assertTrue(awaitUntil { h.link.rxFile?.bytes == 1_024L })
         t.set(FramedLink.WINDOWED_PROGRESS_EVERY_MS)
         assertTrue("the trailing report", awaitUntil { reports.isNotEmpty() })
-        assertEquals(Triple(key, 4_096L, FramedLink.WINDOWED_PROGRESS_EVERY_MS), reports.single())
+        assertEquals(Triple(key, 1_024L, FramedLink.WINDOWED_PROGRESS_EVERY_MS), reports.single())
 
         writeRecord(h.toLink, LinkFraming.Type.FILE_CHUNK, ByteArray(1_024)) // inside the next interval: owed at it
-        assertTrue(awaitUntil { h.link.rxFile?.bytes == 5_120L })
+        assertTrue(awaitUntil { h.link.rxFile?.bytes == 2_048L })
         Thread.sleep(FramedLink.WINDOWED_PROGRESS_EVERY_MS + 200)
         assertEquals("not before its interval", 1, reports.size)
         t.set(2 * FramedLink.WINDOWED_PROGRESS_EVERY_MS)
         assertTrue("the chunk is owed at its interval", awaitUntil { reports.size == 2 })
-        assertEquals(5_120L, reports[1].second)
+        assertEquals(2_048L, reports[1].second)
         Thread.sleep(2 * FramedLink.WINDOWED_PROGRESS_EVERY_MS + 200)
         assertEquals("nothing more landed: a stall says nothing", 2, reports.size)
         h.link.close()
     }
 
     @Test
-    fun aWindowsWorthLandedIsReportedOnTheChunkThatCompletesIt() {
+    fun aSendersSmallestChunkLandedIsReportedOnTheChunkThatCompletesIt() {
         // ADR 2026-10.5buf: on the reader, awake for the chunk, not on a timer a dark receiver may sleep through.
         val reports = CopyOnWriteArrayList<Triple<String, Long, Long>>()
         val t = AtomicLong(0)
@@ -679,12 +680,12 @@ class FramedLinkTest {
             )
         val key = "f7".repeat(32)
         writeRecord(h.toLink, LinkFraming.Type.FILE_HEADER, LinkFraming.encodeFileHeader(hdr("ATTACHMENT", key, size = 64_000)))
-        writeRecord(h.toLink, LinkFraming.Type.FILE_CHUNK, ByteArray(4_096))
-        assertTrue(awaitUntil { h.link.rxFile?.bytes == 4_096L })
+        writeRecord(h.toLink, LinkFraming.Type.FILE_CHUNK, ByteArray(1_024))
+        assertTrue(awaitUntil { h.link.rxFile?.bytes == 1_024L })
         t.set(100)
-        writeRecord(h.toLink, LinkFraming.Type.FILE_CHUNK, ByteArray(4_096))
+        writeRecord(h.toLink, LinkFraming.Type.FILE_CHUNK, ByteArray(1_024))
         assertTrue(awaitUntil { reports.isNotEmpty() })
-        assertEquals(Triple(key, 8_192L, 100L), reports.first())
+        assertEquals(Triple(key, 2_048L, 100L), reports.first())
         h.link.close()
     }
 

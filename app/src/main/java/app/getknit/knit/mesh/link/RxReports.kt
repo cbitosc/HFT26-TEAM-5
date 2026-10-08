@@ -13,8 +13,9 @@ import kotlinx.coroutines.launch
  *
  * - **Paced** ([windowed] false): every [EVERY_MS] of chunks, on the reader after a chunk is written. A stall sends
  *   nothing.
- * - **Windowed:** every [WINDOWED_EVERY_MS], on the chunk that brings [WINDOWED_EVERY_BYTES] since the last report,
- *   and once more [WINDOWED_EVERY_MS] after chunks no later report carried. A windowed sender writes nothing more until
+ * - **Windowed:** on every chunk that brings [WINDOWED_EVERY_BYTES] since the last report (about every chunk),
+ *   every [WINDOWED_EVERY_MS] whatever it brought, and once more [WINDOWED_EVERY_MS] after chunks no later report
+ *   carried. A windowed sender writes nothing more until
  *   it hears, so a fast pair's starting window lands inside one interval and would otherwise wait out its silence (the
  *   bluetooth-reviewer's finding). A stall still sends nothing: the trailing report goes only when the file grew.
  *
@@ -52,10 +53,11 @@ internal class RxReports(
         val ms =
             synchronized(lock) {
                 val wait = reportedAt + every - t
-                // A windowed sender's window is freed by what landed, so a window's worth is reported on the chunk that
-                // completes it, while the reader is awake for it: a dark receiver may suspend before a timer fires.
-                val grown =
-                    windowed && f.bytes - maxOf(reportedBytes, 0L) >= WINDOWED_EVERY_BYTES && t - reportedAt >= MIN_BYTES_GAP_MS
+                // A windowed sender's window is freed only by what a report says landed. Between two dark phones nothing
+                // else wakes either CPU, so the receiver answers its chunks themselves, on the reader, awake for them: a
+                // sender that ran out of window then always has a report coming (device sweep 2026-10-07, P9→P8 dark: an
+                // 8 KiB rule left a smaller window waiting out the sender's 3 s silence every few seconds).
+                val grown = windowed && f.bytes - maxOf(reportedBytes, 0L) >= WINDOWED_EVERY_BYTES
                 if (wait <= 0 || grown) {
                     reportedAt = t
                     reportedBytes = f.bytes
@@ -86,7 +88,7 @@ internal class RxReports(
         var wait = ms
         while (true) {
             // stretches: a backstop only. A receiver that suspends before it fires reports at the sender's next chunk,
-            // which comes after the sender's 3 s silence; the report on a window's worth of bytes ([chunk]) runs awake.
+            // which comes after the sender's 3 s silence; the report on a chunk's worth of bytes ([chunk]) runs awake.
             delay(wait)
             val bytes = arriving()?.takeIf { it.key == key }?.bytes ?: -1L // -1: the file is over
             val t = now()
@@ -115,15 +117,12 @@ internal class RxReports(
         // enough that the report costs nothing beside the file. FeedMeter's settle and smoothing count reports at this.
         const val EVERY_MS = 2_000L
 
-        // How often a windowed one is: often enough that its window keeps up with the drain, at about 240 B/s of reverse
-        // air per file.
+        // How often a windowed one is at the least, whatever landed; it hears far more often from the chunk rule below.
         const val WINDOWED_EVERY_MS = 500L
 
-        // And on every window's worth landed: the starting window, so a fast pair's first report needs no timer.
-        const val WINDOWED_EVERY_BYTES = FeedWindow.INITIAL_WINDOW
-
-        // But not closer than this to the last report: a reader catching up a burst would report ms apart, which the
-        // sender could not measure a rate from anyway.
-        const val MIN_BYTES_GAP_MS = 100L
+        // And on every chunk that brings this much since the last report: a sender's smallest chunk, so under every
+        // window. A chunk is about a quarter second of the drain, so about four reports a second at any rate, ~500 B/s
+        // of reverse air. A reader catching up a burst reports chunks ms apart; the sender takes no sample from those.
+        const val WINDOWED_EVERY_BYTES = FeedWindow.MIN_CHUNK_BYTES.toLong()
     }
 }

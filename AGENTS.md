@@ -76,8 +76,8 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   `PaceWindow` / `TransferPacePolicy`, `BluetoothMeshTransport.paceFor`, or `FramedLink`'s `pace`:** READ ADR
   2026-10.8jwn. **Before touching `FeedWindow`, `PaceConfig.windowed`, `BluetoothMeshTransport.windowed`,
   `FramedLink.feedChunks` / `awaitReport`, `RxReports`, or `BuildConfig.BLE_FEED_WINDOW`:** READ ADR
-  2026-10.5buf — a 1M/2M file to an Android peer that reports is clocked by those reports (written less held kept under
-  500 ms of the measured drain, no split, no earned budget), the old pace only for a silent receiver, an iPhone or
+  2026-10.5buf — a 1M/2M file to an Android peer that reports is clocked by those reports (written and not yet held kept under
+  the measured drain over the round trip plus a quarter second, BBR-style, no split, no earned budget), the old pace only for a silent receiver, an iPhone or
   Coded; dark in release until its A/B, switched on a debug build by `…debug.LINKTUNE --es feed window|pace`. A Bluetooth file is fed below what the air drains, from one budget split evenly among the 1M/2M links
   feeding a file at once (`txInProgress`), in chunks of two seconds of the share; Coded keeps its own pace outside the
   split (yvn6's #114 amendment). The stack's queue hides the drain from the sender, so tune against the receiver's

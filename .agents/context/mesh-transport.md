@@ -637,15 +637,17 @@ that reports `isLeCodedPhySupported`:
   `BuildConfig.BLE_FEED_WINDOW`, debug on / release off, `…debug.LINKTUNE --es feed window|pace`). On a 1M/2M link
   to a peer carrying `CAP_BLOB_HAVE` and no doorbell, `paceFor` returns its pace with `windowed = true`, and
   `FramedLink.feedChunks` writes only while `FeedWindow` lets it.
-  - **The window:** bytes written less bytes the receiver's `blobprog` reports hold, kept under `QUEUE_MS` (500 ms) of
-    the measured drain, from 4 to 32 KiB. With the switch on a receiver reports every 500 ms, and once more 500 ms after
-    chunks no later one reported (`RxReports`); off, every 2 s of chunks.
-  - **The drain:** the largest of the last four Δheld ÷ Δms samples, up to 64 KiB/s.
+  - **The window:** bytes written and not yet reported held, kept under the drain over the round trip plus
+    `QUEUE_MS` (250 ms), from 4 to 64 KiB: BBR's estimates, the drain the largest recent sample and the round trip the
+    smallest in 10 s (kept across the link's files), probed at one chunk's room for a round when none smaller came. With the switch on
+    a receiver reports on every chunk of 2 KiB or more, every 500 ms, and once more 500 ms after chunks no later one
+    reported (`RxReports`); off, every 2 s of chunks.
+  - **The drain:** the largest of the last twelve Δheld ÷ Δms samples, up to 64 KiB/s.
   - **A report or a queued frame wakes the writer.** The split and the earned budgets do not apply (nor is a windowed
     feed counted in a paced one's split), but the boost's interval ask still raises the drain the window follows.
   - **Pacing comes back** while the receiver has been silent for 3 s. It is also what an iPhone, a Coded link or an
     older build always gets.
-  - **Oracle:** `bt file window rate=… target=… queued=… → <node>` when its rate moves a quarter, and ` window` at the
+  - **Oracle:** `bt file window rate=… target=… queued=… rtt=… → <node>` when its rate moves a quarter, and ` window` at the
     end of the `file …` line, whose `@` then names the window's rate.
 - **Diagnostics** draws a PHY chip on each directly-connected row with a handle (`CodedPhyDiag.linkPhys`, testTag
   `ble_phy_chip_<nodeId>`).

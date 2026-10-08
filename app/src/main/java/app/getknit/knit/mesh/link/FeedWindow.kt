@@ -2,24 +2,33 @@ package app.getknit.knit.mesh.link
 
 /**
  * A Bluetooth file feed clocked by its receiver's reports instead of a fixed pace (ADR 2026-10.nsr7's phase 2). The
- * sender cannot see the stack's queue, but the receiver's `blobprog` reports say how much it holds, so the bytes written
- * less the bytes held is that queue plus the air. Writing only while it stays under [queueMs] of the measured drain
- * keeps a frame queued behind the file within about that of the wire on any link speed, and keeps the air busy, so the
- * feed runs at whatever the link drains — dark, lit, crowded or 2M — where a fixed pace overfeeds a slow pair and
- * starves a fast one (the A/B of 2026-10-07: 28 KiB/s held texts minutes behind a photo, 4 KiB/s took 111 s where the
- * same dark pair drained a photo in 12 s).
+ * sender cannot see the stack's queue, but the receiver's `blobprog` reports say how much it holds. So, as TCP does with
+ * its acks, the feed bounds the bytes written and not yet reported held — the stack's queue, the air, and what landed
+ * since the last report — to a window: the drain over the round trip, plus [queueMs] of it queued. The air stays busy,
+ * a frame queued behind the file waits about [queueMs] past the round trip on any link speed, and the feed runs at
+ * whatever the link drains — dark, lit, crowded or 2M — where a fixed pace overfeeds a slow pair and starves a fast one
+ * (the A/B of 2026-10-07: 28 KiB/s held texts minutes behind a photo, 4 KiB/s took 111 s where the same dark pair drained
+ * a photo in 12 s).
  *
- * - **Drain:** each report gives a sample, Δheld ÷ Δms on the receiver's clock, so a report's trip back costs it
- *   nothing. The rate is the largest of the last [SAMPLES] (BBR's choice: noise and a connection event's batching only
- *   ever pull a sample down), held to [ceiling].
- * - **Queued:** what was written less what the last report held, less what the last report's sample has drained since
- *   it came (for at most [EXTRAPOLATE_MAX_MS]: past that only a report frees the window). The latest sample, not the
- *   filter's largest, so a link that slowed is overfed for a report at most; and a queue standing past
- *   [STANDING_WINDOWS] windows at a report clears the filter, since the air set that sample. A report's own lag overstates the queue, the
- *   safe way: the feed holds back, never overfeeds.
- * - **Growth:** a link faster than the rate drains the queue between reports, and the next report resets the estimate
- *   to the truth, so the writer refills the whole window at once and the next sample reads about twice the rate. That
- *   is how a link that got faster (a boost earned, a 2M step) is found, with no probing of its own.
+ * The estimates are BBR's:
+ * - **Drain:** Δheld ÷ Δms between reports on the receiver's clock, so a report's trip back costs it nothing, over at
+ *   least [MIN_SAMPLE_MS] (a reader catching up a burst reports bytes ms apart). The rate is the largest of the last
+ *   [SAMPLES], a few seconds of them (noise and a connection event's batching only ever pull a sample down), held to
+ *   [ceiling]. Four, about a second, let a feed that was briefly the limit (a dark sender waking late for a report)
+ *   drag its own window down in a spiral (device sweep 6: 20 → 4.5 KB/s on a link that drained 15). A link that really
+ *   slowed is read from the round trip instead: a chunk back after twice the round trip and its queue waited behind a
+ *   growing queue, and the filter keeps only what it measures next.
+ * - **Round trip:** from a chunk's write to the report that first holds all of it, on the sender's clock; the smallest
+ *   in the last [RTT_WINDOW_MS]. A sample taken behind the standing queue counts the queue too, so the smallest is the
+ *   one that does not; and when none smaller has come for that long, the window drops to one smallest chunk for a round
+ *   ([probingRtt]) so the queue drains and a chunk's sample reads the air alone. That is also how the estimate rises
+ *   when the link slows mid-file (a 15 → 255 ms interval step). Without the round trip the window covered only the gap
+ *   between reports, and a lit sender to a dark receiver, whose reports came back slowly, got half the link (device
+ *   sweep 4, 2026-10-07: 2.9 and 4.0 KB/s on a link that drained 5.3 and 8.8).
+ * - **Growth:** a window larger than the drain over the round trip delivers more than the rate in a round, so while the
+ *   feed is the limit each round raises the rate, until the air is the limit and the extra, about [queueMs] of it,
+ *   stands as the queue. No timer drains the estimate: a sender whose CPU sleeps (a dark phone) is woken by the reports
+ *   it waits on.
  * - **Silence:** before the first report the window is [INITIAL_WINDOW]. With no report for [NO_REPORT_MS] — a peer
  *   that never reports, or whose reports stopped — the owner paces the feed the old way ([pacing]) until one comes.
  *
@@ -32,30 +41,54 @@ internal class FeedWindow(
     /** The queue, in ms of the rate, the feed keeps ahead of the receiver. Read before every chunk from the link's pace. */
     var queueMs: Long = QUEUE_MS
 
-    /** The drain measured from the receiver's reports, in bytes a second: 0 until two points of a stream are known. */
+    /** The drain measured from the receiver's reports, in bytes a second: 0 until a sample is taken. */
     var rate = 0
+        private set
+
+    /** The round trip the window covers, in ms: [INITIAL_RTT_MS] until measured. */
+    var rttMs = INITIAL_RTT_MS
+        private set
+
+    /** Whether the window is down to [MIN_WINDOW] for a round, so the next round trip measured reads the air alone. */
+    var probingRtt = false
         private set
 
     private var offset = 0L
     private var written = 0L
     private var lastHeld = -1L
-    private var lastMs = 0L
 
-    // Where the next sample is measured from: the last report a sample was taken at (or the stream's start). A report
-    // under [MIN_SAMPLE_MS] after it moves the queue's anchor but takes no sample, since a receiver's reader catching up a
-    // burst reports bytes ms apart and the sample would read MB/s (the bluetooth-reviewer's third pass).
-    private var sampleHeld = -1L
-    private var sampleMs = 0L
-
-    // When the stream began or a report last came, on the sender's clock: what the queue is extrapolated from.
+    // When the stream began or a report last came, on the sender's clock: [pacing]'s silence counts from it.
     private var heardAt = 0L
 
-    // The last report's sample: the drain since the report before. The queue is drained at it between reports, not at
-    // the filter's largest, so a link that slowed is overfed for one report at most.
-    private var lastSample = 0
+    // Where the next drain sample is measured from: the last report a sample was taken at (or the stream's start).
+    private var sampleHeld = -1L
+    private var sampleMs = 0L
     private val samples = IntArray(SAMPLES)
     private var sampleCount = 0
     private var nextSample = 0
+
+    // The chunks written and not yet reported held: where each ends (stream-relative), when it went out, and how much was
+    // unreported ahead of it then.
+    private val outEnds = ArrayDeque<Long>()
+    private val outAt = ArrayDeque<Long>()
+    private val outAhead = ArrayDeque<Long>()
+
+    // When [rttMs] was last measured as the smallest, and, while probing, what was written when the probe began: the
+    // probe ends at the round trip of a chunk written after it. Kept across the link's streams, as BBR keeps its round
+    // trip per connection: a file fed in full still has its tail in the stack's queue (ADR 2026-10.nxfb), so the next
+    // stream's first sample counts it, and taken fresh each stream the estimate grew with every file sent back to back
+    // until it locked at [MAX_RTT_MS] (the bluetooth-reviewer's finding). [forgetRtt] drops it on a PHY step.
+    private var rttAt = -1L
+    private var rttRaw = Long.MAX_VALUE
+    private var probeFrom = 0L
+
+    // The receiver's last report time on its own clock, and how many reports in a row came [SLOW_REPORT_MS] or more
+    // apart: a receiver that reports every two seconds (its window switch off, or a build that predates the window)
+    // never reports the starting window, and a window waiting on it ran in three-second fits below the paced base
+    // (the bluetooth-reviewer's finding). Two such gaps and the stream is paced to its end ([pacing]).
+    private var lastReportMs = -1L
+    private var slowGaps = 0
+    private var slowReporter = false
 
     /** A stream starts at [offset] of its blob, at [now]. */
     fun start(
@@ -65,19 +98,38 @@ internal class FeedWindow(
         this.offset = offset
         written = 0L
         lastHeld = -1L
-        lastMs = 0L
+        heardAt = now
         sampleHeld = -1L
         sampleMs = 0L
-        heardAt = now
         rate = 0
-        lastSample = 0
         sampleCount = 0
         nextSample = 0
+        outEnds.clear()
+        outAt.clear()
+        outAhead.clear()
+        probingRtt = false
+        lastReportMs = -1L
+        slowGaps = 0
+        slowReporter = false
     }
 
-    /** [bytes] more of the stream went to the socket. */
-    fun wrote(bytes: Int) {
+    /** The link stepped PHY: its round trip is another's. */
+    fun forgetRtt() {
+        rttMs = INITIAL_RTT_MS
+        rttAt = -1L
+        rttRaw = Long.MAX_VALUE
+        probingRtt = false
+    }
+
+    /** [bytes] more of the stream went to the socket at [now]. */
+    fun wrote(
+        bytes: Int,
+        now: Long,
+    ) {
+        outAhead.addLast(queued())
         written += bytes
+        outEnds.addLast(written)
+        outAt.addLast(now)
     }
 
     /**
@@ -92,68 +144,144 @@ internal class FeedWindow(
     ) {
         val proven = held.coerceAtMost(offset + written)
         if (proven < maxOf(lastHeld, offset)) return
-        val (fromHeld, fromMs) = if (sampleHeld < 0) offset to 0L else sampleHeld to sampleMs
-        if (ms - fromMs >= MIN_SAMPLE_MS) {
-            val sample = ((proven - fromHeld) * MS_PER_SECOND / (ms - fromMs)).coerceIn(0L, ceiling.toLong()).toInt()
-            // A queue standing well past the window says the air, not the feed, set this sample: it is the drain, and
-            // the larger ones before it are a link that slowed (a second feed began, a boost let go). Kept, they would
-            // overfeed it for the whole filter.
-            if (offset + written - proven > STANDING_WINDOWS * target()) {
-                sampleCount = 0
-                nextSample = 0
-            }
-            samples[nextSample] = sample
-            lastSample = sample
-            nextSample = (nextSample + 1) % SAMPLES
-            sampleCount = minOf(sampleCount + 1, SAMPLES)
-            rate = samples.take(sampleCount).max()
-            sampleHeld = proven
-            sampleMs = ms
+        val standing = !probingRtt && offset + written - proven > STANDING_WINDOWS * target()
+        // The round trip of the last chunk this report holds whole.
+        var sentAt = -1L
+        var end = 0L
+        var ahead = 0L
+        var landed = 0
+        while (outEnds.isNotEmpty() && outEnds.first() <= proven - offset) {
+            end = outEnds.removeFirst()
+            sentAt = outAt.removeFirst()
+            ahead = outAhead.removeFirst()
+            landed++
         }
+        noteReportGap(ms, landed)
+        // A chunk back after half again what it should have taken — the round trip, the queue, and what was ahead of it at the
+        // drain — waited behind a queue that grew: the link slowed, and the drain's filter keeps only what it measures
+        // next. Judged by what was ahead, not by the window: a round trip carried over from a faster file would otherwise
+        // read every chunk at a slow pair's floor as slowed (the bluetooth-reviewer's finding).
+        val expectedMs = rttMs + queueMs + if (rate > 0) ahead * MS_PER_SECOND / rate else 0L
+        val slowed = sentAt >= 0 && !probingRtt && rttAt >= 0 && (now - sentAt) * SLOWED_DEN > SLOWED_NUM * expectedMs
+        if (sentAt >= 0) noteRtt(now - sentAt, end, now)
+        if (!probingRtt && rttAt >= 0 && now - rttAt > RTT_WINDOW_MS) {
+            probingRtt = true
+            probeFrom = written
+        }
+        sampleDrain(proven, ms, reset = standing || slowed)
         lastHeld = proven
-        lastMs = maxOf(lastMs, ms)
         heardAt = now
     }
 
     /**
-     * The writer slept [ms] past the wait it asked for (its `delay` stops while the CPU sleeps): no chunk went out, so
-     * the receiver had nothing to report, and that time does not count toward [pacing]'s silence.
+     * A drain sample from the last sampled report to [proven] held at [ms] on the receiver's clock, if that spans
+     * [MIN_SAMPLE_MS]; none while probing, whose window is smaller than the pipe. [reset] keeps only this one: a standing
+     * queue or a slow round trip says the air set it, and the larger ones before it are a link that slowed.
+     */
+    private fun sampleDrain(
+        proven: Long,
+        ms: Long,
+        reset: Boolean,
+    ) {
+        val (fromHeld, fromMs) = if (sampleHeld < 0) offset to 0L else sampleHeld to sampleMs
+        if (ms - fromMs < MIN_SAMPLE_MS) return
+        if (!probingRtt) {
+            val sample = ((proven - fromHeld) * MS_PER_SECOND / (ms - fromMs)).coerceIn(0L, ceiling.toLong()).toInt()
+            if (reset) {
+                sampleCount = 0
+                nextSample = 0
+            }
+            samples[nextSample] = sample
+            nextSample = (nextSample + 1) % SAMPLES
+            sampleCount = minOf(sampleCount + 1, SAMPLES)
+            rate = samples.take(sampleCount).max()
+        }
+        sampleHeld = proven
+        sampleMs = ms
+    }
+
+    /**
+     * A report [ms] after the header, on the receiver's clock, covering [landed] more chunks: two gaps of [SLOW_REPORT_MS]
+     * that each covered more than one chunk mark a two-second reporter. A windowed receiver reports every chunk, so its
+     * gaps are the chunks' own, and long on a slow link or across a probe: read by time alone they paced a slow link's
+     * window back to the fixed pace (the bluetooth-reviewer's finding).
+     */
+    private fun noteReportGap(
+        ms: Long,
+        landed: Int,
+    ) {
+        if (lastReportMs >= 0) {
+            slowGaps = if (ms - lastReportMs >= SLOW_REPORT_MS && landed > 1) slowGaps + 1 else 0
+            if (slowGaps >= SLOW_GAPS) slowReporter = true
+        }
+        lastReportMs = maxOf(lastReportMs, ms)
+    }
+
+    /**
+     * A chunk ending at [end] (stream-relative) came back [ms] after its write. The smallest is the trip; a probe's first
+     * chunk back, written with at most one smallest chunk ahead of it, is the trip whatever it reads, and ends the probe:
+     * a probe of a whole round more cost a fifth of a slow-report link (the simulation), and one waiting for an empty
+     * pipe left the air idle a round each time. Kept across the link's files, the estimate can lag a rise between them
+     * (a peer's screen going off lets the link boost go, with no PHY step) for up to [RTT_WINDOW_MS], until the probe.
+     */
+    private fun noteRtt(
+        ms: Long,
+        end: Long,
+        now: Long,
+    ) {
+        if (probingRtt && end > probeFrom) {
+            rttRaw = ms
+            rttMs = ms.coerceIn(MIN_RTT_MS, MAX_RTT_MS)
+            rttAt = now
+            probingRtt = false
+            return
+        }
+        // No larger, compared before the clamp: a steady link's samples keep the estimate fresh, and one clamped to the
+        // ceiling must not.
+        if (rttAt < 0 || ms <= rttRaw) {
+            rttRaw = ms
+            rttMs = ms.coerceIn(MIN_RTT_MS, MAX_RTT_MS)
+            rttAt = now
+        }
+    }
+
+    /**
+     * The writer slept [ms] past the wait it asked for (its `delay` stops while the CPU sleeps). With nothing unreported
+     * the receiver had nothing to report, and that time does not count toward [pacing]'s silence; with a window out it
+     * owes a report, and the silence counts (the bluetooth-reviewer's finding). A backstop: every wait starts with
+     * something out, and the report that empties it wakes the writer, so only a receiver silent on a window it owes
+     * reaches it.
      */
     fun slept(
         ms: Long,
         now: Long,
     ) {
-        if (ms > 0) heardAt = minOf(now, heardAt + ms)
-    }
-
-    /** Whether the receiver has been silent for [NO_REPORT_MS]: the owner paces the feed the old way until it reports. */
-    fun pacing(now: Long): Boolean = now - heardAt >= NO_REPORT_MS
-
-    /** The bytes the window lets be queued and on the air: [queueMs] of the rate, or [INITIAL_WINDOW] before it. */
-    fun target(): Long = if (rate <= 0) INITIAL_WINDOW else (rate.toLong() * queueMs / MS_PER_SECOND).coerceIn(MIN_WINDOW, MAX_WINDOW)
-
-    /** The bytes written that the receiver is not yet thought to hold. */
-    fun queued(now: Long): Long {
-        if (lastHeld < 0) return written
-        val since = (now - heardAt).coerceIn(0L, EXTRAPOLATE_MAX_MS)
-        val delivered = lastHeld - offset + lastSample.toLong() * since / MS_PER_SECOND
-        return (written - delivered).coerceAtLeast(0L)
+        if (ms > 0 && queued() == 0L) heardAt = minOf(now, heardAt + ms)
     }
 
     /**
-     * How long to wait before the next chunk: 0 while the queue is under the window, else until the rate should have
-     * drained it there — at least [MIN_WAIT_MS], at most [REPORT_WAIT_MS], since a report re-reads it anyway. Past the
-     * extrapolation's bound only a report frees the window.
+     * Whether the owner paces the feed the old way: the receiver silent for [NO_REPORT_MS] (until it reports), or one that
+     * reports only every two seconds (for the rest of the stream).
      */
-    fun waitMs(now: Long): Long {
-        val q = queued(now)
-        val t = target()
-        if (q < t) return 0L
-        val left = if (lastHeld < 0) 0L else EXTRAPOLATE_MAX_MS - (now - heardAt)
-        if (lastSample <= 0 || left <= 0) return REPORT_WAIT_MS
-        val ms = (q - t + 1) * MS_PER_SECOND / lastSample
-        return ms.coerceIn(MIN_WAIT_MS, minOf(left, REPORT_WAIT_MS).coerceAtLeast(MIN_WAIT_MS))
-    }
+    fun pacing(now: Long): Boolean = slowReporter || now - heardAt >= NO_REPORT_MS
+
+    /**
+     * The bytes the window lets be written and not yet reported held: the rate over the round trip plus [queueMs],
+     * one smallest chunk's room while probing the round trip (so at most one chunk is ahead of the next: every record is
+     * at least [MIN_CHUNK_BYTES]), or [INITIAL_WINDOW] before a rate.
+     */
+    fun target(): Long =
+        when {
+            probingRtt -> MIN_CHUNK_BYTES + 1L
+            rate <= 0 -> INITIAL_WINDOW
+            else -> (rate.toLong() * (rttMs + queueMs) / MS_PER_SECOND).coerceIn(MIN_WINDOW, MAX_WINDOW)
+        }
+
+    /** The bytes written that no report has said the receiver holds. */
+    fun queued(): Long = written - if (lastHeld < 0) 0L else lastHeld - offset
+
+    /** How long to wait before the next chunk: 0 while the window has room, else until a report frees it. */
+    fun waitMs(): Long = if (queued() < target()) 0L else REPORT_WAIT_MS
 
     /** The next chunk's size: about [CHUNK_MS] of the rate, so a frame queued mid-file waits at most a small chunk. */
     fun chunkBytes(): Int {
@@ -163,43 +291,58 @@ internal class FeedWindow(
     }
 
     companion object {
-        // The queue (the stack's and the air's) a feed keeps ahead of the receiver: the wait a frame behind the file sees.
-        const val QUEUE_MS = 500L
+        // The queue a feed keeps ahead of the receiver past the round trip: about the wait a frame behind the file sees.
+        const val QUEUE_MS = 250L
 
         // The fastest drain a report is believed at, which bounds a garbled or lying one: about twice the best 1M
         // drain measured (29 KB/s at a 15 ms interval, ADR 2026-10.2da4).
         const val CEILING_BYTES_PER_SEC = 64 * 1024
 
-        // The window's bounds: never so small that a slow link stops and waits for each report, never past half a second
-        // of the ceiling.
+        // The window's bounds: never so small that a slow link stops and waits for each report, never past a second of
+        // the ceiling.
         const val MIN_WINDOW = 4L * 1024
-        const val MAX_WINDOW = 32L * 1024
+        const val MAX_WINDOW = 64L * 1024
 
-        // What may be queued before the first report measures anything: two seconds of the old 4 KiB/s base.
+        // What may be in flight before the first report measures anything: two seconds of the old 4 KiB/s base.
         const val INITIAL_WINDOW = 8L * 1024
 
-        // A receiver silent this long (six report intervals) gets the old pace until it reports.
+        // A receiver silent this long gets the old pace until it reports.
         const val NO_REPORT_MS = 3_000L
 
-        // How far past the last report the queue is drained at the rate: past it, only a report frees the window.
-        const val EXTRAPOLATE_MAX_MS = 1_500L
-
-        // The longest one wait lasts: a report's interval. A report wakes the writer sooner.
+        // The longest one wait for room lasts; a report wakes the writer sooner.
         const val REPORT_WAIT_MS = 500L
-        const val MIN_WAIT_MS = 20L
 
         // A chunk carries about this much of the rate, between these sizes.
         const val CHUNK_MS = 250L
         const val MIN_CHUNK_BYTES = 2048
         const val INITIAL_CHUNK_BYTES = 4096
 
-        private const val SAMPLES = 4
-
-        // The shortest span, on the receiver's clock, a sample is measured over.
+        // The shortest span, on the receiver's clock, a drain sample is measured over.
         const val MIN_SAMPLE_MS = 250L
 
-        // How many windows of queue at a report make it a standing one, whose sample is the drain.
+        // The round trip: assumed until measured, bounded, the smallest over this long before the window probes it.
+        const val INITIAL_RTT_MS = 500L
+        const val MIN_RTT_MS = 50L
+        const val MAX_RTT_MS = 3_000L
+        const val RTT_WINDOW_MS = 10_000L
+
+        // A receiver reporting this far apart (its own clock), twice running, reports every two seconds: pace it.
+        const val SLOW_REPORT_MS = 1_900L
+        private const val SLOW_GAPS = 2
+
+        // How many windows of queue at a report make it a standing one, whose sample is the drain: what a report finds
+        // unheld is the queue plus the round trip's bytes plus the writer's last chunk, so one window fired on nearly
+        // every report of a lit sender (the bluetooth-reviewer's port). The writer stops at one window, so this fires
+        // when the window shrinks under a queue sized for the old one (the round trip's estimate dropped). A drain
+        // that falls by half or more shows as slowed round trips; a smaller fall is followed as the twelve samples age
+        // out, a few seconds at four reports a second, longer on a slow link.
         private const val STANDING_WINDOWS = 2
+
+        private const val SAMPLES = 12
+
+        // A chunk's round trip past this many of what it should have taken says the link slowed.
+        private const val SLOWED_NUM = 3
+        private const val SLOWED_DEN = 2
         private const val MS_PER_SECOND = 1_000L
     }
 }
