@@ -30,5 +30,17 @@ internal object BoardFilter {
      */
     fun looksLikeBoard(name: String): Boolean = name.startsWith("mesh", ignoreCase = true) || RENAMED_SUFFIX.containsMatchIn(name)
 
+    /**
+     * Whether a bonded device looks like a Meshtastic board: LE-capable (a board is never [classicOnly], which rules out
+     * most headsets outright), and either a board-like [name] ([looksLikeBoard]) or the Meshtastic service among the
+     * stack's cached services ([listsService], read only then: a positive-only signal, since the cache is empty for most
+     * LE bonds until a first connection).
+     */
+    fun isMeshtastic(
+        name: String,
+        classicOnly: Boolean,
+        listsService: () -> Boolean,
+    ): Boolean = !classicOnly && (looksLikeBoard(name) || listsService())
+
     private val RENAMED_SUFFIX = Regex("_[0-9a-f]{4}$", RegexOption.IGNORE_CASE)
 }

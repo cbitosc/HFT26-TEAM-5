@@ -459,7 +459,7 @@ class BluetoothMeshTransport(
         override fun onLinkDown(nodeId: String) {
             val released = teardownLink(nodeId, "eof", only = link)
             // Replaced by a fresh link from the same peer: that link holds the slot, and the peer did not flap.
-            if (!released && links[nodeId] != null) return
+            if (!ConnectBackoffs.flapped(released, replaced = links[nodeId] != null)) return
             // A flapping link escalates on the same per-peer streak as a failed connect, so a peer that keeps
             // dropping isn't reconnected on a tight loop (which would black out scanning each attempt).
             val (streak, nextAt) = synchronized(lock) { bumpBackoffLocked(nodeId) }
@@ -597,7 +597,7 @@ class BluetoothMeshTransport(
     override fun onForeignReachable(peers: Set<String>) {
         // Only chase peers we'd initiate to (larger id initiates); a larger-id foreign peer connects to us via
         // our always-on advert, so scanning harder for it wouldn't help. Guard localNodeId until start() sets it.
-        val initiable = if (::localNodeId.isInitialized) peers.filterTo(HashSet()) { localNodeId > it } else emptySet()
+        val initiable = if (::localNodeId.isInitialized) DialPlan.initiable(localNodeId, peers) else emptySet()
         if (initiable == foreignReachable) return
         val rising = initiable.any { it !in foreignReachable }
         foreignReachable = initiable
@@ -868,9 +868,7 @@ class BluetoothMeshTransport(
         if (adapter?.isEnabled != true || currentPsm == 0 || !::localNodeId.isInitialized) return
         // FLAG_DIALS_GATT_PEERS rides the same gate as the reader, so it never claims a read this phone cannot make:
         // a lower-id iPhone waits to be dialed only by a phone that can find it (companion change A3).
-        val flags =
-            (if (sideChannel?.live == true) BleAdvertPayload.FLAG_SIDE_CHANNEL else 0) or
-                (if (gattPeers) BleAdvertPayload.FLAG_DIALS_GATT_PEERS else 0)
+        val flags = BleAdvertPayload.flags(sideLive = sideChannel?.live == true, gattPeers = gattPeers)
         val payload = BleAdvertPayload.encode(localNodeId, Protocol.LOCAL_CAPABILITIES, storeDigest.current(), currentPsm, flags)
         advertiser.update(payload)
         // The same bytes on the Coded set, so its PSM and cue can never lag the presence advert's.
@@ -1508,14 +1506,14 @@ class BluetoothMeshTransport(
             val hunt = huntNow(power)
             scanWindow(power, hunt)
             val aloneFor = aloneForMs()
-            val idle = idleAfterWindow(power, hunt, aloneFor)
-            logLonelyTransition(!hunt && links.isEmpty() && PowerPolicy.lonelyRelaxed(power, aloneFor), idle, aloneFor)
+            val gap = ScanPlan.gapAfterWindow(power, hunt, ::floorScan, links.size, aloneFor)
+            logLonelyTransition(!hunt && links.isEmpty() && PowerPolicy.lonelyRelaxed(power, aloneFor), gap.ms, aloneFor)
             // The hunting gaps keep wall time through sleep; every other gap is a power budget and stretches (pj9w).
-            if (hunt || PowerPolicy.hunting(power, links.size, aloneFor)) {
-                elapsedWait.receiveWithin(scanWake, idle)
+            if (gap.keepsWallTime) {
+                elapsedWait.receiveWithin(scanWake, gap.ms)
             } else {
                 // stretches: a power budget: the settled, linked and relaxed gaps (pj9w).
-                withTimeoutOrNull(idle) { scanWake.receive() }
+                withTimeoutOrNull(gap.ms) { scanWake.receive() }
             }
         }
     }
@@ -1526,36 +1524,29 @@ class BluetoothMeshTransport(
      */
     private suspend fun waitedBeforeWindow(): Boolean {
         val inflight = inFlightSnapshot()
-        val canScan = adapter?.isEnabled == true && inflight.isEmpty() && !arbiter.busy.value
-        if (!canScan) {
-            // A connect is in flight (radio contention) or the adapter is off — wait, don't scan. Log the
-            // pause so a scanning gap (which starves presence for the whole mesh) is attributable.
-            val adapterOn = adapter?.isEnabled == true
-            if (adapterOn) Log.d(TAG, "scan paused: connect in flight $inflight arbiter=${arbiter.busy.value}")
-            // Wait for the event that ends the pause — the connect's end (`registerLink`/`failConnect` →
-            // `wake()`), the arbiter freeing (its collector → `wakeScan()`), the adapter coming back
-            // (`STATE_ON` → `wake()`) — with a timeout sized to that event, not a 2 s poll: an adapter left
-            // off used to wake this loop thirty times a minute for as long as it stayed off.
-            elapsedWait.receiveWithin(scanWake, if (adapterOn) CONNECT_PAUSE_WAIT_MS else ADAPTER_OFF_WAIT_MS)
-            return true
-        }
-        val early = nextWindowAt - elapsed()
-        if (early <= 0) return false
-        elapsedWait.receiveWithin(scanWake, early) // a window a dial cut short keeps its slot
+        val adapterOn = adapter?.isEnabled == true
+        val busy = arbiter.busy.value
+        // A connect in flight (radio contention) or the adapter off: wait, don't scan, for the event that ends the pause
+        // — the connect's end (`registerLink`/`failConnect` → `wake()`), the arbiter freeing (its collector →
+        // `wakeScan()`), the adapter coming back (`STATE_ON` → `wake()`) — with a timeout sized to that event, not a 2 s
+        // poll: an adapter left off used to wake this loop thirty times a minute for as long as it stayed off. Else a
+        // window a dial cut short keeps its slot.
+        val wait =
+            ScanPlan.beforeWindow(
+                adapterOn,
+                inflight.isNotEmpty(),
+                busy,
+                nextWindowAt,
+                elapsed(),
+                CONNECT_PAUSE_WAIT_MS,
+                ADAPTER_OFF_WAIT_MS,
+            )
+                ?: return false
+        // The pause is logged so a scanning gap (which starves presence for the whole mesh) is attributable.
+        if (adapterOn && (inflight.isNotEmpty() || busy)) Log.d(TAG, "scan paused: connect in flight $inflight arbiter=$busy")
+        elapsedWait.receiveWithin(scanWake, wait)
         return true
     }
-
-    /** The gap after a presence window: the hunting gap while it [hunt]s, else the settled floor or the duty cycle's. */
-    private fun idleAfterWindow(
-        power: PowerState,
-        hunt: Boolean,
-        aloneFor: Long,
-    ): Long =
-        when {
-            hunt -> PowerPolicy.HUNT_IDLE_MS
-            floorScan() -> PowerPolicy.settledIdleAfterScan(power, links.size, aloneFor)
-            else -> PowerPolicy.idleAfterScan(power, links.size, aloneFor)
-        }
 
     /**
      * Whether this window hunts ([CodedPhyPolicy.hunts]): a peer lost at range is wanted back ([rangeHunt]), or Knit is
@@ -1782,8 +1773,8 @@ class BluetoothMeshTransport(
         rssi: Int,
     ) {
         val address = device.address
-        if (!::localNodeId.isInitialized || address in linkAddresses.values) return
-        if (inFlightSnapshot().isNotEmpty() || arbiter.busy.value) return
+        if (!::localNodeId.isInitialized) return
+        if (!DialPlan.mayReadGatt(address, linkAddresses.values, arbiter.busy.value) { inFlightSnapshot().isNotEmpty() }) return
         if (!gattPayloads.begin(address, elapsed())) return
         gattReads.incrementAndGet()
         Log.d(TAG, "bt gatt reading $address")
@@ -2239,8 +2230,7 @@ class BluetoothMeshTransport(
     private fun beginConnect(nodeId: String): Boolean {
         val begun =
             synchronized(lock) {
-                if (nodeId in links.keys || nodeId in inFlight) return false
-                backoffs[nodeId]?.let { if (elapsed() < it.nextAt) return false }
+                if (!ConnectBackoffs.mayBegin(backoffs, nodeId, links.keys, inFlight, elapsed())) return false
                 inFlight.add(nodeId)
                 true
             }
@@ -2261,13 +2251,13 @@ class BluetoothMeshTransport(
         // A dial that failed before its channel opened may have used a PSM the peer no longer listens on (an iPhone
         // that restarted), so its GATT payload is read again at the next advert. A HELLO refusal says nothing of the
         // PSM (GattPayloads, companion change A3).
-        if (gattPeers && device != null && reason != ConnectFailReason.HANDSHAKE) forgetGattPayload(device.address, "dial")
+        if (gattPeers && device != null && DialPlan.forgetsGattPayload(reason)) forgetGattPayload(device.address, "dial")
         val (streak, nextAt) =
             synchronized(lock) {
                 inFlight.remove(nodeId)
                 // A dial the peer refused because its own dial to us linked first (a lonely dial crossing the
                 // ordinary one, ADR 2026-09.hj4a) is no failure to back off from: that link reset the streak already.
-                if (nodeId in links.keys) 0 to elapsed() else bumpBackoffLocked(nodeId)
+                ConnectBackoffs.onDialFailed(backoffs, nodeId, linkedNow = nodeId in links.keys, now = elapsed(), config = backoffConfig)
             }
         metrics.onBtConnectFailed(reason)
         field.record(FieldEvent.BtFail(nodeId, reason, durationMs = elapsed() - startedAt, streak = streak))

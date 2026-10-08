@@ -192,7 +192,7 @@ internal class BlePhyControl(
     ) {
         val before = stepper.phy
         val wasGivenUp = stepper.gaveUp
-        val changed = stepper.onPhy(phyOf(txPhy), status == BluetoothGatt.GATT_SUCCESS, now())
+        val changed = stepper.onPhy(linkPhyOf(txPhy), status == BluetoothGatt.GATT_SUCCESS, now())
         if (changed) {
             Log.i(TAG, "bt phy $nodeId $before→${stepper.phy} rssi=${stepper.smoothedRssi?.toInt()} (${mode().wire})")
             onStep(stepper.phy == LinkPhy.CODED)
@@ -200,7 +200,7 @@ internal class BlePhyControl(
             Log.i(TAG, "bt phy $nodeId on ${stepper.phy} (drives=$drives)")
         }
         if (stepper.gaveUp && !wasGivenUp) {
-            Log.i(TAG, "bt phy $nodeId gave up: update answered ${phyOf(txPhy)} status=$status")
+            Log.i(TAG, "bt phy $nodeId gave up: update answered ${linkPhyOf(txPhy)} status=$status")
             onGiveUp()
         }
         onPhyKnown()
@@ -257,13 +257,14 @@ internal class BlePhyControl(
 
         // A link-RSSI read is one HCI command; one not back by now is skipped, not waited on.
         const val RSSI_TIMEOUT_MS = 1_000L
-
-        fun phyOf(phy: Int): LinkPhy =
-            when (phy) {
-                BluetoothDevice.PHY_LE_1M -> LinkPhy.ONE_M
-                BluetoothDevice.PHY_LE_2M -> LinkPhy.TWO_M
-                BluetoothDevice.PHY_LE_CODED -> LinkPhy.CODED
-                else -> LinkPhy.UNKNOWN
-            }
     }
 }
+
+/** The [LinkPhy] an Android PHY constant names (`BluetoothDevice.PHY_LE_*`): [BlePhyControl]'s and [BleLinkTuner]'s. */
+internal fun linkPhyOf(phy: Int): LinkPhy =
+    when (phy) {
+        BluetoothDevice.PHY_LE_1M -> LinkPhy.ONE_M
+        BluetoothDevice.PHY_LE_2M -> LinkPhy.TWO_M
+        BluetoothDevice.PHY_LE_CODED -> LinkPhy.CODED
+        else -> LinkPhy.UNKNOWN
+    }

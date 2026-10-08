@@ -1,5 +1,7 @@
 package app.getknit.knit.mesh.bluetooth
 
+import app.getknit.knit.mesh.ConnectFailReason
+
 /**
  * The connection engine's glue between the sighted peers and its policies ([PromotionPolicy], [LonelyDialPolicy],
  * [ScanDemandPolicy]): which peers each one is handed, how their answers combine, and where a dial goes. Pure, free of
@@ -92,6 +94,32 @@ internal object DialPlan {
         val device = if (viaCoded) coded else oneM ?: coded
         return device?.let { it to viaCoded }
     }
+
+    /** The peers another plane reports that [localId] would dial (the larger id dials): the only ones worth a chase. */
+    fun initiable(
+        localId: String,
+        peers: Set<String>,
+    ): Set<String> = peers.filterTo(HashSet()) { localId > it }
+
+    /**
+     * Whether a GATT payload read of [address] may start: never an address a link holds ([linkAddresses]), and never
+     * while a dial is in flight ([dialing], read after the address: it takes the transport's lock) or another connect
+     * holds the arbiter: the read is a connection the controller must make, as a dial is. [GattPayloads] decides whether
+     * one is due.
+     */
+    fun mayReadGatt(
+        address: String,
+        linkAddresses: Collection<String>,
+        arbiterBusy: Boolean,
+        dialing: () -> Boolean,
+    ): Boolean = address !in linkAddresses && !dialing() && !arbiterBusy
+
+    /**
+     * Whether a failed dial forgets the peer's GATT payload, so its next advert reads it afresh: a dial that failed
+     * before its channel opened may have used a PSM the peer no longer listens on (an iPhone that restarted); a HELLO
+     * refusal says nothing of the PSM (companion change A3, ADR 2026-09.kwq2).
+     */
+    fun forgetsGattPayload(reason: ConnectFailReason): Boolean = reason != ConnectFailReason.HANDSHAKE
 
     /** The `via=` a dial's `bt initiating to` line carries while the Coded experiment runs ([codedOn]); empty when off. */
     fun via(

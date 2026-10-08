@@ -36,8 +36,9 @@ internal class BondedBoardDirectory(
                     address = device.address,
                     name = name,
                     meshtastic =
-                        device.type != BluetoothDevice.DEVICE_TYPE_CLASSIC &&
-                            (BoardFilter.looksLikeBoard(name) || device.uuids?.any { it.uuid == MeshtasticUuids.SERVICE } == true),
+                        BoardFilter.isMeshtastic(name, classicOnly = device.type == BluetoothDevice.DEVICE_TYPE_CLASSIC) {
+                            device.uuids?.any { it.uuid == MeshtasticUuids.SERVICE } == true
+                        },
                 )
             }
         }.getOrDefault(emptyList())

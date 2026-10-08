@@ -7,6 +7,7 @@ import app.getknit.knit.mesh.bluetooth.ConnectBackoffPolicy
 import app.getknit.knit.mesh.bluetooth.ConnectBackoffs
 import app.getknit.knit.mesh.bluetooth.ConnectFailClassifier
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -115,5 +116,31 @@ class ConnectBackoffPolicyTest {
         assertEquals(ConnectFailReason.OTHER, ConnectFailClassifier.classify(IOException("read failed, socket might closed")))
         assertEquals(ConnectFailReason.OTHER, ConnectFailClassifier.classify(IOException()))
         assertEquals(ConnectFailReason.OTHER, ConnectFailClassifier.classify(null))
+    }
+
+    @Test
+    fun aDialBeginsOnlyToAnUnlinkedPeerWithNoDialInFlightAndNoBackoff() {
+        val book = hashMapOf("waiting" to ConnectBackoffEntry(1, nextAt = 500), "due" to ConnectBackoffEntry(3, nextAt = 100))
+        assertTrue(ConnectBackoffs.mayBegin(book, "new", emptySet(), emptySet(), now = 200))
+        assertTrue("its window has passed", ConnectBackoffs.mayBegin(book, "due", emptySet(), emptySet(), now = 100))
+        assertFalse("backing off", ConnectBackoffs.mayBegin(book, "waiting", emptySet(), emptySet(), now = 499))
+        assertFalse("linked", ConnectBackoffs.mayBegin(book, "new", setOf("new"), emptySet(), now = 200))
+        assertFalse("a dial in flight", ConnectBackoffs.mayBegin(book, "new", emptySet(), setOf("new"), now = 200))
+    }
+
+    @Test
+    fun aDialRefusedBecauseThePeersOwnDialLinkedFirstIsNoFailure() {
+        val book = HashMap<String, ConnectBackoffEntry>()
+        assertEquals(0 to 1_000L, ConnectBackoffs.onDialFailed(book, "a", linkedNow = true, now = 1_000, config = cfg, rand = noJitter))
+        assertTrue("no streak recorded", book.isEmpty())
+        assertEquals(1 to 11_000L, ConnectBackoffs.onDialFailed(book, "a", linkedNow = false, now = 1_000, config = cfg, rand = noJitter))
+    }
+
+    @Test
+    fun aLinkThatEndedFlapsUnlessAFreshLinkFromThePeerReplacedIt() {
+        assertTrue("its own link went", ConnectBackoffs.flapped(released = true, replaced = false))
+        assertTrue("released, and the peer relinked since", ConnectBackoffs.flapped(released = true, replaced = true))
+        assertTrue("already gone, nothing holds the slot", ConnectBackoffs.flapped(released = false, replaced = false))
+        assertFalse("a fresh link holds the slot", ConnectBackoffs.flapped(released = false, replaced = true))
     }
 }

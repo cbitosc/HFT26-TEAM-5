@@ -328,32 +328,38 @@ internal class WearStatusServer(
             ) {
                 val s = server ?: return
                 val (status, value) =
-                    when {
-                        characteristic.uuid != WearStatusUuids.STATUS -> {
-                            BluetoothGatt.GATT_READ_NOT_PERMITTED to null
-                        }
-
-                        device.bondState != BluetoothDevice.BOND_BONDED -> {
-                            BluetoothGatt.GATT_INSUFFICIENT_AUTHENTICATION to null
-                        }
-
-                        else -> {
-                            val bytes = snapshot()
-                            when {
-                                bytes == null -> BluetoothGatt.GATT_FAILURE to null
-                                offset > bytes.size -> BluetoothGatt.GATT_INVALID_OFFSET to null
-                                else -> BluetoothGatt.GATT_SUCCESS to bytes.copyOfRange(offset, bytes.size)
-                            }
-                        }
-                    }
+                    readAnswer(
+                        isStatus = characteristic.uuid == WearStatusUuids.STATUS,
+                        bonded = device.bondState == BluetoothDevice.BOND_BONDED,
+                        offset = offset,
+                        snapshot = ::snapshot,
+                    )
                 if (status != BluetoothGatt.GATT_SUCCESS) Log.d(TAG, "read refused: $status")
                 runCatching { s.sendResponse(device, requestId, status, offset, value) }
             }
         }
 
-    private companion object {
-        const val TAG = "KnitWear"
-        const val SDP_NAME = "Knit mesh status"
-        const val LINGER_MS = 3_000L
+    internal companion object {
+        /**
+         * The answer to a read: (GATT status, value). Only the status characteristic ([isStatus]) is readable, and only
+         * by a [bonded] watch; the [snapshot] is read only then, and a read at [offset] gets the bytes from there (a
+         * long read in parts), past its end an invalid offset, with no snapshot (the mesh not running) a failure.
+         */
+        fun readAnswer(
+            isStatus: Boolean,
+            bonded: Boolean,
+            offset: Int,
+            snapshot: () -> ByteArray?,
+        ): Pair<Int, ByteArray?> {
+            if (!isStatus) return BluetoothGatt.GATT_READ_NOT_PERMITTED to null
+            if (!bonded) return BluetoothGatt.GATT_INSUFFICIENT_AUTHENTICATION to null
+            val bytes = snapshot() ?: return BluetoothGatt.GATT_FAILURE to null
+            if (offset > bytes.size) return BluetoothGatt.GATT_INVALID_OFFSET to null
+            return BluetoothGatt.GATT_SUCCESS to bytes.copyOfRange(offset, bytes.size)
+        }
+
+        private const val TAG = "KnitWear"
+        private const val SDP_NAME = "Knit mesh status"
+        private const val LINGER_MS = 3_000L
     }
 }

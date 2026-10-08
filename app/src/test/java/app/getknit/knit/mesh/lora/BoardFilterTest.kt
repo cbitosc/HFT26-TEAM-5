@@ -42,4 +42,20 @@ class BoardFilterTest {
     fun `show all lists everything in the directory's order`() {
         assertEquals(all, BoardFilter.visible(all, boundAddress = null, showAll = true))
     }
+
+    @Test
+    fun `a bonded device is a board when LE capable and named like one or listing the service`() {
+        assertTrue(BoardFilter.isMeshtastic("Meshtastic_ee01", classicOnly = false) { false })
+        assertTrue("a custom name, the service cached", BoardFilter.isMeshtastic("Base camp", classicOnly = false) { true })
+        assertFalse("neither", BoardFilter.isMeshtastic("Pixel Buds", classicOnly = false) { false })
+        assertFalse("a Classic-only device never is", BoardFilter.isMeshtastic("Meshtastic_ee01", classicOnly = true) { true })
+    }
+
+    @Test
+    fun `the cached services are read only when the name does not settle it`() {
+        var reads = 0
+        BoardFilter.isMeshtastic("Meshtastic_ee01", classicOnly = false) { reads++ > 0 }
+        BoardFilter.isMeshtastic("Headset", classicOnly = true) { reads++ > 0 }
+        assertEquals(0, reads)
+    }
 }

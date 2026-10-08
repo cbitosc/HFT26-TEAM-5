@@ -15,7 +15,32 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /** Coarse Bluetooth-audio state, ordered by how much of the shared radio it plausibly consumes. */
-enum class BtAudioState { Idle, Connected, Streaming }
+enum class BtAudioState {
+    Idle,
+    Connected,
+    Streaming,
+    ;
+
+    companion object {
+        /**
+         * The audio state from what the monitor knows: streaming while A2DP reports [playing], or while a Bluetooth
+         * output is present ([btOutputPresent]) and music plays ([musicActive], read only then: the A2DP playing edge
+         * can be missed when the monitor starts mid-stream); connected while A2DP is [connected] or a Bluetooth output
+         * is present; else idle.
+         */
+        internal fun of(
+            playing: Boolean,
+            connected: Boolean,
+            btOutputPresent: Boolean,
+            musicActive: () -> Boolean,
+        ): BtAudioState =
+            when {
+                playing || (btOutputPresent && musicActive()) -> Streaming
+                connected || btOutputPresent -> Connected
+                else -> Idle
+            }
+    }
+}
 
 /**
  * Observes whether Bluetooth audio (A2DP) is active on this device, so [BluetoothMeshTransport] can
@@ -134,14 +159,7 @@ class BluetoothAudioMonitor(
     fun refresh() = recompute("poll")
 
     private fun recompute(why: String) {
-        val btOut = btAudioOutputPresent()
-        val streaming = playing || (btOut && musicActive())
-        val next =
-            when {
-                streaming -> BtAudioState.Streaming
-                connected || btOut -> BtAudioState.Connected
-                else -> BtAudioState.Idle
-            }
+        val next = BtAudioState.of(playing, connected, btAudioOutputPresent(), ::musicActive)
         if (_state.value != next) {
             _state.value = next
             _contended.value = next == BtAudioState.Streaming

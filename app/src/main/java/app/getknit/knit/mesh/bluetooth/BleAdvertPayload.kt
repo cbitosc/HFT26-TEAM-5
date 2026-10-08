@@ -54,6 +54,15 @@ internal object BleAdvertPayload {
      */
     const val FLAG_DIALS_GATT_PEERS = 0x02
 
+    /**
+     * The flags byte this node advertises: [FLAG_SIDE_CHANNEL] while its side channel is [sideLive], and
+     * [FLAG_DIALS_GATT_PEERS] while its GATT reader runs ([gattPeers]), so it never claims a read it cannot make.
+     */
+    fun flags(
+        sideLive: Boolean,
+        gattPeers: Boolean,
+    ): Int = (if (sideLive) FLAG_SIDE_CHANNEL else 0) or (if (gattPeers) FLAG_DIALS_GATT_PEERS else 0)
+
     private const val CAP_MASK = 0xFFL
     private const val PSM_MASK = 0xFFFF
     private const val FLAGS_MASK = 0xFF

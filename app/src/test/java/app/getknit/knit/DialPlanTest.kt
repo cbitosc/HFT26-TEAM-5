@@ -1,5 +1,6 @@
 package app.getknit.knit
 
+import app.getknit.knit.mesh.ConnectFailReason
 import app.getknit.knit.mesh.bluetooth.BlePresenceTracker
 import app.getknit.knit.mesh.bluetooth.DialPlan
 import app.getknit.knit.mesh.bluetooth.LonelyDialPolicy
@@ -153,5 +154,34 @@ class DialPlanTest {
         assertEquals(0, reads)
         DialPlan.decision(ordinary, null, cap = 3, linkCount = 0) { reads++ }
         assertEquals(1, reads)
+    }
+
+    @Test
+    fun onlyAPeerWeDialIsWorthAChase() {
+        assertEquals(setOf("aaa"), DialPlan.initiable("mmm", setOf("aaa", "mmm", "zzz")))
+        assertEquals(emptySet<String>(), DialPlan.initiable("mmm", emptySet()))
+    }
+
+    @Test
+    fun aGattReadWaitsForTheRadioAndNeverTouchesALinkedAddress() {
+        assertTrue(DialPlan.mayReadGatt("A", listOf("B"), arbiterBusy = false) { false })
+        assertFalse("a link holds it", DialPlan.mayReadGatt("B", listOf("B"), arbiterBusy = false) { false })
+        assertFalse("a dial is in flight", DialPlan.mayReadGatt("A", listOf("B"), arbiterBusy = false) { true })
+        assertFalse("another connect holds the arbiter", DialPlan.mayReadGatt("A", listOf("B"), arbiterBusy = true) { false })
+    }
+
+    @Test
+    fun theDialsInFlightAreNotReadForALinkedAddress() {
+        var reads = 0
+        DialPlan.mayReadGatt("B", listOf("B"), arbiterBusy = false) { reads++ > 0 }
+        assertEquals(0, reads)
+    }
+
+    @Test
+    fun onlyAHelloRefusalKeepsTheGattPayload() {
+        assertFalse(DialPlan.forgetsGattPayload(ConnectFailReason.HANDSHAKE))
+        ConnectFailReason.entries.filter { it != ConnectFailReason.HANDSHAKE }.forEach {
+            assertTrue("$it may have used a stale PSM", DialPlan.forgetsGattPayload(it))
+        }
     }
 }

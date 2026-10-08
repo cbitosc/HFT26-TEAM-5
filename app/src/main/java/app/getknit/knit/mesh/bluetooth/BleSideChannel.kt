@@ -177,7 +177,7 @@ class BleSideChannel internal constructor(
         val a = adapter
         val extended = a != null && a.isEnabled && a.isLeExtendedAdvertisingSupported
         val maxData = if (extended) a.leMaximumAdvertisingDataLength else 0
-        val page = minOf(PAGE_BYTES, maxData - AD_OVERHEAD)
+        val page = pageFor(maxData)
         synchronized(lock) {
             pageMax = page
             live = extended && page >= MIN_PAGE_BYTES
@@ -335,13 +335,14 @@ class BleSideChannel internal constructor(
         index: Int,
         status: Int,
     ) {
-        if (status == AdvertisingSetCallback.ADVERTISE_SUCCESS) return
-        when (status) {
-            AdvertisingSetCallback.ADVERTISE_FAILED_FEATURE_UNSUPPORTED -> {
+        when (slotReaction(status)) {
+            SlotReaction.None -> {}
+
+            SlotReaction.Dark -> {
                 goDark("advertising set refused: feature unsupported")
             }
 
-            AdvertisingSetCallback.ADVERTISE_FAILED_DATA_TOO_LARGE -> {
+            SlotReaction.HalvePage -> {
                 // The controller's maximum lied, or a vendor reserves header room: halve the page and start over
                 // (the queued parts were cut for the old size; the flood carries them).
                 synchronized(lock) {
@@ -359,7 +360,7 @@ class BleSideChannel internal constructor(
 
             // TOO_MANY_ADVERTISERS (the controller's set budget is device-wide), ALREADY_STARTED, INTERNAL_ERROR:
             // this slot sits out for a while; the others keep going.
-            else -> {
+            SlotReaction.SitOut -> {
                 synchronized(lock) {
                     carousel.setSlotUsable(index, false)
                     pushed[index] = null
@@ -452,7 +453,31 @@ class BleSideChannel internal constructor(
         listener?.onFrame(wire, env)
     }
 
+    /** What a page slot's advertising-set status asks of the channel ([slotReaction]). */
+    internal enum class SlotReaction { None, Dark, HalvePage, SitOut }
+
     companion object {
+        /**
+         * The page a controller whose largest extended advertisement is [maxData] bytes can carry: [PAGE_BYTES] at
+         * most, less the AD header ([AD_OVERHEAD]). Under [MIN_PAGE_BYTES] (a legacy-only controller reports 0) the
+         * channel stays dark.
+         */
+        internal fun pageFor(maxData: Int): Int = minOf(PAGE_BYTES, maxData - AD_OVERHEAD)
+
+        /**
+         * What a page slot's [status] asks: nothing on success; dark for good when the controller refuses the feature;
+         * a halved page when it says the data is too large (its maximum lied, or a vendor reserves header room); and
+         * any other refusal (TOO_MANY_ADVERTISERS, the set budget being device-wide; ALREADY_STARTED; INTERNAL_ERROR)
+         * sits that slot out for [SLOT_RETRY_MS] while the others keep going.
+         */
+        internal fun slotReaction(status: Int): SlotReaction =
+            when (status) {
+                AdvertisingSetCallback.ADVERTISE_SUCCESS -> SlotReaction.None
+                AdvertisingSetCallback.ADVERTISE_FAILED_FEATURE_UNSUPPORTED -> SlotReaction.Dark
+                AdvertisingSetCallback.ADVERTISE_FAILED_DATA_TOO_LARGE -> SlotReaction.HalvePage
+                else -> SlotReaction.SitOut
+            }
+
         /**
          * Service-data bytes one page may carry: what fits one AUX_ADV_IND (255 B PDU, ~10 B extended header,
          * 4 B AD header) with room for a vendor's AuxPtr reservation — so a page is never chained, and a

@@ -128,4 +128,15 @@ class BleAdvertPayloadTest {
         assertEquals(a.digestCue, b.digestCue)
         assertEquals(0xAA, a.digestCue)
     }
+
+    @Test
+    fun theFlagsByteClaimsOnlyWhatThisNodeRuns() {
+        assertEquals(0, BleAdvertPayload.flags(sideLive = false, gattPeers = false))
+        assertEquals(BleAdvertPayload.FLAG_SIDE_CHANNEL, BleAdvertPayload.flags(sideLive = true, gattPeers = false))
+        assertEquals(BleAdvertPayload.FLAG_DIALS_GATT_PEERS, BleAdvertPayload.flags(sideLive = false, gattPeers = true))
+        assertEquals(
+            BleAdvertPayload.FLAG_SIDE_CHANNEL or BleAdvertPayload.FLAG_DIALS_GATT_PEERS,
+            BleAdvertPayload.flags(sideLive = true, gattPeers = true),
+        )
+    }
 }

@@ -4,8 +4,11 @@ import app.getknit.knit.mesh.Peer
 import app.getknit.knit.mesh.bluetooth.BlePresenceTracker
 import app.getknit.knit.mesh.bluetooth.CodedPhyPolicy
 import app.getknit.knit.mesh.bluetooth.ScanPlan
+import app.getknit.knit.mesh.power.PowerPolicy
+import app.getknit.knit.mesh.power.PowerState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -75,5 +78,57 @@ class ScanPlanTest {
                 listOf(Peer("both", 2, 2L), Peer("unsighted", 2, 2L)),
             )
         assertEquals(setOf(Peer("seen", 1, 1L), Peer("both", 2, 2L), Peer("unsighted", 2, 2L)), got)
+    }
+
+    private fun before(
+        adapterOn: Boolean = true,
+        dialing: Boolean = false,
+        busy: Boolean = false,
+        nextWindowAt: Long = 0,
+        now: Long = 1_000,
+    ) = ScanPlan.beforeWindow(adapterOn, dialing, busy, nextWindowAt, now, connectPauseMs = 28_000, adapterOffWaitMs = 60_000)
+
+    @Test
+    fun theScanWaitsForTheEventThatEndsItsPause() {
+        assertNull("free radio, no slot held: scan now", before())
+        assertEquals("adapter off, whatever else", 60_000L, before(adapterOn = false, dialing = true, busy = true))
+        assertEquals("a dial in flight", 28_000L, before(dialing = true))
+        assertEquals("the arbiter held", 28_000L, before(busy = true))
+    }
+
+    @Test
+    fun aWindowADialCutShortKeepsItsSlot() {
+        assertEquals(400L, before(nextWindowAt = 1_400, now = 1_000))
+        assertNull("its slot has come", before(nextWindowAt = 1_000, now = 1_000))
+        assertEquals("a pause wins over the slot", 28_000L, before(dialing = true, nextWindowAt = 1_400, now = 1_000))
+    }
+
+    @Test
+    fun aHuntingGapKeepsWallTimeAndNeverAsksForTheFloor() {
+        var floorReads = 0
+        val gap = ScanPlan.gapAfterWindow(PowerState(), hunt = true, floor = { floorReads++ > 0 }, links = 2, aloneForMs = 0)
+        assertEquals(ScanPlan.Gap(PowerPolicy.HUNT_IDLE_MS, keepsWallTime = true), gap)
+        assertEquals(0, floorReads)
+    }
+
+    @Test
+    fun aSettledOrDutyGapIsAPowerBudgetThatStretches() {
+        val lit = PowerState(interactive = true)
+        assertEquals(
+            ScanPlan.Gap(PowerPolicy.settledIdleAfterScan(lit, 2, 0), keepsWallTime = false),
+            ScanPlan.gapAfterWindow(lit, hunt = false, floor = { true }, links = 2, aloneForMs = 0),
+        )
+        assertEquals(
+            ScanPlan.Gap(PowerPolicy.idleAfterScan(lit, 2, 0), keepsWallTime = false),
+            ScanPlan.gapAfterWindow(lit, hunt = false, floor = { false }, links = 2, aloneForMs = 0),
+        )
+    }
+
+    @Test
+    fun aLinklessPhoneThatHasNotRelaxedKeepsWallTimeOutsideAHunt() {
+        val dark = PowerState(interactive = false)
+        val gap = ScanPlan.gapAfterWindow(dark, hunt = false, floor = { false }, links = 0, aloneForMs = 0)
+        assertEquals(PowerPolicy.hunting(dark, 0, 0), gap.keepsWallTime)
+        assertTrue("alone and not yet relaxed", gap.keepsWallTime)
     }
 }

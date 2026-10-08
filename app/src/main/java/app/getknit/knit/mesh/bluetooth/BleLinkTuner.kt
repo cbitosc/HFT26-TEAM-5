@@ -259,10 +259,10 @@ internal class BleLinkTuner(
         what: String,
     ) {
         if (status == BluetoothGatt.GATT_SUCCESS) {
-            txPhy = phyOf(tx)
-            rxPhy = phyOf(rx)
+            txPhy = linkPhyOf(tx)
+            rxPhy = linkPhyOf(rx)
         }
-        Log.i(TAG, "bt tune $nodeId phy tx=${phyOf(tx)} rx=${phyOf(rx)} status=$status ($what)")
+        Log.i(TAG, "bt tune $nodeId phy tx=${linkPhyOf(tx)} rx=${linkPhyOf(rx)} status=$status ($what)")
         phyReports.trySend(status)
     }
 
@@ -353,13 +353,5 @@ internal class BleLinkTuner(
 
         // Every step of one ask, with room to spare; the bridge's reply waits no longer.
         const val TUNE_TIMEOUT_MS = 20_000L
-
-        fun phyOf(phy: Int): LinkPhy =
-            when (phy) {
-                BluetoothDevice.PHY_LE_1M -> LinkPhy.ONE_M
-                BluetoothDevice.PHY_LE_2M -> LinkPhy.TWO_M
-                BluetoothDevice.PHY_LE_CODED -> LinkPhy.CODED
-                else -> LinkPhy.UNKNOWN
-            }
     }
 }

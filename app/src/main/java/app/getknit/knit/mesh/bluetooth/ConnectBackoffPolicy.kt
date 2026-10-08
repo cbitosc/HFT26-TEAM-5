@@ -87,6 +87,38 @@ internal object ConnectBackoffs {
         return entry.streak to entry.nextAt
     }
 
+    /** Whether a dial to [nodeId] may begin at [now]: not [linked], none [inFlight], and not backing off. */
+    fun mayBegin(
+        entries: Map<String, ConnectBackoffEntry>,
+        nodeId: String,
+        linked: Set<String>,
+        inFlight: Set<String>,
+        now: Long,
+    ): Boolean = nodeId !in linked && nodeId !in inFlight && entries[nodeId]?.let { now >= it.nextAt } != false
+
+    /**
+     * A dial to [nodeId] failed at [now]: its streak advances ([bump]), unless the peer is [linkedNow] — a dial it
+     * refused because its own dial to us linked first (a lonely dial crossing the ordinary one, ADR 2026-09.hj4a) is
+     * no failure to back off from, and that link reset the streak already. (streak, deadline).
+     */
+    fun onDialFailed(
+        entries: MutableMap<String, ConnectBackoffEntry>,
+        nodeId: String,
+        linkedNow: Boolean,
+        now: Long,
+        config: BackoffConfig,
+        rand: () -> Double = { Random.nextDouble() },
+    ): Pair<Int, Long> = if (linkedNow) 0 to now else bump(entries, nodeId, now, config, rand)
+
+    /**
+     * Whether a link that ended on its own counts as a flap on the peer's streak: only when the transport [released] its
+     * own link. One replaced by a fresh link from the same peer ([replaced]) holds the slot, and the peer did not flap.
+     */
+    fun flapped(
+        released: Boolean,
+        replaced: Boolean,
+    ): Boolean = released || !replaced
+
     /** The peers still backing off at [now]. */
     fun active(
         entries: Map<String, ConnectBackoffEntry>,
