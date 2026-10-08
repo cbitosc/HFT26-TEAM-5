@@ -1,5 +1,6 @@
 package app.getknit.knit.mesh.bluetooth
 
+import app.getknit.knit.mesh.ConnectFailReason
 import kotlin.random.Random
 
 /**
@@ -60,3 +61,69 @@ data class BackoffConfig(
     /** ± fraction of each delay applied as jitter, so many nodes don't retry a shared peer in lockstep. */
     val jitterFraction: Double = 0.2,
 )
+
+/** Per-peer connect backoff: consecutive-failure streak + the elapsed-time deadline before the next attempt. */
+internal class ConnectBackoffEntry(
+    var streak: Int = 0,
+    var nextAt: Long = 0L,
+)
+
+/**
+ * The transport's per-peer backoff book: pure over the map [BluetoothMeshTransport] holds under its lock, clocked by the
+ * `now` each call passes. A peer backs off while `now` is before its deadline.
+ */
+internal object ConnectBackoffs {
+    /** Advances [nodeId]'s failure streak and sets its next-eligible deadline by [ConnectBackoffPolicy]: (streak, deadline). */
+    fun bump(
+        entries: MutableMap<String, ConnectBackoffEntry>,
+        nodeId: String,
+        now: Long,
+        config: BackoffConfig,
+        rand: () -> Double = { Random.nextDouble() },
+    ): Pair<Int, Long> {
+        val entry = entries.getOrPut(nodeId) { ConnectBackoffEntry() }
+        entry.streak += 1
+        entry.nextAt = now + ConnectBackoffPolicy.nextDelayMs(entry.streak, config, rand)
+        return entry.streak to entry.nextAt
+    }
+
+    /** The peers still backing off at [now]. */
+    fun active(
+        entries: Map<String, ConnectBackoffEntry>,
+        now: Long,
+    ): Set<String> = entries.filterValues { now < it.nextAt }.keys.toSet()
+
+    /**
+     * Drops the state of every peer whose window has passed and that [keep] does not hold (present, linked or being
+     * dialed), so a returning peer starts fresh instead of inheriting a maxed-out streak.
+     */
+    fun prune(
+        entries: MutableMap<String, ConnectBackoffEntry>,
+        now: Long,
+        keep: (String) -> Boolean,
+    ) {
+        entries.entries.removeAll { (id, b) -> now >= b.nextAt && !keep(id) }
+    }
+
+    /** The earliest deadline still ahead of [now], null with none: when a backed-off peer becomes eligible again. */
+    fun nextDueAt(
+        entries: Map<String, ConnectBackoffEntry>,
+        now: Long,
+    ): Long? = entries.values.filter { it.nextAt > now }.minOfOrNull { it.nextAt }
+}
+
+/**
+ * A best-effort bucket for a connect's (otherwise discarded) exception; the raw cause is logged regardless. A
+ * watchdog-forced timeout is failed as [ConnectFailReason.TIMEOUT] at its call site, so it never lands here.
+ */
+internal object ConnectFailClassifier {
+    fun classify(cause: Throwable?): ConnectFailReason {
+        val msg = (cause?.message ?: "").lowercase()
+        return when {
+            cause is java.net.SocketTimeoutException -> ConnectFailReason.TIMEOUT
+            "radio" in msg || "enomem" in msg || "no resources" in msg || "busy" in msg -> ConnectFailReason.RADIO
+            "refused" in msg || "reset" in msg -> ConnectFailReason.REFUSED
+            else -> ConnectFailReason.OTHER
+        }
+    }
+}

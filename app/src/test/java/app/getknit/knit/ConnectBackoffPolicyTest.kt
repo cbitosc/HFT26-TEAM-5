@@ -1,10 +1,17 @@
 package app.getknit.knit
 
+import app.getknit.knit.mesh.ConnectFailReason
 import app.getknit.knit.mesh.bluetooth.BackoffConfig
+import app.getknit.knit.mesh.bluetooth.ConnectBackoffEntry
 import app.getknit.knit.mesh.bluetooth.ConnectBackoffPolicy
+import app.getknit.knit.mesh.bluetooth.ConnectBackoffs
+import app.getknit.knit.mesh.bluetooth.ConnectFailClassifier
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.IOException
+import java.net.SocketTimeoutException
 
 /** Unit tests for [ConnectBackoffPolicy] — the pure escalating per-peer connect backoff curve. */
 class ConnectBackoffPolicyTest {
@@ -58,5 +65,55 @@ class ConnectBackoffPolicyTest {
             val d = ConnectBackoffPolicy.nextDelayMs(3, cfg) { r }
             assertTrue("delay $d within ±20% of 40s", d in 32_000..48_000)
         }
+    }
+
+    @Test
+    fun eachFailureExtendsThePeersStreakAndDeadlineFromNow() {
+        val book = HashMap<String, ConnectBackoffEntry>()
+        assertEquals(1 to 1_010_000L, ConnectBackoffs.bump(book, "a", now = 1_000_000, config = cfg, rand = noJitter))
+        assertEquals(2 to 2_020_000L, ConnectBackoffs.bump(book, "a", now = 2_000_000, config = cfg, rand = noJitter))
+        assertEquals("another peer has its own streak", 1 to 2_010_000L, ConnectBackoffs.bump(book, "b", 2_000_000, cfg, noJitter))
+    }
+
+    @Test
+    fun aPeerBacksOffUntilItsDeadline() {
+        val book = hashMapOf("a" to ConnectBackoffEntry(1, nextAt = 100), "b" to ConnectBackoffEntry(1, nextAt = 200))
+        assertEquals(setOf("a", "b"), ConnectBackoffs.active(book, now = 99))
+        assertEquals("due at its deadline", setOf("b"), ConnectBackoffs.active(book, now = 100))
+        assertEquals(emptySet<String>(), ConnectBackoffs.active(book, now = 200))
+    }
+
+    @Test
+    fun aPassedPeerThatLeftForgetsItsStreakAndOneStillHeldKeepsIt() {
+        val book =
+            hashMapOf(
+                "gone" to ConnectBackoffEntry(5, nextAt = 100),
+                "present" to ConnectBackoffEntry(5, nextAt = 100),
+                "waiting" to ConnectBackoffEntry(5, nextAt = 500),
+            )
+        ConnectBackoffs.prune(book, now = 200) { it == "present" }
+        assertEquals(setOf("present", "waiting"), book.keys)
+    }
+
+    @Test
+    fun theNextDueDeadlineIsTheEarliestStillAhead() {
+        val book = hashMapOf("a" to ConnectBackoffEntry(1, 100), "b" to ConnectBackoffEntry(1, 300), "c" to ConnectBackoffEntry(1, 200))
+        assertEquals(200L, ConnectBackoffs.nextDueAt(book, now = 100))
+        assertNull(ConnectBackoffs.nextDueAt(book, now = 300))
+        assertNull(ConnectBackoffs.nextDueAt(emptyMap(), now = 0))
+    }
+
+    @Test
+    fun aConnectExceptionIsBucketedByItsTypeOrMessage() {
+        assertEquals(ConnectFailReason.TIMEOUT, ConnectFailClassifier.classify(SocketTimeoutException("read timed out")))
+        assertEquals(ConnectFailReason.RADIO, ConnectFailClassifier.classify(IOException("Radio not ready")))
+        assertEquals(ConnectFailReason.RADIO, ConnectFailClassifier.classify(IOException("ENOMEM")))
+        assertEquals(ConnectFailReason.RADIO, ConnectFailClassifier.classify(IOException("No resources")))
+        assertEquals(ConnectFailReason.RADIO, ConnectFailClassifier.classify(IOException("device busy")))
+        assertEquals(ConnectFailReason.REFUSED, ConnectFailClassifier.classify(IOException("Connection refused")))
+        assertEquals(ConnectFailReason.REFUSED, ConnectFailClassifier.classify(IOException("connection reset by peer")))
+        assertEquals(ConnectFailReason.OTHER, ConnectFailClassifier.classify(IOException("read failed, socket might closed")))
+        assertEquals(ConnectFailReason.OTHER, ConnectFailClassifier.classify(IOException()))
+        assertEquals(ConnectFailReason.OTHER, ConnectFailClassifier.classify(null))
     }
 }

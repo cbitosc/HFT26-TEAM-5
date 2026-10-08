@@ -726,24 +726,19 @@ class BluetoothMeshTransport(
     override fun expectedFileRate(nodeId: String): Int {
         val link = links[nodeId] ?: return 0
         val phy = linkPhy[link] ?: LinkPhy.UNKNOWN
-        if (phy == LinkPhy.CODED) return CodedPhyPolicy.pace(phy, CodedPhyDiag.tuning).bytesPerSec
-        // A windowed feed takes what the air gives it, so the last stream's drain is the best guess, shared with the
-        // feeds going beside it on this phone's one controller. Before one, the pace's share below.
-        val drained = link.lastDrain
-        if (drained > 0 && windowed(link, phy)) {
-            // Shared only with the other windowed feeds going now; the last stream measured whatever sharing it had.
-            val others = feedingLinks().count { it !== link && it.txWindowed }
-            return drained / (others + 1)
+        // A windowed feed takes what the air gives it, so the last stream's drain is the best guess, shared only with the
+        // other windowed feeds going now on this phone's one controller; the last stream measured whatever sharing it had.
+        return BleFeedPolicy.expectedRate(
+            codedPace = if (phy == LinkPhy.CODED) CodedPhyPolicy.pace(phy, CodedPhyDiag.tuning).bytesPerSec else null,
+            drained = link.lastDrain,
+            windowed = windowed(link, phy),
+            otherWindowedFeeds = { feedingLinks().count { it !== link && it.txWindowed } },
+            drainRatio = link.drainRatio,
+            boosted = { boostedShare(link, joining = !link.txInProgress) },
+        ) {
+            val feeding = pacedFeedingLinks().size + if (link.txInProgress) 0 else 1
+            CodedPhyPolicy.pace(phy, CodedPhyDiag.tuning, feeding, earned = false, leLinks = links.size).bytesPerSec
         }
-        val boosted = boostedShare(link, joining = !link.txInProgress)
-        val share =
-            if (boosted > 0) {
-                boosted
-            } else {
-                val feeding = pacedFeedingLinks().size + if (link.txInProgress) 0 else 1
-                CodedPhyPolicy.pace(phy, CodedPhyDiag.tuning, feeding, earned = false, leLinks = links.size).bytesPerSec
-            }
-        return (share * link.drainRatio).toInt()
     }
 
     /**
@@ -754,15 +749,23 @@ class BluetoothMeshTransport(
      * finding on the first draft).
      */
     private fun willEarn(link: FramedLink): Boolean =
-        canEarn(link) &&
-            (earned(link) || boosts[link]?.earnedWithin(EARNED_RECENTLY_MS) == true || powerState.state.value.interactive)
+        BleFeedPolicy.willEarn(
+            canEarn(link),
+            earned(link),
+            earnedRecently = { boosts[link]?.earnedWithin(EARNED_RECENTLY_MS) == true },
+            interactive = powerState.state.value.interactive,
+        )
 
     // Whether a feed on [link] can earn the boost at all: an Android peer, the flag and the trial's switch on, a tuner not
     // given up, no audio. Whether anyone will ask for the interval is [willEarn]'s.
-    private fun canEarn(link: FramedLink): Boolean {
-        if (!BuildConfig.BLE_LINK_BOOST || DoorbellPolicy.serves(link.peer.capabilities)) return false
-        return LinkTuneDiag.boostOn && tuners[link]?.alive != false && !audioMonitor.contended.value
-    }
+    private fun canEarn(link: FramedLink): Boolean =
+        BleFeedPolicy.canEarn(
+            buildFlag = BuildConfig.BLE_LINK_BOOST,
+            capabilities = link.peer.capabilities,
+            boostOn = LinkTuneDiag.boostOn,
+            tunerAlive = tuners[link]?.alive != false,
+            audioContended = audioMonitor.contended.value,
+        )
 
     override fun onFileProgress(
         nodeId: String,
@@ -1176,7 +1179,7 @@ class BluetoothMeshTransport(
         val tuning = CodedPhyDiag.tuning
         val base = CodedPhyPolicy.pace(phy, tuning, feeding, earned, le)
         // A windowed feed is clocked by its receiver's reports; the pace above is its fallback while the receiver is silent.
-        val pace = if (windowed(link, phy)) base.copy(windowed = true, windowQueueMs = tuning.feedWindowQueueMs) else base
+        val pace = BleFeedPolicy.pace(base, windowed(link, phy), tuning.feedWindowQueueMs)
         // Recorded only for the live link: a writer still finishing a chunk on a link torn down meanwhile would put it
         // back into the map after its teardown removed it, and pin it there.
         if (phy != LinkPhy.CODED && links[link.nodeId] === link && lastPace.put(link, feeding to earned) != feeding to earned) {
@@ -1199,13 +1202,12 @@ class BluetoothMeshTransport(
     private fun leLinkCount(): Int {
         val now = elapsed()
         if (now - leLinksAt < LE_COUNT_MS) return leLinks
-        val ours = linkAddresses.values.toSet()
-        val others =
+        val connected =
             runCatching { bluetoothManager?.getConnectedDevices(BluetoothProfile.GATT) }
                 .getOrNull()
                 .orEmpty()
-                .count { it.address !in ours }
-        leLinks = links.size + others
+                .map { it.address }
+        leLinks = BleFeedPolicy.leLinks(links.size, connected, linkAddresses.values.toSet())
         leLinksAt = now
         return leLinks
     }
@@ -1225,13 +1227,7 @@ class BluetoothMeshTransport(
     private fun windowed(
         link: FramedLink,
         phy: LinkPhy = linkPhy[link] ?: LinkPhy.UNKNOWN,
-    ): Boolean {
-        val caps = link.peer.capabilities
-        return LinkTuneDiag.feedWindow &&
-            phy != LinkPhy.CODED &&
-            caps and Protocol.CAP_BLOB_HAVE != 0L &&
-            !DoorbellPolicy.serves(caps)
-    }
+    ): Boolean = BleFeedPolicy.windowed(LinkTuneDiag.feedWindow, phy, link.peer.capabilities)
 
     /**
      * Whether every one of [feedingLinks] has earned the boosted budget (none feeding earns nothing): the debug bridge's
@@ -1626,10 +1622,7 @@ class BluetoothMeshTransport(
         val on = codedOn()
         val now = elapsed()
         val sighted = if (on) presence.snapshots(now) else emptyList()
-        val far =
-            sighted
-                .filter { it.nodeId !in links.keys && CodedPhyPolicy.codedOnly(it.codedLagMs) }
-                .map { it.nodeId }
+        val far = ScanPlan.far(sighted, links.keys)
         // Only a chased peer this phone has heard on Coded: a Coded-only window cannot hear one without it (a Pixel 3, a
         // release build, a phone in mode OFF), and the chase's one wake would spend its whole window deaf to it.
         val codedChase = ScanDemandPolicy.ChaseState(chase.deadlines.filterKeys { codedCapable.containsKey(it) })
@@ -1637,7 +1630,7 @@ class BluetoothMeshTransport(
         val alone = links.isEmpty()
         val phys = CodedPhyPolicy.scanPhys(on, alone, far.isNotEmpty(), lastScanCoded, farWanted = hunt || chased)
         lastScanCoded = phys == ScanPhys.CODED
-        val windows = on && (alone || far.isNotEmpty() || hunt || chased)
+        val windows = ScanPlan.codedWindows(on, alone, far, hunt, chased)
         if (windows != codedWindows) {
             codedWindows = windows
             val why = codedWindowsWhy(alone, hunt, far)
@@ -1651,13 +1644,7 @@ class BluetoothMeshTransport(
         alone: Boolean,
         hunt: Boolean,
         far: List<String>,
-    ): String =
-        when {
-            alone -> "alone"
-            hunt -> "hunt"
-            far.isNotEmpty() -> "codedOnly=$far"
-            else -> "chase=${chase.deadlines.keys.filter { codedCapable.containsKey(it) }}"
-        }
+    ): String = ScanPlan.codedWindowsWhy(alone, hunt, far) { chase.deadlines.keys.filter { codedCapable.containsKey(it) } }
 
     /** A window of [ms] ran on [phys]: GATT-payload quiet time, unless it was Coded-only — which cannot hear an iPhone. */
     private fun noteQuietScan(
@@ -1692,12 +1679,7 @@ class BluetoothMeshTransport(
         val now = elapsed()
         val sighted = presence.snapshots(now)
         val backoff = activeBackoff(now)
-        val candidates =
-            sighted
-                .filter {
-                    localNodeId > it.nodeId && it.nodeId !in links.keys &&
-                        it.nodeId !in backoff && it.smoothedRssi >= PROMOTE_RSSI_FLOOR
-                }.mapTo(HashSet()) { it.nodeId }
+        val candidates = DialPlan.scanCandidates(localNodeId, sighted, links.keys, backoff, PROMOTE_RSSI_FLOOR)
         val demand =
             ScanDemandPolicy.decide(
                 linkCount = links.size,
@@ -1843,9 +1825,11 @@ class BluetoothMeshTransport(
     /** A just-sighted peer worth boosting the scan for: one we'd initiate to (larger id), not linked, above the
      *  RSSI floor (so it can actually promote), and off connect backoff. Mirrors the [floorScan] candidate gate. */
     private fun isBoostTrigger(nodeId: String): Boolean {
+        // Before the RSSI read, which takes the presence lock: a scan result for a linked or larger peer stops here.
         if (!::localNodeId.isInitialized || localNodeId <= nodeId || nodeId in links.keys) return false
-        val rssi = presence.smoothedRssiFor(nodeId) ?: return false
-        return rssi >= PROMOTE_RSSI_FLOOR && nodeId !in activeBackoff(elapsed())
+        return DialPlan.promotable(localNodeId, nodeId, presence.smoothedRssiFor(nodeId), links.keys, PROMOTE_RSSI_FLOOR) {
+            it in activeBackoff(elapsed())
+        }
     }
 
     // --- Connection engine (promotion → L2CAP links) ---
@@ -1865,7 +1849,7 @@ class BluetoothMeshTransport(
     private fun nextConnectWaitMs(): Long {
         val now = elapsed()
         val snaps = presence.snapshots(now)
-        val backoffDue = synchronized(lock) { backoffs.values.filter { it.nextAt > now }.minOfOrNull { it.nextAt } }
+        val backoffDue = synchronized(lock) { ConnectBackoffs.nextDueAt(backoffs, now) }
         // The lonely dial comes due on the clock too — the window closing, a candidate's dwell ripening — and on a
         // screen-off phone the next sighting would restart that dwell rather than ripen it (ADR 2026-09.hj4a).
         val lonelyDue = lonelyDialDueMs(snaps)?.let { now + it }
@@ -1877,7 +1861,7 @@ class BluetoothMeshTransport(
 
     /** The sighted peers the tie-break has us dial: a smaller id, not linked, no dial to it in flight. */
     private fun ordinaryCandidates(snaps: List<BlePresenceTracker.Snapshot>): List<BlePresenceTracker.Snapshot> =
-        snaps.filter { localNodeId > it.nodeId && it.nodeId !in links.keys && it.nodeId !in inFlightSnapshot() }
+        DialPlan.ordinaryCandidates(localNodeId, snaps, links.keys, inFlightSnapshot())
 
     private fun ordinaryDialDueMs(
         snaps: List<BlePresenceTracker.Snapshot>,
@@ -1896,12 +1880,8 @@ class BluetoothMeshTransport(
      * The sighted peers [LonelyDialPolicy] may pick from: dialable at all (device and PSM known), not linked, with the
      * ordinary backoff read without [driveConnections]' prune. The policy applies the id order and the other gates.
      */
-    private fun lonelyCandidates(snaps: List<BlePresenceTracker.Snapshot>): List<LonelyDialPolicy.Candidate> {
-        val backoff = activeBackoff(elapsed())
-        return snaps
-            .filter { it.nodeId !in links.keys && it.psm != 0 && dialable(it.nodeId) }
-            .map { LonelyDialPolicy.Candidate(it.nodeId, it.smoothedRssi, it.dwellMs, it.nodeId in backoff) }
-    }
+    private fun lonelyCandidates(snaps: List<BlePresenceTracker.Snapshot>): List<LonelyDialPolicy.Candidate> =
+        DialPlan.lonelyCandidates(snaps, links.keys, activeBackoff(elapsed()), ::dialable)
 
     /** Whether a dial has an address to go to: the peer's 1M advert's, or its Coded set's. */
     private fun dialable(nodeId: String): Boolean = deviceFor.containsKey(nodeId) || codedDeviceFor.containsKey(nodeId)
@@ -1911,24 +1891,17 @@ class BluetoothMeshTransport(
      * dialed at its Coded set, and the link opens on Coded (the 2026-10-01 spike: a plain L2CAP connect to a
      * Coded-only advert lands on Coded, no initiating-PHY mask needed). Null when neither address is known.
      */
-    private fun dialTarget(snap: BlePresenceTracker.Snapshot): Pair<BluetoothDevice, Boolean>? {
-        val viaCoded = codedOn() && CodedPhyPolicy.dialCoded(snap.codedLagMs)
-        val device = if (viaCoded) codedDeviceFor[snap.nodeId] else deviceFor[snap.nodeId] ?: codedDeviceFor[snap.nodeId]
-        return device?.let { it to viaCoded }
-    }
+    private fun dialTarget(snap: BlePresenceTracker.Snapshot): Pair<BluetoothDevice, Boolean>? =
+        DialPlan.target(codedOn() && CodedPhyPolicy.dialCoded(snap.codedLagMs), deviceFor[snap.nodeId], codedDeviceFor[snap.nodeId])
 
     /** Counts a Coded dial, and returns the `via=` the initiating line carries while the experiment runs. */
     private fun noteDial(viaCoded: Boolean): String {
         if (viaCoded) metrics.onBleCodedDial()
-        return when {
-            !codedOn() -> ""
-            viaCoded -> " via=coded"
-            else -> " via=1m"
-        }
+        return DialPlan.via(codedOn(), viaCoded)
     }
 
     /** Whether a dial to a larger id is open: the tie-break never dials one, so it can only be a lonely dial. */
-    private fun lonelyDialInFlight(): Boolean = inFlightSnapshot().any { it > localNodeId }
+    private fun lonelyDialInFlight(): Boolean = DialPlan.lonelyDialInFlight(localNodeId, inFlightSnapshot())
 
     private fun lonelyDialDueMs(snaps: List<BlePresenceTracker.Snapshot>): Long? =
         if (!::localNodeId.isInitialized || adapter?.isEnabled != true) {
@@ -1960,25 +1933,16 @@ class BluetoothMeshTransport(
             synchronized(lock) {
                 // Drop backoff state for a peer that has left and whose window has passed, so a returning peer
                 // starts fresh instead of inheriting a maxed-out streak.
-                backoffs.entries.removeAll { (id, b) ->
-                    now >= b.nextAt && id !in presentIds && id !in links.keys && id !in inFlight
-                }
-                backoffs.filterValues { now < it.nextAt }.keys.toSet()
+                ConnectBackoffs.prune(backoffs, now) { id -> id in presentIds || id in links.keys || id in inFlight }
+                ConnectBackoffs.active(backoffs, now)
             }
         val cap = debugCap
         val config = promotionConfig()
         val ordinary = PromotionPolicy.decide(candidates, linkSnaps, backoff, config)
         // Alone past the window: one larger-id peer too, which the responder admits unless it has sighted us (hj4a).
         val lonely = LonelyDialPolicy.pick(localNodeId, links.size, aloneForMs(), lonelyCandidates(snaps), lonelyDialInFlight(), config)
-        val decided = if (lonely == null) ordinary else ordinary.copy(promote = ordinary.promote + lonely.nodeId)
         // Under a debug cap, a dial still in flight holds a slot too, so back-to-back ticks can't overshoot it.
-        val decision =
-            if (cap == null) {
-                decided
-            } else {
-                val room = cap - linkSnaps.size - inFlightSnapshot().size + decided.evict.size
-                decided.copy(promote = decided.promote.take(room.coerceAtLeast(0)))
-            }
+        val decision = DialPlan.decision(ordinary, lonely, cap, linkSnaps.size) { inFlightSnapshot().size }
         if (decision.promote.isNotEmpty() || decision.evict.isNotEmpty()) {
             Log.i(TAG, "promote=${decision.promote} evict=${decision.evict} backoff=$backoff a2dp=${audioMonitor.state.value}")
         }
@@ -2016,7 +1980,7 @@ class BluetoothMeshTransport(
             val startedAt = elapsed()
             val socket =
                 runCatching { device.createInsecureL2capChannel(psm) }
-                    .getOrElse { t -> return@launch failConnect(nodeId, classify(t), startedAt, t, device) }
+                    .getOrElse { t -> return@launch failConnect(nodeId, ConnectFailClassifier.classify(t), startedAt, t, device) }
             // Time-box the blocking connect(): on stall, give up this peer's inFlight slot at the timeout so the
             // scan (paused while any connect is in flight) resumes promptly — instead of after connect() finally
             // unwinds. Closing the socket is best-effort only: on some stacks (the API-30 device's Qualcomm
@@ -2045,7 +2009,7 @@ class BluetoothMeshTransport(
             watchdog.cancel()
             if (connectErr != null) {
                 runCatching { socket.close() }
-                return@launch failConnect(nodeId, classify(connectErr), startedAt, connectErr, device)
+                return@launch failConnect(nodeId, ConnectFailClassifier.classify(connectErr), startedAt, connectErr, device)
             }
             val link = BluetoothSocketLink(socket)
             // Two-way HELLO: send our identity first, then read the responder's reply and require it to match
@@ -2272,12 +2236,6 @@ class BluetoothMeshTransport(
         return true
     }
 
-    /** Per-peer connect backoff: consecutive-failure streak + the elapsed-time deadline before the next attempt. */
-    private class ConnectBackoffEntry(
-        var streak: Int = 0,
-        var nextAt: Long = 0L,
-    )
-
     private fun beginConnect(nodeId: String): Boolean {
         val begun =
             synchronized(lock) {
@@ -2354,24 +2312,7 @@ class BluetoothMeshTransport(
     }
 
     /** Advance [nodeId]'s failure streak and set its next-eligible deadline via [ConnectBackoffPolicy]. Holds [lock]. */
-    private fun bumpBackoffLocked(nodeId: String): Pair<Int, Long> {
-        val entry = backoffs.getOrPut(nodeId) { ConnectBackoffEntry() }
-        entry.streak += 1
-        entry.nextAt = elapsed() + ConnectBackoffPolicy.nextDelayMs(entry.streak, backoffConfig)
-        return entry.streak to entry.nextAt
-    }
-
-    /** Best-effort bucket for the (otherwise-discarded) connect exception; the raw [cause] is logged regardless.
-     *  A watchdog-forced timeout is failed as [ConnectFailReason.TIMEOUT] at its call site, so it never lands here. */
-    private fun classify(cause: Throwable?): ConnectFailReason {
-        val msg = (cause?.message ?: "").lowercase()
-        return when {
-            cause is java.net.SocketTimeoutException -> ConnectFailReason.TIMEOUT
-            "radio" in msg || "enomem" in msg || "no resources" in msg || "busy" in msg -> ConnectFailReason.RADIO
-            "refused" in msg || "reset" in msg -> ConnectFailReason.REFUSED
-            else -> ConnectFailReason.OTHER
-        }
-    }
+    private fun bumpBackoffLocked(nodeId: String): Pair<Int, Long> = ConnectBackoffs.bump(backoffs, nodeId, elapsed(), backoffConfig)
 
     private fun refreshNeighbors() {
         _neighbors.value = links.values.map { it.peer }.toSet()
@@ -2509,7 +2450,7 @@ class BluetoothMeshTransport(
     private fun inFlightSnapshot(): Set<String> = synchronized(lock) { inFlight.toSet() }
 
     /** Read-only view of peers currently in connect backoff (no [driveConnections] prune side effect). */
-    private fun activeBackoff(now: Long): Set<String> = synchronized(lock) { backoffs.filterValues { now < it.nextAt }.keys.toSet() }
+    private fun activeBackoff(now: Long): Set<String> = synchronized(lock) { ConnectBackoffs.active(backoffs, now) }
 
     /** Wake both loops — a demand-relevant event (link up/down, connect fail, power change, adapter on, heal). */
     private fun wake() {
@@ -2566,10 +2507,7 @@ class BluetoothMeshTransport(
      * floor depends on). Applies to [_reachable] only — never [_neighbors], which routes sends.
      */
     private fun publishReachable(now: Long = elapsed()) {
-        val byId = HashMap<String, Peer>()
-        presence.snapshots(now).forEach { byId[it.nodeId] = Peer(it.nodeId, it.protoVersion, it.capabilities) }
-        links.values.forEach { byId[it.nodeId] = it.peer } // a live link's Peer is authoritative on a dup nodeId
-        _reachable.value = byId.values.toSet()
+        _reachable.value = ScanPlan.reachable(presence.snapshots(now), links.values.map { it.peer })
     }
 
     private fun localNodeIdOrEmpty(): String = if (::localNodeId.isInitialized) localNodeId else ""
