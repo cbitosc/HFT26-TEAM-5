@@ -202,6 +202,18 @@ class SpoolTicketsTest {
         assertFalse(SpoolTicketPolicy.presentable("key"))
     }
 
+    /** The whole ticket as the issuer encodes it (knit-spool's `Ticket`), for minting test tickets. */
+    @Serializable
+    private class WireTicket(
+        val v: Int,
+        val kid: ByteArray,
+        val aud: String,
+        val nbf: Long,
+        val exp: Long,
+        val ps: ByteArray,
+        val fl: Long,
+    )
+
     @Serializable
     private class TicketText(
         val tk: ByteArray,
@@ -237,5 +249,34 @@ class SpoolTicketsTest {
             tk: ByteArray,
             sig: ByteArray,
         ): String = "knit-ticket:v1:" + Base64.getUrlEncoder().withoutPadding().encodeToString(SpoolCodec.encode(TicketText(tk, sig)))
+
+        /**
+         * A ticket with these claims, as a client holds it — every wire field filled, `kid` and `ps` fixed, `sig` a
+         * placeholder (the client never checks it), so [sigByte] is what makes two otherwise equal tickets different.
+         */
+        fun ticket(
+            aud: String = "lab.example",
+            nbf: Long = 1_800_000_000L,
+            exp: Long = 1_800_086_400L,
+            fl: Long = SpoolTicket.FL_TURN,
+            sigByte: Byte = 1,
+        ): HeldTicket {
+            val tk =
+                SpoolCodec.encode(
+                    WireTicket(
+                        v = 1,
+                        kid = ByteArray(8),
+                        aud = aud,
+                        nbf = nbf,
+                        exp = exp,
+                        ps =
+                            ByteArray(16) {
+                                it.toByte()
+                            },
+                        fl = fl,
+                    ),
+                )
+            return HeldTicket.parse(text(tk, ByteArray(64) { sigByte }))!!
+        }
     }
 }

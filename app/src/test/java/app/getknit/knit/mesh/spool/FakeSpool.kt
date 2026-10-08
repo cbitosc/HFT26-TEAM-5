@@ -18,6 +18,7 @@ import app.getknit.knit.mesh.protocol.WireCodec
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ReceiveChannel
 import java.security.MessageDigest
+import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -68,6 +69,11 @@ class FakeSpool(
     // Issues TURN credentials (experimental, docs/VOICE_CALLS.md §2): HELLO carries `turn` and a TURNREQ on a
     // connection holding a SUB is answered. false = an older spool, which skips a TURNREQ unanswered.
     private val turn: Boolean = false,
+    // Takes entitlement tickets (experimental, docs/VOICE_CALLS.md §2.6): HELLO carries `ent`, an ENT is answered by
+    // [entAnswer], and a TURNREQ needs an accepted ticket with the TURN flag instead of a SUB (S-7.6-16).
+    private val ent: Boolean = false,
+    // The credential-free STUN list HELLO advertises; null omits the field.
+    private val stun: List<String>? = null,
 ) : SpoolDialer {
     private class Attachment(
         val total: Int,
@@ -189,6 +195,8 @@ class FakeSpool(
                     powBits = powBits,
                     commons = commons?.second,
                     turn = true.takeIf { turn },
+                    ent = true.takeIf { ent },
+                    stun = stun,
                 ),
             ),
         )
@@ -315,6 +323,20 @@ class FakeSpool(
     var turnIssued = 0
         private set
 
+    /** How many of [turnIssued] rode a ticket — the daemon's `knit_spool_turn_issued_ticketed_total`. */
+    var turnIssuedTicketed = 0
+        private set
+
+    /** The `msg` of every `err ticket` a TURNREQ got. */
+    val turnRefusals: MutableList<String> = Collections.synchronizedList(mutableListOf())
+
+    /** Every ENT this spool was sent, in order. */
+    val ents: MutableList<SpoolEnt> = Collections.synchronizedList(mutableListOf())
+
+    /** What an ENT is answered with: null accepts its claims, a word refuses it `err ticket` with that `msg`. */
+    @Volatile
+    var entAnswer: (SpoolEnt) -> String? = { null }
+
     /** How many chunks the spool holds for [aidHex] — the simplest "did the upload land" assertion. */
     fun chunkCount(
         scopeHex: String,
@@ -389,6 +411,9 @@ class FakeSpool(
     private inner class FakeSocket : SpoolSocket {
         private val channel = Channel<ByteArray>(Channel.UNLIMITED)
         private val subscribed = mutableSetOf<String>()
+
+        // The claims an accepted ENT bound to this connection (S-7.6-15); a refused one leaves them in place.
+        private var ticket: SpoolTicket? = null
 
         @Volatile
         private var open = true
@@ -476,6 +501,10 @@ class FakeSpool(
 
                 SpoolRecordType.TURNREQ -> {
                     if (turn) SpoolCodec.decode<SpoolTurnReq>(bytes)?.let(::onTurnReq) else skip(SpoolRecordType.TURNREQ)
+                }
+
+                SpoolRecordType.ENT -> {
+                    if (ent) SpoolCodec.decode<SpoolEnt>(bytes)?.let(::onEnt) else skip(SpoolRecordType.ENT)
                 }
 
                 else -> {}
@@ -595,7 +624,33 @@ class FakeSpool(
             }
         }
 
+        private fun onEnt(record: SpoolEnt) {
+            ents.add(record)
+            val word = entAnswer(record)
+            if (word != null) {
+                emit(SpoolCodec.encode(SpoolErr(t = SpoolRecordType.ERR, code = SpoolErrCode.TICKET, q = record.q, msg = word)))
+                return
+            }
+            ticket = SpoolCodec.decode<SpoolTicket>(record.tk)
+            emit(SpoolCodec.encode(SpoolOk(t = SpoolRecordType.OK, q = record.q)))
+        }
+
         private fun onTurnReq(req: SpoolTurnReq) {
+            if (ent) {
+                val held = ticket
+                val refusal =
+                    when {
+                        held == null -> "missing"
+                        held.fl and SpoolTicket.FL_TURN == 0L -> "flags"
+                        else -> null
+                    }
+                if (refusal != null) {
+                    turnRefusals.add(refusal)
+                    emit(SpoolCodec.encode(SpoolErr(t = SpoolRecordType.ERR, code = SpoolErrCode.TICKET, q = req.q, msg = refusal)))
+                    return
+                }
+                turnIssuedTicketed++
+            }
             turnIssued++
             emit(
                 SpoolCodec.encode(

@@ -1,5 +1,6 @@
 package app.getknit.knit.mesh.spool
 
+import app.getknit.knit.call.StunServers
 import app.getknit.knit.mesh.crypto.scope.ScopeCrypto
 import app.getknit.knit.mesh.crypto.scope.SpoolPow
 import kotlinx.coroutines.CompletableDeferred
@@ -56,14 +57,42 @@ sealed interface SpoolReply {
         override fun toString(): String = "Turn(urls=$urls, exp=$exp)"
     }
 
-    /** `err` — [code] is from the append-only registry; unknown codes are terminal-generic. */
+    /**
+     * `err` — [code] is from the append-only registry; unknown codes are terminal-generic. [msg] is the spool's one
+     * word beside it where the code defines one (`ticket`'s reason, docs/VOICE_CALLS.md §2.6), bounded like [code].
+     */
     class Failed(
         val code: String,
         val retryMs: Long?,
+        val msg: String? = null,
     ) : SpoolReply
 
     /** The connection closed before the response arrived. */
     data object Closed : SpoolReply
+}
+
+/**
+ * Where this connection stands with an entitlement ticket (experimental, docs/VOICE_CALLS.md §2.6): what the debug
+ * bridge shows and what a TURN ask is gated on. Per connection — a spool binds an accepted ticket to the connection
+ * that presented it (S-7.6-15), so a reconnect starts at [None].
+ */
+sealed interface SpoolTicketState {
+    /** Nothing presented here, or the accepted ticket has lapsed at its `exp` on our clock. */
+    data object None : SpoolTicketState
+
+    /** An `ent` is on its way and nothing accepted is live. */
+    data object Pending : SpoolTicketState
+
+    /** The spool accepted a ticket good until [exp] (Unix seconds) with flags [fl]. */
+    data class Accepted(
+        val exp: Long,
+        val fl: Long,
+    ) : SpoolTicketState
+
+    /** The spool refused the last ticket presented here with [reason], and nothing accepted is live. */
+    data class Refused(
+        val reason: String,
+    ) : SpoolTicketState
 }
 
 /**
@@ -114,6 +143,11 @@ class SpoolConnection(
     // Errors that don't correlate to an outstanding `q` — a scoped SUB refusal (pow/quota) or a
     // connection-scoped fault. The scope is hex, or null when the error is connection-wide.
     private val onScopeError: suspend (scopeHex: String?, code: String, retryMs: Long?) -> Unit = { _, _, _ -> },
+    // The spool answered a ticket [present]ed here: `ok` ([SpoolReply.Ok]) or `err` ([SpoolReply.Failed]). Runs on the
+    // reader after this connection's own state has moved, so it must not wait on anything the reader serves.
+    private val onTicketAnswer: suspend (HeldTicket, SpoolReply) -> Unit = { _, _ -> },
+    // What a ticket's `exp` and an accepted ticket's lapse are read against (epoch ms).
+    private val clock: () -> Long = { System.currentTimeMillis() },
 ) {
     /**
      * One outstanding `q`. For the two requests answered by un-`q`'d records (`pull` → `blob`*,
@@ -135,6 +169,8 @@ class SpoolConnection(
         val aidHex: String? = null,
         // A TURNREQ, which names no scope (S-7.6-4): only a `turncred` may complete it, and a `turncred` only it.
         val turn: Boolean = false,
+        // An ENT, and the ticket it presented: its `ok` binds those claims to this connection, its `err` refuses them.
+        val ticket: HeldTicket? = null,
         // The ids this PULL named, in hex. Drained by `claimBlob`, so its initial size is the hard cap
         // on [blobs] — and an entry that named none (LIST, PUSH, AHAVE, APUT) collects nothing at all,
         // which is what the old `collectsBlobs` flag said less directly.
@@ -212,6 +248,33 @@ class SpoolConnection(
     @Volatile
     var turn: Boolean = false
         private set
+
+    /**
+     * Whether this spool takes entitlement tickets (HELLO `ent`; experimental, docs/VOICE_CALLS.md §2.6) — read after
+     * [awaitReady]. [present] sends nothing without it, and with it a `turnreq` needs an accepted ticket (S-7.6-16).
+     */
+    @Volatile
+    var ent: Boolean = false
+        private set
+
+    /**
+     * The credential-free STUN URIs this spool advertised (HELLO `stun`, C-7.6-20), held to [StunServers]' rule and
+     * cap — what a call gathers from whether or not any spool issues it TURN. Empty before [awaitReady] and when none.
+     */
+    @Volatile
+    var stun: List<String> = emptyList()
+        private set
+
+    // The ticket the spool last accepted here, until its `exp` lapses on our clock or a later one replaces it.
+    @Volatile
+    private var accepted: SpoolTicketState.Accepted? = null
+
+    // The most recent ENT still unanswered — what a TURN ask waits on — and the word the last refusal carried.
+    @Volatile
+    private var presenting: Pending? = null
+
+    @Volatile
+    private var refusal: String? = null
 
     @Volatile
     private var negotiated = false
@@ -337,17 +400,74 @@ class SpoolConnection(
     }
 
     /**
+     * Presents [ticket] (experimental, docs/VOICE_CALLS.md §2.6, C-7.6-19): one `ent`, **not awaited** — the answer
+     * moves [ticketState] and reaches `onTicketAnswer` on the reader, and a TURN ask waits for it on its own. False,
+     * and nothing sent, when this spool never advertised `ent`, before the hello, once closed, or when [ticket]'s
+     * `aud` is not this connection's host.
+     *
+     * That last check is a privacy rule, not an optimisation: the ticket carries the holder's daily pseudonym, and a
+     * spool it was not issued for would learn it for nothing (ADR 2026-10.xkp4). It is made here, against the URL this
+     * connection dialled, so no caller can get past it. A refused `ent` is never a strike and never aborts.
+     */
+    fun present(ticket: HeldTicket): Boolean {
+        if (!ent || !isReady || ticket.claims.aud != SpoolUrl.hostname(url)) return false
+        val entry = Pending(scopeHex = null, ticket = ticket)
+        val q = nextQ.getAndIncrement()
+        pending[q] = entry
+        presenting = entry
+        val sent = send(SpoolCodec.encode(SpoolEnt(t = SpoolRecordType.ENT, q = q, tk = ticket.tk, sig = ticket.sig)))
+        if (!sent) {
+            pending.remove(q, entry)
+            if (presenting === entry) presenting = null
+        }
+        return sent
+    }
+
+    /** Where this connection stands with a ticket; an accepted one lapses at its `exp` on our clock. */
+    fun ticketState(): SpoolTicketState {
+        liveTicket()?.let { return it }
+        if (presenting != null) return SpoolTicketState.Pending
+        return refusal?.let { SpoolTicketState.Refused(it) } ?: SpoolTicketState.None
+    }
+
+    /**
+     * Whether a TURN ask here rides a ticket: an `ent` spool where the live ticket, or the one on its way, grants TURN.
+     * What C-7.6-21 asks on every call, subscribed or not; on an `ent` spool without it a `turnreq` is certain to be
+     * refused (S-7.6-16).
+     */
+    val ticketedTurn: Boolean
+        get() = ent && (turnTicketLive() || presenting?.ticket?.grantsTurn == true)
+
+    private fun liveTicket(): SpoolTicketState.Accepted? = accepted?.takeIf { clock() / MS_PER_S <= it.exp }
+
+    private fun turnTicketLive(): Boolean = liveTicket()?.let { it.fl and SpoolTicket.FL_TURN != 0L } == true
+
+    /**
      * Asks for one TURN credential (experimental, docs/VOICE_CALLS.md §2.2): [SpoolReply.Turn], or [SpoolReply.Failed]
-     * (`not_subscribed`, `rate` + `retryMs`, `internal`), or [SpoolReply.Closed] — including when this spool never
-     * advertised `turn` (C-7.6-3) and when it stays silent past [timeoutMs]. A call is waiting on the answer, so the
-     * wait is short and a silence is no strike against the connection: the sync plane's requests own that counter.
+     * (`not_subscribed`, `rate` + `retryMs`, `internal`, `ticket`), or [SpoolReply.Closed] — including when this spool
+     * never advertised `turn` (C-7.6-3) and when it stays silent past [timeoutMs]. A call is waiting on the answer, so
+     * the wait is short and a silence is no strike against the connection: the sync plane's requests own that counter.
+     *
+     * On an `ent` spool (S-7.6-16) it first waits, inside the same [timeoutMs], for a ticket still on its way, and asks
+     * nothing unless the live one grants TURN: a `turnreq` without one is certain to be refused, and spends the
+     * spool's per-IP bucket that a ticketed ask from the same address may need (ADR 2026-10.xkp4).
      */
     suspend fun turnCredential(timeoutMs: Long): SpoolReply {
         if (!turn) return SpoolReply.Closed
         val reply =
-            request(Pending(scopeHex = null, turn = true), timeoutMs = timeoutMs, strike = false) { q ->
-                SpoolCodec.encode(SpoolTurnReq(t = SpoolRecordType.TURNREQ, q = q))
-            }
+            withTimeoutOrNull(timeoutMs) {
+                if (ent) {
+                    // A live ticket that grants TURN is enough; only without one is a newer `ent` worth waiting for.
+                    if (!turnTicketLive()) presenting?.reply?.await()
+                    if (!turnTicketLive()) return@withTimeoutOrNull SpoolReply.Closed
+                }
+                request(Pending(scopeHex = null, turn = true), timeoutMs = timeoutMs, strike = false) { q ->
+                    SpoolCodec.encode(SpoolTurnReq(t = SpoolRecordType.TURNREQ, q = q))
+                }
+            } ?: SpoolReply.Closed
+        // The spool holds no live ticket for us, whatever our clock says: asking again before a new `ent` is accepted
+        // would only be refused again.
+        if (reply is SpoolReply.Failed && reply.code == SpoolErrCode.TICKET) accepted = null
         // An `ok` completes whatever `q` it names, so anything but a credential is a failure here.
         return if (reply is SpoolReply.Turn || reply is SpoolReply.Failed) reply else SpoolReply.Closed
     }
@@ -410,7 +530,7 @@ class SpoolConnection(
             SpoolRecordType.EVENT -> SpoolCodec.decode<SpoolEvent>(bytes)?.let { onEvent(it) }
             SpoolRecordType.BLOB -> SpoolCodec.decode<SpoolBlob>(bytes)?.let(::onBlob)
             SpoolRecordType.LIST -> SpoolCodec.decode<SpoolList>(bytes)?.let(::onListing)
-            SpoolRecordType.OK -> SpoolCodec.decode<SpoolOk>(bytes)?.let(::onOk)
+            SpoolRecordType.OK -> SpoolCodec.decode<SpoolOk>(bytes)?.let { onOk(it) }
             SpoolRecordType.AHAS -> SpoolCodec.decode<SpoolAhas>(bytes)?.let(::onAhas)
             SpoolRecordType.ACHUNK -> SpoolCodec.decode<SpoolAchunk>(bytes)?.let(::onAchunk)
             SpoolRecordType.TURNCRED -> SpoolCodec.decode<SpoolTurnCred>(bytes)?.let(::onTurnCred)
@@ -455,6 +575,9 @@ class SpoolConnection(
         limits = hello.limits?.clamped()
         commons = hello.commons?.clamped(limits)
         turn = hello.turn == true
+        ent = hello.ent == true
+        // A hostile list is bounded here, before anything holds it: four URLs a call can actually use, or none.
+        stun = StunServers.pick(hello.stun.orEmpty())
         // A difficulty beyond what a phone will attempt is refused outright rather than mined for: the
         // work is spent per scope on every round that re-subscribes, so believing an absurd one is a
         // remote battery denial that costs the spool a single integer.
@@ -553,19 +676,44 @@ class SpoolConnection(
 
     private fun isId(bytes: ByteArray): Boolean = bytes.size == SPOOL_ID_BYTES
 
-    private fun onOk(ok: SpoolOk) {
+    private suspend fun onOk(ok: SpoolOk) {
         // `missing` answers *this* request, so ids it never named are not ours to act on: `ScopeSync`
         // folds them out of the spool's digest anchor, which an invented id would then corrupt.
         val entry = pending.remove(ok.q) ?: return
         replied()
-        entry.reply.complete(SpoolReply.Ok(ok.missing.orEmpty().filter { entry.wasRequested(hex(it)) }))
+        val ticket = entry.ticket
+        // The claims bind to this connection (S-7.6-15), replacing any accepted before — and the state moves before the
+        // reply completes, so a TURN ask waiting on it reads the ticket it waited for.
+        if (ticket != null) {
+            settleTicket(entry) {
+                accepted = SpoolTicketState.Accepted(exp = ticket.claims.exp, fl = ticket.claims.fl)
+                refusal = null
+            }
+        }
+        val reply = SpoolReply.Ok(ok.missing.orEmpty().filter { entry.wasRequested(hex(it)) })
+        entry.reply.complete(reply)
+        if (ticket != null) onTicketAnswer(ticket, reply)
+    }
+
+    /** Settles [entry], the answered ENT: [apply] moves the state, and the entry stops being the one a TURN ask awaits. */
+    private inline fun settleTicket(
+        entry: Pending,
+        apply: () -> Unit,
+    ) {
+        apply()
+        if (presenting === entry) presenting = null
     }
 
     private suspend fun onErr(err: SpoolErr) {
         val entry = err.q?.let { pending.remove(it) }
         if (entry != null) {
             replied()
-            entry.reply.complete(SpoolReply.Failed(err.code.take(SPOOL_ERR_CODE_MAX), err.retryMs))
+            val reply = SpoolReply.Failed(err.code.take(SPOOL_ERR_CODE_MAX), err.retryMs, err.msg?.take(SPOOL_ERR_CODE_MAX))
+            // A refused ENT leaves an accepted ticket in place (S-7.6-15) and is never a strike: only the word moves.
+            val ticket = entry.ticket
+            if (ticket != null) settleTicket(entry) { refusal = reply.msg ?: reply.code }
+            entry.reply.complete(reply)
+            if (ticket != null) onTicketAnswer(ticket, reply)
             return
         }
         // No correlation: a scoped SUB refusal (pow/quota) or a connection-scoped fault. A refused
@@ -629,6 +777,8 @@ class SpoolConnection(
 
         /** How long a `q`-correlated request waits for its terminal `ok`/`err`/`list` before giving up. */
         const val REQUEST_TIMEOUT_MS = 30_000L
+
+        private const val MS_PER_S = 1_000L
 
         /**
          * A `pull` batch's ceiling. Every value here is one the *spool* advertised, so treating them as
