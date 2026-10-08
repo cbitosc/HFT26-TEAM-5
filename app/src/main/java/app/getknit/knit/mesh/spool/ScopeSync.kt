@@ -15,8 +15,11 @@ import app.getknit.knit.mesh.protocol.WireCodec
 import app.getknit.knit.mesh.protocol.WireEnvelope
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ReceiveChannel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -327,6 +330,21 @@ class ScopeSync(
         var any = false
         for (worker in workers.values) if (worker.pushDirect(targets, env, wire)) any = true
         return any
+    }
+
+    /**
+     * TURN credentials for a call with [peerId] (experimental, docs/VOICE_CALLS.md §2, C-7.6-12): one from each of
+     * at most [MAX_TURN_SPOOLS] connected spools that advertised `turn` and have answered the SUB of a live scope
+     * shared with the peer — the daemon's own gate is any subscription (S-7.6-4), and these are the spools the call
+     * would be relayed beside anyway. Asked in parallel, each for at most [TURN_ASK_MS], on the connection directly
+     * and never under a worker's round lock: a call is waiting. A refusal or a silence just leaves that spool out.
+     */
+    suspend fun turnCredentials(peerId: String): List<SpoolReply.Turn> {
+        val hexes = scopes.filter { it.peerId == peerId && !it.retiring }.map { it.idHex }
+        if (hexes.isEmpty()) return emptyList()
+        val connections = workers.values.mapNotNull { it.turnConnection(hexes) }.take(MAX_TURN_SPOOLS)
+        return coroutineScope { connections.map { async { it.turnCredential(TURN_ASK_MS) } }.awaitAll() }
+            .filterIsInstance<SpoolReply.Turn>()
     }
 
     /** Fires [onPresenceChanged] when the present set differs from what was last published. */
@@ -686,6 +704,14 @@ class ScopeSync(
             // round waits forever for a digest that was already answered before it left.
             connection?.retainSubscriptions(live)
         }
+
+        /**
+         * This worker's live connection when it may be asked for a TURN credential: a completed hello that carried
+         * `turn`, and an answered SUB for one of [hexes] (a digest arrived, so the spool counts the subscription).
+         * Lock-free like [status]; the connection is concurrency-safe for requests.
+         */
+        fun turnConnection(hexes: Collection<String>): SpoolConnection? =
+            connection?.takeIf { conn -> conn.isReady && conn.turn && hexes.any(spoolDigests::containsKey) }
 
         fun status(all: List<Scope>): SpoolStatus =
             SpoolStatus(
@@ -2133,6 +2159,12 @@ class ScopeSync(
          */
         private const val RECONCILE_INTERVAL_MS = 60_000L
         internal const val TICK_INTERVAL_MS = 60_000L
+
+        /** At most this many spools are asked for a TURN credential per call (C-7.6-12: at most two TURN servers). */
+        const val MAX_TURN_SPOOLS = 2
+
+        /** How long a call waits on one spool's `turncred` before dialling without it. */
+        const val TURN_ASK_MS = 3_000L
         private const val HANDSHAKE_TIMEOUT_MS = 20_000L
         private const val RECONNECT_JITTER_MS = 750L
 

@@ -71,3 +71,32 @@ SFU with SFrame) and calls over the radios. Nothing is built yet, so no test gua
 it is built, the guards are a wire vector for the signaling frames, a stale-`expiresAt` drop test, a test
 that a DTLS fingerprint absent from the sealed offer fails the call, and a knit-spool conformance case
 for the TURN credential record.
+
+## Amendment (2026-10-07): a minimal build for internal testing, on `feat/voip-calling`
+
+A long-lived experimental branch builds the smallest client that places, rings, answers and hangs up a 1:1 audio
+call, direct or through TURN, against the knit-spool `exp/turn` daemon on a private lab spool. It follows
+`docs/VOICE_CALLS.md` §2–§3 with these choices:
+
+- **Debug builds only.** `io.github.webrtc-sdk:android` is `debugImplementation`, and every `org.webrtc` import, the
+  call screen, the ring and the microphone service live in `src/debug` behind `di/CallWiring` (the `DemoWiring`
+  pattern). Release builds carry the additive wire field and the dormant pure `call/` package, but no WebRTC, no
+  call UI and no `CAP_CALL`: the bit is OR-ed into our own profile only by a build that wires calls
+  (`MeshManager.extraCapabilities`), and `custodyPresentsOtherThan` republishes the profile under a fresh stamp when
+  the bits change, since a reused stamp would hide the new bit for up to 12 h.
+- **No Telecom yet.** Our own `CallActivity` and a CallStyle notification with a full-screen intent, instead of
+  `ConnectionService`; Bluetooth headset routing and the system call log wait for it.
+- **The signaling hook never waits.** `CallManager.onSignal` runs on the inbound path — a spool connection's only
+  reader — so it decides, sends RINGING or a busy DECLINE, and returns; the TURN fetch and every media step run on
+  the app scope. Inline, the callee's TURN prefetch would wait on a `turncred` its own blocked reader had to read.
+- **TURN asks are short and strike-free.** At most two spools carrying the peer's DM scope, 3 s each, and a silence
+  does not count toward `SpoolConnection`'s unresponsive strikes.
+- **Not built:** ICE restart and network handover (§3.8 — a lost path ends the call after 10 s), a user-facing
+  "relay all calls" setting (a debug-bridge toggle, `…debug.CALL op=relay`), tombstones that survive a process
+  death, call history (a missed call is a notification only), a `mesh/lab/` scenario, and the `CallPayload` golden
+  vector. Each is owed before the feature leaves the branch.
+
+Guards: `CallManagerTest` (two managers over a fake signal net: ringing, decline, ring-out, busy, stale offer,
+cancel-before-offer, duplicates, glare, connect timeout, relay-only, a non-blocking `onSignal`), `SdpGuardTest`,
+`SpoolTurnRecordsTest` (the daemon's own hex), the TURN cases in `SpoolConnectionTest` and `ScopeSyncTest`, and the
+`CTL_CALL` cases in `MeshManagerTest` and `InboundPipelineTest`.

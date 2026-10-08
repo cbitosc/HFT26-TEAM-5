@@ -83,6 +83,15 @@ class ProtocolTest {
     }
 
     @Test
+    fun theCallBitIsAdvertisedOnlyByABuildThatWiresCalls() {
+        // docs/VOICE_CALLS.md §3.1: the next bit after the holder query, above the advert's 8 bits, and never in
+        // LOCAL_CAPABILITIES — MeshManager ORs it into its own profile when the call media is wired (di/CallWiring).
+        assertEquals(0x4000L, Protocol.CAP_CALL)
+        assertEquals(Protocol.CAP_BLOB_HAVE shl 1, Protocol.CAP_CALL)
+        assertEquals(0L, Protocol.LOCAL_CAPABILITIES and Protocol.CAP_CALL)
+    }
+
+    @Test
     fun nodeIdIsAlwaysTheFirstSegment() {
         // Robust to any future suffix appended after the capabilities field.
         assertEquals("abcd1234", Protocol.parse("abcd1234|1|f|future|stuff").nodeId)

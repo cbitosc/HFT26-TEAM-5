@@ -5,6 +5,7 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.room3.withWriteTransaction
 import app.getknit.knit.BuildConfig
+import app.getknit.knit.call.CallManager
 import app.getknit.knit.data.KnitDatabase
 import app.getknit.knit.data.MeshBlobStore
 import app.getknit.knit.data.crypto.IdentityKeyStore
@@ -57,6 +58,7 @@ import app.getknit.knit.mesh.meshExceptionHandler
 import app.getknit.knit.mesh.power.AppVisibility
 import app.getknit.knit.mesh.power.PowerMonitor
 import app.getknit.knit.mesh.power.PowerStateSource
+import app.getknit.knit.mesh.protocol.Protocol
 import app.getknit.knit.mesh.spool.OkHttpSpoolDialer
 import app.getknit.knit.mesh.spool.SpoolDialer
 import app.getknit.knit.mesh.wear.WearStatusSource
@@ -346,6 +348,13 @@ val meshModule =
                 online = get<InternetGate>()::isOnline,
                 publicChannel = { body -> get<PublicChannelSink>().postToPublicChannel(body) },
                 onTransferSignal = { sender, payload, sentAt -> get<TransferManager>().onSignal(sender, payload, sentAt) },
+                // Voice calls (experimental, debug only — di/CallWiring): resolved late like the transfer hook, and
+                // never allowed to throw into the inbound path (rules/mesh.md). Null in a build that wires no calls.
+                onCallSignal = { sender, payload, sentAt ->
+                    runCatching { getKoin().getOrNull<CallManager>()?.onSignal(sender, payload, sentAt) }
+                        .onFailure { Log.w("KnitCall", "call signal dropped: ${it.javaClass.simpleName}") }
+                },
+                extraCapabilities = if (CALLS_WIRED) Protocol.CAP_CALL else 0L,
                 identities = get(),
                 quotes = get(),
                 notificationLabels = { notificationLabels(androidContext()) },

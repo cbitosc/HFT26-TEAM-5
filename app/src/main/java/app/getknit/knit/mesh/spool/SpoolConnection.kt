@@ -43,6 +43,19 @@ sealed interface SpoolReply {
         val dead: Boolean,
     ) : SpoolReply
 
+    /**
+     * `turncred` — one TURN credential (experimental, docs/VOICE_CALLS.md §2). A plain class with no [toString] of
+     * its own fields, so [pass] can never reach a log line.
+     */
+    class Turn(
+        val urls: List<String>,
+        val user: String,
+        val pass: String,
+        val exp: Long,
+    ) : SpoolReply {
+        override fun toString(): String = "Turn(urls=$urls, exp=$exp)"
+    }
+
     /** `err` — [code] is from the append-only registry; unknown codes are terminal-generic. */
     class Failed(
         val code: String,
@@ -120,6 +133,8 @@ class SpoolConnection(
         // The aid this AHAVE named, so its `ahas` is checked against the question and not only the `q`.
         // Separate from `chunksFor` on purpose: naming an aid here must not make the entry a chunk collector.
         val aidHex: String? = null,
+        // A TURNREQ, which names no scope (S-7.6-4): only a `turncred` may complete it, and a `turncred` only it.
+        val turn: Boolean = false,
         // The ids this PULL named, in hex. Drained by `claimBlob`, so its initial size is the hard cap
         // on [blobs] — and an entry that named none (LIST, PUSH, AHAVE, APUT) collects nothing at all,
         // which is what the old `collectsBlobs` flag said less directly.
@@ -188,6 +203,14 @@ class SpoolConnection(
      */
     @Volatile
     var commons: SpoolCommonsInfo? = null
+        private set
+
+    /**
+     * Whether this spool issues TURN credentials (HELLO `turn`; experimental, docs/VOICE_CALLS.md §2.1) — read after
+     * [awaitReady]. [turnCredential] is refused without it: a spool that never advertised it skips the record.
+     */
+    @Volatile
+    var turn: Boolean = false
         private set
 
     @Volatile
@@ -314,6 +337,22 @@ class SpoolConnection(
     }
 
     /**
+     * Asks for one TURN credential (experimental, docs/VOICE_CALLS.md §2.2): [SpoolReply.Turn], or [SpoolReply.Failed]
+     * (`not_subscribed`, `rate` + `retryMs`, `internal`), or [SpoolReply.Closed] — including when this spool never
+     * advertised `turn` (C-7.6-3) and when it stays silent past [timeoutMs]. A call is waiting on the answer, so the
+     * wait is short and a silence is no strike against the connection: the sync plane's requests own that counter.
+     */
+    suspend fun turnCredential(timeoutMs: Long): SpoolReply {
+        if (!turn) return SpoolReply.Closed
+        val reply =
+            request(Pending(scopeHex = null, turn = true), timeoutMs = timeoutMs, strike = false) { q ->
+                SpoolCodec.encode(SpoolTurnReq(t = SpoolRecordType.TURNREQ, q = q))
+            }
+        // An `ok` completes whatever `q` it names, so anything but a credential is a failure here.
+        return if (reply is SpoolReply.Turn || reply is SpoolReply.Failed) reply else SpoolReply.Closed
+    }
+
+    /**
      * Fetches up to [n] chunks from [from]; an overshoot of `maxAget` is truncated, never refused.
      *
      * The window kept for filtering is the range this request *named*, not the sparse set of indices the
@@ -363,7 +402,7 @@ class SpoolConnection(
         }
 
     /** Consumes one inbound record. Malformed bytes are dropped — a client never closes on them. */
-    @Suppress("ReturnCount") // a flat dispatch over the record registry; nesting it would read worse
+    @Suppress("ReturnCount", "CyclomaticComplexMethod") // a flat dispatch over the record registry; nesting it would read worse
     suspend fun onMessage(bytes: ByteArray) {
         when (SpoolCodec.peekType(bytes)) {
             SpoolRecordType.HELLO -> onHello(bytes)
@@ -374,6 +413,7 @@ class SpoolConnection(
             SpoolRecordType.OK -> SpoolCodec.decode<SpoolOk>(bytes)?.let(::onOk)
             SpoolRecordType.AHAS -> SpoolCodec.decode<SpoolAhas>(bytes)?.let(::onAhas)
             SpoolRecordType.ACHUNK -> SpoolCodec.decode<SpoolAchunk>(bytes)?.let(::onAchunk)
+            SpoolRecordType.TURNCRED -> SpoolCodec.decode<SpoolTurnCred>(bytes)?.let(::onTurnCred)
             SpoolRecordType.ERR -> SpoolCodec.decode<SpoolErr>(bytes)?.let { onErr(it) }
             else -> Unit // unknown `t`: additive evolution — ignore, never close
         }
@@ -414,6 +454,7 @@ class SpoolConnection(
         }
         limits = hello.limits?.clamped()
         commons = hello.commons?.clamped(limits)
+        turn = hello.turn == true
         // A difficulty beyond what a phone will attempt is refused outright rather than mined for: the
         // work is spent per scope on every round that re-subscribes, so believing an absurd one is a
         // remote battery denial that costs the spool a single integer.
@@ -448,6 +489,15 @@ class SpoolConnection(
         // the strike counter, not keep the connection alive for free.
         val entry = answered(ahas.q, hex(ahas.scope), hex(ahas.aid)) ?: return
         entry.reply.complete(SpoolReply.Presence(total = ahas.total, bits = ahas.bits, dead = ahas.dead))
+    }
+
+    private fun onTurnCred(cred: SpoolTurnCred) {
+        // A TURNREQ names no scope, so [answered] cannot vouch for it; the marker does instead. A `turncred` for a
+        // `q` that asked something else is no answer to it, and is dropped as the silence it is.
+        val entry = pending[cred.q]?.takeIf { it.turn } ?: return
+        if (!pending.remove(cred.q, entry)) return
+        replied()
+        entry.reply.complete(SpoolReply.Turn(urls = cred.urls, user = cred.user, pass = cred.pass, exp = cred.exp))
     }
 
     private fun onAchunk(chunk: SpoolAchunk) {
@@ -527,6 +577,10 @@ class SpoolConnection(
 
     private suspend fun request(
         entry: Pending,
+        timeoutMs: Long = REQUEST_TIMEOUT_MS,
+        // Whether a silence counts toward [MAX_SILENT_REQUESTS]. Off only for a request whose short wait is the
+        // caller's own impatience rather than evidence about the spool (a TURN credential a call is waiting on).
+        strike: Boolean = true,
         encode: (Long) -> ByteArray,
     ): SpoolReply {
         val q = nextQ.getAndIncrement()
@@ -540,11 +594,16 @@ class SpoolConnection(
         // idempotent, so nothing is lost by giving up on a response). Three such silences in a row and
         // the connection itself is given up on — otherwise a spool that goes quiet after the handshake
         // costs 30 s per request, serially, across every scope on it.
-        return withTimeoutOrNull(REQUEST_TIMEOUT_MS) { entry.reply.await() }
-            ?: SpoolReply.Closed.also {
-                pending.remove(q)
-                if (silent.incrementAndGet() >= MAX_SILENT_REQUESTS) abort(UNRESPONSIVE)
-            }
+        return try {
+            withTimeoutOrNull(timeoutMs) { entry.reply.await() }
+                ?: SpoolReply.Closed.also {
+                    if (strike && silent.incrementAndGet() >= MAX_SILENT_REQUESTS) abort(UNRESPONSIVE)
+                }
+        } finally {
+            // Also on a cancelled caller (a hung-up call), which would otherwise leave its entry in the table.
+            // A no-op once a terminal handler already removed it.
+            pending.remove(q, entry)
+        }
     }
 
     /**

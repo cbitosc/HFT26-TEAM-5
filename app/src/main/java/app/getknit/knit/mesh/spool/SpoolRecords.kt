@@ -38,6 +38,11 @@ object SpoolRecordType {
     const val AGET = "aget"
     const val ACHUNK = "achunk"
     const val APUT = "aput"
+
+    // TURN provisioning (experimental; docs/VOICE_CALLS.md §2, proposed spec §7.6). Sent only to a spool whose
+    // HELLO carried `turn` (C-7.6-3), for the attachment family's reason.
+    const val TURNREQ = "turnreq"
+    const val TURNCRED = "turncred"
 }
 
 /** Error codes a spool may return; the registry is append-only (unknown codes are terminal-generic). */
@@ -171,8 +176,10 @@ class ScopeSub(
 
 /**
  * First record in each direction. Spool→client: [v] is the highest supported version, with [min],
- * [limits], [powBits] (0 = PoW off), and [commons] when the spool runs one (§7.4). Client→spool: [v] is
- * the chosen version, everything else omitted — a client identifies itself no further than that.
+ * [limits], [powBits] (0 = PoW off), [commons] when the spool runs one (§7.4), and [turn] when it issues
+ * TURN credentials (experimental, docs/VOICE_CALLS.md §2.1: presence is the signal, `false` is never sent).
+ * Client→spool: [v] is the chosen version, everything else omitted — a client identifies itself no further
+ * than that.
  */
 @Serializable
 class SpoolHello(
@@ -182,6 +189,7 @@ class SpoolHello(
     val limits: SpoolLimits? = null,
     val powBits: Int? = null,
     val commons: SpoolCommonsInfo? = null,
+    val turn: Boolean? = null,
 )
 
 /** Client→spool: subscribe to scopes (responded to with one DIGEST or scoped ERR each). */
@@ -269,6 +277,30 @@ class SpoolAhave(
     val q: Long,
     val scope: ByteArray,
     val aid: ByteArray,
+)
+
+/**
+ * Client→spool: ask for one TURN credential (experimental, docs/VOICE_CALLS.md §2.2). Names no scope on purpose,
+ * so the spool never learns which conversation is calling (S-7.6-4). Answered by [SpoolTurnCred] or `err`.
+ */
+@Serializable
+class SpoolTurnReq(
+    val t: String,
+    val q: Long,
+)
+
+/**
+ * Spool→client: one coturn REST credential. [user] is `"<exp>:<random>"`, [pass] its HMAC, [exp] Unix
+ * **seconds**, [urls] RFC 7065 `turn:`/`turns:` URIs. Terminal, and echoes [q] like [SpoolAhas]. Never logged.
+ */
+@Serializable
+class SpoolTurnCred(
+    val t: String,
+    val q: Long,
+    val urls: List<String>,
+    val user: String,
+    val pass: String,
+    val exp: Long,
 )
 
 /**

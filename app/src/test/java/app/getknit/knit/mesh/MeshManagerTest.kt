@@ -45,6 +45,7 @@ import app.getknit.knit.mesh.crypto.ratchet.RatchetEngine
 import app.getknit.knit.mesh.crypto.ratchet.RatchetSessions
 import app.getknit.knit.mesh.crypto.scope.ScopeCrypto
 import app.getknit.knit.mesh.protocol.BlobReqContent
+import app.getknit.knit.mesh.protocol.CallPayload
 import app.getknit.knit.mesh.protocol.ChatContent
 import app.getknit.knit.mesh.protocol.CommonsPost
 import app.getknit.knit.mesh.protocol.EncEnvelope
@@ -341,7 +342,7 @@ class MeshManagerTest {
 
     /** The manager under test, wired with real crypto + a recording transport + real custody + mocked repos. */
     private inner class Rig(
-        scope: CoroutineScope,
+        private val scope: CoroutineScope,
         val commons: FakeCommonsStore? = null,
     ) {
         val me = party()
@@ -450,47 +451,51 @@ class MeshManagerTest {
             // No proof of key held (ADR 2026-09.g64k): relaxed, this would hand KeyExchange a mock frame to serve.
             coEvery { peers.profileFrame(any()) } returns null
             coEvery { blobs.bytes(any()) } returns null
-            manager =
-                MeshManager(
-                    transport = transport,
-                    messages = messages,
-                    receipts = receipts,
-                    groups = groups,
-                    reactions = reactions,
-                    peers = peers,
-                    metPeers = MetPeerRepository(db.metPeerDao(), db),
-                    identity = identity,
-                    settings = settings,
-                    blobs = blobs,
-                    imageScreening = imageScreening,
-                    blobStore = blobStore,
-                    partials = PartialBlobs(Files.createTempDirectory("mm-parts").toFile()),
-                    forwardStore = forwardStore,
-                    notifier = notifier,
-                    textModeration = textModeration,
-                    messageCrypto = me.crypto,
-                    ratchet =
-                        RatchetSessions(
-                            store = RatchetRepository(db.ratchetDao(), clock = { now }),
-                            dhIdentityPriv = { ByteArray(32) { 1 } }, // send-path tests never derive
-                            spkPrivFor = { null },
-                        ),
-                    groupRatchet = groupRatchet,
-                    groupRoots = groupRoots,
-                    scope = scope,
-                    metrics = metrics,
-                    // The relaxed settings mock is the journal: nothing here collects the totals, and a flush's
-                    // write is a no-op on it.
-                    ledger = ContributionLedger(journal = settings, selfId = { me.nodeId }, clock = { clockNow }),
-                    db = db,
-                    clock = { clockNow },
-                    publicChannel = { body ->
-                        publicPosts += body
-                        publicChannelRefusal
-                    },
-                    commons = commons,
-                )
+            manager = build()
         }
+
+        /** A manager over this rig's stores — the same phone's next build when [extraCapabilities] differs. */
+        fun build(extraCapabilities: Long = 0L): MeshManager =
+            MeshManager(
+                transport = transport,
+                messages = messages,
+                receipts = receipts,
+                groups = groups,
+                reactions = reactions,
+                peers = peers,
+                metPeers = MetPeerRepository(db.metPeerDao(), db),
+                identity = identity,
+                settings = settings,
+                blobs = blobs,
+                imageScreening = imageScreening,
+                blobStore = blobStore,
+                partials = PartialBlobs(Files.createTempDirectory("mm-parts").toFile()),
+                forwardStore = forwardStore,
+                notifier = notifier,
+                textModeration = textModeration,
+                messageCrypto = me.crypto,
+                ratchet =
+                    RatchetSessions(
+                        store = RatchetRepository(db.ratchetDao(), clock = { now }),
+                        dhIdentityPriv = { ByteArray(32) { 1 } }, // send-path tests never derive
+                        spkPrivFor = { null },
+                    ),
+                groupRatchet = groupRatchet,
+                groupRoots = groupRoots,
+                scope = scope,
+                metrics = metrics,
+                // The relaxed settings mock is the journal: nothing here collects the totals, and a flush's
+                // write is a no-op on it.
+                ledger = ContributionLedger(journal = settings, selfId = { me.nodeId }, clock = { clockNow }),
+                db = db,
+                clock = { clockNow },
+                publicChannel = { body ->
+                    publicPosts += body
+                    publicChannelRefusal
+                },
+                commons = commons,
+                extraCapabilities = extraCapabilities,
+            )
 
         /** Pins [p]'s real key under its nodeId, as the profile handler would once its profile arrives. */
         fun pin(p: Party) {
@@ -1045,6 +1050,26 @@ class MeshManagerTest {
             advanceUntilIdle()
 
             assertTrue(rig.sentChatFrames().isEmpty())
+        }
+
+    @Test
+    fun aCallSignalIsSealedToThePeerAsAControlDmAndRefusedForAnUnpinnedOne() =
+        runTest(UnconfinedTestDispatcher()) {
+            val rig = Rig(backgroundScope)
+            rig.pinCryptoV3(rig.bob, RatchetCrypto.generateKeyPair().pub)
+            val payload = CallPayload(id = "c1", ph = CallPayload.PHASE_OFFER, sdp = "v=0")
+
+            assertTrue(rig.manager.sendCallSignal(rig.bob.nodeId, payload))
+            advanceUntilIdle()
+
+            val frame = rig.sentChatFrames().single()
+            assertEquals(rig.bob.nodeId, frame.recipientId)
+            val content = WireCodec.decodePayload<ChatContent>(frame.payload)!!
+            assertEquals("no plaintext body leaks on the wire", "", content.body)
+            // The call ctl has no compact form either: the named v2 layout, even toward a v3 reader.
+            assertEquals(EncEnvelope.VERSION_RATCHET, content.enc!!.v)
+            assertTrue("a ctl is never a local message", rig.saved.isEmpty())
+            assertFalse("nothing to seal to", rig.manager.sendCallSignal("nobody", payload))
         }
 
     // --- the long-range re-offer set (FarPeerFrameSource, ADR 039) ---
@@ -3387,6 +3412,32 @@ class MeshManagerTest {
             val flooded = rig.floodedProfiles().single()
             assertEquals("Alex", WireCodec.decodePayload<ProfileContent>(flooded.payload)?.name)
             assertNotEquals("under a fresh id, so nobody dedupes it as the seed", seeded.id, flooded.id)
+        }
+
+    @Test
+    fun aBuildThatGainsACapabilityRepublishesItsProfileWhenItStarts() =
+        runTest(UnconfinedTestDispatcher()) {
+            val rig = Rig(backgroundScope)
+            rig.stubProfileState(MutableStateFlow(0L))
+
+            rig.manager.start()
+            rig.await(1) { rig.custodiedProfiles().size }
+            rig.awaitProfileWatcher()
+            val seeded = rig.custodiedProfiles().single()
+            assertEquals(0L, WireCodec.decodePayload<ProfileContent>(seeded.payload)!!.capabilities!! and Protocol.CAP_CALL)
+            assertTrue("an unchanged build publishes nothing at start", rig.floodedProfiles().isEmpty())
+            rig.manager.stop()
+
+            // The same phone's next build wires calls. Its stamp is not stale, so without the capability check the
+            // start would reuse the held bytes, and peers would not learn CAP_CALL until an edit or the 12 h republish.
+            val calling = rig.build(extraCapabilities = Protocol.CAP_CALL)
+            rig.clockNow = rig.now + 26_000
+            calling.start()
+            rig.await(1) { rig.floodedProfiles().size }
+            val flooded = rig.floodedProfiles().single()
+            assertEquals(Protocol.CAP_CALL, WireCodec.decodePayload<ProfileContent>(flooded.payload)!!.capabilities!! and Protocol.CAP_CALL)
+            assertNotEquals("under a fresh stamp, never a second set of bytes under the old one", seeded.id, flooded.id)
+            calling.stop()
         }
 
     @Test

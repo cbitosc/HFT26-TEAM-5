@@ -157,6 +157,17 @@ object Protocol {
      */
     const val CAP_BLOB_HAVE = 0x2000L
 
+    /**
+     * Voice calls (experimental, docs/VOICE_CALLS.md): this build answers a sealed `CTL_CALL` offer
+     * (`MessageContent.cl`) by ringing, and carries the call's media over WebRTC.
+     *
+     * **Never in [LOCAL_CAPABILITIES]:** only a build that wires the call media (`di/CallWiring`, debug today)
+     * advertises it, OR-ed into its own profile by `MeshManager`. A send-time input like [CAP_DIRECT_TRANSFER] — an
+     * offer goes only toward a pinned profile carrying this bit (C-3.1-2), since a build without it consumes the ctl
+     * as a silent no-op and the caller would ring out for nothing. Above the 8 bits a BLE advert carries.
+     */
+    const val CAP_CALL = 0x4000L
+
     /** This build's advertised capability bitfield. */
     const val LOCAL_CAPABILITIES: Long =
         CAP_E2E or CAP_GROUPS or CAP_REACTIONS or CAP_STORE_FORWARD or CAP_RATCHET or CAP_FAST_COMPACT or

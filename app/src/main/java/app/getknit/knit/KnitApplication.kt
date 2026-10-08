@@ -12,9 +12,11 @@ import app.getknit.knit.data.backup.RestoreApplier
 import app.getknit.knit.data.blob.BlobDao
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.di.appModule
+import app.getknit.knit.di.callModule
 import app.getknit.knit.di.meshModule
 import app.getknit.knit.di.moderationModule
 import app.getknit.knit.di.seedDemoIfEnabled
+import app.getknit.knit.di.startCallsIfWired
 import app.getknit.knit.di.startDemoDirectorIfEnabled
 import app.getknit.knit.di.uiModule
 import app.getknit.knit.mesh.power.AppVisibility
@@ -70,7 +72,8 @@ class KnitApplication :
             startKoin {
                 androidLogger()
                 androidContext(this@KnitApplication)
-                modules(appModule, meshModule, moderationModule, uiModule)
+                // The voice calls' graph exists only in a build that wires them (di/CallWiring, debug today).
+                modules(listOf(appModule, meshModule, moderationModule, uiModule) + listOfNotNull(callModule()))
             }
         // Register the message notification channel up front so it appears in system settings.
         koinApp.koin.get<Notifier>().createChannel()
@@ -132,6 +135,9 @@ class KnitApplication :
         // Demo-trailer mode (`-PdemoDirector=true`): play the scripted, animated promo conversation instead
         // of the static seed. Also debug-only and a no-op in release.
         startDemoDirectorIfEnabled(koinApp.koin)
+        // Experimental voice calls (di/CallWiring): the ring and missed-call surfaces collect from process start, on
+        // a background thread. A no-op in release.
+        startCallsIfWired(koinApp.koin)
     }
 
     /**

@@ -58,6 +58,7 @@ import app.getknit.knit.mesh.protocol.BlobHasContent
 import app.getknit.knit.mesh.protocol.BlobHasItem
 import app.getknit.knit.mesh.protocol.BlobHaveContent
 import app.getknit.knit.mesh.protocol.BlobReqContent
+import app.getknit.knit.mesh.protocol.CallPayload
 import app.getknit.knit.mesh.protocol.ChatContent
 import app.getknit.knit.mesh.protocol.CommonsPost
 import app.getknit.knit.mesh.protocol.EncEnvelope
@@ -269,6 +270,9 @@ class InboundPipelineTest {
 
         // What the direct-transfer hook saw, and what it answers (true = a live incoming offer was admitted).
         val transferSignals = mutableListOf<Triple<String, TransferPayload, Long>>()
+
+        // What the voice-call hook saw (CTL_CALL, call/CallManager).
+        val callSignals = mutableListOf<Triple<String, CallPayload, Long>>()
 
         // The publish stamps of our own profile looping back — what the clone watch is handed (ADR 2026-09.ypcc).
         val selfProfileStamps = mutableListOf<Long>()
@@ -500,6 +504,7 @@ class InboundPipelineTest {
                         transferSignals += Triple(sender, xf, at)
                         admitTransfer
                     },
+                    onCallCtl = { sender, cl, at -> callSignals += Triple(sender, cl, at) },
                     onSelfProfile = { selfProfileStamps += it },
                 )
         }
@@ -3648,6 +3653,45 @@ class InboundPipelineTest {
             coVerify(exactly = 0) { rig.notifier.notify(any(), any(), any(), any(), any()) }
         }
 
+    // --- voice-call signaling (CTL_CALL, call/CallManager; experimental) ---
+
+    @Test
+    fun aCallSignalFromAnAcceptedContactReachesTheHookAndNothingElse() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.pin(alice)
+            rig.settings.accepted.value = setOf(alice.nodeId)
+            val author = V2Author(alice, rig)
+            val offer = CallPayload(id = "c1", ph = CallPayload.PHASE_OFFER, sdp = "v=0")
+
+            rig.deliver(alice, author.dm("cl-1", "", ctl = MessageContent.CTL_CALL, cl = offer, sentAt = 7L))
+
+            assertEquals(listOf(Triple(alice.nodeId, offer, 7L)), rig.callSignals)
+            assertNull("a ctl is never a message", rig.msgMap["cl-1"])
+            // The call layer owns ringing: the pipeline notifies nothing for it.
+            coVerify(exactly = 0) { rig.notifier.notify(any(), any(), any(), any(), any()) }
+            coVerify(exactly = 0) { rig.notifier.notifyTransferOffer(any(), any(), any(), any(), any()) }
+            assertTrue(rig.transferSignals.isEmpty())
+        }
+
+    @Test
+    fun aCallFromAStrangerNeverReachesTheHook() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.pin(alice) // key pinned, but a message request: not accepted
+            val author = V2Author(alice, rig)
+
+            rig.deliver(
+                alice,
+                author.dm("cl-2", "", ctl = MessageContent.CTL_CALL, cl = CallPayload(id = "c2", ph = CallPayload.PHASE_OFFER)),
+            )
+
+            assertTrue(rig.callSignals.isEmpty())
+            coVerify(exactly = 0) { rig.notifier.notify(any(), any(), any(), any(), any()) }
+        }
+
     // --- Message Requests: a stranger's DM/group is delivered + acked but silent until "accepted" ---
 
     @Test
@@ -5195,6 +5239,7 @@ class InboundPipelineTest {
             pr: ProfilePayload? = null,
             acks: List<String>? = null,
             xf: TransferPayload? = null,
+            cl: CallPayload? = null,
             sentAt: Long = 5L,
             /** Seal crypto scheme v3 (derived nonce, compact plaintext, header-bound AAD) instead of v2. */
             v3: Boolean = false,
@@ -5214,6 +5259,7 @@ class InboundPipelineTest {
                     pr = pr,
                     acks = acks,
                     xf = xf,
+                    cl = cl,
                 ).sealBytes(v3)
             check(!v3 || scheme == EncEnvelope.VERSION_DM_V3) { "fixture asked for v3 but the content has no compact form" }
             val sealed = checkNotNull(engine.seal(session, plain, aad, rig.selfSpk.pub, now = 5L, v3 = v3))

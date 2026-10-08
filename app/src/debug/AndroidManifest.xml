@@ -12,7 +12,31 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- Experimental voice calls (docs/VOICE_CALLS.md; the WebRTC media is debugImplementation, so calls exist in
+         debug builds only). RECORD_AUDIO is already main's, for voice notes. The microphone foreground service keeps
+         a call's audio while Knit is off screen; the full-screen intent rings it over the lock screen. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+
     <application android:usesCleartextTraffic="true">
+        <activity
+            android:name="app.getknit.knit.debug.call.CallActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:launchMode="singleInstance"
+            android:showWhenLocked="true"
+            android:taskAffinity=""
+            android:theme="@style/Theme.Knit"
+            android:turnScreenOn="true" />
+        <service
+            android:name="app.getknit.knit.debug.call.CallService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
+        <receiver
+            android:name="app.getknit.knit.debug.call.CallActionReceiver"
+            android:exported="false" />
+
         <receiver
             android:name="app.getknit.knit.debug.DebugBridgeReceiver"
             android:exported="true"
@@ -58,6 +82,7 @@
                 <action android:name="app.getknit.knit.debug.LORATX" />
                 <action android:name="app.getknit.knit.debug.LORAPROV" />
                 <action android:name="app.getknit.knit.debug.XFER" />
+                <action android:name="app.getknit.knit.debug.CALL" />
                 <action android:name="app.getknit.knit.debug.BACKUP" />
                 <action android:name="app.getknit.knit.debug.PURGE" />
                 <action android:name="app.getknit.knit.debug.RESETDB" />

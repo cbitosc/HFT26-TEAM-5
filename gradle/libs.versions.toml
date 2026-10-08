@@ -88,6 +88,11 @@ litert = "1.4.2"
 # parseKeyset/serializeKeyset overloads in favour of the RegistryConfiguration-taking ones — same wire
 # bytes, pure inlining; IdentityKeyStore already passes RegistryConfiguration.get() explicitly.
 tink = "1.23.0"
+# WebRTC (libwebrtc's Android SDK: Opus over DTLS-SRTP, ICE/TURN) for the experimental voice calls
+# (docs/VOICE_CALLS.md, ADR 2026-10.3tee). DEBUG ONLY — `debugImplementation`, every org.webrtc import in
+# src/debug — so the release APK carries none of its ~10 MB per ABI and F-Droid's rebuild is untouched. The
+# community build of Google's retired AAR (BSD-3, no transitive deps, no aar-metadata, 16 KB-aligned .so).
+webrtc = "150.7871.01"
 # QR identity verification. zxing core is the pure-Java codec — it both *generates* the identity QR
 # (ui/image/QrCode.kt) and *decodes* camera frames (ui/scan/QrDecoder.kt). Being Android-free is what
 # keeps QrDecoder a plain-JVM unit-test target (see QrDecoderTest).
@@ -295,6 +300,7 @@ coil-gif = { group = "io.coil-kt.coil3", name = "coil-gif", version.ref = "coil"
 
 litert = { group = "com.google.ai.edge.litert", name = "litert", version.ref = "litert" }
 tink-android = { group = "com.google.crypto.tink", name = "tink-android", version.ref = "tink" }
+webrtc-android = { group = "io.github.webrtc-sdk", name = "android", version.ref = "webrtc" }
 zxing-core = { group = "com.google.zxing", name = "core", version.ref = "zxingCore" }
 
 # CameraX: the QR identity scanner's camera stack (see the cameraX version pin for the constraints).

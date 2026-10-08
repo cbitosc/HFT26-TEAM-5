@@ -5,6 +5,7 @@ import app.getknit.knit.data.message.MessageEntity
 import app.getknit.knit.data.message.replyRef
 import app.getknit.knit.data.message.videoInfo
 import app.getknit.knit.mesh.protocol.AttachmentName
+import app.getknit.knit.mesh.protocol.CallPayload
 import app.getknit.knit.mesh.protocol.GroupKeyPayload
 import app.getknit.knit.mesh.protocol.Mention
 import app.getknit.knit.mesh.protocol.ProfilePayload
@@ -65,7 +66,7 @@ data class MessageContent(
     val replyTo: ReplyRef? = null,
     // Control marker for ratchet session management and sealed metadata (additive;
     // [CTL_SESSION_RESET], [CTL_GROUP_KEY], [CTL_GROUP_KEY_REQ], [CTL_GROUP_KEY_ACK],
-    // [CTL_RECEIPT], [CTL_REACTION], [CTL_PROFILE], [CTL_TRANSFER]). A non-null value means this frame is machinery, not
+    // [CTL_RECEIPT], [CTL_REACTION], [CTL_PROFILE], [CTL_TRANSFER], [CTL_CALL]). A non-null value means this frame is machinery, not
     // conversation: it is never persisted as a message, never notified, never acked-as-a-message —
     // see docs/FORWARD_SECRECY_RATCHET.md §7. Inside the ciphertext deliberately: a relay cannot
     // distinguish machinery from an ordinary DM. An unknown value is consumed as a silent no-op,
@@ -85,6 +86,9 @@ data class MessageContent(
     // Direct-transfer signaling for [CTL_TRANSFER] (additive): the offer, answer and one-shot Wi-Fi Direct
     // credentials of a file transfer whose bytes never ride the mesh.
     val xf: TransferPayload? = null,
+    // Voice-call signaling for [CTL_CALL] (additive; experimental, docs/VOICE_CALLS.md §3): the offer, answer,
+    // late candidates and hang-up of a 1:1 call whose media never rides the mesh.
+    val cl: CallPayload? = null,
 ) {
     @OptIn(ExperimentalSerializationApi::class)
     fun encode(): ByteArray = cryptoCbor.encodeToByteArray(this)
@@ -150,6 +154,13 @@ data class MessageContent(
          * message; a build without the feature consumes it as the usual silent no-op.
          */
         const val CTL_TRANSFER = 9
+
+        /**
+         * [ctl]: [cl] is voice-call signaling (`call/CallManager`, docs/VOICE_CALLS.md §3) — experimental, sent only
+         * toward a pinned profile carrying `Protocol.CAP_CALL`. Never persisted as a message; a build without the
+         * feature consumes it as the usual silent no-op.
+         */
+        const val CTL_CALL = 10
 
         @OptIn(ExperimentalSerializationApi::class)
         fun decode(bytes: ByteArray): MessageContent? =

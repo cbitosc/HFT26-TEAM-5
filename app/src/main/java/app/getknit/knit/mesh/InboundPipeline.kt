@@ -63,6 +63,7 @@ import app.getknit.knit.mesh.protocol.BlobHasContent
 import app.getknit.knit.mesh.protocol.BlobHaveContent
 import app.getknit.knit.mesh.protocol.BlobProgressContent
 import app.getknit.knit.mesh.protocol.BlobReqContent
+import app.getknit.knit.mesh.protocol.CallPayload
 import app.getknit.knit.mesh.protocol.ChatContent
 import app.getknit.knit.mesh.protocol.EncEnvelope
 import app.getknit.knit.mesh.protocol.FrameId
@@ -218,6 +219,10 @@ class InboundPipeline(
     // A sealed CTL_TRANSFER landed (transfer/TransferManager.onSignal): direct-transfer signaling, handed on
     // post-commit like the rest. True when it admitted a live incoming OFFER, which is what earns a notification.
     private val onTransferCtl: suspend (senderId: String, payload: TransferPayload, sentAt: Long) -> Boolean = { _, _, _ -> false },
+    // A sealed CTL_CALL landed (call/CallManager.onSignal; experimental, docs/VOICE_CALLS.md): voice-call signaling,
+    // handed on post-commit from an accepted thread only. The call layer owns ringing and every notification, and the
+    // hook must return without waiting — it runs on this frame's inbound path.
+    private val onCallCtl: suspend (senderId: String, payload: CallPayload, sentAt: Long) -> Unit = { _, _, _ -> },
     // A commons' advertised name for its notification title (`CommonsStore.find`), null when the operator
     // set none — the notifier then uses the generic room title.
     commonsTitle: suspend (conversationId: String) -> String? = { null },
@@ -1149,6 +1154,7 @@ class InboundPipeline(
      * actions (reset recovery, the adoption ack, a key-request answer) originate new frames and run
      * strictly after, outside the transaction.
      */
+    @Suppress("CyclomaticComplexMethod") // one arm per ctl value; splitting the dispatch would scatter the registry
     private suspend fun handleCtlDm(
         env: RelayEnvelope,
         plain: MessageContent,
@@ -1196,6 +1202,10 @@ class InboundPipeline(
 
             MessageContent.CTL_TRANSFER -> {
                 plain.xf?.let { onTransferSignal(env, it, me) }
+            }
+
+            MessageContent.CTL_CALL -> {
+                plain.cl?.let { onCallSignal(env, it, me) }
             }
 
             else -> {}
@@ -3144,6 +3154,18 @@ class InboundPipeline(
         ackSync.rode(riding)
         metrics.onReceiptRidden(riding.size)
         return true
+    }
+
+    /**
+     * Voice-call signaling (experimental), handed to the call layer post-commit — and, like a transfer offer, only
+     * from an accepted DM thread: a stranger's call is dropped as silently as their file. The call layer rings.
+     */
+    private suspend fun onCallSignal(
+        env: RelayEnvelope,
+        payload: CallPayload,
+        me: String,
+    ) {
+        if (isAccepted(env.senderId, me)) onCallCtl(env.senderId, payload, env.sentAt)
     }
 
     /**

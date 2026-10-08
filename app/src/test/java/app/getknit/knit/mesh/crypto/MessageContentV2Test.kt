@@ -1,6 +1,7 @@
 package app.getknit.knit.mesh.crypto
 
 import app.getknit.knit.identity.NodeId
+import app.getknit.knit.mesh.protocol.CallPayload
 import app.getknit.knit.mesh.protocol.EncEnvelope
 import app.getknit.knit.mesh.protocol.FrameId
 import app.getknit.knit.mesh.protocol.GroupKeyPayload
@@ -125,6 +126,9 @@ class MessageContentV2Test {
         val transfer = MessageContent(body = "", ctl = MessageContent.CTL_TRANSFER, xf = TransferPayload(id = "t1", phase = 2))
         assertNull("a direct-transfer ctl", MessageContentV2.encodeOrNull(transfer))
         assertEquals(EncEnvelope.VERSION_RATCHET, transfer.sealBytes(v3 = true).scheme)
+        val call = MessageContent(body = "", ctl = MessageContent.CTL_CALL, cl = CallPayload(id = "c1", ph = CallPayload.PHASE_END))
+        assertNull("a call ctl", MessageContentV2.encodeOrNull(call))
+        assertEquals(EncEnvelope.VERSION_RATCHET, call.sealBytes(v3 = true).scheme)
         assertNull("a foreign content version", MessageContentV2.encodeOrNull(MessageContent(v = 2, body = "")))
         // The board key goes through the same canonical check (#175): an unpadded one would be rewritten padded, and
         // one that does not decode at all used to throw IllegalArgumentException out of the seal.

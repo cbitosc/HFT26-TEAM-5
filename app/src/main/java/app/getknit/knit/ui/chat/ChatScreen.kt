@@ -79,6 +79,7 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.BrokenImage
+import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.ContentCopy
@@ -570,6 +571,7 @@ fun ChatScreen(
         },
         onDownloadAttachment = viewModel::downloadAttachment,
         onSendFileDirectly = viewModel::sendFileDirectly,
+        onStartCall = viewModel::startCall,
         showTransferConsent = showTransferConsent,
         onAcceptTransferConsent = viewModel::acceptTransferConsent,
         onDismissTransferConsent = viewModel::dismissTransferConsent,
@@ -703,6 +705,8 @@ internal fun ChatScreenContent(
     onDownloadAttachment: (hash: String) -> Unit = {},
     // A large file over a direct Wi-Fi link (DM only): the menu item, and the card's answers.
     onSendFileDirectly: () -> Unit = {},
+    // A voice call (experimental; DM only, in a build that wires calls — [ChatUiState.canCall]).
+    onStartCall: () -> Unit = {},
     showTransferConsent: TransferConsent? = null,
     onAcceptTransferConsent: () -> Unit = {},
     onDismissTransferConsent: () -> Unit = {},
@@ -1072,6 +1076,7 @@ internal fun ChatScreenContent(
                     // position (a text-only channel, and a text-only room), and the bridged one has no peer to
                     // block — its authors are not peers, and blocking the gateway would silence a contact over
                     // somebody else's post.
+                    if (state.canCall) CallButton(onStartCall)
                     if (!state.isBridged && !state.isCommons) {
                         Box {
                             IconButton(onClick = { headerMenuOpen = true }, modifier = Modifier.size(48.dp)) {
@@ -4447,6 +4452,24 @@ private fun AttachFileButton(onClick: () -> Unit) {
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.size(24.dp),
         )
+    }
+}
+
+/**
+ * The top bar's voice-call button (experimental). The microphone is asked for on the press that finds it missing and,
+ * like the voice-note mic, the call does not start on the grant: the user taps again.
+ */
+@Composable
+private fun CallButton(onStartCall: () -> Unit) {
+    val context = LocalContext.current
+    val denied = stringResource(R.string.chat_call_mic_denied)
+    val gate = rememberMicGate(onDenied = { Toast.makeText(context, denied, Toast.LENGTH_LONG).show() })
+    if (!gate.hasMicrophone) return
+    IconButton(
+        onClick = { gate.runOrRequest(onStartCall) },
+        modifier = Modifier.size(48.dp).testTag("chat_call"),
+    ) {
+        Icon(Icons.Filled.Call, contentDescription = stringResource(R.string.chat_call))
     }
 }
 

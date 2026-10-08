@@ -37,7 +37,7 @@ import kotlinx.serialization.encodeToByteArray
  * hygiene rather than a compatibility path, but it is what keeps this codec unable to lose a frame.
  * [MessageContent.gk] is not modelled (the group-key ctls stay v2; label 13 is reserved for a raw-seed form)
  * and refuses the same way, as does [MessageContent.xf] (the direct-transfer ctl stays v2: a rare control frame
- * with nothing to gain from the compact layout).
+ * with nothing to gain from the compact layout), and so does [MessageContent.cl] (the call ctl, for the same reason).
  *
  * Nested types are this codec's own rather than the domain's: `Mention`/`ReplyRef`/`ReactionPayload`/
  * `ProfilePayload` are shared with the cleartext `ChatContent`, whose shape is frozen (docs/WIRE_COMPAT.md
@@ -52,13 +52,16 @@ internal object MessageContentV2 {
 
     /** [content] in the compact layout, or null when something in it has no canonical raw form (see the kdoc). */
     fun encodeOrNull(content: MessageContent): ByteArray? {
-        if (content.v != MessageContent.VERSION || content.gk != null || content.xf != null) return null
+        if (content.v != MessageContent.VERSION || content.hasNamedOnlyPayload()) return null
         return try {
             compactCbor.encodeToByteArray(wireOf(content))
         } catch (_: NonCanonical) {
             null
         }
     }
+
+    /** The rare control payloads the compact layout does not model: the group key, a transfer, a call. */
+    private fun MessageContent.hasNamedOnlyPayload(): Boolean = gk != null || xf != null || cl != null
 
     /** Signals one non-canonical id/hash/key inside [wireOf]: the whole content falls back to the named form. */
     private class NonCanonical : RuntimeException()

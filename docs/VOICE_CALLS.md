@@ -1,0 +1,316 @@
+# Internet voice calls
+
+| | |
+|--------------------|-------------------------------------------------------------------------------------------------------------------------------|
+| Status             | **Draft sketch, not normative.** Nothing here is on the wire                                                                  |
+| Decision           | ADR 2026-10.3tee (Proposed)                                                                                                   |
+| Spool side         | §2 is written to drop into `docs/SPOOL_PROTOCOL.md` as §7.6 (records) and a §10.1 bullet (observations) once accepted        |
+| Client side        | §3 is app protocol: a new `MessageContent.ctl` value, invisible to spools and relays                                          |
+
+## 1. Overview
+
+A 1:1 audio call has three paths:
+
+```
+           sealed CTL_CALL frames (existing DM scope, unchanged)
+ caller ──────────────────── spool(s) / mesh ──────────────────── callee
+   │  turnreq → turncred                         turnreq → turncred │
+   │                                                                │
+   └──────────── DTLS-SRTP (Opus) ── direct, or via TURN ───────────┘
+```
+
+- **Signaling** is ordinary sealed DM traffic. It needs **no spool change**: a `CTL_CALL` frame is a
+  v2-sealed `chat` frame between the scope's two members, which C-4.4-5…7 already admit. It also rides
+  the mesh and the §9.4 bridge like any other DM, so two phones on one LAN with no Internet can still
+  signal a call.
+- **Media** is WebRTC: Opus over DTLS-SRTP, peer to peer where ICE finds a path and through TURN where
+  it does not. The DTLS fingerprint rides inside the sealed SDP, so Knit identity authenticates the
+  media keys (§3.7).
+- **TURN credentials** are the only new spool-side behaviour (§2). The spool hands out short-lived
+  credentials for a TURN server its operator runs. It never carries media.
+
+## 2. Spool side: TURN provisioning
+
+### 2.1 Advertisement
+
+| ID          | Requirement                                                                                                                                                       |
+|-------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **S-7.6-1** | A spool that issues TURN credentials advertises `turn: true` in HELLO. A spool that does not MUST omit the field; `false` is never sent. Presence is the signal. |
+| **S-7.6-2** | A spool MUST NOT advertise `turn` unless it is configured with a TURN secret and at least one TURN URL.                                                           |
+| **C-7.6-3** | A client MUST NOT send `turnreq` to a spool that omitted `turn`.                                                                                                  |
+
+> **Why a gate, not a hint.** The §7.3 reasoning, reapplied: an unknown record is skipped (B-2-2), and a
+> skipped request is never answered, so a `turnreq` to an older spool would hang until the client's
+> request timeout, once per call.
+
+### 2.2 Records
+
+| Record     | Direction | Fields                                                            | Semantics                                                                     |
+|------------|-----------|-------------------------------------------------------------------|-------------------------------------------------------------------------------|
+| `turnreq`  | c→s       | `t, q: Long`                                                      | Ask for one TURN credential. Answered by `turncred`, or by `err`               |
+| `turncred` | s→c       | `t, q: Long, urls: [String], user: String, pass: String, exp: Long` | The credential. `exp` is Unix **seconds**. `urls` are RFC 7065 `turn:`/`turns:` URIs |
+
+`turncred` carries `q` and is itself terminal, like `ahas`. No new error codes: `not_subscribed`,
+`rate` and `internal` cover every refusal.
+
+| ID           | Requirement                                                                                                                                                                                                                       |
+|--------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **S-7.6-4**  | A spool MUST refuse `turnreq` with `not_subscribed` on a connection that holds no subscription. The request names **no scope**, and the spool MUST NOT ask for one.                                                              |
+| **S-7.6-5**  | A spool MUST rate-limit `turnreq` per connection and per IP, refusing with `rate` + `retryMs`. Suggested: 4 per connection per 10 min, burst 2.                                                                                  |
+| **S-7.6-6**  | `user = decimal(exp) ‖ ":" ‖ base32lower(random(10))`, and `pass = base64(HMAC-SHA1(turnSecret, UTF8(user)))`: the TURN REST shared-secret scheme that coturn's `use-auth-secret` verifies.                                      |
+| **S-7.6-7**  | The random suffix MUST be fresh per issue. It MUST NOT be derived from a scope id, an IP, a token or any connection state.                                                                                                        |
+| **S-7.6-8**  | `exp = now + turnTtl`. Suggested default 5 min, at most 1 h.                                                                                                                                                                      |
+| **S-7.6-9**  | A spool MUST NOT log or persist issued credentials. Metrics MAY count issues and refusals.                                                                                                                                       |
+| **S-7.6-10** | The spool process MUST NOT relay media. TURN is a separate service that shares only the secret.                                                                                                                                  |
+| **C-7.6-11** | A client SHOULD fetch a credential per call, or reuse a cached one only while `exp` is at least 1 h away. It MUST NOT send a credential to its peer or into any frame.                                                          |
+| **C-7.6-12** | A client SHOULD request from every spool of the DM scope that advertises `turn` and is connected, and SHOULD offer relay candidates from at most two TURN servers, to bound ICE checks.                                          |
+
+> **Why no scope.** Asking for a credential "for scope S" would tell the spool which conversation is
+> calling, a fact it otherwise never learns. Holding *some* subscription is the whole gate: it costs a
+> squatter a PoW stamp (§8) and admits any member of any conversation the spool carries. On a private
+> spool, the `k` token (S-7.1-3) already gates the connection, so TURN inherits that gate.
+>
+> **Why minutes, not hours.** coturn checks a REST credential's expiry only when a session first
+> authenticates, which is its Allocate; refreshes reuse the cached key (4.18.0, `check_stun_auth`). So
+> `exp` bounds when a credential can *start* relaying, not how long a call lasts, and a few minutes is
+> enough for ICE to allocate. The flip side: an allocation refreshed past `exp` lives on, so what a
+> leaked or farmed credential is worth is bounded by the TURN server's quotas (§2.4), not by `exp`.
+>
+> **Why HMAC-SHA1.** It is what coturn and every TURN server implementing the REST scheme verify. It is
+> not a choice this protocol makes, and it carries nothing a short-lived credential needs beyond a MAC.
+
+**Test vector** (proposed §13 addition). `turnSecret = "knit-turn-test-secret"`, `exp = 1800000000`,
+suffix bytes `fixture(10, 11)`:
+
+```
+user = 1800000000:bmjbsibhfy2tyq2k
+pass = yV18C+LcL6biIfL7ZVOuV9xVuoU=
+```
+
+### 2.3 Daemon configuration
+
+Environment variables, following the house rule that an invalid value refuses to start:
+
+| Variable                 | Meaning                                                                                                  |
+|--------------------------|----------------------------------------------------------------------------------------------------------|
+| `SPOOL_TURN_SECRET`      | The shared secret, the same value as coturn's `static-auth-secret`. Unset ⇒ no `turn` in HELLO           |
+| `SPOOL_TURN_URLS`        | Comma-separated `turn:`/`turns:` URIs. Required when the secret is set                                   |
+| `SPOOL_TURN_TTL_S`       | Credential lifetime, default `300` (60–3600; S-7.6-8)                                                    |
+| `SPOOL_TURN_RATE`        | Issues per connection per 10 min, default `4`                                                            |
+
+`SpoolServer` gains one record handler. `ScopeStore` is untouched, because nothing is stored.
+
+### 2.4 Running the TURN server
+
+coturn runs beside the daemon: a sidecar in `deploy/`, `network_mode: host`, because it needs the
+relay port range. A starting `turnserver.conf`:
+
+```
+use-auth-secret
+static-auth-secret=<SPOOL_TURN_SECRET>
+realm=<spool host>
+listening-port=3478
+tls-listening-port=5349
+alt-tls-listening-port=443
+min-port=49160
+max-port=49660
+fingerprint
+no-cli
+no-multicast-peers
+no-tcp-relay
+user-quota=3
+total-quota=16
+max-bps=16000
+bps-capacity=125000
+denied-peer-ip=0.0.0.0-0.255.255.255
+denied-peer-ip=10.0.0.0-10.255.255.255
+denied-peer-ip=100.64.0.0-100.127.255.255
+denied-peer-ip=127.0.0.0-127.255.255.255
+denied-peer-ip=169.254.0.0-169.254.255.255
+denied-peer-ip=172.16.0.0-172.31.255.255
+denied-peer-ip=192.168.0.0-192.168.255.255
+denied-peer-ip=::1
+denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+```
+
+- **The `denied-peer-ip` list is not optional.** Without it, any credential holder can use the relay
+  to reach the host's loopback, its private network or a cloud metadata endpoint. This is the
+  standard TURN SSRF.
+- **`max-bps` and `bps-capacity` are bytes per second.** One Opus call leg is about 4 kB/s. On a
+  public spool anyone can get a credential, so these caps, not the credential, are what bound a
+  stranger: 1 Mbps for the whole relay is about 325 GB/month if saturated around the clock.
+- **Bandwidth.** A relayed call is Opus at about 32 kbps each way, about 128 kbps through the server
+  counting both legs, which is roughly 58 MB per call-hour. A Nanode's 1 TB transfer allowance covers
+  on the order of 10,000 relayed call-hours a month.
+- **TLS on 443** gets through networks that block UDP and 3478. Media is DTLS-encrypted either way, and
+  TLS additionally hides the TURN username from the network path.
+- **Hosted.** A TURN sidecar is an add-on for Knit Hosted. Any metering or billing lives in the control
+  plane, never in `daemon/`.
+
+### 2.5 What the spool and the TURN server observe
+
+Proposed §10.1 bullet:
+
+- **The spool** sees that an IP asked for a TURN credential at a given time. It does not see which
+  scope the IP is calling from.
+- **The TURN server** sees both endpoint IPs of a relayed call, the call's duration and its byte counts.
+  It never sees content.
+- **Joined**, as one operator can join them, this sharpens §10.1's residual leak. "These k IPs touch the
+  same scope" becomes "these two IPs talked for 14 minutes at 09:14". Tor cannot cover it, because media
+  is UDP.
+- **The "relay all calls" setting** (§3.7) moves the IP-pair exposure from the peer to the TURN
+  operator. It does not remove the exposure.
+
+## 3. Signaling (client)
+
+### 3.1 Carriage
+
+```
+CTL_CALL = 10        MessageContent.cl: CallPayload?
+CAP_CALL = 0x4000    profile capability bit
+```
+
+| ID          | Requirement                                                                                                                                                       |
+|-------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **C-3.1-1** | Call signaling is a `MessageContent.ctl` value carried in an ordinary v2-sealed DM. It is never persisted as a message, never notified as one and never receipted. |
+| **C-3.1-2** | A client MUST send an `OFFER` only toward a pinned profile carrying `CAP_CALL`, because a build without it consumes the ctl as a silent no-op.                   |
+| **C-3.1-3** | Signaling rides every path a DM rides: the mesh, and every spool of the DM scope. A client MUST NOT special-case its routing.                                      |
+
+> **Why not a dedicated call scope with a short `ttlMs`.** It would need a new scope kind in §3 and a
+> new derivation, would not ride the mesh, and would buy only the early expiry that §3.4's `sentAt`
+> window already gives. The cost of reuse is a few signaling blobs sitting in the DM scope for its 48 h
+> retention. They are opaque, and §3.6 bounds them to a handful per call.
+
+### 3.2 Payload
+
+```
+CallPayload {
+    id:   String     // 128-bit random, base32; one per call attempt, both directions
+    ph:   Int        // phase, below
+    gen:  Int = 0    // negotiation generation; > 0 is an ICE restart (§3.8)
+    sdp:  String?    // OFFER, ANSWER
+    cand: [String]?  // CANDS: "candidate:…" lines; an empty list = end of candidates
+    rsn:  Int?       // DECLINE, CANCEL, END
+    m:    Int = 1    // media bitmask: 1 audio; 2 video reserved
+}
+```
+
+| `ph` | Name      | Sender | Meaning                                                                    |
+|------|-----------|--------|----------------------------------------------------------------------------|
+| 1    | `OFFER`   | caller | Start a call (`gen = 0`) or restart ICE (`gen > 0`)                        |
+| 2    | `RINGING` | callee | The offer reached a device that is alerting. The caller UI moves from "Calling" to "Ringing" |
+| 3    | `ANSWER`  | callee | Accept, carrying the answer SDP for this `gen`                             |
+| 4    | `DECLINE` | callee | Refuse, with `rsn`                                                         |
+| 5    | `CANCEL`  | caller | Withdraw before an answer, with `rsn`                                      |
+| 6    | `END`     | either | Hang up after connecting, with `rsn`                                       |
+| 7    | `CANDS`   | either | Late candidates for this `gen` (§3.6)                                      |
+
+Reasons, in one registry as `TransferPayload` has: `1` user · `2` busy · `3` timeout · `4` no route
+(ICE failed or no network) · `5` media unsupported · `6` error.
+
+### 3.3 State machine
+
+```
+caller: Idle ─OFFER→ Calling ─RINGING→ Ringing ─ANSWER→ Connecting ─ICE ok→ Connected ─END→ Ended
+                        └──────────────┴── 45 s / user ─CANCEL→ Ended
+callee: Idle ─OFFER (fresh)→ Alerting ─user─ANSWER→ Connecting ─ICE ok→ Connected ─END→ Ended
+                                 └──user / busy─DECLINE→ Ended
+```
+
+| ID          | Requirement                                                                                                                                                            |
+|-------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **C-3.3-1** | A caller MUST send `CANCEL rsn=timeout` after 45 s without an `ANSWER`.                                                                                                |
+| **C-3.3-2** | A callee already in a call answers a new `OFFER` with `DECLINE rsn=busy` and does not alert.                                                                           |
+| **C-3.3-3** | Connecting that does not reach ICE `connected` within 20 s ends with `END rsn=no_route`.                                                                               |
+| **C-3.3-4** | Every phase is idempotent on `(id, ph, gen)`. Custody and the spool can deliver a frame twice, and the second copy MUST change nothing.                                |
+
+### 3.4 Staleness and ordering
+
+Signaling rides store-and-forward paths, so a frame can arrive late, twice or out of order.
+
+| ID          | Requirement                                                                                                                                                                                         |
+|-------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **C-3.4-1** | A callee MUST NOT alert for an `OFFER` whose envelope `sentAt` lies outside `[now − 60 s, now + 60 s]`.                                                                                             |
+| **C-3.4-2** | A stale `OFFER` for which no `CANCEL rsn=user` or `ANSWER` has been seen is recorded as a **missed call**. A `CANCEL rsn=user` that arrives first suppresses it.                                      |
+| **C-3.4-3** | A terminal phase (`DECLINE`, `CANCEL`, `END`) for an unknown `id` MUST be remembered as a tombstone, at least for the custody TTL and in a bounded set, so a later-arriving `OFFER` for that `id` never alerts. |
+
+> **Why `sentAt` and not a payload expiry.** `sentAt` is signed inside the `RelayEnvelope` and is what
+> `CTL_TRANSFER`'s `STALE_OFFER_MS` already reads. A payload `exp` would be the same sender clock with
+> a second field to keep consistent.
+>
+> **Missed calls fall out for free.** A callee that was offline pulls the stale offer on reconnect,
+> and C-3.4-2 turns it into the missed-call row every phone app shows.
+
+### 3.5 Glare
+
+Each side sends an `OFFER` to the other before seeing the other's offer.
+
+| ID          | Requirement                                                                                                                                                       |
+|-------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **C-3.5-1** | The offer from the **lower node id** survives. The higher side MUST drop its own attempt without sending `CANCEL`, and MUST answer the surviving offer at once without alerting. |
+
+> **Why auto-answer.** Both users just asked to talk to each other. A `CANCEL` would race the surviving
+> offer and could suppress it on a peer that sees them out of order (C-3.4-3).
+
+### 3.6 Candidates
+
+| ID          | Requirement                                                                                                                                                                         |
+|-------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **C-3.6-1** | A client MUST NOT trickle candidates one frame each. It gathers for up to 1.5 s, or until gathering completes, and embeds the candidates in the SDP.                                 |
+| **C-3.6-2** | At most one `CANDS` frame per side per `gen` carries the late ones, usually a slow relay allocation.                                                                                |
+
+> **Why.** Every signaling frame is a ratchet step, a spool blob kept 48 h and, on the mesh, a flood.
+> Per-candidate trickle is 10–20 frames per call. Batched, a whole call is about five: `OFFER`,
+> `RINGING`, `ANSWER`, at most one `CANDS`, then `END`. An SDP is 2–5 KB, well inside `maxBlob` (64 KiB)
+> and the link layer's 512 KiB.
+
+### 3.7 Media and identity binding
+
+| ID          | Requirement                                                                                                                                                                                              |
+|-------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **C-3.7-1** | Media MUST be DTLS-SRTP. SDES and plain RTP MUST be refused.                                                                                                                                             |
+| **C-3.7-2** | The remote DTLS certificate MUST match the `a=fingerprint` in the SDP that arrived in that peer's sealed `CallPayload`, and SDP from any other source MUST NOT be applied.                              |
+| **C-3.7-3** | With "relay all calls" on, a client sets `iceTransportPolicy = relay` **and** MUST strip its own host and server-reflexive candidates from the SDP it sends. Otherwise its own IP still reaches the peer. |
+| **C-3.7-4** | Opus is mandatory; `bundle` and `rtcp-mux` are required.                                                                                                                                                 |
+
+> **Why C-3.7-2 is the whole E2E argument.** The SDP is authenticated by the frame signature and the DM
+> ratchet, so its fingerprint is the peer's own. DTLS then proves that whoever terminates the media
+> holds the matching key. A TURN server, a spool or a network attacker can drop or delay a call, but
+> cannot read or join it. Fresh ECDHE per call gives forward secrecy independently of the ratchet.
+
+### 3.8 Network changes
+
+A move from Wi-Fi to cellular kills the selected candidate pair. The side that notices sends `OFFER`
+with `gen + 1` and fresh ICE credentials (an ICE restart), and the peer answers with the same `gen`.
+The DTLS session and the call `id` survive. A ratchet session reset during a call is not recovered,
+because ctl frames are never re-sealed (ADR 2026-10.gcrd's lesson for `CTL_TRANSFER`). An established
+call keeps running, and only a later restart would fail.
+
+### 3.9 Ringing
+
+Android rings only while the callee holds a live spool connection. `event` fan-out then delivers the
+`OFFER` in well under a second. Otherwise the offer waits and becomes a missed call (C-3.4-2). iOS
+background ringing is out of scope until ADR 2026-10.3tee's push question is settled.
+
+## 4. Tests this would add
+
+- **knit-spool:**
+  - `SpoolRecordsTest` vectors for `turnreq`/`turncred`, and the §2.2 HMAC vector.
+  - Conformance cases: no `turn` in HELLO without config; `not_subscribed` with no sub; `rate` past the
+    budget; two issues never share a suffix.
+- **knit-next:**
+  - A `CallPayload` golden vector.
+  - Stale `OFFER` → missed call; `CANCEL` before `OFFER` → no alert.
+  - Glare resolution; idempotent duplicates.
+  - Relay-only SDP stripping, and fingerprint mismatch → call refused.
+
+## 5. Open questions
+
+- **iOS ringing:** a PushKit relay, foreground-only ringing or outbound-only calls (ADR 2026-10.3tee).
+- **Secret rotation:** coturn has one `static-auth-secret`, so rotation is a short window of failed
+  allocations unless the sidecar uses its database-backed multi-secret mode.
+- **Whose TURN:** a client may want to prefer a TURN server run by someone other than the spool
+  operator, to avoid §2.5's join. Nothing above stops that, but no configuration surface exists for it.
+- **Timing signature:** a call shows up as a short burst of about five blobs plus a `turnreq`. That is
+  more distinctive than chat traffic, and padding (§11) is the only answer.

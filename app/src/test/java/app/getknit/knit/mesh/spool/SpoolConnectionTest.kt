@@ -39,6 +39,7 @@ class SpoolConnectionTest {
     }
 
     private val scope = ByteArray(32) { it.toByte() }
+    private val urls = listOf("turn:spool.example:3478?transport=udp")
     private val other = ByteArray(32) { (it + 1).toByte() }
     private val attachment = ByteArray(32) { (it + 2).toByte() }
 
@@ -55,7 +56,8 @@ class SpoolConnectionTest {
         powBits: Int = 0,
         limits: SpoolLimits =
             SpoolLimits(maxBlob = 64, maxRecord = 4096, maxScopes = 8, maxPull = 2, maxFramesCap = 10, maxTtlMs = 1),
-    ) = SpoolCodec.encode(SpoolHello(t = SpoolRecordType.HELLO, v = v, min = min, limits = limits, powBits = powBits))
+        turn: Boolean? = null,
+    ) = SpoolCodec.encode(SpoolHello(t = SpoolRecordType.HELLO, v = v, min = min, limits = limits, powBits = powBits, turn = turn))
 
     /** A spool whose advertised caps are enormous — the numbers a hostile one would send. */
     private fun greedyLimits(
@@ -218,6 +220,125 @@ class SpoolConnectionTest {
             runCurrent()
 
             assertEquals(SpoolReply.Closed, reply)
+        }
+
+    @Test
+    fun `a spool that never advertised turn is never sent a turnreq`() =
+        runTest {
+            val link = RecordingLink()
+            val conn = connection(link)
+            conn.onMessage(serverHello())
+            val before = link.sent.size
+
+            // C-7.6-3: it would skip the record unanswered, and the call would wait out the request for nothing.
+            assertFalse(conn.turn)
+            assertEquals(SpoolReply.Closed, conn.turnCredential(3_000))
+            assertEquals(before, link.sent.size)
+        }
+
+    @Test
+    fun `a turncred answers its turnreq and nothing else does`() =
+        runTest {
+            val link = RecordingLink()
+            val conn = connection(link)
+            conn.onMessage(serverHello(turn = true))
+            assertTrue(conn.turn)
+
+            var turn: SpoolReply? = null
+            var push: SpoolReply? = null
+            launch { turn = conn.turnCredential(3_000) }
+            runCurrent()
+            val turnQ = link.last<SpoolTurnReq>().q
+            launch { push = conn.push(scope, other, byteArrayOf(1)) }
+            runCurrent()
+            val pushQ = link.last<SpoolPush>().q
+
+            // A turncred naming the PUSH's q is no answer to it: the TURNREQ names no scope, so the marker decides.
+            conn.onMessage(
+                SpoolCodec.encode(SpoolTurnCred(t = SpoolRecordType.TURNCRED, q = pushQ, urls = urls, user = "u", pass = "p", exp = 9)),
+            )
+            runCurrent()
+            assertNull(push)
+            assertNull(turn)
+
+            conn.onMessage(
+                SpoolCodec.encode(
+                    SpoolTurnCred(t = SpoolRecordType.TURNCRED, q = turnQ, urls = urls, user = "u", pass = "s3cret", exp = 9),
+                ),
+            )
+            runCurrent()
+            val cred = turn as SpoolReply.Turn
+            assertEquals(urls, cred.urls)
+            assertEquals(9L, cred.exp)
+            assertEquals("s3cret", cred.pass)
+            assertFalse("the password never reaches a log line", "s3cret" in cred.toString())
+            assertNull(push)
+
+            // ...and an `ok` that lands on a TURNREQ's q is a failure there, never a credential.
+            var second: SpoolReply? = null
+            launch { second = conn.turnCredential(3_000) }
+            runCurrent()
+            conn.onMessage(SpoolCodec.encode(SpoolOk(t = SpoolRecordType.OK, q = link.last<SpoolTurnReq>().q)))
+            runCurrent()
+            assertEquals(SpoolReply.Closed, second)
+        }
+
+    @Test
+    fun `a refused turnreq reports its code and retry`() =
+        runTest {
+            val link = RecordingLink()
+            val conn = connection(link)
+            conn.onMessage(serverHello(turn = true))
+
+            var reply: SpoolReply? = null
+            launch { reply = conn.turnCredential(3_000) }
+            runCurrent()
+            val q = link.last<SpoolTurnReq>().q
+            conn.onMessage(SpoolCodec.encode(SpoolErr(t = SpoolRecordType.ERR, code = SpoolErrCode.RATE, q = q, retryMs = 5_000)))
+            runCurrent()
+
+            val failed = reply as SpoolReply.Failed
+            assertEquals(SpoolErrCode.RATE, failed.code)
+            assertEquals(5_000L, failed.retryMs)
+        }
+
+    @Test
+    fun `a silent turnreq costs its short wait and never a strike against the connection`() =
+        runTest {
+            val link = RecordingLink()
+            val conn = connection(link)
+            conn.onMessage(serverHello(turn = true))
+
+            repeat(SpoolConnection.MAX_SILENT_REQUESTS + 1) {
+                var reply: SpoolReply? = null
+                launch { reply = conn.turnCredential(3_000) }
+                runCurrent()
+                advanceTimeBy(3_001)
+                runCurrent()
+                assertEquals(SpoolReply.Closed, reply)
+            }
+            // The sync plane's requests own the unresponsive counter; a call's impatience is not evidence.
+            assertNull(link.closedWith)
+            assertTrue(conn.isReady)
+        }
+
+    @Test
+    fun `a hung-up call's turnreq leaves nothing waiting on the connection`() =
+        runTest {
+            val link = RecordingLink()
+            val conn = connection(link)
+            conn.onMessage(serverHello(turn = true))
+
+            val asking = launch { conn.turnCredential(3_000) }
+            runCurrent()
+            val q = link.last<SpoolTurnReq>().q
+            asking.cancel()
+            runCurrent()
+            // Its entry is gone, so the late answer finds nothing to complete and counts as no reply.
+            conn.onMessage(
+                SpoolCodec.encode(SpoolTurnCred(t = SpoolRecordType.TURNCRED, q = q, urls = urls, user = "u", pass = "p", exp = 9)),
+            )
+            assertFalse(conn.answered)
         }
 
     @Test

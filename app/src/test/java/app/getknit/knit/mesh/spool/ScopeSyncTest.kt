@@ -267,6 +267,33 @@ class ScopeSyncTest {
             receiver.sync.stop()
         }
 
+    @Test
+    fun `a call asks a turn spool carrying the peer's scope for a credential and no other spool at all`() =
+        runTest {
+            val spool = FakeSpool(turn = true)
+            val caller = member(spool, alice, bob)
+            caller.sync.start(backgroundScope)
+            pump()
+
+            // Experimental (docs/VOICE_CALLS.md §2): the DM scope is subscribed and answered, so the spool counts it.
+            val creds = caller.sync.turnCredentials(bob)
+            assertEquals(listOf(listOf("turn:spool.test:3478?transport=udp")), creds.map { it.urls })
+            assertEquals(1, spool.turnIssued)
+            // A peer this phone shares no scope with gets none, and costs the spool nothing.
+            assertTrue(caller.sync.turnCredentials("nobody").isEmpty())
+            assertEquals(1, spool.turnIssued)
+            caller.sync.stop()
+
+            // C-7.6-3: a spool that never advertised turn is never sent a TURNREQ it would leave hanging.
+            val older = FakeSpool()
+            val other = member(older, alice, bob)
+            other.sync.start(backgroundScope)
+            pump()
+            assertTrue(other.sync.turnCredentials(bob).isEmpty())
+            assertFalse(SpoolRecordType.TURNREQ in older.skippedRecords)
+            other.sync.stop()
+        }
+
     /**
      * A scope is derived from the pairwise ratchet root, so it is subscribed and converged whether or not
      * its peer has been online this month — which is why nothing else on [ScopeStatus] can be read as

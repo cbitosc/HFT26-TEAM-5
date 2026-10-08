@@ -4,6 +4,7 @@ import app.getknit.knit.data.message.MentionStore
 import app.getknit.knit.data.message.MessageEntity
 import app.getknit.knit.data.message.withReply
 import app.getknit.knit.data.message.withVideo
+import app.getknit.knit.mesh.protocol.CallPayload
 import app.getknit.knit.mesh.protocol.GroupInfo
 import app.getknit.knit.mesh.protocol.GroupKeyPayload
 import app.getknit.knit.mesh.protocol.GroupRootPayload
@@ -395,6 +396,27 @@ class MessageContentTest {
         // Sender-supplied text is brought inside AttachmentName's rules at the decode boundary, like attachmentName.
         assertEquals(ready.copy(name = "evilfdp.exe"), decoded.xf)
         assertNull(MessageContent.decode(MessageContent(body = "hi").encode())!!.xf)
+    }
+
+    @Test
+    fun theCallPayloadRoundTripsEveryFieldAndStaysOffOrdinaryMessages() {
+        val cands =
+            CallPayload(
+                id = "c1",
+                ph = CallPayload.PHASE_CANDS,
+                gen = 1,
+                sdp = "v=0\r\na=fingerprint:sha-256 AB:CD\r\n",
+                cand = listOf("candidate:1 1 udp 2122260223 192.0.2.1 49152 typ host", ""),
+                rsn = CallPayload.REASON_NO_ROUTE,
+                m = CallPayload.MEDIA_AUDIO,
+            )
+        val decoded = MessageContent.decode(MessageContent(body = "", ctl = MessageContent.CTL_CALL, cl = cands).encode())!!
+        assertEquals(MessageContent.CTL_CALL, decoded.ctl)
+        assertEquals(cands, decoded.cl)
+        // The defaults cost nothing: an OFFER carries only its id, phase and SDP.
+        val offer = CallPayload(id = "c2", ph = CallPayload.PHASE_OFFER, sdp = "v=0")
+        assertEquals(offer, MessageContent.decode(MessageContent(body = "", ctl = MessageContent.CTL_CALL, cl = offer).encode())!!.cl)
+        assertNull(MessageContent.decode(MessageContent(body = "hi").encode())!!.cl)
     }
 
     private companion object {

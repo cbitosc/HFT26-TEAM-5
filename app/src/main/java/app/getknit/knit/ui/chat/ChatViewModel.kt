@@ -10,6 +10,8 @@ import androidx.lifecycle.viewModelScope
 import app.getknit.knit.R
 import app.getknit.knit.TextLimits
 import app.getknit.knit.clampToUtf16
+import app.getknit.knit.call.CallManager
+import app.getknit.knit.call.CallRefusal
 import app.getknit.knit.data.AttachmentIdentities
 import app.getknit.knit.data.AttachmentStore
 import app.getknit.knit.data.BlobRepository
@@ -459,6 +461,9 @@ data class ChatUiState(
     // one side has updated. The capability is enforced where it can explain itself instead, in
     // [ChatViewModel.attachFile].
     val canSendFile: Boolean = false,
+    // Whether the top bar offers a voice call (experimental, docs/VOICE_CALLS.md): a 1:1 thread in a build that wires
+    // calls. Not gated on the peer's CAP_CALL, for [canSendFile]'s reason; [ChatViewModel.startCall] explains instead.
+    val canCall: Boolean = false,
     // True when this thread is the **Meshtastic room** — the paired radio's primary channel, mirrored into a
     // room on this phone. It is a public room like Nearby, and shares its glyph and its "no attachments"
     // refusal, but its authors are not Knit peers: no verified badge, nothing to tap through to, and a contact
@@ -555,6 +560,8 @@ class ChatViewModel(
     // A save opens a sealed attachment, which is when an older one learns its plaintext name, so a forward of the
     // saved copy reuses the identity it came under (ADR 2026-10.mptm). Stateless; defaulted for every test rig.
     private val identities: AttachmentIdentities = AttachmentIdentities(messages, blobs),
+    // Voice calls (experimental, di/CallWiring): null in a build that wires none, which hides the call button.
+    private val calls: CallManager? = null,
 ) : ViewModel() {
     /** This thread is the broadcast room (vs a 1:1 DM keyed by the peer's node id). */
     private val isRoom = conversationId == Conversations.NEARBY
@@ -1252,6 +1259,7 @@ class ChatViewModel(
                 publicChannelKeyIsPublic = mesh.lora.facts.primaryKeyIsPublic,
                 needsPublicConsent = isBridged && !publicConsented,
                 isBlocked = isPeerThread && conversationId in blocked,
+                canCall = calls != null && isPeerThread && conversationId !in blocked,
                 verified = isPeerThread && peersByNode[conversationId]?.verified == true,
                 isGroup = isGroup,
                 memberCount = members.size,
@@ -2163,6 +2171,32 @@ class ChatViewModel(
             val outcome = transfers.offer(conversationId, uri.toString())
             if (outcome is OfferOutcome.Refused) _events.tryEmit(transferRefusalMessage(outcome.refusal))
         }
+    }
+
+    /** Calls this thread's peer (experimental). The call screen opens from the call layer; a refusal is a toast. */
+    fun startCall() {
+        val calls = calls ?: return
+        viewModelScope.launch {
+            val refusal =
+                refusalForCall() ?: when (calls.start(conversationId)) {
+                    null -> null
+                    CallRefusal.BUSY -> R.string.chat_call_busy
+                    CallRefusal.SELF -> R.string.chat_call_needs_dm
+                }
+            refusal?.let { _events.tryEmit(it) }
+        }
+    }
+
+    /**
+     * Why this thread cannot be called, or null when it can: a DM only, toward a pinned profile carrying
+     * [Protocol.CAP_CALL] (C-3.1-2) — a build without it would swallow the offer and the call would ring out unheard.
+     * No nearness test: a call rides the Internet plane as readily as the radios.
+     */
+    private suspend fun refusalForCall(): Int? {
+        val members = groups.find(conversationId)?.let { GroupMembersStore.decode(it.members) }.orEmpty()
+        if (isRoom || conversationId == Conversations.MESHTASTIC || members.isNotEmpty()) return R.string.chat_call_needs_dm
+        if ((peers.find(conversationId)?.capabilities ?: 0L) and Protocol.CAP_CALL == 0L) return R.string.chat_call_peer_too_old
+        return null
     }
 
     /**

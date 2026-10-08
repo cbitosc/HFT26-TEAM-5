@@ -3,6 +3,9 @@ package app.getknit.knit.mesh
 import android.util.Log
 import app.getknit.knit.TextLimits
 import app.getknit.knit.clampToUtf16
+import app.getknit.knit.call.CallSignals
+import app.getknit.knit.call.TurnServer
+import app.getknit.knit.call.TurnSource
 import app.getknit.knit.data.AttachmentIdentities
 import app.getknit.knit.data.AttachmentStore
 import app.getknit.knit.data.BlobRepository
@@ -51,6 +54,7 @@ import app.getknit.knit.mesh.crypto.sealedContent
 import app.getknit.knit.mesh.lora.LoraCtl
 import app.getknit.knit.mesh.lora.LoraFramePolicy
 import app.getknit.knit.mesh.lora.LoraSizeHint
+import app.getknit.knit.mesh.protocol.CallPayload
 import app.getknit.knit.mesh.protocol.ChatContent
 import app.getknit.knit.mesh.protocol.CommonsPost
 import app.getknit.knit.mesh.protocol.EncEnvelope
@@ -233,6 +237,13 @@ class MeshManager(
     // like publicChannel because the manager sends through this class. The default admits nothing. Not a
     // property: the only reader is [pipeline]'s initializer, which hands it straight to onTransferCtl.
     onTransferSignal: suspend (senderId: String, payload: TransferPayload, sentAt: Long) -> Boolean = { _, _, _ -> false },
+    // A sealed CTL_CALL landed (call/CallManager.onSignal; experimental, docs/VOICE_CALLS.md): voice-call signaling,
+    // late-bound for onTransferSignal's reason. Called on the inbound path, so the far end must return without
+    // waiting on the network or the media. The default ignores it — every test, and every build without calls.
+    onCallSignal: suspend (senderId: String, payload: CallPayload, sentAt: Long) -> Unit = { _, _, _ -> },
+    // Capability bits this build advertises beyond [Protocol.LOCAL_CAPABILITIES] — [Protocol.CAP_CALL] when the call
+    // media is wired (di/CallWiring). OR-ed into our own profile; a change republishes it at the next start.
+    private val extraCapabilities: Long = 0L,
     // One plaintext, one identity (ADR 2026-10.mptm): handed to the inbound pipeline, which records each sealed
     // attachment's plaintext name and makes a room copy from a sealed one this phone holds. Stateless over [messages]
     // and [blobs], so the default is what every test wants; production hands in the Koin single.
@@ -249,6 +260,8 @@ class MeshManager(
     private val fieldLog: FieldLog? = null,
 ) : MeshController,
     TransferSignals,
+    CallSignals,
+    TurnSource,
     ProfileFrameSource,
     FarPeerFrameSource,
     BridgeFrameSource,
@@ -539,6 +552,7 @@ class MeshManager(
             onSelfProfile = { cloneWatch.onSelfProfile(it) },
             onPeerFrameOpened = { senderId, initEph, flagged -> introSync.onPeerFrameOpened(senderId, initEph, flagged) },
             onTransferCtl = onTransferSignal,
+            onCallCtl = onCallSignal,
             commonsTitle = { commons?.find(it)?.name },
             noteVerified = ::noteVerified,
         )
@@ -2914,7 +2928,10 @@ class MeshManager(
             held.avatarHash != settings.ownAvatarHash.first() ||
             held.openToChat != live.openToChat ||
             held.loraNode != live.board?.node ||
-            held.loraKey != live.board?.key
+            held.loraKey != live.board?.key ||
+            // A build that gained or lost a capability bit (CAP_CALL) reuses the held frame for the current stamp,
+            // so peers would not see the change until an edit or the 12 h republish.
+            held.capabilities != (Protocol.LOCAL_CAPABILITIES or extraCapabilities)
     }
 
     private fun watchIncomingFiles(session: CoroutineScope) {
@@ -3112,6 +3129,20 @@ class MeshManager(
     ): Boolean = sendCtlDm(peerId, MessageContent(body = "", ctl = MessageContent.CTL_TRANSFER, xf = payload), null, identity.nodeId())
 
     /**
+     * [CallSignals]: one sealed `CTL_CALL` DM to [peerId] — the offer, answer, late candidates or hang-up of a voice
+     * call (`call/CallManager`), never a message. It rides every path a DM rides (C-3.1-3). False when nothing could
+     * be sealed.
+     */
+    override suspend fun sendCallSignal(
+        peerId: String,
+        payload: CallPayload,
+    ): Boolean = sendCtlDm(peerId, MessageContent(body = "", ctl = MessageContent.CTL_CALL, cl = payload), null, identity.nodeId())
+
+    /** [TurnSource]: TURN credentials from the connected spools carrying [peerId]'s DM scope; empty without the plane. */
+    override suspend fun turnServers(peerId: String): List<TurnServer> =
+        scopeSync?.turnCredentials(peerId).orEmpty().map { TurnServer(urls = it.urls, user = it.user, pass = it.pass) }
+
+    /**
      * Seals one ctl DM ([payload], a `CTL_PROFILE` or `CTL_TRANSFER`) to [peerId]. For a profile the avatar hash is
      * repeated in the **cleartext**
      * [ChatContent.attachmentHash] — the DB v19 precedent (`docs/WIRE_COMPAT.md`) reapplied: it is what
@@ -3189,7 +3220,7 @@ class MeshManager(
                 pubKey = identity.publicKeyBundle(),
                 deviceTag = identity.deviceTag(),
                 protoVersion = Protocol.VERSION,
-                capabilities = Protocol.LOCAL_CAPABILITIES,
+                capabilities = Protocol.LOCAL_CAPABILITIES or extraCapabilities,
                 prekey = PrekeyInfo(id = spk.id, pub = spk.pub, sig = spk.sig),
                 version = version,
                 openToChat = settings.openToChat.first(),

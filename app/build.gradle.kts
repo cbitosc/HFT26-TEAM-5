@@ -896,6 +896,7 @@ kover {
                     // The debug source set (src/debug/java) outside the two packages below — the release
                     // twin of DemoWiring is a no-op stub, and the report is the debug variant's.
                     "app.getknit.knit.di.DemoWiring*",
+                    "app.getknit.knit.di.CallWiring*", // the voice calls' variant seam; its surfaces sit under `debug`
                     "app.getknit.knit.mesh.DemoTransport*",
                     "app.getknit.knit.mesh.DemoLoraPlane*",
                     "app.getknit.knit.mesh.DemoBoardDirectory*", // declared in DemoLoraPlane.kt
@@ -1055,6 +1056,8 @@ dependencies {
     androidTestUtil(libs.androidx.test.services)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     debugImplementation(libs.androidx.compose.ui.tooling)
+    // Experimental voice calls' media (docs/VOICE_CALLS.md): debug only, behind di/CallWiring.
+    debugImplementation(libs.webrtc.android)
     // Compose Preview Screenshot Testing: `@PreviewTest` plus the preview renderer's tooling, for the
     // `screenshotTest` source set only. See .agents/context/testing.md.
     screenshotTestImplementation(libs.compose.screenshot.validation.api)

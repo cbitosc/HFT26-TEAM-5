@@ -90,6 +90,13 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   and `AndroidDirectWifi` is the one
   `android.net.wifi.p2p` importer. Wi-Fi Aware does **not** yield to our own P2P on Android 12+, so it must
   be paused explicitly — that is what `pause`/`resume` are for.
+- **When touching `call/`, `MessageContent.CTL_CALL` / `cl`, `CallPayload`, `Protocol.CAP_CALL`,
+  `MeshManager.extraCapabilities`, the spool's `turnreq`/`turncred` (`SpoolConnection.turnCredential`,
+  `ScopeSync.turnCredentials`), `di/CallWiring`, or `debug/call/`:** READ `docs/VOICE_CALLS.md` and ADR 2026-10.3tee
+  (its 2026-10-07 amendment is this branch's minimal build). Experimental and debug-only: WebRTC is
+  `debugImplementation`, so every `org.webrtc` import stays in `src/debug` and release advertises no `CAP_CALL`.
+  `CallManager.onSignal` runs on the inbound path — never make it wait on TURN or the media — and a TURN credential is
+  never logged or put in a frame.
 - **When touching `location/`, the chat overflow's "Send location" item, or anything that reads the device's
   position:** READ ADR 2026-09.tss4. A shared position is a `geo:` line in the message body (no wire field,
   no capability bit); it is read only between the pin tap and the send, by `ChatViewModel.startLocation`,

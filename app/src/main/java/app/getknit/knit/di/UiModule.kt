@@ -1,6 +1,7 @@
 package app.getknit.knit.di
 
 import app.getknit.knit.BuildConfig
+import app.getknit.knit.call.CallManager
 import app.getknit.knit.data.AttachmentIdentities
 import app.getknit.knit.data.KnitDatabase
 import app.getknit.knit.data.LinkCardStore
@@ -71,6 +72,7 @@ val uiModule =
                 get<TransferManager>(),
                 get<CommonsRepository>(),
                 get<AttachmentIdentities>(),
+                getOrNull<CallManager>(),
             )
         }
         viewModel {

@@ -16,6 +16,8 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.core.graphics.createBitmap
 import app.getknit.knit.BuildConfig
+import app.getknit.knit.call.CallManager
+import app.getknit.knit.call.CallPhase
 import app.getknit.knit.crash.ProcessExitReasons
 import app.getknit.knit.data.AttachmentIdentities
 import app.getknit.knit.data.AttachmentStore
@@ -43,10 +45,12 @@ import app.getknit.knit.data.peer.PeerEntity
 import app.getknit.knit.data.settings.KnitBoardSetup
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.data.webp.WebpTranscode
+import app.getknit.knit.debug.call.CallActivity
 import app.getknit.knit.identity.Identity
 import app.getknit.knit.identity.displayNameFor
 import app.getknit.knit.mesh.ForwardStore
 import app.getknit.knit.mesh.MeshController
+import app.getknit.knit.mesh.MeshManager
 import app.getknit.knit.mesh.MeshMetrics
 import app.getknit.knit.mesh.MeshPause
 import app.getknit.knit.mesh.MeshStartGate
@@ -71,6 +75,7 @@ import app.getknit.knit.mesh.link.LinkFraming
 import app.getknit.knit.mesh.lora.BoardOwner
 import app.getknit.knit.mesh.lora.BoardSettings
 import app.getknit.knit.mesh.lora.ProvisionMode
+import app.getknit.knit.mesh.power.AppVisibility
 import app.getknit.knit.mesh.protocol.ReplyRef
 import app.getknit.knit.mesh.sha256Hex
 import app.getknit.knit.mesh.spool.CommonsInvite
@@ -355,6 +360,10 @@ class DebugBridgeReceiver :
 
                         ACTION_XFER -> {
                             handleXfer(intent)
+                        }
+
+                        ACTION_CALL -> {
+                            handleCall(context, intent)
                         }
 
                         ACTION_WEBPPROBE -> {
@@ -1945,6 +1954,93 @@ class DebugBridgeReceiver :
     ): JSONObject = JSONObject().put("status", status).put("message", message)
 
     /**
+     * Drives the experimental voice calls (docs/VOICE_CALLS.md): `--es op` is `state` (the default: the call, its
+     * selected candidate pair as `route`, and the relay-only toggle), `start --es peer <id>`, `answer`, `decline`,
+     * `hangup`, `relay --ez on true|false` (C-3.7-3: every new call through TURN), or `turn --es peer <id>` (asks the
+     * connected spools for a credential and reports its URLs and expiry — never the username or password).
+     *
+     * `start` and `answer` need Knit in the foreground (`am start` it first): the call's microphone service and its
+     * screen can only start from there. `answer` opens the call screen, which answers, so it asks for the microphone
+     * like a tap would — pre-grant RECORD_AUDIO with `pm grant` for an unattended run.
+     */
+    @Suppress("CyclomaticComplexMethod", "ReturnCount") // a flat dispatch over the ops
+    private suspend fun handleCall(
+        context: Context,
+        intent: Intent,
+    ): JSONObject {
+        val calls = getKoin().getOrNull<CallManager>() ?: return reply("error", "this build wires no calls")
+        val foreground = getKoin().get<AppVisibility>().visible.value
+        val state = calls.state.value
+        when (intent.getStringExtra("op") ?: "state") {
+            "start" -> {
+                val peer = intent.getStringExtra("peer") ?: return reply("error", "missing 'peer' extra")
+                if (!foreground) return reply("error", "not foreground: am start Knit first")
+                val refusal = calls.start(peer)
+                return reply(if (refusal == null) "ok" else "refused", refusal?.name ?: "calling $peer")
+                    .put("id", calls.state.value?.id ?: JSONObject.NULL)
+            }
+
+            "answer" -> {
+                val id = state?.takeIf { it.phase == CallPhase.Alerting }?.id ?: return reply("error", "nothing is ringing")
+                if (!foreground) return reply("error", "not foreground: am start Knit first")
+                context.startActivity(
+                    CallActivity
+                        .intent(context, id)
+                        .setAction(CallActivity.ACTION_ANSWER)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                )
+                return reply("ok", "answering $id")
+            }
+
+            "decline" -> {
+                val id = state?.id ?: return reply("error", "no call")
+                calls.decline(id)
+                return reply("ok", "declined $id")
+            }
+
+            "hangup" -> {
+                calls.hangUp()
+                return reply("ok", "hung up")
+            }
+
+            "relay" -> {
+                calls.relayOnly = intent.getBooleanExtra("on", true)
+                return reply("ok", "relay-only ${calls.relayOnly}")
+            }
+
+            "turn" -> {
+                val peer = intent.getStringExtra("peer") ?: return reply("error", "missing 'peer' extra")
+                val servers = getKoin().get<MeshManager>().turnServers(peer)
+                val list = JSONArray()
+                servers.forEach { server ->
+                    list.put(JSONObject().put("urls", JSONArray(server.urls)).put("expires", server.user.substringBefore(':')))
+                }
+                return reply("ok", "${servers.size} credential(s)").put("turn", list)
+            }
+        }
+        return JSONObject()
+            .put("status", "ok")
+            .put("foreground", foreground)
+            .put("relayOnly", calls.relayOnly)
+            .put(
+                "call",
+                state?.let {
+                    JSONObject()
+                        .put("id", it.id)
+                        .put("peer", it.peerId)
+                        .put("outgoing", it.outgoing)
+                        .put("phase", it.phase.name)
+                        .put("startedAt", it.startedAt)
+                        .put("connectedAt", it.connectedAt ?: JSONObject.NULL)
+                        .put("muted", it.muted)
+                        .put("speaker", it.speaker)
+                        .put("reason", it.reason ?: JSONObject.NULL)
+                        .put("route", calls.route() ?: JSONObject.NULL)
+                } ?: JSONObject.NULL,
+            )
+    }
+
+    /**
      * Drives a direct file transfer headless (transfer/TransferManager) so two lab phones can run one
      * without touching a screen: `--es to <nodeId> --es path <file>` offers the file at `path` to that peer;
      * `--es accept|decline|cancel <transferId>` answers one; `--ez sweep true` clears a group a dead process
@@ -1957,6 +2053,7 @@ class DebugBridgeReceiver :
      * simply never answered. Note that the disclosure sheet is a UI gate only — accepting an offer through this
      * bridge steps around it, exactly as it steps around the picker.
      */
+
     private suspend fun handleXfer(intent: Intent): JSONObject {
         if (intent.getBooleanExtra("sweep", false)) {
             directWifi.sweep()
@@ -2604,6 +2701,7 @@ class DebugBridgeReceiver :
         const val ACTION_LORATX = "app.getknit.knit.debug.LORATX"
         const val ACTION_LORAPROV = "app.getknit.knit.debug.LORAPROV"
         const val ACTION_XFER = "app.getknit.knit.debug.XFER"
+        const val ACTION_CALL = "app.getknit.knit.debug.CALL"
         const val ACTION_BACKUP = "app.getknit.knit.debug.BACKUP"
         const val ACTION_PURGE = "app.getknit.knit.debug.PURGE"
         const val ACTION_RESETDB = "app.getknit.knit.debug.RESETDB"

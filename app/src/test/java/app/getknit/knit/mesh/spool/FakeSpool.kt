@@ -65,6 +65,9 @@ class FakeSpool(
     private val tombstonePadding: Int = 0,
     // A spool that turns every stamp down (a difficulty the client cannot meet, a day it will not take).
     private val rejectStamps: Boolean = false,
+    // Issues TURN credentials (experimental, docs/VOICE_CALLS.md §2): HELLO carries `turn` and a TURNREQ on a
+    // connection holding a SUB is answered. false = an older spool, which skips a TURNREQ unanswered.
+    private val turn: Boolean = false,
 ) : SpoolDialer {
     private class Attachment(
         val total: Int,
@@ -185,6 +188,7 @@ class FakeSpool(
                         ),
                     powBits = powBits,
                     commons = commons?.second,
+                    turn = true.takeIf { turn },
                 ),
             ),
         )
@@ -306,6 +310,10 @@ class FakeSpool(
 
     /** Records this spool was sent but does not implement; must stay empty against a v1 spool. */
     val skippedRecords = mutableListOf<String>()
+
+    /** How many TURN credentials this spool issued. */
+    var turnIssued = 0
+        private set
 
     /** How many chunks the spool holds for [aidHex] — the simplest "did the upload land" assertion. */
     fun chunkCount(
@@ -432,6 +440,7 @@ class FakeSpool(
                 handleLocked(bytes)
             }
 
+        @Suppress("CyclomaticComplexMethod") // a flat dispatch over the record registry
         private fun handleLocked(bytes: ByteArray) {
             when (SpoolCodec.peekType(bytes)) {
                 SpoolRecordType.HELLO -> {}
@@ -463,6 +472,10 @@ class FakeSpool(
 
                 SpoolRecordType.APUT -> {
                     if (attachments) SpoolCodec.decode<SpoolAput>(bytes)?.let(::onAput) else skip(SpoolRecordType.APUT)
+                }
+
+                SpoolRecordType.TURNREQ -> {
+                    if (turn) SpoolCodec.decode<SpoolTurnReq>(bytes)?.let(::onTurnReq) else skip(SpoolRecordType.TURNREQ)
                 }
 
                 else -> {}
@@ -580,6 +593,22 @@ class FakeSpool(
                     .filterNot { it === this }
                     .forEach { it.deliverEvent(push.scope, idHex, push.data) }
             }
+        }
+
+        private fun onTurnReq(req: SpoolTurnReq) {
+            turnIssued++
+            emit(
+                SpoolCodec.encode(
+                    SpoolTurnCred(
+                        t = SpoolRecordType.TURNCRED,
+                        q = req.q,
+                        urls = listOf("turn:spool.test:3478?transport=udp"),
+                        user = "1800000000:fake",
+                        pass = "fake-pass",
+                        exp = 1_800_000_000L,
+                    ),
+                ),
+            )
         }
 
         /** A v1 spool skips an unknown record without answering — the stall a client must never provoke. */

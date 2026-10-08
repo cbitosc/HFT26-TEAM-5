@@ -812,6 +812,46 @@ data class TransferPayload(
 }
 
 /**
+ * The sealed `CTL_CALL` payload — the signaling of one 1:1 voice call (`call/CallManager`, docs/VOICE_CALLS.md
+ * §3.2). Experimental, and spoken only by builds that advertise `Protocol.CAP_CALL`. [id] names one call attempt in
+ * both directions; [ph] is its phase; [gen] the negotiation generation (> 0 would be an ICE restart, not built).
+ * [sdp] rides the OFFER and the ANSWER with the gathered candidates folded in, [cand] carries the late ones in a
+ * single CANDS (an empty list ends them), and [rsn] says why a DECLINE, CANCEL or END happened. [m] is the media
+ * bitmask (1 audio; 2 video is reserved). Every field but [id]/[ph] is nullable or defaulted, per
+ * docs/WIRE_COMPAT.md rule 1. The media is DTLS-SRTP, so the `a=fingerprint` inside [sdp] — sealed and signed by
+ * the peer — is what authenticates it (§3.7).
+ */
+@Serializable
+data class CallPayload(
+    val id: String,
+    val ph: Int,
+    val gen: Int = 0,
+    val sdp: String? = null,
+    val cand: List<String>? = null,
+    val rsn: Int? = null,
+    val m: Int = MEDIA_AUDIO,
+) {
+    companion object {
+        const val PHASE_OFFER = 1
+        const val PHASE_RINGING = 2
+        const val PHASE_ANSWER = 3
+        const val PHASE_DECLINE = 4
+        const val PHASE_CANCEL = 5
+        const val PHASE_END = 6
+        const val PHASE_CANDS = 7
+
+        const val REASON_USER = 1
+        const val REASON_BUSY = 2
+        const val REASON_TIMEOUT = 3
+        const val REASON_NO_ROUTE = 4
+        const val REASON_MEDIA = 5
+        const val REASON_ERROR = 6
+
+        const val MEDIA_AUDIO = 1
+    }
+}
+
+/**
  * The end-to-end encryption envelope carried inside an encrypted [ChatContent]. A random per-message
  * content key encrypts the [app.getknit.knit.mesh.crypto.MessageContent] with AES-256-GCM into [ct]
  * under [nonce] (both raw byte strings — CBOR `@ByteString`, not base64: the envelope already rides a

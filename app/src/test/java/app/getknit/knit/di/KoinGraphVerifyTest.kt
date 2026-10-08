@@ -2,6 +2,8 @@ package app.getknit.knit.di
 
 import android.app.Application
 import android.content.Context
+import app.getknit.knit.call.CallSignals
+import app.getknit.knit.call.TurnSource
 import app.getknit.knit.data.crypto.KeystoreSecret
 import app.getknit.knit.data.settings.ContributionJournal
 import app.getknit.knit.data.settings.InboundSettings
@@ -31,7 +33,9 @@ class KoinGraphVerifyTest {
     @OptIn(KoinExperimentalAPI::class)
     @Test
     fun everyDefinitionResolves() {
-        module { includes(appModule, meshModule, moderationModule, uiModule) }.verify(extraTypes = extraTypes)
+        // Plus the voice calls' graph where this variant wires one (di/CallWiring; unit tests build the debug one).
+        val calls = listOfNotNull(callModule()).toTypedArray()
+        module { includes(appModule, meshModule, moderationModule, uiModule, *calls) }.verify(extraTypes = extraTypes)
     }
 
     private companion object {
@@ -65,6 +69,11 @@ class KoinGraphVerifyTest {
                 ContributionJournal::class,
                 ModelLoadJournal::class,
                 IdentitySource::class,
+                // The voice calls' seams, written inline over MeshManager so building the call graph builds nothing
+                // else (di/CallWiring), and the ring's alert timeout.
+                CallSignals::class,
+                TurnSource::class,
+                Long::class,
             )
     }
 }

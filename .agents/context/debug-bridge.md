@@ -182,6 +182,18 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   - A force-stop mid-transfer really does strand a group on air (`dumpsys wifip2p` shows
     `curState=GroupCreatedState` with the app dead). `--ez sweep true` is the same sweep the app runs 8 s into
     launch, on demand — the way to prove a leftover is gone without waiting out a restart.
+- `…debug.CALL` — drives an **experimental voice call** (`call/CallManager`, debug builds only;
+  `docs/VOICE_CALLS.md`). `--es op state` (the default) dumps the call, its phase, `reason` and the selected
+  candidate pair as `route` (`host/host`, `relay/srflx`…), plus `relayOnly`. `--es op start --es peer <nodeId>`
+  dials; `answer` opens the call screen, which answers; `decline` and `hangup` end it; `--es op relay --ez on true`
+  sends every new call through TURN (C-3.7-3); `--es op turn --es peer <nodeId>` asks the connected spools for a
+  credential and reports its URLs and expiry, never the username or password.
+  - `start` and `answer` refuse unless Knit is in the foreground (`am start` it first): the microphone's
+    foreground service and the call screen can only start from there. Pre-grant the mic with
+    `pm grant app.getknit.knit android.permission.RECORD_AUDIO`; the prompt cannot show over the keyguard.
+  - Both ends need `CAP_CALL` pinned for each other (`…debug.STATE`); a build that gains it republishes its profile
+    at the next mesh start. TURN needs a spool whose HELLO carried `turn`, with the peer's DM scope subscribed. The
+    oracle is logcat under `KnitCall` (`call <id> …` and `webrtc: …` lines; credentials are never logged).
 - `…debug.RATCHET` — dumps the **DM ratchet's per-peer state** and, with `--es reset <peerNodeId>`, forces a
   session reset past the heuristic that guards it. Exists because every gate in the recovery path returns
   *silently*: a peer we hold no prekey for (`peerPrekeyPinned:false` — a reset from this side is impossible
