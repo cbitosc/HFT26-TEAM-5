@@ -31,6 +31,12 @@ package app.getknit.knit.mesh.link
  *   it waits on.
  * - **Silence:** before the first report the window is [INITIAL_WINDOW]. With no report for [NO_REPORT_MS] — a peer
  *   that never reports, or whose reports stopped — the owner paces the feed the old way ([pacing]) until one comes.
+ * - **Two-second reporter:** a receiver whose reports come [SLOW_REPORT_MS] apart, each covering several chunks, is
+ *   paced too ([slowReporter]), in chunks small enough ([pacedChunkBytes]) that a receiver reporting every chunk answers
+ *   each well inside that gap. [RECOVER_REPORTS] such answers in a row, each one chunk at the paced spacing, give the
+ *   window back: a dozing receiver's late reports read like a two-second reporter's, and one woken mid-file (its user
+ *   picking it up to look) drains at its full rate again (the D2 run of 2026-10-08: a dozing P9 left a photo paced at
+ *   4 KiB/s to its end). A backlog read in a burst does not count: its reports come milliseconds apart.
  *
  * One stream at a time ([start]). Not thread-safe: its owner ([FramedLink]) calls it under one lock. Pure, clocked by
  * the `now` each call passes.
@@ -85,10 +91,25 @@ internal class FeedWindow(
     // The receiver's last report time on its own clock, and how many reports in a row came [SLOW_REPORT_MS] or more
     // apart: a receiver that reports every two seconds (its window switch off, or a build that predates the window)
     // never reports the starting window, and a window waiting on it ran in three-second fits below the paced base
-    // (the bluetooth-reviewer's finding). Two such gaps and the stream is paced to its end ([pacing]).
+    // (the bluetooth-reviewer's finding). Two such gaps and the stream is paced ([pacing]) until [RECOVER_REPORTS]
+    // reports in a row come one chunk at a time, inside the gap: a two-second reporter never sends one.
     private var lastReportMs = -1L
     private var slowGaps = 0
-    private var slowReporter = false
+    private var onTimeReports = 0
+
+    // The shortest gap, on the receiver's clock, an on-time report may follow the last by: half the paced chunks'
+    // spacing ([chunkFor]). A dozing receiver working through its backlog reports each chunk milliseconds apart, and
+    // three of those would give the window back to a receiver still asleep (the bluetooth-reviewer's finding).
+    private var onTimeFloorMs = 0L
+
+    // Where the stream stood (stream-relative) when it was last taken for a two-second reporter: only a chunk written
+    // after it can be answered on time. The window's chunks still out at that moment are a backlog the floor cannot
+    // judge, since no paced chunk had set it yet (the bluetooth-reviewer's second pass).
+    private var pacedFrom = 0L
+
+    /** Whether the stream paces a receiver taken for a two-second reporter, until it answers chunk by chunk again. */
+    var slowReporter = false
+        private set
 
     /** A stream starts at [offset] of its blob, at [now]. */
     fun start(
@@ -110,6 +131,9 @@ internal class FeedWindow(
         probingRtt = false
         lastReportMs = -1L
         slowGaps = 0
+        onTimeReports = 0
+        onTimeFloorMs = 0L
+        pacedFrom = 0L
         slowReporter = false
     }
 
@@ -156,7 +180,7 @@ internal class FeedWindow(
             ahead = outAhead.removeFirst()
             landed++
         }
-        noteReportGap(ms, landed)
+        noteReportGap(ms, landed, end)
         // A chunk back after half again what it should have taken — the round trip, the queue, and what was ahead of it at the
         // drain — waited behind a queue that grew: the link slowed, and the drain's filter keeps only what it measures
         // next. Judged by what was ahead, not by the window: a round trip carried over from a faster file would otherwise
@@ -204,15 +228,31 @@ internal class FeedWindow(
      * A report [ms] after the header, on the receiver's clock, covering [landed] more chunks: two gaps of [SLOW_REPORT_MS]
      * that each covered more than one chunk mark a two-second reporter. A windowed receiver reports every chunk, so its
      * gaps are the chunks' own, and long on a slow link or across a probe: read by time alone they paced a slow link's
-     * window back to the fixed pace (the bluetooth-reviewer's finding).
+     * window back to the fixed pace (the bluetooth-reviewer's finding). Once marked, [RECOVER_REPORTS] reports in a
+     * row unmark it, each one chunk written since ([pacedFrom]), under [SLOW_REPORT_MS] after the last and no sooner than
+     * [onTimeFloorMs]: [pacedChunkBytes] keeps the paced chunks that close, and the floor keeps a backlog's burst out.
      */
     private fun noteReportGap(
         ms: Long,
         landed: Int,
+        end: Long,
     ) {
         if (lastReportMs >= 0) {
-            slowGaps = if (ms - lastReportMs >= SLOW_REPORT_MS && landed > 1) slowGaps + 1 else 0
-            if (slowGaps >= SLOW_GAPS) slowReporter = true
+            val gap = ms - lastReportMs
+            slowGaps = if (gap >= SLOW_REPORT_MS && landed > 1) slowGaps + 1 else 0
+            if (slowGaps >= SLOW_GAPS && !slowReporter) {
+                slowReporter = true
+                pacedFrom = written
+            }
+            if (slowReporter) {
+                val onTime = gap in onTimeFloorMs until SLOW_REPORT_MS && landed == 1 && end > pacedFrom
+                onTimeReports = if (onTime) onTimeReports + 1 else 0
+                if (onTimeReports >= RECOVER_REPORTS) {
+                    slowReporter = false
+                    slowGaps = 0
+                    onTimeReports = 0
+                }
+            }
         }
         lastReportMs = maxOf(lastReportMs, ms)
     }
@@ -290,6 +330,31 @@ internal class FeedWindow(
         return chunk.coerceIn(MIN_CHUNK_BYTES.toLong(), LinkFraming.FILE_CHUNK_BYTES.toLong()).toInt()
     }
 
+    /**
+     * A paced chunk's size, from the pace's own [paced]: while [slowReporter], [MIN_CHUNK_BYTES], so at the paced base a
+     * receiver reporting every chunk answers each about half a second apart, inside [SLOW_REPORT_MS], and can earn the
+     * window back. A two-second reporter's reports still come two seconds apart, several chunks each.
+     */
+    fun pacedChunkBytes(paced: Int): Int = if (slowReporter) minOf(paced, MIN_CHUNK_BYTES) else paced
+
+    /**
+     * The next chunk's size for a feed with [pace]: the window's own while [windowed]; while a windowed feed is paced,
+     * [pacedChunkBytes] (small enough that a receiver reporting every chunk shows itself); a paced link's, its pace's.
+     */
+    fun chunkFor(
+        windowed: Boolean,
+        pace: PaceConfig,
+    ): Int {
+        if (windowed) return chunkBytes()
+        if (!pace.windowed) return pace.chunkBytes
+        val chunk = pacedChunkBytes(pace.chunkBytes)
+        onTimeFloorMs = chunk * MS_PER_SECOND / maxOf(pace.bytesPerSec, 1).toLong() / 2
+        return chunk
+    }
+
+    /** Why a windowed feed is paced, for its `bt file window` line: a two-second reporter, or a silent receiver. */
+    fun pacedWhy(): String = if (slowReporter) "paced: two-second reporter" else "paced: receiver silent"
+
     companion object {
         // The queue a feed keeps ahead of the receiver past the round trip: about the wait a frame behind the file sees.
         const val QUEUE_MS = 250L
@@ -329,6 +394,10 @@ internal class FeedWindow(
         // A receiver reporting this far apart (its own clock), twice running, reports every two seconds: pace it.
         const val SLOW_REPORT_MS = 1_900L
         private const val SLOW_GAPS = 2
+
+        // How many reports in a row, one chunk at a time at the paced spacing, give a two-second reporter its window
+        // back: a second and a half at the paced base.
+        const val RECOVER_REPORTS = 3
 
         // How many windows of queue at a report make it a standing one, whose sample is the drain: what a report finds
         // unheld is the queue plus the round trip's bytes plus the writer's last chunk, so one window fired on nearly

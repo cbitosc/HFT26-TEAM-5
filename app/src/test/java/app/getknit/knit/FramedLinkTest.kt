@@ -478,6 +478,49 @@ class FramedLinkTest {
     }
 
     @Test
+    fun aFeedTakenForATwoSecondReporterIsPacedInSmallChunksAndWinsItsWindowBack() {
+        // The D2 run of 2026-10-08: a dozing receiver's late reports, several chunks each, read as a two-second
+        // reporter's. Paced, the feed writes the smallest chunks, so a receiver answering each one on time shows itself;
+        // three such reports give the window back. The clock moves only when the test moves it, so the receiver is
+        // never silent.
+        val t = AtomicLong(0)
+        val h =
+            harness(
+                pace = { PaceConfig(bytesPerSec = 1024 * 1024, chunkBytes = 8_192, windowed = true) },
+                now = { t.get() },
+            )
+        val key = "d4".repeat(32)
+        val file = tmp.newFile("dozing.bin").apply { writeBytes(ByteArray(256 * 1024)) }
+        assertTrue(h.link.sendFile(file, FileMeta(FileKind.ATTACHMENT, key, "image/jpeg")))
+        assertEquals(LinkFraming.Type.FILE_HEADER, LinkFraming.read(h.fromLink)!!.type)
+        var written = chunksUntilQuiet(h.fromLink).sum().toLong()
+        h.link.onProgress(key, written, 2_000)
+        // Two late reports two seconds apart, each holding everything written since: several chunks apiece.
+        for (ms in listOf(4_000L, 6_000L)) {
+            val refill = chunksUntilQuiet(h.fromLink)
+            assertTrue("refilled in more than one chunk: $refill", refill.size > 1)
+            written += refill.sum()
+            h.link.onProgress(key, written, ms)
+        }
+        val paced = chunksUntilQuiet(h.fromLink)
+        assertTrue("paced: $paced", paced.isNotEmpty() && !h.link.txWindowed)
+        assertTrue("in the smallest chunks, not the pace's 8 KiB: $paced", paced.all { it == FeedWindow.MIN_CHUNK_BYTES })
+
+        // The pace lets more go as its clock moves: 20 ms of 1 MiB/s, about ten chunks.
+        t.addAndGet(20)
+        val more = paced + chunksUntilQuiet(h.fromLink)
+        assertTrue("paced chunks to answer: $more", more.size >= FeedWindow.RECOVER_REPORTS && !h.link.txWindowed)
+        // Woken: it reports chunk by chunk, half a second apart on its own clock.
+        var held = written
+        for (i in 1..FeedWindow.RECOVER_REPORTS) {
+            held += FeedWindow.MIN_CHUNK_BYTES
+            h.link.onProgress(key, held, 6_000L + i * 500)
+        }
+        assertTrue("windowed again", awaitUntil { h.link.txWindowed })
+        h.link.close()
+    }
+
+    @Test
     fun framesQueuedDuringAWindowedFeedsFallbackDoNotHurryItsPace() {
         // A silent receiver's feed is paced; a frame's wake drains the frame but must not end the pace's wait, or the pace
         // follows the link's frames (the bluetooth-reviewer's finding). On a real clock, as the silent-receiver case.

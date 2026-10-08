@@ -61,7 +61,8 @@ The receiver's progress reports (`blobprog`, nsr7) already measure what the air 
    - **Chunks:** about 250 ms of the rate each, 2–16 KiB.
    - **A receiver that reports every two seconds** (its window switch off, or a build that predates the window) never
      reports the starting window, and a window waiting on it ran in three-second fits below the paced base. Two report
-     gaps of 1.9 s or more in a row, each covering more than one chunk, pace the stream to its end. A windowed receiver
+     gaps of 1.9 s or more in a row, each covering more than one chunk, pace the stream, until it answers chunk by chunk
+     again (the dozing-receiver amendment below). A windowed receiver
      reports every chunk, so its gaps are the chunks' own, long on a slow link or across a probe; read by time alone
      they paced a slow link's window away (the reviewer's fourth pass).
 2. **Which links.** The window covers a 1M/2M link to an Android peer carrying `CAP_BLOB_HAVE`
@@ -193,3 +194,67 @@ by `…debug.LINKTUNE --es feed window|pace` and `--ez boost`:
 - **Before the arms:** pick `QUEUE_MS` with `scripts/ble-drain-trial.py --feed window --window-queue-ms 250|500|1000`
   on one link, reading the receiver's `rx … in` line, the texts, and the `bt file window` line.
 - **Flipping the release default** is a separate commit after the A/B.
+
+## Amendment 2026-10-08: a dozing receiver gets its window back
+
+**What was observed.** On 2026-10-08 the P3, lit, posted a group picture to the dark P8 and P9, with the boost off and
+no orphan connections (#142; run D2, 6 reps). The P3's snoop showed its link to the P9 skipping 41–68% of connection
+events, at 2.4–9 KiB/s, while its link to the P8 drained 17–19 KiB/s at the same moments. With the P9's screen kept on
+(run D3, 3 reps), the same link drained 13.6–14.5 KiB/s and the P9 held the picture in 17–28 s, against 48–167 s
+dark. A dark receiver dozing drains slower, and its reports come back late, several chunks at a time.
+
+In D2's second rep those late reports read as a two-second reporter's, and the rest of the picture went at the 4 KiB/s
+pace. That cost little while the P9 dozed. But the paced chunks were the pace's 8 KiB, one every 2 s, so a receiver
+woken mid-file, its user picking it up to look, still answered two seconds apart and stayed paced to the end.
+
+**What changed.**
+
+- **Paced chunks are small while the receiver is taken for a two-second reporter:** `FeedWindow.pacedChunkBytes`
+  gives `MIN_CHUNK_BYTES` (2 KiB), so a receiver reporting every chunk answers at the paced spacing. That spacing
+  follows 8jwn's split of the base among the links feeding at once: about 0.5 s with one feeder, 1 s with two (D2's
+  group picture), and 2 s or more with four or more, past `SLOW_REPORT_MS`, where a woken receiver never earns the
+  window back.
+- **Three such answers in a row give the window back** (`RECOVER_REPORTS`): each holds exactly one new chunk, under
+  `SLOW_REPORT_MS` after the last on the receiver's clock and no sooner than half the paced chunks' spacing (about
+  250 ms at the base). A true two-second reporter reports once every two seconds of its own clock
+  (`RxReports.EVERY_MS`), so it never earns one. The floor keeps out a dozing receiver working through a backlog,
+  whose per-chunk reports come milliseconds apart (the bluetooth-reviewer's finding). Only a chunk written after the
+  latch counts: the window's chunks still out when it trips arrive before any paced chunk has set the floor (its
+  second pass).
+- **Recovery assumes a lit sender.** A dark sender's paced waits stretch while its CPU sleeps, which pushes the
+  receiver's gaps past `SLOW_REPORT_MS`.
+- **The feed logs its switches:** `bt file window paced: two-second reporter|paced: receiver silent|back → <node>`,
+  on each change of what it says, including a reason that changes while the feed stays paced (silent, then taken for a
+  two-second reporter); a stream starts as `back` and does not log it.
+- **Checked on the phones (2026-10-08 05:08, P3 → P9 with the P9 on `--feed pace`):** `paced: receiver silent`, `back`,
+  then `paced: two-second reporter`, and no `back` for the 11 s the P9 kept reporting every 2 s. Switched to per-chunk
+  reports, it logged `back` 3.1 s later. The P9 stayed dark, so the rest of the picture went at its dozing drain.
+
+**What it costs.** A dozing receiver can flap: a run of on-time reports gives the window back, and two late batches
+take it away again. Each switch moves the meter's pace and the split of any paced link beside it. Smaller paced
+chunks add a record header every 2 KiB instead of every 8 KiB, and wake a writer paced against a true two-second
+reporter twice a second instead of every two.
+
+**Open: what made D2's reports late and several chunks each.** A receiver reporting every chunk sends its first late
+report with one chunk in it, which cannot meet the latch (`landed > 1`). So D2's reports were merged or lost on the way.
+Candidates, none proven: the receiver's `rxProgress` flow (16 deep, `DROP_OLDEST`, `BluetoothMeshTransport`) behind a
+stalled collector, `BlobExchange.onFileProgress` returning early while the peer is briefly not a neighbour, or a failed
+send. Until that is known, how often a dozing receiver flaps has no bound in code; fixing a drop would remove the false
+latch at its source.
+
+**Not changed.** The stall, the deadline and the asker order already scale with a slow drain: late reports of 2–3 s
+never reach `FeedMeter.STALL_MS`, the deadline comes from a measured ETA, and `expectedFileRate` puts a dozing
+receiver measured slow behind a lit one.
+
+**Tests.** `FeedWindowTest.aDozingReceiverWokenMidFileGetsItsWindowBack`, `aTwoSecondReporterStaysPacedInSmallChunks`,
+`anOnTimeRunBrokenByALateReportStartsOver`, `aDozingReceiverWorkingThroughItsBacklogDoesNotWinTheWindowBack`,
+`theWindowsChunksStillOutWhenTheFeedIsPacedAreNoAnswer`, `aReportThatProvesNoNewChunkIsNotOnTime`;
+`FramedLinkTest.aFeedTakenForATwoSecondReporterIsPacedInSmallChunksAndWinsItsWindowBack`.
+
+**Device check owed.** The D2 cell (the P3 lit posting to the group, the P8 and P9 dark, boost off). Wake the P9
+during a feed that logged `paced: two-second reporter` and read `bt file window back` within about 4 s (two feeders,
+1 s paced spacing, three answers), then its
+drain return to the lit-receiver level. While the P9 stays dark, `back` should not fire; count each `back`/`paced`
+pair per rep if it does, and count the P9's sent `blobprog` reports against the P3's taken ones per stream to settle
+the open question. A second check pairs a windowed sender with a receiver on `--feed pace`: one
+`paced: two-second reporter` and no `back` for the rest of the file.

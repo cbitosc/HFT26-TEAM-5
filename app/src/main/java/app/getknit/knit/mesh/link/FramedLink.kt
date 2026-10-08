@@ -688,6 +688,7 @@ class FramedLink(
         val window = PaceWindow(cfg, now())
         val buf = ByteArray(LinkFraming.FILE_CHUNK_BYTES)
         var windowed = false
+        var why = "back" // what the stream's `bt file window` line last said: a stream starts windowed
         while (true) {
             // Interleave live frames between chunks — and flush them NOW so they ride the pace gap ahead
             // of the next chunk instead of trailing behind it in the socket buffer.
@@ -702,6 +703,10 @@ class FramedLink(
                 }
             txWindowed = windowed
             if (wasWindowed && !windowed) window.restart(cfg, now())
+            // Logged on each change, a reason changing while paced included (silent, then a two-second reporter).
+            val says = if (windowed) "back" else synchronized(pendingLock) { inFlight.pacedWhy() }
+            if (cfg.windowed && says != why) log("bt file window $says → $nodeId")
+            why = says
             // Waiting for room, frames queued meanwhile go first and the window is read again.
             if (wait > 0) {
                 awaitReport(wait)
@@ -721,7 +726,7 @@ class FramedLink(
         windowed: Boolean,
         window: PaceWindow,
     ): Boolean {
-        val chunk = if (windowed) synchronized(pendingLock) { inFlight.chunkBytes() } else cfg.chunkBytes
+        val chunk = synchronized(pendingLock) { inFlight.chunkFor(windowed, cfg) }
         val paceNow = if (windowed) windowedPace(cfg.bytesPerSec) else cfg.bytesPerSec
         if (windowed && paceNow != txPace) logWindow(paceNow)
         notePaced(paceNow) // known before this chunk's write, which may block

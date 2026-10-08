@@ -1,6 +1,7 @@
 package app.getknit.knit
 
 import app.getknit.knit.mesh.link.FeedWindow
+import app.getknit.knit.mesh.link.PaceConfig
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -262,6 +263,104 @@ class FeedWindowTest {
     }
 
     @Test
+    fun aDozingReceiverWokenMidFileGetsItsWindowBack() {
+        // The D2 run of 2026-10-08: a dozing P9's reports came back late and several chunks at a time, so the feed was
+        // taken for a two-second reporter and paced at 4 KiB/s to its end. Woken, it reports each small paced chunk
+        // inside the gap, and three in a row give the window back.
+        val w = FeedWindow().apply { start(offset = 0, now = 0) }
+        repeat(6) { w.wrote(2_048, 0) }
+        w.report(held = 4_096, ms = 2_000, now = 2_100)
+        w.report(held = 8_192, ms = 4_000, now = 4_100)
+        w.report(held = 12_288, ms = 6_000, now = 6_100)
+        assertTrue(w.pacing(6_100))
+        assertEquals("paced in the smallest chunks", FeedWindow.MIN_CHUNK_BYTES, w.chunkFor(false, BASE_PACE))
+        repeat(4) { w.wrote(2_048, 6_200 + it * 500L) }
+        w.report(held = 14_336, ms = 6_500, now = 6_600)
+        w.report(held = 16_384, ms = 7_000, now = 7_100)
+        assertTrue("two on time are not yet three", w.pacing(7_100))
+        w.report(held = 18_432, ms = 7_500, now = 7_600)
+        assertFalse("three chunks answered on time: windowed again", w.pacing(7_600))
+        assertEquals("and its chunks are the pace's own again", 8_192, w.pacedChunkBytes(8_192))
+    }
+
+    @Test
+    fun aDozingReceiverWorkingThroughItsBacklogDoesNotWinTheWindowBack() {
+        // Still asleep, it reads a backlog of paced chunks at once and reports each milliseconds apart: one chunk a
+        // report, inside the gap, but sooner than the pace could have delivered them (the bluetooth-reviewer's finding).
+        val w = FeedWindow().apply { start(offset = 0, now = 0) }
+        repeat(6) { w.wrote(2_048, 0) }
+        w.report(held = 4_096, ms = 2_000, now = 2_100)
+        w.report(held = 8_192, ms = 4_000, now = 4_100)
+        w.report(held = 12_288, ms = 6_000, now = 6_100)
+        w.chunkFor(false, BASE_PACE) // paced: 2 KiB every half second, so a report under a quarter second is a burst
+        repeat(4) { w.wrote(2_048, 6_200) }
+        w.report(held = 14_336, ms = 8_000, now = 8_100)
+        w.report(held = 16_384, ms = 8_005, now = 8_100)
+        w.report(held = 18_432, ms = 8_010, now = 8_100)
+        w.report(held = 20_480, ms = 8_015, now = 8_100)
+        assertTrue("a backlog read at once: still paced", w.pacing(8_100))
+    }
+
+    @Test
+    fun theWindowsChunksStillOutWhenTheFeedIsPacedAreNoAnswer() {
+        // The latch trips with a window of chunks out, before any paced chunk sets the burst floor. A dozing receiver's
+        // reports for those, read at once, are a backlog, not a receiver awake (the bluetooth-reviewer's second pass).
+        val w = FeedWindow().apply { start(offset = 0, now = 0) }
+        repeat(10) { w.wrote(2_048, 0) }
+        w.report(held = 4_096, ms = 2_000, now = 2_100)
+        w.report(held = 8_192, ms = 4_000, now = 4_100)
+        w.report(held = 12_288, ms = 6_000, now = 6_100)
+        assertTrue(w.pacing(6_100))
+        w.report(held = 14_336, ms = 6_001, now = 6_100)
+        w.report(held = 16_384, ms = 6_002, now = 6_100)
+        w.report(held = 18_432, ms = 6_003, now = 6_100)
+        w.report(held = 20_480, ms = 6_004, now = 6_100)
+        assertTrue("the window's own chunks, read at once: still paced", w.pacing(6_100))
+    }
+
+    @Test
+    fun aReportThatProvesNoNewChunkIsNotOnTime() {
+        val w = FeedWindow().apply { start(offset = 0, now = 0) }
+        repeat(6) { w.wrote(2_048, 0) }
+        w.report(held = 4_096, ms = 2_000, now = 2_100)
+        w.report(held = 8_192, ms = 4_000, now = 4_100)
+        w.report(held = 12_288, ms = 6_000, now = 6_100)
+        w.report(held = 12_288, ms = 6_500, now = 6_600)
+        w.report(held = 12_288, ms = 7_000, now = 7_100)
+        w.report(held = 12_288, ms = 7_500, now = 7_600)
+        assertTrue("three reports holding nothing new: still paced", w.pacing(7_600))
+    }
+
+    @Test
+    fun aTwoSecondReporterStaysPacedInSmallChunks() {
+        // Two seconds apart and several small chunks each, its reports never come on time.
+        val w = FeedWindow().apply { start(offset = 0, now = 0) }
+        var held = 0L
+        for (i in 1..10) {
+            repeat(4) { w.wrote(2_048, i * 2_000L - 1_500) }
+            held += 4 * 2_048
+            w.report(held = held, ms = i * 2_000L, now = i * 2_000L + 100)
+        }
+        assertTrue("still paced after ten reports", w.pacing(20_100))
+    }
+
+    @Test
+    fun anOnTimeRunBrokenByALateReportStartsOver() {
+        val w = FeedWindow().apply { start(offset = 0, now = 0) }
+        repeat(6) { w.wrote(2_048, 0) }
+        w.report(held = 4_096, ms = 2_000, now = 2_100)
+        w.report(held = 8_192, ms = 4_000, now = 4_100)
+        w.report(held = 12_288, ms = 6_000, now = 6_100)
+        repeat(6) { w.wrote(2_048, 6_200) }
+        w.report(held = 14_336, ms = 6_500, now = 6_600)
+        w.report(held = 16_384, ms = 7_000, now = 7_100)
+        w.report(held = 20_480, ms = 9_000, now = 9_100) // a late catch-up of two chunks
+        w.report(held = 22_528, ms = 9_500, now = 9_600)
+        w.report(held = 24_576, ms = 10_000, now = 10_100)
+        assertTrue("the run counts again from the late one", w.pacing(10_100))
+    }
+
+    @Test
     fun aWindowedReceiverOnASlowLinkIsNotTakenForATwoSecondReporter() {
         // Its reports come one per chunk, so on a slow link, or across a probe, they are two seconds apart too; read by
         // time alone that paced the slow link's window away (the bluetooth-reviewer's finding).
@@ -419,6 +518,9 @@ class FeedWindowTest {
     }
 
     private companion object {
+        // A windowed feed's paced fallback at the 4 KiB/s base, in the pace's 8 KiB chunks.
+        val BASE_PACE = PaceConfig(bytesPerSec = 4_096, chunkBytes = 8_192, windowed = true)
+
         const val STEP_MS = 10L
         const val CHUNK_REPORT_BYTES = 2_048L
     }
