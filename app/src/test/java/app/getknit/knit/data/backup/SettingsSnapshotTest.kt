@@ -43,6 +43,8 @@ class SettingsSnapshotTest {
                     longPreferencesKey("mesh_pause_until") to 9L,
                     intPreferencesKey("debug_ble_link_cap") to 2,
                     booleanPreferencesKey("debug_nan_off") to true,
+                    stringPreferencesKey("spool_ticket:relay.example") to "knit-ticket:v1:…",
+                    stringPreferencesKey("spool_ticket_verdict:relay.example") to "retry:early",
                     longPreferencesKey("lora_board_node") to 42L,
                     booleanPreferencesKey("lora_enabled") to true,
                 )
@@ -68,6 +70,8 @@ class SettingsSnapshotTest {
                 "mesh_pause_until",
                 "debug_ble_link_cap",
                 "debug_nan_off",
+                "spool_ticket:relay.example",
+                "spool_ticket_verdict:relay.example",
             )) {
                 assertFalse(dropped, restored.asMap().keys.any { it.name == dropped })
             }

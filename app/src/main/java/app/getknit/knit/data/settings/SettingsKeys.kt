@@ -24,7 +24,9 @@ object SettingsKeys {
      * as prefixes against the key name. The clone watch's two stamps (`clone_seen_at`, `clone_dismissed_at`)
      * are about this phone too: a backup taken while its banner showed must not plant it on the next one, and
      * so is the mesh pause deadline (`mesh_pause_until`): a backup taken mid-pause must not pause the other phone.
-     * Debug-build diagnostic knobs (`debug_`, e.g. the Bluetooth link cap) are about this phone's test run.
+     * Debug-build diagnostic knobs (`debug_`, e.g. the Bluetooth link cap) are about this phone's test run. A spool
+     * entitlement ticket (`spool_ticket…`, ADR 2026-10.xkp4) is a bearer grant to this phone for a day, and must not
+     * ride a backup file anywhere.
      */
     val TRANSIENT_PREFIXES: List<String> =
         listOf(
@@ -39,5 +41,6 @@ object SettingsKeys {
             "lora_prior_",
             "lora_plane_state",
             "debug_",
+            "spool_ticket",
         )
 }

@@ -5,6 +5,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import app.getknit.knit.data.emoji.RecentReactions
 import app.getknit.knit.mesh.bluetooth.PromotionConfig
+import app.getknit.knit.mesh.spool.StoredSpoolTicket
 import app.getknit.knit.ui.theme.ThemeMode
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.first
@@ -448,5 +449,25 @@ class SettingsStoreTest {
             store.markWhatsNewSeen("b")
             store.noteWhatsNewOpen("b", now = 400L)
             assertEquals(WhatsNewRecord("b", "b", 300L, 1), store.whatsNewRecord.first())
+        }
+
+    @Test
+    fun `a spool ticket is kept per host, and an answer lands only on the ticket it answered`() =
+        runTest {
+            val store = newStore()
+            assertTrue(store.spoolTickets.first().isEmpty())
+            store.putSpoolTicket("lab.example", "knit-ticket:v1:first")
+            store.putSpoolTicket("other.example", "knit-ticket:v1:other")
+            store.answerSpoolTicket("lab.example", "knit-ticket:v1:first", verdict = "signature", drop = false)
+            assertEquals(StoredSpoolTicket("knit-ticket:v1:first", "signature"), store.spoolTickets.first()["lab.example"])
+
+            // A new import replaces the ticket and clears its verdict; a late answer to the old one changes nothing.
+            store.putSpoolTicket("lab.example", "knit-ticket:v1:second")
+            store.answerSpoolTicket("lab.example", "knit-ticket:v1:first", verdict = null, drop = true)
+            assertEquals(StoredSpoolTicket("knit-ticket:v1:second", null), store.spoolTickets.first()["lab.example"])
+
+            store.answerSpoolTicket("lab.example", "knit-ticket:v1:second", verdict = null, drop = true)
+            store.removeSpoolTicket("other.example")
+            assertTrue(store.spoolTickets.first().isEmpty())
         }
 }

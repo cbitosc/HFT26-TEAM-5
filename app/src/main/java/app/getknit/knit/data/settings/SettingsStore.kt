@@ -12,6 +12,8 @@ import app.getknit.knit.BuildConfig
 import app.getknit.knit.data.emoji.RecentReactions
 import app.getknit.knit.mesh.bluetooth.CodedPhyMode
 import app.getknit.knit.mesh.bluetooth.PromotionConfig
+import app.getknit.knit.mesh.spool.SpoolTicketJournal
+import app.getknit.knit.mesh.spool.StoredSpoolTicket
 import app.getknit.knit.ui.theme.ThemeMode
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
@@ -30,7 +32,8 @@ class SettingsStore(
     ModelLoadJournal,
     NanAttachJournal,
     NanInitiatorJournal,
-    ContributionJournal {
+    ContributionJournal,
+    SpoolTicketJournal {
     override val displayName: Flow<String> = dataStore.data.map { it[KEY_NAME] ?: "" }
     val status: Flow<String> = dataStore.data.map { it[KEY_STATUS] ?: "" }
 
@@ -888,6 +891,69 @@ class SettingsStore(
             it[KEY_SPOOL_DISABLED] = (it[KEY_SPOOL_DISABLED] ?: emptySet()) - url
         }
 
+    /**
+     * The entitlement tickets this device holds, one per spool host name (experimental, docs/VOICE_CALLS.md §2.6, ADR
+     * 2026-10.xkp4). Kept here beside [spoolUrls] and its `?k=` tokens, and protected the same way (ADR
+     * 2026-09.66cw): app-private, excluded from Auto Backup and device transfer with the whole DataStore, and — unlike
+     * a token — kept out of a Knit backup too (`SettingsKeys.TRANSIENT_PREFIXES`), since a ticket is a day's grant to
+     * this phone's account, not a setting the person carries. Two keys per host: the ticket's text and the verdict
+     * its last answer left.
+     */
+    override val spoolTickets: Flow<Map<String, StoredSpoolTicket>> =
+        dataStore.data.map { prefs ->
+            prefs
+                .asMap()
+                .entries
+                .mapNotNull { (key, value) ->
+                    if (!key.name.startsWith(SPOOL_TICKET_PREFIX)) return@mapNotNull null
+                    val host = key.name.removePrefix(SPOOL_TICKET_PREFIX)
+                    val text = value as? String ?: return@mapNotNull null
+                    host to StoredSpoolTicket(text, prefs[spoolTicketVerdictKey(host)])
+                }.toMap()
+        }
+
+    override suspend fun putSpoolTicket(
+        host: String,
+        text: String,
+    ) {
+        dataStore.edit {
+            it[spoolTicketKey(host)] = text
+            it.remove(spoolTicketVerdictKey(host))
+        }
+    }
+
+    override suspend fun removeSpoolTicket(host: String) {
+        dataStore.edit {
+            it.remove(spoolTicketKey(host))
+            it.remove(spoolTicketVerdictKey(host))
+        }
+    }
+
+    override suspend fun answerSpoolTicket(
+        host: String,
+        text: String,
+        verdict: String?,
+        drop: Boolean,
+    ) {
+        dataStore.edit {
+            if (it[spoolTicketKey(host)] != text) return@edit
+            when {
+                drop -> {
+                    it.remove(spoolTicketKey(host))
+                    it.remove(spoolTicketVerdictKey(host))
+                }
+
+                verdict == null -> {
+                    it.remove(spoolTicketVerdictKey(host))
+                }
+
+                else -> {
+                    it[spoolTicketVerdictKey(host)] = verdict
+                }
+            }
+        }
+    }
+
     /** Hides the room's relay notice for good. See [relayRoomNoticeDismissed]; there is no un-dismiss. */
     suspend fun dismissRelayRoomNotice() = dataStore.edit { it[KEY_RELAY_ROOM_NOTICE_DISMISSED] = true }
 
@@ -983,6 +1049,16 @@ class SettingsStore(
 
     private companion object {
         const val LAST_READ_PREFIX = "last_read_"
+
+        // A held entitlement ticket and its verdict, per spool host name. Both start with "spool_ticket", the
+        // backup-transient prefix in `SettingsKeys.TRANSIENT_PREFIXES`; neither prefix is a prefix of the other.
+        const val SPOOL_TICKET_PREFIX = "spool_ticket:"
+        const val SPOOL_TICKET_VERDICT_PREFIX = "spool_ticket_verdict:"
+
+        fun spoolTicketKey(host: String) = stringPreferencesKey(SPOOL_TICKET_PREFIX + host)
+
+        fun spoolTicketVerdictKey(host: String) = stringPreferencesKey(SPOOL_TICKET_VERDICT_PREFIX + host)
+
         const val MODEL_LOAD_PREFIX = "model_load_"
 
         val KEY_AWARE_GIVE_UP_STAMP = stringPreferencesKey("aware_give_up_stamp")

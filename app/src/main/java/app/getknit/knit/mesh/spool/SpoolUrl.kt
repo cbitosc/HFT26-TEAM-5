@@ -79,6 +79,17 @@ object SpoolUrl {
     }
 
     /**
+     * The host name alone, lowercased: no scheme, user info, port, path or token. What an entitlement ticket's `aud`
+     * must equal (docs/VOICE_CALLS.md §2.6) and the key a held ticket is stored under — a spool's audience is a
+     * lowercase host name (knit-spool's `SPOOL_TICKET_AUDIENCE`), never a port. Null when [url] carries none.
+     */
+    fun hostname(url: String): String? {
+        val authority = redact(url).substringAfter("://", missingDelimiterValue = "").substringBefore('/').substringAfterLast('@')
+        val name = if (authority.startsWith('[')) authority.substringBefore(']') + "]" else authority.substringBefore(':')
+        return name.lowercase().ifEmpty { null }
+    }
+
+    /**
      * Where this spool publishes what it is running: its `GET /source` document, derived from the URL we
      * dial by swapping the scheme and replacing [SPOOL_PATH]. Null when the URL is not one this build
      * would dial at all, so the plaintext rule [isAcceptable] enforces covers this fetch too — a release
