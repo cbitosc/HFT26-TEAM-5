@@ -70,6 +70,7 @@ import androidx.compose.foundation.text.input.clearText
 import androidx.compose.foundation.text.input.maxLength
 import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.foundation.text.input.setTextAndPlaceCursorAtEnd
+import androidx.compose.foundation.text.input.then
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -128,6 +129,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -569,6 +571,7 @@ fun ChatScreen(
         onTyping = viewModel::onUserTyping,
         onDraftChanged = viewModel::onDraftChanged,
         linkPreviewLoading = linkPreviewLoading,
+        mentions = pendingMentions,
         onMentionAdded = { m -> if (pendingMentions.none { it == m }) pendingMentions.add(m) },
         onStartReply = { replyingTo = it },
         onCancelReply = { replyingTo = null },
@@ -696,6 +699,8 @@ internal fun ChatScreenContent(
     onDraftChanged: (String) -> Unit = {},
     // True while that card is being fetched; the input bar shows a transient "Loading preview…" line.
     linkPreviewLoading: Boolean = false,
+    // The draft's autocompleted mentions, drawn and edited as chips in the field (see [MentionChips]).
+    mentions: List<Mention> = emptyList(),
     onMentionAdded: (Mention) -> Unit,
     onStartReply: (ReplyRef) -> Unit,
     onCancelReply: () -> Unit,
@@ -1139,6 +1144,7 @@ internal fun ChatScreenContent(
                         replyingTo = replyingTo,
                         myNodeId = state.myNodeId,
                         onCancelReply = onCancelReply,
+                        mentions = mentions,
                         onMentionAdded = onMentionAdded,
                         onAttachClick = onAttachClick,
                         onCameraClick = onCameraClick,
@@ -3600,6 +3606,7 @@ private fun MessageInput(
     replyingTo: ReplyRef? = null,
     myNodeId: String = "",
     onCancelReply: () -> Unit = {},
+    mentions: List<Mention> = emptyList(),
     onMentionAdded: (Mention) -> Unit,
     onAttachClick: () -> Unit,
     onCameraClick: () -> Unit = {},
@@ -3730,6 +3737,14 @@ private fun MessageInput(
             activeQuery?.let { filterCandidates(candidates, it.query) }.orEmpty()
         }
     val showSuggestions = activeQuery != null && filtered.isNotEmpty()
+    // Read by the field's transformations on every edit and draw, so a mention picked a moment ago is a chip at once.
+    val currentMentions by rememberUpdatedState(mentions)
+    val chipStyle =
+        SpanStyle(
+            color = MaterialTheme.colorScheme.onSecondaryContainer,
+            background = MaterialTheme.colorScheme.secondaryContainer,
+            fontWeight = FontWeight.SemiBold,
+        )
 
     fun insertMention(
         query: MentionQuery,
@@ -3960,10 +3975,15 @@ private fun MessageInput(
                                 // The byte cap replaces the character one rather than chaining after it: a
                                 // Meshtastic line is a fifth of [TextLimits.MESSAGE] at its most generous, so
                                 // the character cap could never be the one that bit.
+                                // The chips go first: a deletion they widen only shortens the draft, so the
+                                // cap after them still judges the edit that actually lands.
                                 inputTransformation =
                                     remember(maxBytes) {
-                                        maxBytes?.let(::MaxUtf8Bytes) ?: InputTransformation.maxLength(TextLimits.MESSAGE)
+                                        MentionChips { currentMentions }.then(
+                                            maxBytes?.let(::MaxUtf8Bytes) ?: InputTransformation.maxLength(TextLimits.MESSAGE),
+                                        )
                                     },
+                                outputTransformation = remember(chipStyle) { MentionChipStyle({ currentMentions }, chipStyle) },
                                 textStyle =
                                     MaterialTheme.typography.bodyLarge.copy(
                                         color = MaterialTheme.colorScheme.onSurface,

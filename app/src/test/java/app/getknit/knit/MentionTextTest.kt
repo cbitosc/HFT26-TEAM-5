@@ -2,14 +2,19 @@ package app.getknit.knit
 
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import app.getknit.knit.mesh.protocol.Mention
 import app.getknit.knit.ui.chat.MentionCandidate
+import app.getknit.knit.ui.chat.MentionEdit
 import app.getknit.knit.ui.chat.activeMentionQuery
 import app.getknit.knit.ui.chat.annotateMessageBody
 import app.getknit.knit.ui.chat.filterCandidates
 import app.getknit.knit.ui.chat.findUrls
 import app.getknit.knit.ui.chat.highlightMentions
+import app.getknit.knit.ui.chat.keepChipsWhole
+import app.getknit.knit.ui.chat.mentionSpans
+import app.getknit.knit.ui.chat.snapOutOfChips
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -249,5 +254,85 @@ class MentionTextTest {
         assertEquals(1, links.size)
         assertEquals("https://a.com", (links[0].item as LinkAnnotation.Url).url)
         assertEquals("https://a.com", out.text.substring(links[0].start, links[0].end))
+    }
+
+    // --- mention chips ---
+
+    private val walter = listOf(Mention("n1", "Walter"))
+
+    @Test
+    fun spansAreSortedAndLongestNameWins() {
+        val spans = mentionSpans("@Jaylene and @Jay", listOf(Mention("a", "Jay"), Mention("b", "Jaylene")))
+        assertEquals(listOf(TextRange(0, 8), TextRange(13, 17)), spans)
+    }
+
+    @Test
+    fun backspaceAtAChipsEndTakesTheWholeChip() {
+        // "hi @Walter|" — the IME deletes the "r".
+        val chips = mentionSpans("hi @Walter", walter)
+        val out = keepChipsWhole(chips, listOf(MentionEdit(9, 10, "")))
+        assertEquals(listOf(MentionEdit(3, 10, "")), out)
+    }
+
+    @Test
+    fun forwardDeleteAtAChipsStartTakesTheWholeChip() {
+        val chips = mentionSpans("@Walter hi", walter)
+        assertEquals(listOf(MentionEdit(0, 7, "")), keepChipsWhole(chips, listOf(MentionEdit(0, 1, ""))))
+    }
+
+    @Test
+    fun aReplacementReachingIntoAChipTakesItWhole() {
+        // An autocorrect swapping "Walter hi" for "Walt hey" still leaves no half name.
+        val chips = mentionSpans("@Walter hi", walter)
+        assertEquals(listOf(MentionEdit(0, 10, "hey")), keepChipsWhole(chips, listOf(MentionEdit(5, 10, "hey"))))
+    }
+
+    @Test
+    fun typingInsideAChipLandsAfterIt() {
+        val chips = mentionSpans("@Walter", walter)
+        assertEquals(listOf(MentionEdit(7, 7, "x")), keepChipsWhole(chips, listOf(MentionEdit(3, 3, "x"))))
+    }
+
+    @Test
+    fun editsThatLeaveChipsWholeAreKept() {
+        val chips = mentionSpans("hi @Walter ok", walter)
+        // Typing at either edge, deleting the space after, and deleting the whole chip all pass untouched.
+        assertNull(keepChipsWhole(chips, listOf(MentionEdit(10, 10, "s"))))
+        assertNull(keepChipsWhole(chips, listOf(MentionEdit(3, 3, "x"))))
+        assertNull(keepChipsWhole(chips, listOf(MentionEdit(10, 11, ""))))
+        assertNull(keepChipsWhole(chips, listOf(MentionEdit(3, 10, ""))))
+        assertNull(keepChipsWhole(emptyList(), listOf(MentionEdit(5, 6, ""))))
+    }
+
+    @Test
+    fun widenedEditsThatMeetAreMerged() {
+        // "@Ann@Bob": one edit cuts the end of the first chip, another the start of the second.
+        val chips = mentionSpans("@Ann@Bob", listOf(Mention("a", "Ann"), Mention("b", "Bob")))
+        val out = keepChipsWhole(chips, listOf(MentionEdit(3, 4, "x"), MentionEdit(4, 5, "y")))
+        assertEquals(listOf(MentionEdit(0, 8, "xy")), out)
+    }
+
+    @Test
+    fun aCursorTappedInsideAChipGoesToTheNearerEdge() {
+        val chips = mentionSpans("hi @Walter", walter)
+        assertEquals(TextRange(3), snapOutOfChips(chips, TextRange(5), from = null))
+        assertEquals(TextRange(10), snapOutOfChips(chips, TextRange(8), from = null))
+        assertEquals(TextRange(1), snapOutOfChips(chips, TextRange(1), from = null))
+    }
+
+    @Test
+    fun arrowKeysStepOverAChip() {
+        val chips = mentionSpans("hi @Walter", walter)
+        // Left from the end lands at the start, right from the start lands at the end.
+        assertEquals(TextRange(3), snapOutOfChips(chips, TextRange(9), from = TextRange(10)))
+        assertEquals(TextRange(10), snapOutOfChips(chips, TextRange(4), from = TextRange(3)))
+    }
+
+    @Test
+    fun aSelectionGrowsToTakeEveryChipItCuts() {
+        val chips = mentionSpans("hi @Walter ok", walter)
+        assertEquals(TextRange(0, 10), snapOutOfChips(chips, TextRange(0, 6), from = null))
+        // A backwards selection keeps its direction.
+        assertEquals(TextRange(13, 3), snapOutOfChips(chips, TextRange(13, 6), from = null))
     }
 }
