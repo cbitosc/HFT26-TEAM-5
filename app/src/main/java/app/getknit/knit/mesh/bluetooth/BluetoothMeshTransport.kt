@@ -731,7 +731,7 @@ class BluetoothMeshTransport(
         return BleFeedPolicy.expectedRate(
             codedPace = if (phy == LinkPhy.CODED) CodedPhyPolicy.pace(phy, CodedPhyDiag.tuning).bytesPerSec else null,
             drained = link.lastDrain,
-            windowed = windowed(link, phy),
+            windowed = windowed(link),
             otherWindowedFeeds = { feedingLinks().count { it !== link && it.txWindowed } },
             drainRatio = link.drainRatio,
             boosted = { boostedShare(link, joining = !link.txInProgress) },
@@ -1153,8 +1153,10 @@ class BluetoothMeshTransport(
             }
         known.forEach { (link, status) ->
             if (links[link.nodeId] !== link) return@forEach
-            // A PHY step makes what the link's last stream measured meaningless for the next (ADR 2026-10.nsr7).
-            if (linkPhy.put(link, status.phy).let { it != null && it != status.phy }) link.forgetDrain()
+            // A PHY step makes what the link's last stream measured meaningless for the next (ADR 2026-10.nsr7); a step to
+            // or from Coded, the drain of the one streaming now too (ADR 2026-10.5buf's Coded amendment).
+            val was = linkPhy.put(link, status.phy)
+            if (was != null && was != status.phy) link.forgetDrain(newAir = was == LinkPhy.CODED || status.phy == LinkPhy.CODED)
         }
         CodedPhyDiag.publishLinkPhys(known.associate { (_, status) -> status.nodeId to status.phy })
         boosts.values.forEach(BleLinkBoost::poke) // a link on Coded is never boosted
@@ -1177,7 +1179,7 @@ class BluetoothMeshTransport(
         val tuning = CodedPhyDiag.tuning
         val base = CodedPhyPolicy.pace(phy, tuning, feeding, earned, le)
         // A windowed feed is clocked by its receiver's reports; the pace above is its fallback while the receiver is silent.
-        val pace = BleFeedPolicy.pace(base, windowed(link, phy), tuning.feedWindowQueueMs)
+        val pace = BleFeedPolicy.pace(base, windowed(link), phy, tuning)
         // Recorded only for the live link: a writer still finishing a chunk on a link torn down meanwhile would put it
         // back into the map after its teardown removed it, and pin it there.
         if (phy != LinkPhy.CODED && links[link.nodeId] === link && lastPace.put(link, feeding to earned) != feeding to earned) {
@@ -1218,14 +1220,11 @@ class BluetoothMeshTransport(
     private fun pacedFeedingLinks(): List<FramedLink> = feedingLinks().filter { !it.txWindowed }
 
     /**
-     * Whether a file to [link] is clocked by its receiver's reports (ADR 2026-10.nsr7's phase 2): the switch on, a 1M/2M
-     * link, and a peer that reports — an Android build carrying [Protocol.CAP_BLOB_HAVE]. Never an iPhone
+     * Whether a file to [link] is clocked by its receiver's reports (ADR 2026-10.nsr7's phase 2): the switch on and a
+     * peer that reports — an Android build carrying [Protocol.CAP_BLOB_HAVE] — on any PHY. Never an iPhone
      * ([DoorbellPolicy.serves]): nothing sends it a report to answer, and its own reports are not measured yet.
      */
-    private fun windowed(
-        link: FramedLink,
-        phy: LinkPhy = linkPhy[link] ?: LinkPhy.UNKNOWN,
-    ): Boolean = BleFeedPolicy.windowed(LinkTuneDiag.feedWindow, phy, link.peer.capabilities)
+    private fun windowed(link: FramedLink): Boolean = BleFeedPolicy.windowed(LinkTuneDiag.feedWindow, link.peer.capabilities)
 
     /**
      * Whether every one of [feedingLinks] has earned the boosted budget (none feeding earns nothing): the debug bridge's

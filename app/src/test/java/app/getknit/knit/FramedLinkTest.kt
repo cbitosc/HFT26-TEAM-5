@@ -452,6 +452,20 @@ class FramedLinkTest {
     }
 
     @Test
+    fun aWindowedFeedOnCodedStartsInItsSmallerChunks() {
+        // ADR 2026-10.5buf's Coded amendment: the window's floors are counted in the link's smallest chunk, which the
+        // pace carries, so Coded's slower air starts with half the 1M window in half its chunks.
+        val h = harness(pace = { PaceConfig(bytesPerSec = 1_024, chunkBytes = 2_048, windowed = true, windowChunkBytes = 1_024) })
+        val key = "c3".repeat(32)
+        val file = tmp.newFile("coded.bin").apply { writeBytes(ByteArray(64 * 1024)) }
+        assertTrue(h.link.sendFile(file, FileMeta(FileKind.ATTACHMENT, key, "image/jpeg")))
+        assertEquals(LinkFraming.Type.FILE_HEADER, LinkFraming.read(h.fromLink)!!.type)
+        assertEquals("four smallest chunks, in chunks of two", listOf(2_048, 2_048), chunksUntilQuiet(h.fromLink))
+        assertTrue(h.link.txWindowed)
+        h.link.close()
+    }
+
+    @Test
     fun aWindowedFeedWhoseReceiverIsSilentIsPacedUntilItReports() {
         // A peer that carries the bit but never reports (or whose reports stopped) gets the old pace, not a stopped feed.
         // On a real clock: a test clock jumping past the writer's wait would read as the writer asleep, not the receiver

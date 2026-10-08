@@ -463,3 +463,13 @@ second drop, `clear`), `CodedPhyPolicyTest` (`huntAfterDrop`, `hunts`, `scanPhys
 - An in-use bench: Knit open, a ~700 KB photo to a linked peer, texts at +5/+15/+30 s. The receiver's drain stays at or
   over 4.8 KB/s and the texts arrive inside 8jwn's bound. Note `hunt=` in every `ble-link-trial` rep: a lab phone with
   Knit in front and its screen lit now hunts the whole time.
+
+## Amendment 2026-10-08 — a Coded file to a peer that reports is clocked by its reports
+
+The walk trial this ADR's #114 amendment waited on has run, so a file on a Coded link to an Android peer carrying
+`CAP_BLOB_HAVE` is now fed by ADR 2026-10.5buf's window, as on 1M and 2M, in smaller chunks (1 KiB,
+`PhyTuning.codedWindowChunkBytes`); the measured drain sets its rate instead of the fixed 1 KiB/s, which stays the
+fallback for a silent receiver and the feed of an iPhone or an older build. A PHY step now forgets the window's drain
+as well as its round trip. The reasoning, the simulation and the owed desk and walk checks are 5buf's amendment of
+2026-10-08 (2).
+

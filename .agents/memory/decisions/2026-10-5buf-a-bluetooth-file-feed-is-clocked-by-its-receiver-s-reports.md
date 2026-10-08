@@ -68,7 +68,8 @@ The receiver's progress reports (`blobprog`, nsr7) already measure what the air 
 2. **Which links.** The window covers a 1M/2M link to an Android peer carrying `CAP_BLOB_HAVE`
    (`BluetoothMeshTransport.windowed`).
    - **Kept on today's `CodedPhyPolicy.pace`:** an iPhone (`DoorbellPolicy.serves`), since nothing reports to it and
-     its own reports are not measured yet; a Coded link, which waits on its walk trial; and an older build. A build
+     its own reports are not measured yet; a Coded link, which waits on its walk trial (windowed since the amendment
+     of 2026-10-08 (2), below); and an older build. A build
      that carries `CAP_BLOB_HAVE` but predates `blobprog` (origin/main at 403cd861) costs only a 3 s stall on the
      first 8 KiB, then the pace.
    - **That pace is also the fallback:** a windowed feed whose receiver has been silent for `NO_REPORT_MS` (3 s) is
@@ -154,7 +155,7 @@ drain is the only number that is right on each of them.
 
 - **A BBR-style probing cycle** (pace gain 1.25 and 0.75). The report's reset of the estimate already probes, and
   the device data does not ask for more yet.
-- **The window on Coded:** it waits on the walk trial.
+- **The window on Coded:** it waited on the walk trial, and was taken by the amendment of 2026-10-08 (2).
 
 **What it costs.**
 
@@ -258,3 +259,104 @@ drain return to the lit-receiver level. While the P9 stays dark, `back` should n
 pair per rep if it does, and count the P9's sent `blobprog` reports against the P3's taken ones per stream to settle
 the open question. A second check pairs a windowed sender with a receiver on `--feed pace`: one
 `paced: two-second reporter` and no `back` for the rest of the file.
+
+## Amendment 2026-10-08 (2): the window on Coded
+
+**Why now.** The window was kept off Coded only until yvn6's walk trial, which has run. Coded's fixed pace is wrong both
+ways, as 1M's was. At close range S=8 drains about 2.7 KB/s (yvn6's 22 kbps at HIGH), and the 1 KiB/s pace held a
+photo to a third of that, the cost #114 accepted. At the far edge a drain under 1 KiB/s is overfed for the whole file:
+at 0.8 KB/s a 200 KB photo leaves about 40 KB in the stack's queue by its end, a text behind it nearly a minute.
+
+**What changed.**
+
+- **A Coded link to a peer that reports is windowed** (`BleFeedPolicy.windowed` no longer reads the PHY). Coded's pace
+  (1 KiB/s in 2 KiB chunks) is its fallback for a silent receiver, and stays the feed of an iPhone and an older build.
+- **The floors are counted in the link's smallest chunk** (`FeedWindow.minChunk`, carried by
+  `PaceConfig.windowChunkBytes` and read before every chunk): the window never under two, four before the first report,
+  starting chunks of two, a probe's room of one, and the paced chunks of a two-second reporter one. On 1M and 2M that is
+  2 KiB, every number as before; on Coded 1 KiB (`PhyTuning.codedWindowChunkBytes`, `…debug.PHY --ei
+  codedWindowChunk`). The 1M floor at the edge's 1.1 KB/s held a frame about 3.5 s, and 7.4 s at a file's start.
+- **Never under 1 KiB** (`FeedWindow.SMALLEST_CHUNK_BYTES`). A dark receiver reports only on the record its reader
+  wakes for, and then only once 2 KiB came since its last report (`RxReports.WINDOWED_EVERY_BYTES`) or 500 ms passed.
+  Two 512 B chunks, the whole floor, landed inside 500 ms and unreported, and the feed waited out its 3 s silence (the
+  simulation, at 2.7 KB/s). Two chunks of 1 KiB always make a report. The receiver's rule is unchanged.
+- **A step to or from Coded forgets the drain as well as the round trip, and probes** (`FeedWindow.forgetLink(drain
+  = true)`, from `FramedLink.forgetDrain(newAir)`). The filter keeps the largest of its samples, so a 1M rate kept past
+  a step to Coded sized the window for 1M over Coded's longer round trip. The probe holds one chunk's room until a
+  chunk written after the step comes back, so the round trip reads the new air, not the backlog 1M left, and the drain
+  is sampled afresh from there. Until the receiver has reported all 1M wrote, the silence waits three chunks' longest
+  crossing (about 10 s): 1M's chunks, 5–7 KB at 20–29 KB/s, take 4.6–6.5 s each to cross Coded, and a 3 s silence
+  paced on every one of them. Only a chunk written with at most one smallest chunk ahead ends a probe, so a paced chunk
+  that waited behind a backlog cannot set the round trip (both the bluetooth-reviewer's second pass). In the
+  simulation, from 8 and 20 KB/s down to 1.1: with the drain kept, 8 s and 62 s of queue still stood 20 to 50 s after
+  the step, and from 20 KB/s the feed paced on silence; forgotten, 2.7 s, at most 5.5 and 10.9 s across the step (most
+  of it the backlog 1M left, which drains at Coded's rate whatever the window does), no silence, and the round trip
+  read 1.0 s within 20 s. A step between 1M and 2M (the stack takes 2M on its own) forgets the round trip alone, as
+  before: the filter follows a halving by itself (the bluetooth-reviewer's finding).
+- **At the far edge a chunk's own crossing sets the silence and the two-second gap** (`FeedWindow.recordsMs`). A
+  receiver reports a chunk only once all of it has crossed, and under about 0.7 KB/s a 1 KiB chunk outlasts the 3 s
+  silence, under 0.54 KB/s two outlast the 1.9 s gap: every chunk tripped the paced fallback, and a feed latched as a
+  two-second reporter (a dozing receiver reading two chunks a wake, a phone in a pocket at range) could never answer on
+  time, so it stayed on the 1 KiB/s pace that overfeeds that drain (the bluetooth-reviewer's finding). The silence is
+  now at least three chunks' time at the measured rate, the gap two, each chunk counted at most 3.4 s (a 1 KiB chunk at
+  0.3 KB/s, `MAX_CHUNK_CROSSING_MS`): one low sample, a link that nearly stalled for a moment, otherwise held a
+  receiver whose reports stopped unpaced for minutes (the second pass). On 1M and 2M the constants stand at any drain
+  over about 2 KB/s.
+- **`minChunk` is held to 1–8 KiB:** past `FILE_CHUNK_BYTES` ÷ 2 the starting chunk would pass the record's ceiling.
+
+**The simulation** (`FeedWindowTest`, its receiver now optionally holding a chunk only once all of it crossed, and
+reporting only on a record when dark; reverse lag 150 ms):
+
+| Drain | Throughput | Queue, Coded's 1 KiB floor | Queue, 1M's 2 KiB floor | Fixed 1 KiB/s pace |
+|---|---|---|---|---|
+| 0.4 KB/s | 100–108% | 5.0–5.5 s | | grows all file |
+| 0.8 KB/s | 99% | 3.5–3.7 s | 4.8–5.0 s | grows all file |
+| 1.1 KB/s | 99% | 2.5–2.7 s (start 3.7) | 3.4–3.6 s (start 7.4) | about 1.9 s, 93% of the drain |
+| 2.7 KB/s | 98–100% | 1.0–1.1 s | 2.0–2.2 s | under 0.8 s, 38% of the drain |
+
+A lit receiver, whose trailing report fires between records, reads the drain high on Coded's whole-record steps: at
+2.7 KB/s its queue reached 2.2–2.5 s, at 94–97% of the drain.
+
+**What it costs.**
+
+- **Paced at the far edge:** while a feed is paced (a silent receiver, or one latched), Coded's fallback pace, 1 KiB/s,
+  runs over a drain under it; the scaled gap lets a latched feed answer and win the window back within three chunks.
+  A file's first chunk, sent before any rate is measured, still trips the 3 s silence once under about 0.7 KB/s.
+  Capping the fallback at the measured drain was not taken: it would move 1M's dozing receivers too, whose pacing the
+  dozing-receiver amendment measured on the phones.
+- **Slower to give up on a receiver gone silent:** up to about 10 s, not 3, while a step's backlog is out or the drain
+  reads under about 2 KB/s; the pace it falls back to would overfeed such a link anyway.
+- **At the edge's 1.1 KB/s a text waits a little longer:** about 2.7 s, 3.7 s at a file's start, against about 1.9 s
+  behind the fixed pace's one chunk. A smaller floor would need the receiver to report every record, more reverse air.
+- **Reverse air:** at the edge about one report a second, where 2 KiB records brought one every two; near, about 1.3 a
+  second, as before. A report is about 125 B of S=8 air back; whether that takes from the forward drain is unmeasured.
+- **Not changed, left for after the trial:** `fileFeed` still answers nothing for a Coded link (nsr7's parked asks
+  never wait behind a Coded feed), `expectedFileRate` answers Coded's pace, and the split and `feedingLoad` leave Coded
+  out. With the window they could read the measured drain.
+
+**Tests.** `FeedWindowTest.onCodedTheWindowRunsAtTheDrainWithAShortQueue`,
+`codedsSmallerChunksKeepItsQueueShorterThanThe1mFloorWould`, `aStepToCodedMidFileStartsTheWindowOverAtTheSlowerAir`,
+`aStepToCodedProbesUntilAChunkWrittenAfterItComesBack`, `aChunkThePaceSlippedInBehindTheBacklogDoesNotEndTheProbe`,
+`atTheFarEdgeASlowChunkIsNoSilenceAndNoTwoSecondReporter`, `oneLowSampleCannotHoldASilentReceiverUnpacedForLong`,
+`at1mDrainsTheSilenceAndTheTwoSecondGapAreTheConstants`, `theSmallestChunkSizesTheWindowsFloors`,
+`aDozingReceiverOnCodedWinsItsWindowBackAtCodedsPace`, and `theRoundTripIsTheLinksAndOutlivesTheStreamUntilAPhyStep`
+(a 1M ↔ 2M step keeps the drain);
+`FramedLinkTest.aWindowedFeedOnCodedStartsInItsSmallerChunks`; `BleFeedPolicyTest`'s gate and Coded pace. Each new
+rule was checked by removing it: the drain kept past a step, the probe, the probe's one-chunk-ahead rule, the
+backlog's silence, the floor not passed to the window, the floors fixed at 1M's, the silence and the gap held to their
+constants, and the crossing's cap each fail their test. The simulation's writer now takes the paced fallback as
+`FramedLink` does, and the Coded runs assert it never did once steady.
+
+**Device checks owed** (two of the P7, P8 and P9: the Pixel 3 answers a Coded ask with nothing).
+
+- **Desk:** both pinned `…debug.PHY --es mode coded`, `scripts/ble-drain-trial.py --feed window` against `--feed pace`,
+  the receiver lit, then dark. Read the receiver's `rx … in` line, the texts, and the `bt file window rate=… rtt=…`
+  line. Pass: the window drains at least what the pace does, texts within about 3 s (4 s at a file's start), and no
+  `paced: receiver silent` once steady.
+- **A step mid-file:** a photo on a lit, boosted 1M link, then `--es mode coded`. Pass: at most one
+  `bt file window paced: receiver silent` across the step, the queue `queued` ÷ rate implies under 12 s across it and
+  3 s within 30 s, and `rtt=` under 3000 within about 10 s.
+- **A walk** with the receiver dark in a pocket until the drain falls under 1 KB/s: no `paced: two-second reporter`
+  without a later `back`, and texts behind the photo under about 5 s.
+- **The experiment on at 1M** with a stack-driven 2M step mid-file: `bt file window rate=` does not drop to the
+  fallback.

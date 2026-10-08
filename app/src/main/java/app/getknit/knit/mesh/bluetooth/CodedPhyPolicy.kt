@@ -90,10 +90,19 @@ data class PhyTuning(
     val huntInUseHoldMs: Long = 1_800_000,
     /**
      * A file's feed rate and chunk on a link on Coded ([CodedPhyPolicy.pace], #114): about what S=8 drained at the edge
-     * of the 2026-10-02 walk (~1.1 KB/s), so a frame queued behind a file waits about one chunk, not the file.
+     * of the 2026-10-02 walk (~1.1 KB/s), so a frame queued behind a file waits about one chunk, not the file. A peer
+     * that reports is windowed on Coded too (ADR 2026-10.5buf), and this pace is then its fallback: an iPhone, an
+     * older build, and a receiver gone silent keep it.
      */
     val codedPaceBytesPerSec: Int = 1024,
     val codedChunkBytes: Int = 2048,
+    /**
+     * A windowed feed's smallest chunk on Coded ([FeedWindow.minChunk]), which sizes its floors: the window never under
+     * two of them, four before the first report. Half the 1M/2M floor, the least a dark receiver still reports on
+     * ([FeedWindow.SMALLEST_CHUNK_BYTES]): at the edge's ~1.1 KB/s a frame behind a file then waits under three
+     * seconds, where the 1M floor held it near four (the simulation). `…debug.PHY --ei codedWindowChunk`.
+     */
+    val codedWindowChunkBytes: Int = FeedWindow.SMALLEST_CHUNK_BYTES,
     /**
      * The file-feed budget every link on 1M or 2M shares, split among the ones feeding a file at once
      * ([CodedPhyPolicy.pace]); ≤ 0 is unbounded. `…debug.PHY --ei filePace` sweeps it in a trial against the
@@ -337,7 +346,8 @@ object CodedPhyPolicy {
      * Coded S=8 drains far slower, and at the 1M pace a whole photo reached the stack in seconds and every frame after it
      * waited minutes behind it (#114). So Coded takes [PhyTuning.codedPaceBytesPerSec] in [PhyTuning.codedChunkBytes]
      * chunks, outside the split, earned or not. A link not yet read (or with no PHY handle: the experiment off) is paced
-     * as 1M.
+     * as 1M. A feed to a peer that reports is clocked by its reports on any PHY ([BleFeedPolicy.windowed], ADR
+     * 2026-10.5buf), and this pace is then its fallback for a receiver gone silent.
      */
     fun pace(
         phy: LinkPhy,

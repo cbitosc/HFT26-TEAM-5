@@ -435,11 +435,14 @@ class FramedLink(
     /** The drain this link's last measured stream ran at, in bytes a second; 0 before one, or since a PHY step. */
     val lastDrain: Int get() = synchronized(pendingLock) { meter.lastRate }
 
-    /** The link's PHY stepped: what its last stream measured says nothing of the new one. */
-    fun forgetDrain() {
+    /**
+     * The link's PHY stepped: what its last stream measured says nothing of the new one. With [newAir] — a step to or
+     * from Coded — the window streaming now forgets its drain too ([FeedWindow.forgetLink]).
+     */
+    fun forgetDrain(newAir: Boolean) {
         synchronized(pendingLock) {
             meter.forgetDrain()
-            inFlight.forgetRtt()
+            inFlight.forgetLink(drain = newAir)
         }
     }
 
@@ -698,6 +701,7 @@ class FramedLink(
             val wait =
                 synchronized(pendingLock) {
                     inFlight.queueMs = cfg.windowQueueMs
+                    inFlight.minChunk = cfg.windowChunkBytes
                     windowed = cfg.windowed && !inFlight.pacing(now())
                     if (windowed) inFlight.waitMs() else 0L
                 }

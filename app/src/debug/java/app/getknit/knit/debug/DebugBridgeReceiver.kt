@@ -61,6 +61,7 @@ import app.getknit.knit.mesh.bluetooth.TunePriority
 import app.getknit.knit.mesh.crypto.AttachmentCrypto
 import app.getknit.knit.mesh.crypto.b64d
 import app.getknit.knit.mesh.indirectPeers
+import app.getknit.knit.mesh.link.FeedWindow
 import app.getknit.knit.mesh.link.LinkFraming
 import app.getknit.knit.mesh.lora.BoardOwner
 import app.getknit.knit.mesh.lora.BoardSettings
@@ -219,7 +220,8 @@ import java.nio.ByteBuffer
  *   advert reading gains on the 1M scale (12), `--ei fastAdvertMs|fastHoldMs N` the Coded advert's interval after a
  *   link at range drops (250) and how long it holds (180000) — on the dialing side, how long the scan hunts the lost
  *   peer — with `--ei huntInUseHoldMs N` that hunt's bound while Knit is open on a lit screen (1800000), `--ei codedPace|codedChunk N` a file's feed rate in B/s
- *   and chunk on a link on Coded (1024, 2048), and `--ei filePace N` the file budget the links on 1M or 2M share, split
+ *   and chunk on a link on Coded (1024, 2048; a windowed feed's fallback there), `--ei codedWindowChunk N` a windowed
+ *   feed's smallest chunk on Coded, which sizes the window's floors (1024; 1024 to 8192 — ADR 2026-10.5buf's Coded amendment), and `--ei filePace N` the file budget the links on 1M or 2M share, split
  *   among those feeding (4096; 0 unbounded; a share's chunk is two seconds of it, 2048 to 16384 — ADR 2026-10.8jwn),
  *   until the process dies (`--ez resetTuning true` restores them). The reply: `mode`, `supported`, `advert`
  *   (off|starting|live|dark <status>), `txPower`, the tuning (with `fileChunk`, a lone 1M/2M feed's chunk), `links[]`
@@ -2224,6 +2226,8 @@ class DebugBridgeReceiver :
                 huntInUseHoldMs = int("huntInUseHoldMs")?.toLong() ?: t.huntInUseHoldMs,
                 codedPaceBytesPerSec = int("codedPace") ?: t.codedPaceBytesPerSec,
                 codedChunkBytes = int("codedChunk")?.coerceIn(1, LinkFraming.FILE_CHUNK_BYTES) ?: t.codedChunkBytes,
+                codedWindowChunkBytes =
+                    int("codedWindowChunk")?.coerceIn(MIN_CODED_WINDOW_CHUNK, MAX_CODED_WINDOW_CHUNK) ?: t.codedWindowChunkBytes,
                 filePaceBytesPerSec = int("filePace") ?: t.filePaceBytesPerSec,
             )
         delay(PHY_SETTLE_MS) // the transport collects the stored mode; let it land before reading the status back
@@ -2251,6 +2255,7 @@ class DebugBridgeReceiver :
                     .put("huntInUseHoldMs", tuned.huntInUseHoldMs)
                     .put("codedPace", tuned.codedPaceBytesPerSec)
                     .put("codedChunk", tuned.codedChunkBytes)
+                    .put("codedWindowChunk", tuned.codedWindowChunkBytes)
                     .put("filePace", tuned.filePaceBytesPerSec)
                     .put("fileChunk", CodedPhyPolicy.pace(LinkPhy.ONE_M, tuned).chunkBytes),
             ).put(
@@ -2572,6 +2577,11 @@ class DebugBridgeReceiver :
         // The queue a `…debug.LINKTUNE --ei windowQueueMs` may set a windowed feed to keep ahead of its receiver.
         const val MIN_WINDOW_QUEUE_MS = 100
         const val MAX_WINDOW_QUEUE_MS = 5_000
+
+        // The chunk `…debug.PHY --ei codedWindowChunk` may give a windowed feed on Coded: no smaller than a dark receiver
+        // still reports on, up to four of the 1M/2M floor.
+        const val MIN_CODED_WINDOW_CHUNK = FeedWindow.SMALLEST_CHUNK_BYTES
+        const val MAX_CODED_WINDOW_CHUNK = 8_192
 
         // The ATT MTU range a `…debug.LINKTUNE` ask may name: the spec's default up to Android's own ceiling.
         const val MIN_ATT_MTU = 23

@@ -1,5 +1,6 @@
 package app.getknit.knit.mesh.bluetooth
 
+import app.getknit.knit.mesh.link.FeedWindow
 import app.getknit.knit.mesh.link.PaceConfig
 import app.getknit.knit.mesh.protocol.Protocol
 
@@ -10,26 +11,34 @@ import app.getknit.knit.mesh.protocol.Protocol
  */
 internal object BleFeedPolicy {
     /**
-     * Whether a file is clocked by its receiver's reports (ADR 2026-10.nsr7's phase 2): the switch [feedWindowOn], a
-     * 1M/2M [phy], and a peer that reports — an Android build carrying [Protocol.CAP_BLOB_HAVE] in [capabilities]. Never
-     * an iPhone ([DoorbellPolicy.serves]): nothing sends it a report to answer, and its own reports are not measured yet.
+     * Whether a file is clocked by its receiver's reports (ADR 2026-10.nsr7's phase 2): the switch [feedWindowOn] and a
+     * peer that reports — an Android build carrying [Protocol.CAP_BLOB_HAVE] in [capabilities] — on any PHY, Coded too
+     * (ADR 2026-10.5buf's Coded amendment). Never an iPhone ([DoorbellPolicy.serves]): nothing sends it a report to
+     * answer, and its own reports are not measured yet.
      */
     fun windowed(
         feedWindowOn: Boolean,
-        phy: LinkPhy,
         capabilities: Long,
     ): Boolean =
         feedWindowOn &&
-            phy != LinkPhy.CODED &&
             capabilities and Protocol.CAP_BLOB_HAVE != 0L &&
             !DoorbellPolicy.serves(capabilities)
 
-    /** A link's [base] pace, marked [windowed] with the window's [queueMs] when its receiver's reports clock it. */
+    /**
+     * A link's [base] pace, marked [windowed] when its receiver's reports clock it, with the window's queue and its
+     * smallest chunk from [tuning]: on Coded, [PhyTuning.codedWindowChunkBytes], so its slower air holds no more queue
+     * than [base], Coded's own pace, did; on any other [phy], [FeedWindow.MIN_CHUNK_BYTES].
+     */
     fun pace(
         base: PaceConfig,
         windowed: Boolean,
-        queueMs: Long,
-    ): PaceConfig = if (windowed) base.copy(windowed = true, windowQueueMs = queueMs) else base
+        phy: LinkPhy,
+        tuning: PhyTuning,
+    ): PaceConfig {
+        if (!windowed) return base
+        val chunk = if (phy == LinkPhy.CODED) tuning.codedWindowChunkBytes else FeedWindow.MIN_CHUNK_BYTES
+        return base.copy(windowed = true, windowQueueMs = tuning.feedWindowQueueMs, windowChunkBytes = chunk)
+    }
 
     /**
      * How fast a file to a peer would go now (ADR 2026-10.nsr7):

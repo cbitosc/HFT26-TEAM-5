@@ -310,7 +310,8 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   the dialing side, how long the scan hunts the lost peer — and `--ei huntInUseHoldMs N` that hunt's bound while Knit
   is open on a lit screen (1800000), and
   `--ei codedPace N` / `codedChunk N` a file's feed rate in B/s (1024; 0 unbounded) and chunk (2048, capped at 16384)
-  on a link on Coded (#114), and `--ei filePace N` the file budget the links on 1M or 2M share, split evenly among those
+  on a link on Coded (#114; a windowed feed's fallback there), `--ei codedWindowChunk N` a windowed feed's smallest
+  chunk on Coded, which sizes the window's floors (1024; 1024 to 8192 — ADR 2026-10.5buf's Coded amendment), and `--ei filePace N` the file budget the links on 1M or 2M share, split evenly among those
   feeding a file (4096; 0 unbounded; a share's chunk is two seconds of it, 2048 to 16384 — #117, ADR 2026-10.8jwn), until the process dies (`--ez resetTuning true` restores them); no
   extras reads. The reply: `mode`, `supported`
   (the controller has Coded and extended advertising), `advert` (`off` / `starting` / `live` / `refused <status>` /

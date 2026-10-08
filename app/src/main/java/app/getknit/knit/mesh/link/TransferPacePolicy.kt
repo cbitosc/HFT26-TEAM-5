@@ -60,6 +60,11 @@ data class PaceConfig(
     val windowed: Boolean = false,
     /** The queue a windowed feed keeps ahead of its receiver ([FeedWindow.queueMs]); `…debug.LINKTUNE --ei windowQueueMs`. */
     val windowQueueMs: Long = FeedWindow.QUEUE_MS,
+    /**
+     * The smallest chunk a windowed feed writes ([FeedWindow.minChunk]), which sizes its floors: smaller on a Coded link,
+     * whose air drains about a kilobyte a second at range (`…debug.PHY --ei codedWindowChunk`).
+     */
+    val windowChunkBytes: Int = FeedWindow.MIN_CHUNK_BYTES,
 )
 
 /**

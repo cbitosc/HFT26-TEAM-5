@@ -613,7 +613,7 @@ that reports `isLeCodedPhySupported`:
   Mode OFF lets the handles go and leaves each link on its PHY: asking a far Coded link back to 1M drops it.
 - **A file is paced by the link's PHY** (#114) **and by how many links share the radio** (#117, ADR 2026-10.8jwn).
   `FramedLink` reads its `PaceConfig` before every chunk: `CodedPhyPolicy.pace` gives a link last read on Coded 1 KiB/s
-  in 2 KiB chunks (`PhyTuning.codedPaceBytesPerSec` / `codedChunkBytes`), and every other link its share of one
+  in 2 KiB chunks (`PhyTuning.codedPaceBytesPerSec` / `codedChunkBytes`; a windowed feed's fallback there, below), and every other link its share of one
   4 KiB/s budget (`PhyTuning.filePaceBytesPerSec`), split evenly among the 1M/2M links feeding a file right now
   (`BluetoothMeshTransport.paceFor` counts `txInProgress`), in chunks of two seconds of the share (2–16 KiB). A change
   restarts the pace's clock (`PaceWindow`). The PHY a link was last read on outlives its handle (`linkPhy`), since OFF
@@ -634,19 +634,21 @@ that reports `isLeCodedPhySupported`:
   (`PhyTuning.boostPaceBytesPerSec`), or 12 KiB/s (`crowdedBoostPaceBytesPerSec`) past four LE connections (the host's
   buffer split; `leLinkCount`), split as above; otherwise 4 KiB/s. An iPhone link is never boosted (dqvb).
 - **A file to a reporting Android peer is clocked by its reports** (ADR 2026-10.5buf, nsr7's phase 2;
-  `BuildConfig.BLE_FEED_WINDOW`, debug on / release off, `…debug.LINKTUNE --es feed window|pace`). On a 1M/2M link
-  to a peer carrying `CAP_BLOB_HAVE` and no doorbell, `paceFor` returns its pace with `windowed = true`, and
-  `FramedLink.feedChunks` writes only while `FeedWindow` lets it.
+  `BuildConfig.BLE_FEED_WINDOW`, debug on / release off, `…debug.LINKTUNE --es feed window|pace`). On a link to a
+  peer carrying `CAP_BLOB_HAVE` and no doorbell, on any PHY (Coded too since 5buf's amendment of 2026-10-08 (2)),
+  `paceFor` returns its pace with `windowed = true`, and `FramedLink.feedChunks` writes only while `FeedWindow` lets it.
   - **The window:** bytes written and not yet reported held, kept under the drain over the round trip plus
-    `QUEUE_MS` (250 ms), from 4 to 64 KiB: BBR's estimates, the drain the largest recent sample and the round trip the
+    `QUEUE_MS` (250 ms), from two of the link's smallest chunks (`PaceConfig.windowChunkBytes`: 2 KiB on 1M/2M, 1 KiB
+    on Coded, never under 1 KiB) to 64 KiB: BBR's estimates, the drain the largest recent sample and the round trip the
     smallest in 10 s (kept across the link's files), probed at one chunk's room for a round when none smaller came. With the switch on
     a receiver reports on every chunk of 2 KiB or more, every 500 ms, and once more 500 ms after chunks no later one
     reported (`RxReports`); off, every 2 s of chunks.
   - **The drain:** the largest of the last twelve Δheld ÷ Δms samples, up to 64 KiB/s.
   - **A report or a queued frame wakes the writer.** The split and the earned budgets do not apply (nor is a windowed
     feed counted in a paced one's split), but the boost's interval ask still raises the drain the window follows.
-  - **Pacing comes back** while the receiver has been silent for 3 s. It is also what an iPhone, a Coded link or an
-    older build always gets.
+  - **Pacing comes back** while the receiver has been silent for 3 s (or three smallest chunks' time at the measured
+    drain, if longer: Coded's far edge). It is also what an iPhone or an older build always gets. A PHY step forgets
+    the window's round trip; a step to or from Coded its drain too, and the window probes (`FeedWindow.forgetLink`).
   - **Oracle:** `bt file window rate=… target=… queued=… rtt=… → <node>` when its rate moves a quarter, and ` window` at the
     end of the `file …` line, whose `@` then names the window's rate.
 - **Diagnostics** draws a PHY chip on each directly-connected row with a handle (`CodedPhyDiag.linkPhys`, testTag

@@ -1,7 +1,10 @@
 package app.getknit.knit
 
 import app.getknit.knit.mesh.bluetooth.BleFeedPolicy
+import app.getknit.knit.mesh.bluetooth.CodedPhyPolicy
 import app.getknit.knit.mesh.bluetooth.LinkPhy
+import app.getknit.knit.mesh.bluetooth.PhyTuning
+import app.getknit.knit.mesh.link.FeedWindow
 import app.getknit.knit.mesh.link.PaceConfig
 import app.getknit.knit.mesh.protocol.Protocol
 import org.junit.Assert.assertEquals
@@ -16,25 +19,40 @@ class BleFeedPolicyTest {
     private val iphone = Protocol.CAP_BLOB_HAVE or Protocol.CAP_DOORBELL
 
     @Test
-    fun anAndroidPeerThatReportsIsWindowedOn1mAnd2m() {
-        assertTrue(BleFeedPolicy.windowed(true, LinkPhy.ONE_M, android))
-        assertTrue(BleFeedPolicy.windowed(true, LinkPhy.TWO_M, android))
-        assertTrue("a PHY not yet read is not Coded", BleFeedPolicy.windowed(true, LinkPhy.UNKNOWN, android))
+    fun anAndroidPeerThatReportsIsWindowed() {
+        assertTrue(BleFeedPolicy.windowed(true, android))
     }
 
     @Test
-    fun theWindowNeedsTheSwitchAReportingPeerAndNotCoded() {
-        assertFalse("switch off", BleFeedPolicy.windowed(false, LinkPhy.ONE_M, android))
-        assertFalse("Coded keeps its own pace", BleFeedPolicy.windowed(true, LinkPhy.CODED, android))
-        assertFalse("an older build never reports", BleFeedPolicy.windowed(true, LinkPhy.ONE_M, 0L))
-        assertFalse("an iPhone's reports are not measured", BleFeedPolicy.windowed(true, LinkPhy.ONE_M, iphone))
+    fun theWindowNeedsTheSwitchAndAReportingPeer() {
+        assertFalse("switch off", BleFeedPolicy.windowed(false, android))
+        assertFalse("an older build never reports", BleFeedPolicy.windowed(true, 0L))
+        assertFalse("an iPhone's reports are not measured", BleFeedPolicy.windowed(true, iphone))
     }
 
     @Test
     fun aWindowedPaceKeepsItsBaseAsTheFallback() {
+        val tuning = PhyTuning(feedWindowQueueMs = 400)
         val base = PaceConfig(bytesPerSec = 4_096, chunkBytes = 8_192)
-        assertSame(base, BleFeedPolicy.pace(base, windowed = false, queueMs = 400))
-        assertEquals(base.copy(windowed = true, windowQueueMs = 400), BleFeedPolicy.pace(base, windowed = true, queueMs = 400))
+        assertSame(base, BleFeedPolicy.pace(base, windowed = false, LinkPhy.ONE_M, tuning))
+        assertEquals(
+            base.copy(windowed = true, windowQueueMs = 400, windowChunkBytes = FeedWindow.MIN_CHUNK_BYTES),
+            BleFeedPolicy.pace(base, windowed = true, LinkPhy.ONE_M, tuning),
+        )
+    }
+
+    @Test
+    fun aWindowedPaceOnCodedTakesCodedsSmallestChunkAndKeepsCodedsPaceAsItsFallback() {
+        val tuning = PhyTuning(feedWindowQueueMs = 400, codedWindowChunkBytes = 512)
+        val coded = CodedPhyPolicy.pace(LinkPhy.CODED, tuning)
+        assertEquals(
+            coded.copy(windowed = true, windowQueueMs = 400, windowChunkBytes = 512),
+            BleFeedPolicy.pace(coded, windowed = true, LinkPhy.CODED, tuning),
+        )
+        assertEquals("half the 1M/2M floor by default", 1_024, PhyTuning().codedWindowChunkBytes)
+        for (phy in listOf(LinkPhy.ONE_M, LinkPhy.TWO_M, LinkPhy.UNKNOWN)) {
+            assertEquals(phy.name, FeedWindow.MIN_CHUNK_BYTES, BleFeedPolicy.pace(coded, windowed = true, phy, tuning).windowChunkBytes)
+        }
     }
 
     private fun rate(
