@@ -3143,9 +3143,15 @@ class MeshManager(
         payload: CallPayload,
     ): Boolean = sendCtlDm(peerId, MessageContent(body = "", ctl = MessageContent.CTL_CALL, cl = payload), null, identity.nodeId())
 
-    /** [TurnSource]: TURN credentials from the connected spools carrying [peerId]'s DM scope; empty without the plane. */
+    /**
+     * [TurnSource]: TURN credentials from the connected spools carrying [peerId]'s DM scope, or holding a ticket of
+     * ours (ADR 2026-10.xkp4); empty without the plane.
+     */
     override suspend fun turnServers(peerId: String): List<TurnServer> =
         scopeSync?.turnCredentials(peerId).orEmpty().map { TurnServer(urls = it.urls, user = it.user, pass = it.pass) }
+
+    /** [TurnSource]: the STUN URIs every connected spool advertised in its HELLO (C-7.6-20); empty without the plane. */
+    override fun stunUrls(): List<String> = scopeSync?.stunUrls().orEmpty()
 
     /**
      * Seals one ctl DM ([payload], a `CTL_PROFILE` or `CTL_TRANSFER`) to [peerId]. For a profile the avatar hash is

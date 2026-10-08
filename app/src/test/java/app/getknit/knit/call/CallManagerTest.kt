@@ -205,6 +205,9 @@ class CallManagerTest {
         var fail = false
         var turn: suspend (String) -> List<TurnServer> = { emptyList() }
 
+        // What this side's connected spools advertise as STUN in their HELLOs (C-7.6-20).
+        var stun: List<String> = emptyList()
+
         val state: CallState? get() = manager.state.value
 
         fun phases(): List<Int> = synchronized(sent) { sent.map { it.ph } }
@@ -230,9 +233,13 @@ class CallManagerTest {
                         true
                     },
                 turn =
-                    TurnSource { peerId ->
-                        turnAsks += peerId
-                        side.turn(peerId)
+                    object : TurnSource {
+                        override suspend fun turnServers(peerId: String): List<TurnServer> {
+                            turnAsks += peerId
+                            return side.turn(peerId)
+                        }
+
+                        override fun stunUrls(): List<String> = side.stun
                     },
                 media = media,
                 scope = backgroundScope,
@@ -585,6 +592,90 @@ class CallManagerTest {
             assertEquals("", stun.user)
             assertEquals("", stun.pass)
         }
+
+    @Test
+    fun spoolStunRidesEveryCallBesideTurnAndWithoutIt() =
+        runTest {
+            val (_, alice, bob) = pair()
+            val server = TurnServer(listOf("turn:pay.example:3478?transport=udp"), "1800000000:abc", "secret")
+            alice.turn = { listOf(server) }
+            alice.stun = listOf("stun:lab.example:3478")
+            // The free side: no spool issues it TURN, and its hellos still hand it a STUN server (C-7.6-20). Read when
+            // the offer rings, which is when the callee prefetches its servers.
+            bob.stun = listOf("stun:lab.example:3478")
+            alice.manager.start(BOB)
+            runCurrent()
+            val withTurn = alice.media.last.servers
+            assertEquals(listOf(server), withTurn.take(1))
+            assertEquals(listOf("stun:lab.example:3478"), withTurn.drop(1).single().urls)
+            assertEquals("", withTurn.last().user)
+            assertEquals("", withTurn.last().pass)
+
+            assertTrue(bob.manager.answer(bob.state!!.id))
+            runCurrent()
+            val free =
+                bob.media.last.servers
+                    .single()
+            assertEquals(listOf("stun:lab.example:3478"), free.urls)
+            assertEquals("", free.user)
+        }
+
+    @Test
+    fun spoolStunJoinsTheCachedFallbackWithoutRepeatsAndCapped() =
+        runTest {
+            val (_, alice, _) = pair()
+            val server = TurnServer(listOf("turn:lab.example:3478?transport=udp"), "300:abc", "secret")
+            alice.turn = { listOf(server) }
+            alice.manager.start(BOB)
+            runCurrent()
+            alice.manager.hangUp()
+            runCurrent()
+
+            // Past the credential's expiry: its STUN half, then what the hellos say — the same server once.
+            alice.turn = { emptyList() }
+            alice.stun =
+                listOf(
+                    "stun:lab.example:3478",
+                    "stun:other.example:3478",
+                    "turn:other.example:3478",
+                    "stun:other.example:3478?transport=udp",
+                    "stun:third.example",
+                    "stuns:fourth.example:5349",
+                    "stun:fifth.example",
+                )
+            advanceTimeBy(250_000)
+            alice.manager.start(BOB)
+            runCurrent()
+            val stun =
+                alice.media.last.servers
+                    .single()
+            assertEquals(
+                listOf("stun:lab.example:3478", "stun:other.example:3478", "stun:third.example", "stuns:fourth.example:5349"),
+                stun.urls,
+            )
+            assertEquals(StunServers.MAX, stun.urls.size)
+        }
+
+    @Test
+    fun theStunRuleTakesOnlyWhatLibwebrtcParses() {
+        for (good in listOf("stun:lab.example", "stun:lab.example:3478", "stuns:lab.example:5349", "stun:10.0.2.2:1", "stun:[::1]:3478")) {
+            assertTrue(good, StunServers.accepts(good))
+        }
+        for (bad in listOf(
+            "turn:lab.example:3478",
+            "stun:lab.example:3478?transport=udp",
+            "stun:user@lab.example",
+            "stun:lab.example:0",
+            "stun:lab.example:65536",
+            "stun://lab.example",
+            "stun:lab example",
+            "stun:lab.example,stun:x",
+            "STUN:lab.example",
+            "stun:",
+        )) {
+            assertFalse(bad, StunServers.accepts(bad))
+        }
+    }
 
     @Test
     fun anOfferIsHandledWithoutWaitingOnTurnOrTheMedia() =

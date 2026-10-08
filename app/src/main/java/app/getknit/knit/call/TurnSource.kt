@@ -1,19 +1,34 @@
 package app.getknit.knit.call
 
 /**
- * The spool seam of a voice call: TURN credentials from the spools that carry [peerId]'s DM scope and advertise
- * `turn` (docs/VOICE_CALLS.md §2, C-7.6-12). Empty when no spool can issue one — the call then dials on host and
- * server-reflexive candidates alone. Never asks a spool that did not advertise it, and never waits long: a call is
- * waiting on the answer.
+ * The spool seam of a voice call: what the connected spools offer a call's ICE gathering (docs/VOICE_CALLS.md §2).
+ *
+ * Two questions, both abstract on purpose. This was a `fun interface` with [turnServers] alone; STUN is a second
+ * question with a different shape — no peer, no wait, nothing issued, just what the hellos already said — and a
+ * default for it would let an implementation that forgot it hand every call no STUN, silently, which is the very
+ * failure C-7.6-20 exists to close (ADR 2026-10.xkp4). As a plain interface, every implementation answers both.
  */
-fun interface TurnSource {
+interface TurnSource {
+    /**
+     * TURN credentials from the spools that would issue one for a call with [peerId]: those carrying its DM scope that
+     * advertise `turn` (C-7.6-12), and any where this phone holds a ticket (C-7.6-21). Empty when none can — the call
+     * then dials on host and server-reflexive candidates alone. Never asks a spool that did not advertise it, and
+     * never waits long: a call is waiting on the answer.
+     */
     suspend fun turnServers(peerId: String): List<TurnServer>
+
+    /**
+     * The credential-free STUN URIs every connected spool advertised in its HELLO (C-7.6-20), unfiltered: the call
+     * holds them to `StunServers`' rule. Read on every call, with or without TURN — a phone with no STUN offers only
+     * private addresses, which a paying peer's relay cannot permit.
+     */
+    fun stunUrls(): List<String>
 }
 
 /**
- * One short-lived TURN credential (coturn's REST scheme): [urls] are `turn:`/`turns:` URIs. A plain class, and its
- * [toString] names the URLs only, so [pass] can never reach a log line. Never sent to the peer or into any frame
- * (C-7.6-11).
+ * One ICE server for a call: a short-lived TURN credential (coturn's REST scheme), whose [urls] are `turn:`/`turns:`
+ * URIs, or — with an empty [user] and [pass] — credential-free `stun:` URIs. A plain class, and its [toString] names
+ * the URLs only, so [pass] can never reach a log line. Never sent to the peer or into any frame (C-7.6-11).
  */
 class TurnServer(
     val urls: List<String>,

@@ -499,37 +499,48 @@ class CallManager(
     // ---- setup, off the caller's and the inbound path ----
 
     /**
-     * The TURN servers a call gathers from: fresh credentials when a spool issues them; else the last ones while they
-     * can still start an allocation; else those servers as plain STUN, which needs no credential. A phone that just
-     * changed networks dials before its spool has reconnected, and with no STUN either its offer carries only
-     * addresses nothing outside its carrier can reach — and the peer's relay accepts traffic only from addresses the
-     * offer named (device-observed 2026-10-07, a Pixel 9 seconds onto LTE). Reusing a live credential bends C-7.6-11's
-     * fetch-per-call SHOULD only when fetching has just failed.
+     * The ICE servers a call gathers from: TURN, then STUN.
+     *
+     * TURN is fresh credentials when a spool issues them; else the last ones while they can still start an allocation;
+     * else those servers as plain STUN, which needs no credential. A phone that just changed networks dials before its
+     * spool has reconnected, and with no STUN either its offer carries only addresses nothing outside its carrier can
+     * reach — and the peer's relay accepts traffic only from addresses the offer named (device-observed 2026-10-07, a
+     * Pixel 9 seconds onto LTE). Reusing a live credential bends C-7.6-11's fetch-per-call SHOULD only when fetching has
+     * just failed.
+     *
+     * STUN is gathered on every call, TURN or not (C-7.6-20, ADR 2026-10.xkp4): what connected spools advertise in
+     * HELLO beside whatever the fallback reduced to, held to [StunServers]' rule, without repeats, at most
+     * [StunServers.MAX] — one credential-free server. That is what lets a phone no spool issues TURN to offer its
+     * public address, the one a paying peer's relay can permit.
      */
     private suspend fun servers(peerId: String): List<TurnServer> {
         val fresh = turn.turnServers(peerId)
-        if (fresh.isNotEmpty()) return fresh.also { lastServers = it }
+        val (relays, derived) = if (fresh.isNotEmpty()) fresh.also { lastServers = it } to emptyList() else fallback()
+        val stun = StunServers.pick(derived + turn.stunUrls())
+        log("call ICE: ${relays.size} TURN server(s), ${stun.size} STUN url(s)")
+        return if (stun.isEmpty()) relays else relays + TurnServer(urls = stun, user = "", pass = "")
+    }
+
+    /** No credential issued: the last ones while they can still allocate, else their STUN half (see [servers]). */
+    private fun fallback(): Pair<List<TurnServer>, List<String>> {
         val nowS = clock() / MS_PER_S
         val cached = lastServers
         val live = cached.filter { (it.user.substringBefore(':').toLongOrNull() ?: 0L) - CREDENTIAL_MARGIN_S > nowS }
         if (live.isNotEmpty()) {
             log("call TURN: none issued, reusing ${live.size} live credential(s)")
-            return live
+            return live to emptyList()
         }
-        val stun = cached.mapNotNull(::stunOnly)
-        if (stun.isNotEmpty()) log("call TURN: none issued, STUN only from ${stun.size} known server(s)")
-        return stun
+        val stun = cached.flatMap(::stunOnly)
+        if (stun.isNotEmpty()) log("call TURN: none issued, STUN only from ${stun.size} known url(s)")
+        return emptyList<TurnServer>() to stun
     }
 
     /** [server]'s UDP URLs as `stun:` ones, without the credential — what a binding request needs. */
-    private fun stunOnly(server: TurnServer): TurnServer? {
-        val urls =
-            server.urls
-                .filter { it.startsWith("turn:") && !it.contains("transport=tcp") }
-                .map { "stun:" + it.removePrefix("turn:").substringBefore('?') }
-                .distinct()
-        return if (urls.isEmpty()) null else TurnServer(urls = urls, user = "", pass = "")
-    }
+    private fun stunOnly(server: TurnServer): List<String> =
+        server.urls
+            .filter { it.startsWith("turn:") && !it.contains("transport=tcp") }
+            .map { "stun:" + it.removePrefix("turn:").substringBefore('?') }
+            .distinct()
 
     /**
      * Runs one setup step of [l] on [scope]. A step that throws (the media layer, a TURN fetch) ends the call at once

@@ -63,7 +63,12 @@ fun callModule(): Module? =
         single {
             CallManager(
                 signals = CallSignals { peerId, payload -> get<MeshManager>().sendCallSignal(peerId, payload) },
-                turn = TurnSource { peerId -> get<MeshManager>().turnServers(peerId) },
+                turn =
+                    object : TurnSource {
+                        override suspend fun turnServers(peerId: String) = get<MeshManager>().turnServers(peerId)
+
+                        override fun stunUrls() = get<MeshManager>().stunUrls()
+                    },
                 media = get(),
                 scope = get<CoroutineScope>(),
                 selfId = { get<Identity>().nodeId() },
