@@ -104,6 +104,13 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   IPv4 lease), the caller hosts only then; the group reaches libwebrtc through our own detector as an Ethernet-typed
   network (never `setIncludeWifiDirect`, which leaks a P2P channel), and a sealed lane over it carries every signal
   beside the mesh, since Wi-Fi Aware is paused while the group is up. Relay-only goes direct nowhere.
+  **Before touching `SpoolEnt` / `SpoolTicket`, `mesh/spool/SpoolTickets`, `SpoolConnection.present` /
+  `ticketState` / `ticketedTurn`, the order in `ScopeSync.turnCredentials`, `stunUrls`, `TurnSource.stunUrls`,
+  `call/StunServers`, the `spool_ticket` settings keys or `…debug.SPOOL --es ticket`:** READ ADR 2026-10.xkp4 and
+  `docs/VOICE_CALLS.md` §2.6 (knit-spool ADR 2026-10.bxsg) — a ticket goes once per connection after the hello and
+  only to the spool whose host name is its `aud` (a privacy rule), a refusal is a stored verdict, an `ent` spool gets
+  no `turnreq` without a TURN-flagged ticket and a ticketed one is asked first, and every call gathers from the
+  hellos' STUN under a URL rule narrower than the spec's, because one URL libwebrtc refuses ends the call.
 - **When touching `location/`, the chat overflow's "Send location" item, or anything that reads the device's
   position:** READ ADR 2026-09.tss4. A shared position is a `geo:` line in the message body (no wire field,
   no capability bit); it is read only between the pin tap and the send, by `ChatViewModel.startLocation`,
