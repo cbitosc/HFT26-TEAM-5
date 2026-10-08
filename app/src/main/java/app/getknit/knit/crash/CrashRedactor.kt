@@ -47,8 +47,25 @@ object CrashRedactor {
         secrets: KnownSecrets = KnownSecrets.NONE,
     ): String =
         text.lineSequence().joinToString("\n") { line ->
-            if (isFrame(line)) line else redactHeaderLine(line, secrets)
+            when {
+                isFrame(line) -> line
+                THREAD_HEADER.matches(line) -> redactThreadHeader(line, secrets)
+                else -> redactHeaderLine(line, secrets)
+            }
         }
+
+    /**
+     * An ANR dump's thread header, `"DefaultDispatcher-worker-3" daemon prio=5 tid=24 WaitingForGcToComplete`:
+     * the name is the app's to choose and is scrubbed like a message; the rest is ART's own vocabulary, kept
+     * verbatim, since a long state name would otherwise read as base64 to [RULES].
+     */
+    private fun redactThreadHeader(
+        line: String,
+        secrets: KnownSecrets,
+    ): String {
+        val close = line.indexOf('"', startIndex = 1)
+        return "\"" + scrub(line.substring(1, close), secrets) + line.substring(close)
+    }
 
     /**
      * The last-resort rendering: every frame verbatim, every exception message discarded outright,
@@ -61,10 +78,16 @@ object CrashRedactor {
             if (isFrame(line)) line else classNameOnly(line)
         }
 
-    /** A stack frame — `\tat com.example.Foo.bar(Foo.kt:12)` or a `\t... 12 more` elision. */
+    /**
+     * A stack frame — `\tat com.example.Foo.bar(Foo.kt:12)`, a `\t... 12 more` elision, or an ANR dump's
+     * `native: #00 pc 0004f2c8  /apex/…/libc.so (__epoll_pwait+8)`, whose on-device paths [AnrTrace] has
+     * already collapsed before anything is written.
+     */
     private fun isFrame(line: String): Boolean {
         val trimmed = line.trimStart()
-        return trimmed.startsWith("at ") || (trimmed.startsWith("... ") && trimmed.endsWith(" more"))
+        return trimmed.startsWith("at ") ||
+            trimmed.startsWith("native: #") ||
+            (trimmed.startsWith("... ") && trimmed.endsWith(" more"))
     }
 
     /**
@@ -117,6 +140,9 @@ object CrashRedactor {
     }
 
     private val MARKERS = listOf("Caused by: ", "Suppressed: ")
+
+    /** `"name" [daemon ]prio=N tid=N State` — the rest after the name is ART's, never the app's. */
+    private val THREAD_HEADER = Regex("""^"[^"]*"( daemon)? prio=\d+ tid=\d+ \w+$""")
 
     /** Matches a dotted identifier — an R8-mangled `a.b.c` as readily as a real class name. */
     private val CLASS_NAME = Regex("""[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*""")

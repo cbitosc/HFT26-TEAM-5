@@ -52,10 +52,74 @@ class CrashStore(
         threadName: String,
         throwable: Throwable,
     ): File? {
+        val stamp = now()
+        return write(stamp) {
+            val raw = throwable.stackTraceToString()
+            val body = runCatching { CrashRedactor.redact(raw) }.getOrElse { CrashRedactor.framesOnly(raw) }
+            cap(header(environment, threadName, stamp, Kind.CRASH) + body, MAX_REPORT_CHARS)
+        }
+    }
+
+    /**
+     * Writes a report for each ANR in [exits] (newest first, as the platform lists them) that no earlier call
+     * imported, oldest first so [prune] keeps the newest, and returns how many were written. At most [MAX_FILES]
+     * are read — older ones would be pruned on arrival. A watermark file beside the reports records the newest
+     * ANR seen, so a restart, a Delete all or a pruned report never brings one back; it is advanced even when a
+     * write fails (a full disk is not worth re-reading traces for on every start).
+     *
+     * Never throws, for the same reason [record] does not: it runs at every process start.
+     */
+    fun importAnrs(
+        environment: CrashEnvironment,
+        exits: List<AnrExit>,
+    ): Int =
+        runCatching {
+            val seen = anrWatermark()
+            val fresh =
+                exits
+                    .filter { it.at > seen }
+                    .sortedByDescending { it.at }
+                    .take(MAX_FILES)
+                    .sortedBy { it.at }
+            if (fresh.isEmpty()) return 0
+            val written = fresh.count { recordAnr(environment, it) != null }
+            if (dir.isDirectory || dir.mkdirs()) {
+                File(dir, ANR_WATERMARK).writeBytesAtomically(
+                    fresh
+                        .last()
+                        .at
+                        .toString()
+                        .encodeToByteArray(),
+                )
+            }
+            written
+        }.getOrDefault(0)
+
+    private fun recordAnr(
+        environment: CrashEnvironment,
+        exit: AnrExit,
+    ): File? =
+        write(exit.at) {
+            val condensed = AnrTrace.condense(runCatching { exit.trace() }.getOrNull(), exit.description)
+            val body = runCatching { CrashRedactor.redact(condensed) }.getOrElse { CrashRedactor.framesOnly(condensed) }
+            val kind = if (exit.predatesInstall) Kind.EARLIER_ANR else Kind.ANR
+            cap(header(environment, "main", exit.at, kind) + body, MAX_ANR_CHARS)
+        }
+
+    /** The newest ANR an earlier [importAnrs] saw, or 0 if none ever was (or the mark cannot be read). */
+    private fun anrWatermark(): Long = runCatching { File(dir, ANR_WATERMARK).readText().trim().toLong() }.getOrDefault(0L)
+
+    /**
+     * The one write path: checks the directory and the free space, renders, writes atomically, prunes. A
+     * render that throws writes nothing — **no path here writes an unredacted stack trace to disk.**
+     */
+    private fun write(
+        stamp: Long,
+        render: () -> String,
+    ): File? {
         if (!dir.isDirectory && !dir.mkdirs()) return null
         if (dir.usableSpace < MIN_FREE_BYTES) return null
-        val stamp = now()
-        val body = renderSafely(environment, threadName, throwable, stamp) ?: return null
+        val body = runCatching(render).getOrNull() ?: return null
         val target = nextFile(stamp, fingerprintOf(body))
         target.writeBytesAtomically(body.encodeToByteArray())
         prune(keep = target)
@@ -83,22 +147,6 @@ class CrashStore(
     }
 
     /**
-     * Assembles header + redacted trace, capped. Falls back to frames-only if redaction throws and to
-     * `null` if even that fails — **no path here writes an unredacted stack trace to disk.**
-     */
-    private fun renderSafely(
-        environment: CrashEnvironment,
-        threadName: String,
-        throwable: Throwable,
-        stamp: Long,
-    ): String? =
-        runCatching {
-            val raw = throwable.stackTraceToString()
-            val body = runCatching { CrashRedactor.redact(raw) }.getOrElse { CrashRedactor.framesOnly(raw) }
-            cap(header(environment, threadName, stamp) + body)
-        }.getOrNull()
-
-    /**
      * The report header. **ASCII only, deliberately**: [CrashRedactor]'s non-ASCII rule is what catches
      * typed message text, and phase 2 re-runs over this header, so an em dash here would redact itself.
      *
@@ -111,16 +159,29 @@ class CrashStore(
         environment: CrashEnvironment,
         threadName: String,
         stamp: Long,
+        kind: Kind,
     ): String =
         buildString {
             appendLine("FATAL EXCEPTION: $threadName")
-            appendLine("Knit crash report - redacted on device. Nothing was uploaded.")
-            appendLine("app: ${environment.appLine()}")
+            when (kind) {
+                Kind.CRASH -> appendLine("Knit crash report - redacted on device. Nothing was uploaded.")
+                else -> appendLine("Knit ANR report (the app stopped responding) - redacted on device. Nothing was uploaded.")
+            }
+            // An ANR from before the running build was installed: naming this build here would point a reader,
+            // and crash-report.yml, at the wrong release's mapping. The value is deliberately not `x (n) type`.
+            if (kind == Kind.EARLIER_ANR) {
+                appendLine("app: unknown - recorded before Knit was updated to ${environment.appLine()}")
+            } else {
+                appendLine("app: ${environment.appLine()}")
+            }
             if (environment.obfuscated) {
-                appendLine(
-                    "obfuscated: yes - frames are R8-mangled; deobfuscate with " +
-                        "mapping-${environment.versionName}.txt.gz from the matching GitHub release",
-                )
+                val mapping =
+                    if (kind == Kind.EARLIER_ANR) {
+                        "the mapping of the release installed at the time"
+                    } else {
+                        "mapping-${environment.versionName}.txt.gz from the matching GitHub release"
+                    }
+                appendLine("obfuscated: yes - frames are R8-mangled; deobfuscate with $mapping")
             }
             appendLine("time: ${Instant.ofEpochMilli(stamp)} ($stamp)")
             appendLine("device: ${environment.deviceLine()}")
@@ -133,11 +194,14 @@ class CrashStore(
         }
 
     /** Truncates the **tail** — the header and top frames are the diagnosis. Chars, not bytes: a byte cut splits UTF-8. */
-    private fun cap(text: String): String =
-        if (text.length <= MAX_REPORT_CHARS) {
+    private fun cap(
+        text: String,
+        max: Int,
+    ): String =
+        if (text.length <= max) {
             text
         } else {
-            text.take(MAX_REPORT_CHARS) + "\n... [truncated, ${text.length - MAX_REPORT_CHARS} more chars]"
+            text.take(max) + "\n... [truncated, ${text.length - max} more chars]"
         }
 
     /**
@@ -244,6 +308,9 @@ class CrashStore(
         return if (where.isBlank()) simple else "$simple at $where"
     }
 
+    /** What a report records: a crash, an ANR of this build, or an ANR from before this build was installed. */
+    private enum class Kind { CRASH, ANR, EARLIER_ANR }
+
     private data class Head(
         val fields: Map<String, String>,
         val summary: String,
@@ -261,6 +328,15 @@ class CrashStore(
 
         /** ~60 KB of ASCII per report, so the directory ceiling is ~300 KB. */
         const val MAX_REPORT_CHARS = 60_000
+
+        /**
+         * An ANR's every thread is the diagnosis when `main` is idle (ADR 2026-10.fzsy), and a busy process dumps
+         * ~100 KB of them, so an ANR may take twice a crash's room: ~600 KB for a directory of nothing but ANRs.
+         */
+        const val MAX_ANR_CHARS = 120_000
+
+        /** The newest imported ANR's timestamp; not a `crash-` file, so [list], [prune] and [clear] never see it. */
+        const val ANR_WATERMARK = "anr-seen"
 
         const val MIN_FREE_BYTES = 512L * 1024L
         const val FINGERPRINT_BYTES = 4

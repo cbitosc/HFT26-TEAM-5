@@ -282,6 +282,10 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   that arrives from someone else, over the radios or a spool, goes through `ingest` before its obtained hook runs,
   and a key-less one is always screened there, before it is stored, so "held" means "screened" (#109). A held avatar is adopted only if screening has not refused
   it: a refused avatar's bytes can stay, pinned in custody by the sealed profile that names them.
+- **When touching `crash/` (the crash store, `CrashRedactor`, `AnrTrace`, `importAnrs`) or the Diagnostics crash
+  screens:** READ ADR 028 and ADR 2026-10.fzsy. Reports are written redacted and leave the phone only by the user's
+  hand; ANRs are imported from `ApplicationExitInfo` at start, once each (the `anr-seen` watermark), and `AnrTrace`
+  is the privacy boundary for native frames, which the redactor passes verbatim.
 - **When touching `fieldlog/`, a `FieldEvent`, a `field.record(…)` / `field.sampler(…)` call in a transport,
   `ui/diagnostics/FieldLog*`, or `MessageDao.inboundDelays` / `receiptDelays`:** READ ADR 2026-10.a239 and
   `docs/FIELD_LOG.md`. Every build can keep a bounded record of how the radios behaved (4 MiB, 72 h, in

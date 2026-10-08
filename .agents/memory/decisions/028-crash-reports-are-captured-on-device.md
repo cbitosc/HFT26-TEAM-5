@@ -63,3 +63,7 @@ The `<!-- knit-crash-report -->` marker in every app-filed issue is consumed by
 names the `mapping-<version>.txt.gz` asset needed to deobfuscate release frames. It is separate from
 `needs-info.yml` on purpose — an app-filed report satisfies that bot's trace/device/version rules by
 construction, so the two never speak on the same thread.
+
+*Amended by ADR 2026-10.fzsy (2026-10-08): ANRs are no longer out of scope. At each start the platform's
+`REASON_ANR` exit records are imported into this store with their thread dumps, condensed and redacted; native
+crashes remain out of scope.*

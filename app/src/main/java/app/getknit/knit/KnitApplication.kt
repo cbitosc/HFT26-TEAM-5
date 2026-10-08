@@ -1,9 +1,11 @@
 package app.getknit.knit
 
 import android.app.Application
+import android.util.Log
 import app.getknit.knit.crash.CrashHandler
 import app.getknit.knit.crash.crashStore
 import app.getknit.knit.crash.currentCrashEnvironment
+import app.getknit.knit.crash.importAnrs
 import app.getknit.knit.data.LinkCardStore
 import app.getknit.knit.data.backup.RestoreApplier
 import app.getknit.knit.data.blob.BlobDao
@@ -28,6 +30,7 @@ import coil3.PlatformContext
 import coil3.SingletonImageLoader
 import coil3.gif.AnimatedImageDecoder
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.koin.android.ext.android.inject
@@ -54,7 +57,9 @@ class KnitApplication :
         // ui/StorageGate stand down on it rather than crash, and nothing is wiped — ADR 2026-10.47rw.)
         // Chains to whatever handler was already default, so the "Knit keeps stopping" dialog and the
         // process kill still happen exactly as before.
-        CrashHandler.install(crashStore(this), currentCrashEnvironment())
+        val crashes = crashStore(this)
+        val environment = currentCrashEnvironment()
+        CrashHandler.install(crashes, environment)
         // A backup restore staged before the relaunch lands here, while nothing has the database, the
         // identity file or the DataStore open — the one window in which those files can be replaced. After
         // the crash handler, so a failure in the move is captured like any other startup fault.
@@ -104,6 +109,15 @@ class KnitApplication :
             koinApp.koin.get<ConversationShortcutSync>().start()
         }
 
+        // Copy any ANR the platform recorded against an earlier process into the crash store, thread dump and all,
+        // before the platform's few-day retention takes it: Play shows an idle-main ANR with no trace at all (ADR
+        // 2026-10.fzsy). Off the main thread and past the cold start; a phone with nothing new pays one binder call.
+        koinApp.koin.get<CoroutineScope>().launch(Dispatchers.IO) {
+            delay(ANR_IMPORT_DELAY_MS)
+            val added = importAnrs(this@KnitApplication, crashes, environment)
+            if (added > 0) Log.i(TAG, "imported $added ANR report(s) into Diagnostics")
+        }
+
         // Demo-screenshot mode (`-PseedDemo=true`): fill the DB with a realistic conversation history so
         // the app renders populated on an emulator. Debug-only — the seeder lives in `src/debug`, so this is
         // a no-op in release (see the per-variant di/DemoWiring). Off by default even in debug.
@@ -135,5 +149,10 @@ class KnitApplication :
     private companion object {
         /** How long the leftover-group sweep waits out the cold-start window: a stale group has waited this long already. */
         const val SWEEP_DELAY_MS = 8_000L
+
+        /** How long the ANR import waits out the cold start; the platform keeps a record for days. */
+        const val ANR_IMPORT_DELAY_MS = 5_000L
+
+        const val TAG = "KnitApplication"
     }
 }

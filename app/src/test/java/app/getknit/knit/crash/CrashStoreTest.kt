@@ -147,4 +147,64 @@ class CrashStoreTest {
         store.clear()
         assertTrue(store.list().isEmpty())
     }
+
+    private fun anr(
+        at: Long,
+        predatesInstall: Boolean = false,
+        onRead: () -> Unit = {},
+    ) = AnrExit(at, "executing service app.getknit.knit/.mesh.MeshService", predatesInstall) {
+        onRead()
+        // Distinct per ANR, as real dumps are (memory lines, addresses): identical ones share one fingerprint slot.
+        "RssKb: $at\n\"main\" prio=5 tid=1 Native\n  at android.os.MessageQueue.nativePollOnce(Native method)\n"
+    }
+
+    @Test
+    fun `imports an ANR as a report stamped when it happened`() {
+        val store = store()
+        assertEquals(1, store.importAnrs(testEnvironment(), listOf(anr(1_699_000_000_000L))))
+        val ref = requireNotNull(store.latest())
+        assertEquals(1_699_000_000_000L, ref.at)
+        assertEquals("ApplicationNotResponding at Native method", ref.summary)
+        assertEquals("2.3.0 (13) debug", ref.appVersion)
+        assertTrue(ref.file.readText().contains("Knit ANR report"))
+        assertTrue(ref.file.readText().startsWith("FATAL EXCEPTION: main"))
+    }
+
+    @Test
+    fun `never imports the same ANR twice, even after a delete all`() {
+        val store = store()
+        var reads = 0
+        val exits = listOf(anr(1_699_000_002_000L) { reads++ }, anr(1_699_000_001_000L) { reads++ })
+        assertEquals(2, store.importAnrs(testEnvironment(), exits))
+        store.clear()
+        assertEquals(0, store.importAnrs(testEnvironment(), exits))
+        assertEquals("a seen ANR's dump is never read again", 2, reads)
+        assertTrue(store.list().isEmpty())
+        assertEquals(1, store.importAnrs(testEnvironment(), listOf(anr(1_699_000_003_000L)) + exits))
+    }
+
+    @Test
+    fun `imports only the five newest of a long history`() {
+        val store = store()
+        val exits = (1..8).map { anr(1_699_000_000_000L + it * 1_000L) }.reversed()
+        assertEquals(5, store.importAnrs(testEnvironment(), exits))
+        assertEquals((8 downTo 4).map { 1_699_000_000_000L + it * 1_000L }, store.list().map { it.at })
+    }
+
+    @Test
+    fun `an ANR from before this install names no version`() {
+        val store = store()
+        store.importAnrs(testEnvironment(obfuscated = true), listOf(anr(1_699_000_000_000L, predatesInstall = true)))
+        val ref = requireNotNull(store.latest())
+        assertEquals("unknown - recorded before Knit was updated to 2.3.0 (13) debug", ref.appVersion)
+        assertFalse(ref.file.readText().contains("mapping-2.3.0"))
+    }
+
+    @Test
+    fun `a dump that cannot be read still leaves a report`() {
+        val store = store()
+        val exit = AnrExit(1_699_000_000_000L, "executing service x", predatesInstall = false) { error("gone") }
+        assertEquals(1, store.importAnrs(testEnvironment(), listOf(exit)))
+        assertTrue(requireNotNull(store.latest()).file.readText().contains("ApplicationNotResponding: executing service x"))
+    }
 }

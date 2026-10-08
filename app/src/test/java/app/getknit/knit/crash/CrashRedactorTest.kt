@@ -175,4 +175,22 @@ class CrashRedactorTest {
         assertTrue(out.contains("Caused by: java.io.IOException"))
         assertTrue(out.contains("at app.getknit.knit.mesh.MeshRouter.route(MeshRouter.kt:91)"))
     }
+
+    @Test
+    fun `an ANR thread header keeps ART's state and scrubs only the name`() {
+        val node = NodeId.derive("seed")
+        assertEquals(
+            "\"ADB-JDWP Connection Control Thread\" daemon prio=0 tid=4 WaitingInMainDebuggerLoop",
+            CrashRedactor.redact("\"ADB-JDWP Connection Control Thread\" daemon prio=0 tid=4 WaitingInMainDebuggerLoop"),
+        )
+        assertEquals("\"bt-read-[node]\" prio=5 tid=31 Native", CrashRedactor.redact("\"bt-read-$node\" prio=5 tid=31 Native"))
+    }
+
+    @Test
+    fun `an ANR native frame passes verbatim`() {
+        val frame =
+            "  native: #00 pc 000ddbea  /apex/com.android.runtime/lib64/bionic/libc.so (__epoll_pwait+10) " +
+                "(BuildId: fcb82240218d1473de1e3d2137c0be35)"
+        assertEquals(frame, CrashRedactor.redact(frame))
+    }
 }

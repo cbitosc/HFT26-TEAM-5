@@ -17,7 +17,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  * is still captured. That is also why it takes an already-built store rather than resolving one.
  *
  * Does not see native crashes (Tink, SQLCipher, the tflite moderator), ANRs, or a deliberate
- * `Process.killProcess` such as `WifiAwareTransport`'s NAN-wedge self-restart. The UI says so.
+ * `Process.killProcess` such as `WifiAwareTransport`'s NAN-wedge self-restart. The UI says so. ANRs reach the
+ * same store after the fact, from the platform's exit records ([importAnrs], ADR 2026-10.fzsy).
  */
 class CrashHandler(
     private val store: CrashStore,
