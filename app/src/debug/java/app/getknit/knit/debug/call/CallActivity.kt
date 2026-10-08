@@ -20,6 +20,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -30,7 +31,10 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Call
@@ -38,12 +42,14 @@ import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.outlined.Cloud
+import androidx.compose.material.icons.outlined.Insights
 import androidx.compose.material.icons.outlined.Sensors
 import androidx.compose.material.icons.outlined.WifiTethering
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilledTonalIconToggleButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.IconToggleButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -54,6 +60,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -64,6 +71,7 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
@@ -84,7 +92,8 @@ import org.koin.core.component.inject
 
 /**
  * The one call screen (experimental, debug only): the peer's face and name, incoming Answer/Decline, then status, the
- * route (direct or relayed), mute, speaker and hang up. [CallScreen] is the stateless half the previews draw.
+ * route (direct or relayed), mute, speaker and hang up, with a live diagnostics card ([CallDiagnostics]) the header's
+ * toggle hides. [CallScreen] is the stateless half the previews draw.
  * Shows over the lock screen for the full-screen ring. While it is in the foreground it starts [CallService], the
  * microphone's foreground service, once the call is live and RECORD_AUDIO is granted.
  */
@@ -93,6 +102,7 @@ class CallActivity :
     KoinComponent {
     private val calls: CallManager by inject()
     private val peers: PeerRepository by inject()
+    private val media: WebRtcCallMedia by inject()
     private var pendingAnswer: String? = null
     private var serviceStarted = false
 
@@ -146,13 +156,16 @@ class CallActivity :
             name = callerName(peers, peerId)
             avatarHash = peers.find(peerId)?.avatarHash
         }
-        // The selected candidate pair, read while connected: it can move (a relay pair first, a direct one later).
-        val connected = state?.phase == CallPhase.Connected
+        // The selected candidate pair and the media's stats, read while the media is up: the pair can move (a relay
+        // pair first, a direct one later), and the stats are the diagnostics card's.
+        val mediaUp = state?.phase == CallPhase.Connecting || state?.phase == CallPhase.Connected
         var route by remember { mutableStateOf<String?>(null) }
-        LaunchedEffect(connected) {
-            while (connected) {
+        var stats by remember { mutableStateOf<CallStats?>(null) }
+        LaunchedEffect(mediaUp) {
+            while (mediaUp) {
                 route = calls.route()
-                delay(ROUTE_POLL_MS)
+                stats = media.stats()
+                delay(POLL_MS)
             }
         }
         CallScreen(
@@ -160,6 +173,7 @@ class CallActivity :
             name = name,
             avatarHash = avatarHash,
             route = route,
+            stats = stats,
             onAnswer = { state?.id?.let(::answer) },
             onDecline = { state?.id?.let { id -> lifecycleScope.launch { calls.decline(id) } } },
             onHangUp = { lifecycleScope.launch { calls.hangUp() } },
@@ -199,7 +213,7 @@ class CallActivity :
         const val ACTION_ANSWER = "app.getknit.knit.call.ANSWER"
         private const val EXTRA_ID = "call_id"
         private const val ENDED_LINGER_MS = 1_500L
-        private const val ROUTE_POLL_MS = 2_000L
+        private const val POLL_MS = 1_000L
 
         fun intent(
             context: Context,
@@ -212,6 +226,12 @@ class CallActivity :
 internal val HangUpRed = Color(0xFFD93025)
 private val AnswerGreen = Color(0xFF1E8E3E)
 private val AvatarSize = 144.dp
+
+// With the diagnostics card up the face gives it room: smaller on a tall phone, beside the name on a short one.
+private val CompactAvatarSize = 104.dp
+private val CompactRingReach = 16.dp
+private val InlineAvatarSize = 72.dp
+private val StackedMinHeight = 760.dp
 private val RingReach = 40.dp
 private val ActionSize = 72.dp
 private val ToggleSize = 64.dp
@@ -219,14 +239,19 @@ private const val RING_MS = 1_800
 private const val RING_ALPHA = 0.28f
 private const val ENDED_ALPHA = 0.5f
 private val RINGING = setOf(CallPhase.Calling, CallPhase.Ringing, CallPhase.Alerting, CallPhase.Connecting)
+private val MEDIA_UP = setOf(CallPhase.Connecting, CallPhase.Connected)
 
-/** The call screen proper: the peer's face and name, where the call stands, and the controls its phase offers. */
+/**
+ * The call screen proper: the peer's face and name, where the call stands, the controls its phase offers and, while
+ * the media is up, the diagnostics card for [stats] (shown until the header's toggle hides it).
+ */
 @Composable
 internal fun CallScreen(
     state: CallState?,
     name: String,
     avatarHash: String?,
     route: String?,
+    stats: CallStats?,
     onAnswer: () -> Unit,
     onDecline: () -> Unit,
     onHangUp: () -> Unit,
@@ -236,59 +261,142 @@ internal fun CallScreen(
     clock: () -> Long = System::currentTimeMillis,
 ) {
     val phase = state?.phase
+    var showStats by rememberSaveable { mutableStateOf(true) }
+    val diagnostics = stats?.takeIf { showStats && phase in MEDIA_UP }
     Surface(modifier = modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
-        Column(
-            modifier = Modifier.fillMaxSize().safeDrawingPadding().padding(horizontal = 24.dp, vertical = 16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            Text(
-                "Experimental · internal testing",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.weight(0.6f))
-            RingingAvatar(pulsing = phase in RINGING, dimmed = phase == CallPhase.Ended) {
-                Avatar(
-                    avatarHash = avatarHash,
-                    name = name,
-                    nodeId = state?.peerId,
-                    size = AvatarSize,
-                    textStyle = MaterialTheme.typography.displayLarge,
-                )
+        BoxWithConstraints(Modifier.fillMaxSize().safeDrawingPadding().padding(horizontal = 24.dp, vertical = 16.dp)) {
+            // With the card up, a phone too short for the stacked face puts it beside the name instead.
+            val inline = diagnostics != null && maxHeight < StackedMinHeight
+            Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
+                Header(stats = if (phase in MEDIA_UP) showStats else null, onStats = { showStats = it })
+                if (inline) {
+                    Spacer(Modifier.height(8.dp))
+                    InlineFace(state, name, avatarHash, route, clock)
+                } else {
+                    if (diagnostics != null) Spacer(Modifier.height(8.dp)) else Spacer(Modifier.weight(0.6f))
+                    StackedFace(state, name, avatarHash, route, compact = diagnostics != null, clock)
+                }
+                if (diagnostics != null) {
+                    // The room between the face and the controls; a short screen scrolls the card rather than clip it.
+                    Box(Modifier.weight(1f).fillMaxWidth().padding(vertical = 16.dp), contentAlignment = Alignment.Center) {
+                        CallDiagnostics(diagnostics, Modifier.verticalScroll(rememberScrollState()))
+                    }
+                } else {
+                    Spacer(Modifier.weight(1f))
+                }
+                Controls(state, onAnswer, onDecline, onHangUp, onMute, onSpeaker)
             }
-            Spacer(Modifier.height(24.dp))
-            Text(
-                name,
-                style = MaterialTheme.typography.headlineMedium,
-                textAlign = TextAlign.Center,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.fillMaxWidth(),
+        }
+    }
+}
+
+/** The face as every call screen draws it: the avatar centred over the name, the status and the route. */
+@Composable
+private fun StackedFace(
+    state: CallState?,
+    name: String,
+    avatarHash: String?,
+    route: String?,
+    compact: Boolean,
+    clock: () -> Long,
+) {
+    val phase = state?.phase
+    val size = if (compact) CompactAvatarSize else AvatarSize
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        RingingAvatar(
+            size = size,
+            reach = if (compact) CompactRingReach else RingReach,
+            pulsing = phase in RINGING,
+            dimmed = phase == CallPhase.Ended,
+        ) {
+            Avatar(
+                avatarHash = avatarHash,
+                name = name,
+                nodeId = state?.peerId,
+                size = size,
+                textStyle = if (compact) MaterialTheme.typography.displayMedium else MaterialTheme.typography.displayLarge,
             )
-            Spacer(Modifier.height(8.dp))
+        }
+        Spacer(Modifier.height(24.dp))
+        Text(
+            name,
+            style = MaterialTheme.typography.headlineMedium,
+            textAlign = TextAlign.Center,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            statusOf(state, clock),
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
+        // One slot for the reason or the route, held empty otherwise so the face doesn't jump as the call moves on.
+        Box(Modifier.heightIn(min = 48.dp), contentAlignment = Alignment.Center) {
+            if (phase == CallPhase.Ended) {
+                reasonOf(state.reason)?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+            } else if (phase == CallPhase.Connected && route != null) {
+                RoutePill(route)
+            }
+        }
+    }
+}
+
+/** The face beside the name, status and route: what a short phone shows above the diagnostics card. */
+@Composable
+private fun InlineFace(
+    state: CallState?,
+    name: String,
+    avatarHash: String?,
+    route: String?,
+    clock: () -> Long,
+) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Avatar(
+            avatarHash = avatarHash,
+            name = name,
+            nodeId = state?.peerId,
+            size = InlineAvatarSize,
+            textStyle = MaterialTheme.typography.headlineLarge,
+        )
+        Spacer(Modifier.width(16.dp))
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(name, style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(
                 statusOf(state, clock),
-                style = MaterialTheme.typography.titleMedium,
+                style = MaterialTheme.typography.titleSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center,
             )
-            // One slot for the reason or the route, held empty otherwise so the face doesn't jump as the call moves on.
-            Box(Modifier.heightIn(min = 48.dp), contentAlignment = Alignment.Center) {
-                if (phase == CallPhase.Ended) {
-                    reasonOf(state.reason)?.let {
-                        Text(
-                            it,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            textAlign = TextAlign.Center,
-                        )
-                    }
-                } else if (phase == CallPhase.Connected && route != null) {
-                    RoutePill(route)
-                }
+            if (state?.phase == CallPhase.Connected && route != null) RoutePill(route)
+        }
+    }
+}
+
+/** The experimental label, with the diagnostics card's toggle at its end while there is a card to show ([stats]). */
+@Composable
+private fun Header(
+    stats: Boolean?,
+    onStats: (Boolean) -> Unit,
+) {
+    Box(Modifier.fillMaxWidth().heightIn(min = 48.dp), contentAlignment = Alignment.Center) {
+        Text(
+            "Experimental · internal testing",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        if (stats != null) {
+            IconToggleButton(checked = stats, onCheckedChange = onStats, modifier = Modifier.align(Alignment.CenterEnd)) {
+                Icon(Icons.Outlined.Insights, contentDescription = if (stats) "Hide call diagnostics" else "Show call diagnostics")
             }
-            Spacer(Modifier.weight(1f))
-            Controls(state, onAnswer, onDecline, onHangUp, onMute, onSpeaker)
         }
     }
 }
@@ -296,12 +404,14 @@ internal fun CallScreen(
 /** The avatar, with rings rippling out of it while the call is still being set up. */
 @Composable
 private fun RingingAvatar(
+    size: Dp,
+    reach: Dp,
     pulsing: Boolean,
     dimmed: Boolean,
     avatar: @Composable () -> Unit,
 ) {
     val ring = MaterialTheme.colorScheme.primary
-    Box(Modifier.size(AvatarSize + RingReach * 2), contentAlignment = Alignment.Center) {
+    Box(Modifier.size(size + reach * 2), contentAlignment = Alignment.Center) {
         if (pulsing) {
             // Reduced motion keeps one still ring: the call is still ringing, it just doesn't move.
             val wave =
@@ -318,10 +428,10 @@ private fun RingingAvatar(
                     animated
                 }
             Canvas(Modifier.matchParentSize()) {
-                val inner = AvatarSize.toPx() / 2
-                val reach = size.minDimension / 2 - inner
+                val inner = size.toPx() / 2
+                val spread = this.size.minDimension / 2 - inner
                 listOf(wave, (wave + 0.5f) % 1f).forEach { t ->
-                    drawCircle(ring.copy(alpha = RING_ALPHA * (1f - t)), radius = inner + reach * t)
+                    drawCircle(ring.copy(alpha = RING_ALPHA * (1f - t)), radius = inner + spread * t)
                 }
             }
         }
@@ -494,6 +604,7 @@ private fun PreviewCall(
     outgoing: Boolean = true,
     name: String = "Ada Lovelace",
     route: String? = null,
+    stats: CallStats? = null,
     muted: Boolean = false,
     speaker: Boolean = false,
     reason: Int? = null,
@@ -514,6 +625,7 @@ private fun PreviewCall(
         name = name,
         avatarHash = null,
         route = route,
+        stats = stats,
         onAnswer = {},
         onDecline = {},
         onHangUp = {},
@@ -539,6 +651,39 @@ fun CallScreenRingingPreview() = PreviewCall(CallPhase.Ringing)
 @Preview(name = "Connected, dark", widthDp = 411, heightDp = 891, uiMode = Configuration.UI_MODE_NIGHT_YES)
 @Composable
 fun CallScreenConnectedPreview() = PreviewCall(CallPhase.Connected, route = "relay/srflx", muted = true)
+
+@Preview(name = "Connected, diagnostics", widthDp = 411, heightDp = 891)
+@Preview(name = "Connected, diagnostics, small", widthDp = 360, heightDp = 640)
+@Preview(name = "Connected, diagnostics, dark", widthDp = 411, heightDp = 891, uiMode = Configuration.UI_MODE_NIGHT_YES)
+@Composable
+fun CallScreenDiagnosticsPreview() =
+    PreviewCall(
+        CallPhase.Connected,
+        route = "host/host/wifi-direct",
+        stats =
+            CallStats(
+                localType = "host",
+                remoteType = "host",
+                protocol = "udp",
+                networkType = "ethernet",
+                wifiDirect = true,
+                codec = "opus",
+                clockRate = 48_000,
+                channels = 2,
+                fec = true,
+                rttMs = 4.2,
+                jitterMs = 1.8,
+                lossPercent = 0.0,
+                sendKbps = 33.6,
+                receiveKbps = 32.9,
+                jitterBufferMs = 41.0,
+                dtlsVersion = "1.2",
+                dtlsCipher = "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+                srtpCipher = "AEAD_AES_256_GCM",
+                localCandidates = 5,
+                remoteCandidates = 4,
+            ),
+    )
 
 @Preview(name = "Ended", widthDp = 411, heightDp = 891)
 @Composable

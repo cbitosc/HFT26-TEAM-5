@@ -57,9 +57,11 @@ fun callModule(): Module? =
                 log = { Log.i(TAG, it) },
             )
         }
-        single<CallMedia> {
+        single {
             WebRtcCallMedia(androidContext(), get(), get<CoroutineScope>(), link = get<DirectCallPath>().link, log = { Log.i(TAG, it) })
         }
+        // The call screen reads the media's stats itself (its diagnostics card); the manager sees only the seam.
+        single<CallMedia> { get<WebRtcCallMedia>() }
         single {
             CallManager(
                 signals = CallSignals { peerId, payload -> get<MeshManager>().sendCallSignal(peerId, payload) },

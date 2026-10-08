@@ -1,0 +1,114 @@
+package app.getknit.knit.debug.call
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Test
+import java.math.BigInteger
+
+class CallStatsReaderTest {
+    private fun report(
+        atUs: Double,
+        sent: Long,
+        received: Long,
+    ): List<StatEntry> =
+        listOf(
+            StatEntry(
+                "T01",
+                "transport",
+                atUs,
+                mapOf(
+                    "selectedCandidatePairId" to "CP1",
+                    "tlsVersion" to "FEFD",
+                    "dtlsCipher" to "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+                    "srtpCipher" to "AEAD_AES_256_GCM",
+                ),
+            ),
+            // A pair that is not the selected one must not be read.
+            StatEntry("CP0", "candidate-pair", atUs, mapOf("localCandidateId" to "L0", "currentRoundTripTime" to 0.9)),
+            StatEntry(
+                "CP1",
+                "candidate-pair",
+                atUs,
+                mapOf("localCandidateId" to "L1", "remoteCandidateId" to "R1", "currentRoundTripTime" to 0.042),
+            ),
+            StatEntry("L0", "local-candidate", atUs, mapOf("candidateType" to "host")),
+            StatEntry(
+                "L1",
+                "local-candidate",
+                atUs,
+                mapOf("candidateType" to "relay", "protocol" to "udp", "relayProtocol" to "udp", "networkType" to "wifi"),
+            ),
+            StatEntry("R1", "remote-candidate", atUs, mapOf("candidateType" to "srflx")),
+            StatEntry(
+                "C111",
+                "codec",
+                atUs,
+                mapOf("mimeType" to "audio/opus", "clockRate" to 48_000L, "channels" to 2L, "sdpFmtpLine" to "minptime=10;useinbandfec=1"),
+            ),
+            StatEntry(
+                "OUT",
+                "outbound-rtp",
+                atUs,
+                mapOf("kind" to "audio", "codecId" to "C111", "bytesSent" to BigInteger.valueOf(sent), "packetsSent" to 50L),
+            ),
+            StatEntry(
+                "IN",
+                "inbound-rtp",
+                atUs,
+                mapOf(
+                    "kind" to "audio",
+                    "codecId" to "C111",
+                    "bytesReceived" to BigInteger.valueOf(received),
+                    "packetsReceived" to 99L,
+                    "packetsLost" to 1,
+                    "jitter" to 0.002,
+                    "jitterBufferDelay" to 4.0,
+                    "jitterBufferEmittedCount" to BigInteger.valueOf(100),
+                ),
+            ),
+        )
+
+    @Test
+    fun theSelectedPairCodecAndSuiteAreRead() {
+        val stats = CallStatsReader().read(report(0.0, 0, 0), wifiDirect = false)
+        assertEquals("relay", stats.localType)
+        assertEquals("srflx", stats.remoteType)
+        assertEquals(42.0, stats.rttMs!!, 1e-9)
+        assertEquals("relay (TURN/UDP) ↔ srflx · UDP · Wi-Fi", pathOf(stats))
+        assertEquals("Opus · 48 kHz · 2 ch · FEC", codecOf(stats))
+        assertEquals("1.2 · ECDHE-ECDSA / AES-128-GCM-SHA256", dtlsOf(stats))
+        assertEquals("AEAD_AES_256_GCM", stats.srtpCipher)
+        assertEquals(2.0, stats.jitterMs!!, 1e-9)
+        assertEquals(1.0, stats.lossPercent!!, 1e-9)
+        assertEquals(40.0, stats.jitterBufferMs!!, 1e-9)
+        assertEquals(2, stats.localCandidates)
+        assertEquals(1, stats.remoteCandidates)
+    }
+
+    @Test
+    fun bitratesComeFromTheSecondReportOn() {
+        val reader = CallStatsReader()
+        val first = reader.read(report(0.0, 0, 0), wifiDirect = false)
+        assertNull(first.sendKbps)
+        assertNull(first.receiveKbps)
+        // 4 000 bytes in a second is 32 kbit/s; 2 000 is 16.
+        val second = reader.read(report(1_000_000.0, 4_000, 2_000), wifiDirect = false)
+        assertEquals(32.0, second.sendKbps!!, 1e-9)
+        assertEquals(16.0, second.receiveKbps!!, 1e-9)
+    }
+
+    @Test
+    fun aWifiDirectPairSaysSoAndAnEmptyReportShowsDashes() {
+        val direct = CallStats(localType = "host", remoteType = "host", protocol = "udp", networkType = "ethernet", wifiDirect = true)
+        assertEquals("host ↔ host · UDP · Wi-Fi Direct", pathOf(direct))
+        val empty = CallStatsReader().read(emptyList(), wifiDirect = false)
+        assertEquals("—", pathOf(empty))
+        assertEquals("—", codecOf(empty))
+        assertEquals("—", dtlsOf(empty))
+        assertEquals("—", ms(empty.rttMs))
+        assertFalse(empty.fec)
+        assertEquals("4.0 kbps", kbps(4.0))
+        assertEquals("48 kbps", kbps(48.4))
+    }
+}

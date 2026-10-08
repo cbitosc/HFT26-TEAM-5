@@ -26,9 +26,11 @@ import org.webrtc.NetworkChangeDetector
 import org.webrtc.NetworkMonitor
 import org.webrtc.PeerConnection
 import org.webrtc.PeerConnectionFactory
+import org.webrtc.RTCStatsCollectorCallback
 import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
 import org.webrtc.audio.JavaAudioDeviceModule
+import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.coroutines.resume
 
 /**
@@ -71,12 +73,19 @@ internal class WebRtcCallMedia(
         PeerConnectionFactory.builder().setAudioDeviceModule(adm).createPeerConnectionFactory()
     }
 
+    // The sessions open now, newest last: a glare's dropped one can close after its replacement opened.
+    private val open = CopyOnWriteArrayList<WebRtcSession>()
+
     override fun open(
         servers: List<TurnServer>,
         relayOnly: Boolean,
         direct: Boolean,
         events: (MediaEvent) -> Unit,
-    ): CallSession = WebRtcSession(factory, servers, relayOnly, direct, link, events, audio, scope, log)
+    ): CallSession =
+        WebRtcSession(factory, servers, relayOnly, direct, link, events, audio, scope, log, onClosed = open::remove).also(open::add)
+
+    /** The newest open session's stats, for the call screen's diagnostics card; null with no session or no report. */
+    suspend fun stats(): CallStats? = open.lastOrNull()?.stats()
 }
 
 private class WebRtcSession(
@@ -89,8 +98,10 @@ private class WebRtcSession(
     private val audio: CallAudio,
     private val scope: CoroutineScope,
     private val log: (String) -> Unit,
+    private val onClosed: (WebRtcSession) -> Unit,
 ) : CallSession {
     private val lock = Any()
+    private val statsReader = CallStatsReader()
     private val gathered = CompletableDeferred<Unit>()
     private val firstCandidate = CompletableDeferred<Unit>()
 
@@ -230,11 +241,32 @@ private class WebRtcSession(
 
     override suspend fun route(): String? = selected
 
+    /** One stats report, read: the first call's counters are the bitrates' baseline, so those come on the second. */
+    suspend fun stats(): CallStats? {
+        val report =
+            withTimeoutOrNull(STATS_MS) {
+                suspendCancellableCoroutine<List<StatEntry>?> { cont ->
+                    val callback =
+                        RTCStatsCollectorCallback { report ->
+                            val entries =
+                                report.statsMap.values.map { StatEntry(it.id, it.type, it.timestampUs, it.members) }
+                            if (cont.isActive) cont.resume(entries)
+                        }
+                    // Under the lock, so close() cannot dispose the connection between the check and the call.
+                    synchronized(lock) {
+                        if (closed) cont.resume(null) else pc.getStats(callback)
+                    }
+                }
+            } ?: return null
+        return statsReader.read(report, wifiDirect = selected?.endsWith("/$ROUTE_DIRECT") == true)
+    }
+
     override fun close() {
         synchronized(lock) {
             if (closed) return
             closed = true
         }
+        onClosed(this)
         gathered.complete(Unit)
         // dispose() closes the connection and its senders; the source is ours to free.
         pc.dispose()
@@ -360,6 +392,7 @@ private class WebRtcSession(
         const val GATHER_MS = 1_500L
         const val LATE_WINDOW_MS = 4_000L
         const val SDP_MS = 10_000L
+        const val STATS_MS = 2_000L
 
         fun typeOf(candidate: IceCandidate): String = typeOf(candidate.sdp)
 
