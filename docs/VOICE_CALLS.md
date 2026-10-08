@@ -52,15 +52,15 @@ A 1:1 audio call has three paths:
 | `turnreq`  | c→s       | `t, q: Long`                                                      | Ask for one TURN credential. Answered by `turncred`, or by `err`               |
 | `turncred` | s→c       | `t, q: Long, urls: [String], user: String, pass: String, exp: Long` | The credential. `exp` is Unix **seconds**. `urls` are RFC 7065 `turn:`/`turns:` URIs |
 
-`turncred` carries `q` and is itself terminal, like `ahas`. No new error codes: `not_subscribed`,
-`rate` and `internal` cover every refusal.
+`turncred` carries `q` and is itself terminal, like `ahas`. `not_subscribed`, `rate` and `internal`
+cover every refusal, plus `ticket` on a spool that takes entitlement tickets (§2.6).
 
 | ID           | Requirement                                                                                                                                                                                                                       |
 |--------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **S-7.6-4**  | A spool MUST refuse `turnreq` with `not_subscribed` on a connection that holds no subscription. The request names **no scope**, and the spool MUST NOT ask for one.                                                              |
+| **S-7.6-4**  | A spool MUST refuse `turnreq` with `not_subscribed` on a connection that holds no subscription. The request names **no scope**, and the spool MUST NOT ask for one. On a connection whose HELLO carried `ent`, S-7.6-16 replaces this gate. |
 | **S-7.6-5**  | A spool MUST rate-limit `turnreq` per connection and per IP, refusing with `rate` + `retryMs`. Suggested: 4 per connection per 10 min, burst 2.                                                                                  |
 | **S-7.6-6**  | `user = decimal(exp) ‖ ":" ‖ base32lower(random(10))`, and `pass = base64(HMAC-SHA1(turnSecret, UTF8(user)))`: the TURN REST shared-secret scheme that coturn's `use-auth-secret` verifies.                                      |
-| **S-7.6-7**  | The random suffix MUST be fresh per issue. It MUST NOT be derived from a scope id, an IP, a token or any connection state.                                                                                                        |
+| **S-7.6-7**  | The random suffix MUST be fresh per issue. It MUST NOT be derived from a scope id, an IP, a token or any connection state. A ticketed issue (S-7.6-17) is the one exception.                                                       |
 | **S-7.6-8**  | `exp = now + turnTtl`. Suggested default 5 min, at most 1 h.                                                                                                                                                                      |
 | **S-7.6-9**  | A spool MUST NOT log or persist issued credentials. Metrics MAY count issues and refusals.                                                                                                                                       |
 | **S-7.6-10** | The spool process MUST NOT relay media. TURN is a separate service that shares only the secret.                                                                                                                                  |
@@ -163,6 +163,67 @@ Proposed §10.1 bullet:
   is UDP.
 - **The "relay all calls" setting** (§3.7) moves the IP-pair exposure from the peer to the TURN
   operator. It does not remove the exposure.
+
+### 2.6 Entitlement tickets and STUN (experimental)
+
+Two additions for a spool whose operator sells TURN (Knit Anywhere; knit-spool ADR 2026-10.bxsg).
+A **ticket** is an Ed25519 grant an issuer signs and the spool checks with only the public half, so
+the spool can tell a paying caller from anyone else without holding an account. A **STUN list** lets
+any client, paying or not, learn its own public address — without which a free phone offers only
+private addresses, and a paying peer's relay cannot permit it (coturn keys permissions on IP alone).
+
+| Record | Direction | Fields                                    | Semantics                                                         |
+|--------|-----------|-------------------------------------------|-------------------------------------------------------------------|
+| `ent`  | c→s       | `t, q: Long, tk: bytes, sig: bytes(64)`   | Present a ticket. Answered by `ok`, or by `err ticket` with `msg` |
+
+```
+Ticket {                 // tk: the house CBOR, every field required, unknown keys ignored
+    v:   1
+    kid: bytes(8)        // SHA-256(raw Ed25519 public key)[0..8]
+    aud: String          // the one spool it is good for
+    nbf: uint            // Unix seconds
+    exp: uint            // Unix seconds, exp - nbf <= 48 h
+    ps:  bytes(16)       // the holder's pseudonym for the day, opaque to the spool
+    fl:  uint            // bit 0: may ask for TURN
+}
+sig = Ed25519(issuer key, "knit/spool/v1/ticket" ‖ tk)
+```
+
+| ID           | Requirement                                                                                                                                                                                                                      |
+|--------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **S-7.6-13** | A spool configured with a ticket key advertises `ent: true` in HELLO; one that is not MUST omit it. A spool that advertises STUN puts a non-empty `stun: [String]` of `stun:`/`stuns:` URIs in HELLO, with no credential.        |
+| **S-7.6-14** | On `ent`, a spool MUST refuse with `err ticket` and a `msg` of `malformed`, `key`, `signature`, `audience`, `early` or `expired` unless `tk` decodes, `kid` names its key, `sig` verifies, `aud` is its own, and `nbf - 300 s <= now <= exp + 300 s`. |
+| **S-7.6-15** | An accepted ticket binds to the connection until it expires, and a later accepted `ent` replaces it. A refused `ent` MUST leave an earlier ticket in place, and is never a strike.                                               |
+| **S-7.6-16** | On a connection whose HELLO carried `ent`, `turnreq` needs a live ticket with bit 0 of `fl`, else `err ticket` with `msg` `missing`, `expired` or `flags`. With one, no subscription is needed. S-7.6-5's limits still apply.   |
+| **S-7.6-17** | A ticketed credential's suffix is `SHA-256("knit/spool/v1/turn-user" ‖ ps)[0..10]`, so every issue under one pseudonym shares it, and the TURN server's per-user quota counts the holder, not the credential.                |
+| **S-7.6-18** | A spool MUST NOT log or persist a ticket or a pseudonym. Metrics MAY count acceptances and refusals by `msg`.                                                                                                                     |
+| **C-7.6-19** | A client that holds a ticket for a spool sends `ent` right after HELLO when the spool advertised `ent`, and again before the ticket expires. It MUST NOT retry a refused ticket on every round.                                 |
+| **C-7.6-20** | A client SHOULD gather from every `stun` URI its connected spools advertise, on every call, whether or not it obtained a TURN credential.                                                                                       |
+| **C-7.6-21** | A client that holds a ticket for a spool SHOULD ask that spool for TURN on every call, whether or not the DM scope is subscribed there; this refines C-7.6-12.                                                                   |
+
+> **Why one ticket per connection.** The spool already ties a connection to every scope it
+> subscribes, so a ticket on each record would buy no unlinkability and cost a signature check per
+> record. The pseudonym does let the spool link one holder's connections across addresses within a
+> day; blind-signed tickets are the later answer if that becomes a concern.
+>
+> **Why the suffix is hashed.** coturn's `user-quota` counts the part of the username after the colon
+> (4.18.0, `get_real_username`), so a stable suffix per pseudonym is what makes a quota per customer
+> possible. Hashing it keeps the spool-side pseudonym out of the TURN server's logs verbatim.
+>
+> **Why STUN rides HELLO.** A free phone that is the *caller* gathers before any answer arrives, so a
+> STUN URI carried in the paying peer's signaling would come too late. coturn answers STUN without a
+> credential, so advertising it costs the operator nothing a TURN allocation would.
+
+**Test vector.** Key pair RFC 8032 §7.1 TEST 1; `aud = "lab.example"`, `nbf = 1800000000`,
+`exp = 1800086400`, `ps = 00 01 … 0f`, `fl = 1`; the `ent` with `q = 7`:
+
+```
+kid = 21fe31dfa154a261
+tk  = a7617601636b69644821fe31dfa154a261636175646b6c61622e6578616d706c65636e62661a6b49d200
+      636578701a6b4b238062707350000102030405060708090a0b0c0d0e0f62666c01
+sig = c0740d14d5f46f2771721c593fa34a6e926b39182955cc6f8fb15365dddcf229
+      da2cb33bdf6f23881cf4b153eedc4238e143fa53ef1a834961040bb55818b809
+```
 
 ## 3. Signaling (client)
 
