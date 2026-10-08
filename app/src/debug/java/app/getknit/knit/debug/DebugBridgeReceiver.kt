@@ -20,6 +20,7 @@ import app.getknit.knit.call.CallManager
 import app.getknit.knit.call.CallPhase
 import app.getknit.knit.call.DirectCallPath
 import app.getknit.knit.call.DirectMode
+import app.getknit.knit.call.StunServers
 import app.getknit.knit.crash.ProcessExitReasons
 import app.getknit.knit.data.AttachmentIdentities
 import app.getknit.knit.data.AttachmentStore
@@ -82,6 +83,10 @@ import app.getknit.knit.mesh.power.AppVisibility
 import app.getknit.knit.mesh.protocol.ReplyRef
 import app.getknit.knit.mesh.sha256Hex
 import app.getknit.knit.mesh.spool.CommonsInvite
+import app.getknit.knit.mesh.spool.SpoolStatus
+import app.getknit.knit.mesh.spool.SpoolTicketState
+import app.getknit.knit.mesh.spool.SpoolTickets
+import app.getknit.knit.mesh.spool.SpoolUrl
 import app.getknit.knit.mesh.wifiaware.NanFaultInjector
 import app.getknit.knit.mesh.wifiaware.NanMsgFault
 import app.getknit.knit.moderation.MlTextModerator
@@ -179,7 +184,8 @@ import java.nio.ByteBuffer
  *   flagged message and the marketing seed deliberately carries none (a hidden bubble would spoil a screenshot).
  * - [ACTION_SPOOL] — configures and inspects the Internet (spool) plane, which has no UI beyond a
  *   debug-only on/off switch: `--es url <ws(s)://…/spool/v1>` adds a spool, `--es drop <url>` removes one,
- *   `--ez on <bool>` flips the global opt-in, and no extras at all just dumps state. The per-scope
+ *   `--ez on <bool>` flips the global opt-in, `--es url <url> --es ticket <knit-ticket:v1:…|clear>` holds or clears
+ *   that relay's entitlement ticket (VOICE_CALLS.md §2.6), and no extras at all just dumps state. The per-scope
  *   `local` vs `spool` counts are the convergence oracle, the way `liveFingerprint` parity is for custody.
  * - [ACTION_RATCHET] — dumps the DM ratchet's per-peer state (X3DH inputs, session/confirmed, send epoch,
  *   the reset floor's anchor) and, with `--es reset <peerNodeId>`, forces a session reset past the
@@ -1564,7 +1570,13 @@ class DebugBridgeReceiver :
      */
 
     private suspend fun handleSpool(intent: Intent): JSONObject {
-        intent.getStringExtra(EXTRA_URL)?.takeIf { it.isNotBlank() }?.let { settings.addSpoolUrl(it.trim()) }
+        val tickets = SpoolTickets(settings)
+        val ticketText = intent.getStringExtra(EXTRA_TICKET)?.takeIf { it.isNotBlank() }
+        // With `ticket`, `url` names the relay the ticket is for and is not added: the relay is configured already, and
+        // re-adding a URL typed without its `?k=` token would make a second, untokened row for the same host.
+        val ticketNote = ticketText?.let { importTicket(tickets, intent.getStringExtra(EXTRA_URL)?.trim(), it) }
+        if (ticketNote?.optString("status") == "error") return ticketNote
+        if (ticketText == null) intent.getStringExtra(EXTRA_URL)?.takeIf { it.isNotBlank() }?.let { settings.addSpoolUrl(it.trim()) }
         intent.getStringExtra(EXTRA_DROP)?.takeIf { it.isNotBlank() }?.let { settings.removeSpoolUrl(it.trim()) }
         intent.getStringExtra(EXTRA_PARK)?.takeIf { it.isNotBlank() }?.let { settings.setSpoolUrlEnabled(it.trim(), false) }
         intent.getStringExtra(EXTRA_UNPARK)?.takeIf { it.isNotBlank() }?.let { settings.setSpoolUrlEnabled(it.trim(), true) }
@@ -1628,16 +1640,82 @@ class DebugBridgeReceiver :
                                 .put("maxBlob", it.maxBlob)
                                 .put("attach", it.attach)
                         } ?: JSONObject.NULL,
-                    ).put("scopes", scopes),
+                    ).put("scopes", scopes)
+                    // VOICE_CALLS.md §2.6: whether this spool takes tickets, how many STUN URIs its hello gave a call,
+                    // and where this connection and the store stand with a ticket. Never the ticket itself.
+                    .put("ent", spool.ent)
+                    .put("stun", spool.stun.size)
+                    .put("ticket", ticketJson(tickets, spool)),
             )
         }
         return JSONObject()
             .put("status", "ok")
+            .put("ticketImport", ticketNote?.optString("message") ?: JSONObject.NULL)
             .put("enabled", settings.spoolEnabled.first())
             .put("configured", JSONArray(settings.spoolUrls.first().toList()))
             .put("disabled", JSONArray(settings.disabledSpoolUrls.first().toList()))
             .put("spools", spools)
             .put("counters", metricsJson(metrics.snapshot()))
+    }
+
+    /**
+     * `…debug.SPOOL --es url <spoolUrl> --es ticket <knit-ticket:v1:…|clear>` (experimental, docs/VOICE_CALLS.md §2.6,
+     * ADR 2026-10.xkp4): holds the ticket for the URL's host, refusing one whose `aud` is another host, or clears it.
+     * The stand-in for a storefront. A live connection presents an imported ticket at once. The reply names the host
+     * and `exp`, never the ticket.
+     */
+    private suspend fun importTicket(
+        tickets: SpoolTickets,
+        url: String?,
+        text: String,
+    ): JSONObject {
+        if (url.isNullOrBlank()) return reply("error", "a ticket needs --es url <the relay it is for>")
+        if (text.trim() == "clear") {
+            tickets.clear(url)
+            return reply("ok", "ticket cleared for ${SpoolUrl.hostname(url)}")
+        }
+        return when (val result = tickets.import(url, text)) {
+            is SpoolTickets.Import.Held -> {
+                reply("ok", "ticket held for ${result.ticket.claims.aud} until ${result.ticket.claims.exp}")
+            }
+
+            SpoolTickets.Import.Unreadable -> {
+                reply("error", "not a knit-ticket:v1 ticket this build can read")
+            }
+
+            SpoolTickets.Import.NoHost -> {
+                reply("error", "the url names no host")
+            }
+
+            is SpoolTickets.Import.ForAnotherSpool -> {
+                reply("error", "the ticket is for ${result.aud}, not ${result.host}; never held")
+            }
+        }
+    }
+
+    /** This connection's ticket state beside what the store holds for the host: claims and verdicts, never bytes. */
+    private suspend fun ticketJson(
+        tickets: SpoolTickets,
+        spool: SpoolStatus,
+    ): JSONObject {
+        val held = tickets.view(spool.url)
+        val state = spool.ticket
+        return JSONObject()
+            .put(
+                "state",
+                when (state) {
+                    SpoolTicketState.None -> "none"
+                    SpoolTicketState.Pending -> "pending"
+                    is SpoolTicketState.Accepted -> "accepted"
+                    is SpoolTicketState.Refused -> "refused"
+                },
+            ).put("exp", (state as? SpoolTicketState.Accepted)?.exp ?: held?.exp ?: JSONObject.NULL)
+            .put("turn", (state as? SpoolTicketState.Accepted)?.let { it.fl and 1L != 0L } ?: held?.grantsTurn ?: JSONObject.NULL)
+            .put("reason", (state as? SpoolTicketState.Refused)?.reason ?: JSONObject.NULL)
+            // The store's side: whether a ticket is held for this host at all, and the verdict its last answer left
+            // (`retry:early`, or the refusal word that keeps it from ever going out again).
+            .put("held", held != null)
+            .put("verdict", held?.verdict ?: JSONObject.NULL)
     }
 
     /**
@@ -2052,7 +2130,9 @@ class DebugBridgeReceiver :
                 servers.forEach { server ->
                     list.put(JSONObject().put("urls", JSONArray(server.urls)).put("expires", server.user.substringBefore(':')))
                 }
-                return reply("ok", "${servers.size} credential(s)").put("turn", list)
+                // C-7.6-20: the STUN URLs a call would gather from beside them, as the call picks them from the hellos.
+                val stun = StunServers.pick(getKoin().get<MeshManager>().stunUrls())
+                return reply("ok", "${servers.size} credential(s), ${stun.size} STUN url(s)").put("turn", list).put("stun", JSONArray(stun))
             }
         }
         return JSONObject()
@@ -2770,6 +2850,7 @@ class DebugBridgeReceiver :
         const val EXTRA_DROP = "drop"
         const val EXTRA_PARK = "park"
         const val EXTRA_UNPARK = "unpark"
+        const val EXTRA_TICKET = "ticket"
         const val EXTRA_RESET_PEER = "reset"
         const val EXTRA_PREFIX = "prefix"
         const val EXTRA_DRY = "dry"

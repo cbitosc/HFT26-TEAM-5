@@ -91,6 +91,17 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   removes one, `--ez on <true|false>` flips the global opt-in (default **off**); no extras at all just
   dumps state. `--es park <url>` / `--es unpark <url>` flip one relay's own switch (ADR 063) — how a soak
   run takes a single spool out of the rotation **without losing its bearer token**, which `drop` would.
+  `--es url <spoolUrl> --es ticket <knit-ticket:v1:…>` holds an **entitlement ticket** for that relay's host name
+  (experimental, `docs/VOICE_CALLS.md` §2.6, ADR 2026-10.xkp4) — the storefront's stand-in, printed by knit-spool's
+  `ticket-mint` — and refuses one whose `aud` is another host; `--es ticket clear` forgets it. With `ticket` the
+  `url` only names the relay and is not added (re-adding it untokened would make a second row). A live connection
+  presents an import at once; the reply's `ticketImport` names the host and `exp`, never the ticket. Each spool in
+  the dump carries `ent` (its hello takes tickets), `stun` (how many STUN URIs its hello gave a call, after the
+  client's URL rule) and `ticket`: `state` (`none`/`pending`/`accepted`/`refused`) with `exp`, `turn` and the
+  refusal `reason` for this connection, plus `held` and `verdict` for the stored ticket (`retry:early`, or the word
+  that keeps it from going out again). A free phone on an Anywhere spool reads `ent: true`, `stun: 1`,
+  `held: false`. Logcat under `ScopeSync`: `<host>: ticket presented|accepted|refused: <word>` and, per call,
+  `<host>: TURN ask (ticketed): …` or `TURN ask skipped, no ticket (ent)`.
   The dump's `disabled` array is the parked set, and a parked URL stays in `configured` while leaving
   `spools[]` within one 15 s `ScopeSync` reconcile tick as its worker stops (that disappearance is the
   oracle that parking actually closed the socket). `drop` clears a parked flag too, so a re-added URL
@@ -187,13 +198,17 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   candidate pair as `route` (`host/host`, `relay/srflx`…), plus `relayOnly`. `--es op start --es peer <nodeId>`
   dials; `answer` opens the call screen, which answers; `decline` and `hangup` end it; `--es op relay --ez on true`
   sends every new call through TURN (C-3.7-3); `--es op turn --es peer <nodeId>` asks the connected spools for a
-  credential and reports its URLs and expiry, never the username or password.
+  credential and reports its URLs and expiry, never the username or password, plus `stun`: the URLs a call would
+  gather from beside them (the hellos' `stun` lists through `call/StunServers`, C-7.6-20). It spends a real
+  issue at each spool asked.
   - `start` and `answer` refuse unless Knit is in the foreground (`am start` it first): the microphone's
     foreground service and the call screen can only start from there. Pre-grant the mic with
     `pm grant app.getknit.knit android.permission.RECORD_AUDIO`; the prompt cannot show over the keyguard.
   - Both ends need `CAP_CALL` pinned for each other (`…debug.STATE`); a build that gains it republishes its profile
-    at the next mesh start. TURN needs a spool whose HELLO carried `turn`, with the peer's DM scope subscribed. The
-    oracle is logcat under `KnitCall` (`call <id> …` and `webrtc: …` lines; credentials are never logged).
+    at the next mesh start. TURN needs a spool whose HELLO carried `turn`, with the peer's DM scope subscribed — or,
+    on a spool whose HELLO carried `ent`, an accepted ticket (`…debug.SPOOL --es ticket`) and no scope at all. The
+    oracle is logcat under `KnitCall` (`call <id> …`, `call ICE: <n> TURN server(s), <m> STUN url(s)` and `webrtc: …`
+    lines; credentials are never logged).
   - **The Wi-Fi Direct leg** (§3.10, ADR 2026-10.kxnw): `state` adds `directMode` and `direct` (the radio's owner,
     each leg as `<id>:host|join:Starting|Up|Over`, and the group interface), and a `route` ending `/wifi-direct` is a
     pair on the group. `--es op direct --es mode prewarm|answer|off` sets when a call between neighbours raises its
