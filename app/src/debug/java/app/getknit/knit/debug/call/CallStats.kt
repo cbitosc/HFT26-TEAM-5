@@ -1,5 +1,7 @@
 package app.getknit.knit.debug.call
 
+import kotlin.math.roundToLong
+
 /**
  * One reading of a call's media, as the call screen's diagnostics card draws it (experimental, debug only). Read from
  * libwebrtc's standard stats report ([CallStatsReader]); every field is null until the report carries it. No address
@@ -42,6 +44,43 @@ internal class StatEntry(
     val timestampUs: Double,
     val members: Map<String, Any?>,
 )
+
+/**
+ * Every candidate pair that has had an answer, for the log line beside a route change: `*` marks the selected one,
+ * then its candidate types, the local transport (and the leg to the TURN server for a relay), and its round trip —
+ * the current one, else the average over every answer so far, else `?`. Fastest first, with the pairs still unanswered
+ * counted. Candidate types and transports only: never an address, the rule the media's log follows.
+ */
+internal fun pairSummary(report: List<StatEntry>): String {
+    val byId = report.associateBy { it.id }
+    val selectedId = report.firstOrNull { it.type == "transport" }?.members?.get("selectedCandidatePairId") as? String
+    val pairs = report.filter { it.type == "candidate-pair" }
+    val answered = pairs.filter { (it.members["responsesReceived"] as? Number)?.toLong()?.let { n -> n > 0 } == true }
+    val lines =
+        answered
+            .map { pair ->
+                val local = (pair.members["localCandidateId"] as? String)?.let(byId::get)
+                val remote = (pair.members["remoteCandidateId"] as? String)?.let(byId::get)
+                val rtt = pairRttMs(pair)
+                val relay = (local?.members?.get("relayProtocol") as? String)?.let { "/turn-$it" }.orEmpty()
+                val line =
+                    (if (pair.id == selectedId) "*" else "") +
+                        "${local?.members?.get("candidateType") ?: "?"}/${remote?.members?.get("candidateType") ?: "?"} " +
+                        "${local?.members?.get("protocol") ?: "?"}$relay " +
+                        (rtt?.let { "${it.roundToLong()}ms" } ?: "?")
+                (rtt ?: Double.MAX_VALUE) to line
+            }.sortedBy { it.first }
+            .map { it.second }
+    val pending = pairs.size - answered.size
+    return if (lines.isEmpty()) "none answered yet ($pending pending)" else lines.joinToString() + " ($pending pending)"
+}
+
+private fun pairRttMs(pair: StatEntry): Double? {
+    (pair.members["currentRoundTripTime"] as? Number)?.toDouble()?.let { return it * 1_000.0 }
+    val total = (pair.members["totalRoundTripTime"] as? Number)?.toDouble() ?: return null
+    val count = (pair.members["responsesReceived"] as? Number)?.toDouble()?.takeIf { it > 0 } ?: return null
+    return total / count * 1_000.0
+}
 
 /**
  * Turns successive stats reports into [CallStats]. Bitrates are the byte counters' change since the previous report,

@@ -111,4 +111,47 @@ class CallStatsReaderTest {
         assertEquals("4.0 kbps", kbps(4.0))
         assertEquals("48 kbps", kbps(48.4))
     }
+
+    @Test
+    fun thePairSummaryListsAnsweredPairsFastestFirstWithTheSelectedOneStarredAndNoAddress() {
+        val report =
+            listOf(
+                StatEntry("T", "transport", 0.0, mapOf("selectedCandidatePairId" to "CP2")),
+                StatEntry(
+                    "CP1",
+                    "candidate-pair",
+                    0.0,
+                    mapOf(
+                        "localCandidateId" to "L1",
+                        "remoteCandidateId" to "R1",
+                        "currentRoundTripTime" to 0.142,
+                        "responsesReceived" to 3L,
+                    ),
+                ),
+                // No current round trip yet: the average over its answers stands in.
+                StatEntry(
+                    "CP2",
+                    "candidate-pair",
+                    0.0,
+                    mapOf(
+                        "localCandidateId" to "L2",
+                        "remoteCandidateId" to "R2",
+                        "totalRoundTripTime" to 0.196,
+                        "responsesReceived" to BigInteger.valueOf(2),
+                    ),
+                ),
+                StatEntry("CP3", "candidate-pair", 0.0, mapOf("localCandidateId" to "L1", "responsesReceived" to 0L)),
+                StatEntry("L1", "local-candidate", 0.0, mapOf("candidateType" to "srflx", "protocol" to "udp", "address" to "203.0.113.7")),
+                StatEntry(
+                    "L2",
+                    "local-candidate",
+                    0.0,
+                    mapOf("candidateType" to "relay", "protocol" to "udp", "relayProtocol" to "tcp", "address" to "198.51.100.9"),
+                ),
+                StatEntry("R1", "remote-candidate", 0.0, mapOf("candidateType" to "srflx", "address" to "192.0.2.1")),
+                StatEntry("R2", "remote-candidate", 0.0, mapOf("candidateType" to "prflx", "address" to "192.0.2.2")),
+            )
+        assertEquals("*relay/prflx udp/turn-tcp 98ms, srflx/srflx udp 142ms (1 pending)", pairSummary(report))
+        assertEquals("none answered yet (0 pending)", pairSummary(emptyList()))
+    }
 }

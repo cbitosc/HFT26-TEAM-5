@@ -208,7 +208,9 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
     at the next mesh start. TURN needs a spool whose HELLO carried `turn`, with the peer's DM scope subscribed — or,
     on a spool whose HELLO carried `ent`, an accepted ticket (`…debug.SPOOL --es ticket`) and no scope at all. The
     oracle is logcat under `KnitCall` (`call <id> …`, `call ICE: <n> TURN server(s), <m> STUN url(s)` and `webrtc: …`
-    lines; credentials are never logged).
+    lines; credentials are never logged). Each `webrtc: route <local>/<remote> (<libwebrtc's reason>)` is followed by
+    `webrtc: pairs …`: every answered candidate pair, fastest first, with its round trip and the selected one starred —
+    what a switch to a relay pair was chosen on.
   - **The Wi-Fi Direct leg** (§3.10, ADR 2026-10.kxnw): `state` adds `directMode` and `direct` (the radio's owner,
     each leg as `<id>:host|join:Starting|Up|Over`, and the group interface), and a `route` ending `/wifi-direct` is a
     pair on the group. `--es op direct --es mode prewarm|answer|off` sets when a call between neighbours raises its

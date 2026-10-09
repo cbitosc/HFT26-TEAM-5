@@ -165,7 +165,10 @@ private class WebRtcSession(
             override fun onSelectedCandidatePairChanged(event: CandidatePairChangeEvent) {
                 val group = if (onGroup(event.local.sdp)) "/$ROUTE_DIRECT" else ""
                 selected = "${typeOf(event.local)}/${typeOf(event.remote)}$group"
-                log("webrtc: route $selected")
+                // libwebrtc's own words for why it switched, then every answered pair's round trip at that moment:
+                // what a switch to a lower-priority pair (srflx → relay) was chosen on.
+                log("webrtc: route $selected (${event.reason})")
+                scope.launch { report()?.let { log("webrtc: pairs ${pairSummary(it)}") } }
             }
 
             override fun onAddStream(stream: MediaStream) = Unit
@@ -243,23 +246,26 @@ private class WebRtcSession(
 
     /** One stats report, read: the first call's counters are the bitrates' baseline, so those come on the second. */
     suspend fun stats(): CallStats? {
-        val report =
-            withTimeoutOrNull(STATS_MS) {
-                suspendCancellableCoroutine<List<StatEntry>?> { cont ->
-                    val callback =
-                        RTCStatsCollectorCallback { report ->
-                            val entries =
-                                report.statsMap.values.map { StatEntry(it.id, it.type, it.timestampUs, it.members) }
-                            if (cont.isActive) cont.resume(entries)
-                        }
-                    // Under the lock, so close() cannot dispose the connection between the check and the call.
-                    synchronized(lock) {
-                        if (closed) cont.resume(null) else pc.getStats(callback)
-                    }
-                }
-            } ?: return null
+        val report = report() ?: return null
         return statsReader.read(report, wifiDirect = selected?.endsWith("/$ROUTE_DIRECT") == true)
     }
+
+    /** One raw stats report, or null once closed or after [STATS_MS]. */
+    private suspend fun report(): List<StatEntry>? =
+        withTimeoutOrNull(STATS_MS) {
+            suspendCancellableCoroutine<List<StatEntry>?> { cont ->
+                val callback =
+                    RTCStatsCollectorCallback { report ->
+                        val entries =
+                            report.statsMap.values.map { StatEntry(it.id, it.type, it.timestampUs, it.members) }
+                        if (cont.isActive) cont.resume(entries)
+                    }
+                // Under the lock, so close() cannot dispose the connection between the check and the call.
+                synchronized(lock) {
+                    if (closed) cont.resume(null) else pc.getStats(callback)
+                }
+            }
+        }
 
     override fun close() {
         synchronized(lock) {
