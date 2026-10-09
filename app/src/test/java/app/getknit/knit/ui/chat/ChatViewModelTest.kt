@@ -11,6 +11,8 @@ import android.net.Uri
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import app.getknit.knit.R
+import app.getknit.knit.call.CallKind
+import app.getknit.knit.call.CallManager
 import app.getknit.knit.data.AttachmentStore
 import app.getknit.knit.data.BlobRepository
 import app.getknit.knit.data.GallerySaver
@@ -248,6 +250,9 @@ class ChatViewModelTest {
             }
     }
 
+    // The call layer a case hands the chat (experimental); null, as in a build without calls, unless a case sets it.
+    private var calls: CallManager? = null
+
     private fun vm(conversationId: String = Conversations.NEARBY) =
         ChatViewModel(
             conversationId,
@@ -276,6 +281,7 @@ class ChatViewModelTest {
             loraFactsFlow,
             context,
             transfers,
+            calls = calls,
         )
 
     @Test
@@ -2462,6 +2468,7 @@ class ChatViewModelTest {
     private companion object {
         const val GROUP = "g-trailhead"
         const val GONE_GROUP = "g-deleted"
+        const val PEER_CALL = "callpeer7u3xqz5w2kcmvbdyrh4a"
     }
 
     /**
@@ -3477,5 +3484,54 @@ class ChatViewModelTest {
             val rows = vm.state.value.rows
             assertEquals(GeoPoint(37.421998, -122.084, 12), rows[0].location)
             assertNull(rows[1].location)
+        }
+
+    @Test
+    fun theCallPutFirstFollowsTheCallLayerOnlyWhileTheChatIsOnScreen() =
+        runTest {
+            val calls = mockk<CallManager>(relaxed = true).also { calls = it }
+            every { calls.walkieEnabled } returns true
+            var meshFirst = true
+            coEvery { calls.prefersWalkie(PEER_CALL) } answers { meshFirst }
+            val vm = vm(PEER_CALL)
+            runCurrent()
+            assertFalse("not asked off screen", vm.meshCallFirst.value)
+
+            vm.onChatForeground()
+            runCurrent()
+            assertTrue(vm.meshCallFirst.value)
+            // A live path appears: the next re-check puts the live call first again.
+            meshFirst = false
+            advanceTimeBy(5_001)
+            assertFalse(vm.meshCallFirst.value)
+
+            vm.onChatBackground()
+            meshFirst = true
+            advanceTimeBy(60_000)
+            assertFalse("no re-check off screen", vm.meshCallFirst.value)
+        }
+
+    @Test
+    fun eachCallButtonPlacesItsOwnKindAndAMeshCallNeedsThePeersBit() =
+        runTest {
+            val calls = mockk<CallManager>(relaxed = true).also { calls = it }
+            coEvery { calls.start(any(), any()) } returns null
+            coEvery { groups.find(PEER_CALL) } returns null
+            coEvery { peers.find(PEER_CALL) } returns peer(PEER_CALL, capabilities = Protocol.CAP_CALL)
+            val vm = vm(PEER_CALL)
+            val events = mutableListOf<Int>()
+            backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.events.collect { events += it } }
+
+            vm.startCall()
+            vm.startMeshCall()
+            advanceUntilIdle()
+            coVerify(exactly = 1) { calls.start(PEER_CALL, CallKind.LIVE) }
+            coVerify(exactly = 0) { calls.start(PEER_CALL, CallKind.WALKIE) }
+            assertEquals(listOf(R.string.chat_mesh_call_peer_too_old), events)
+
+            coEvery { peers.find(PEER_CALL) } returns peer(PEER_CALL, capabilities = Protocol.CAP_CALL or Protocol.CAP_WALKIE)
+            vm.startMeshCall()
+            advanceUntilIdle()
+            coVerify(exactly = 1) { calls.start(PEER_CALL, CallKind.WALKIE) }
         }
 }

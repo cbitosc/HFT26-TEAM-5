@@ -9,6 +9,7 @@ import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.StringRes
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
@@ -76,6 +77,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Reply
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.BrokenImage
@@ -93,7 +95,7 @@ import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material.icons.filled.Podcasts
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -252,6 +254,7 @@ import app.getknit.knit.ui.theme.knitColors
 import app.getknit.knit.ui.theme.readableOn
 import app.getknit.knit.ui.theme.rememberPressScale
 import app.getknit.knit.ui.util.rememberCurrentTimeMillis
+import app.getknit.knit.ui.voice.MicGate
 import app.getknit.knit.ui.voice.VoiceNoteBubble
 import app.getknit.knit.ui.voice.VoiceNotePreview
 import app.getknit.knit.ui.voice.VoicePlayer
@@ -305,6 +308,7 @@ fun ChatScreen(
     val videoEncoding by viewModel.videoEncoding.collectAsStateWithLifecycle()
     val showPublicConsent by viewModel.showPublicConsent.collectAsStateWithLifecycle()
     val stagedLocation by viewModel.stagedLocation.collectAsStateWithLifecycle()
+    val meshCallFirst by viewModel.meshCallFirst.collectAsStateWithLifecycle()
     val showLocationConsent by viewModel.showLocationConsent.collectAsStateWithLifecycle()
     val showTransferConsent by viewModel.showTransferConsent.collectAsStateWithLifecycle()
     val voiceRecording by viewModel.voiceRecording.collectAsStateWithLifecycle()
@@ -572,6 +576,8 @@ fun ChatScreen(
         onDownloadAttachment = viewModel::downloadAttachment,
         onSendFileDirectly = viewModel::sendFileDirectly,
         onStartCall = viewModel::startCall,
+        onStartMeshCall = viewModel::startMeshCall,
+        meshCallFirst = meshCallFirst,
         showTransferConsent = showTransferConsent,
         onAcceptTransferConsent = viewModel::acceptTransferConsent,
         onDismissTransferConsent = viewModel::dismissTransferConsent,
@@ -707,6 +713,10 @@ internal fun ChatScreenContent(
     onSendFileDirectly: () -> Unit = {},
     // A voice call (experimental; DM only, in a build that wires calls — [ChatUiState.canCall]).
     onStartCall: () -> Unit = {},
+    // A mesh call — a walkie-talkie over the mesh (§3.11, [ChatUiState.canMeshCall]) — and whether it is the one the top
+    // bar shows, the live call going to the overflow; else the other way round.
+    onStartMeshCall: () -> Unit = {},
+    meshCallFirst: Boolean = false,
     showTransferConsent: TransferConsent? = null,
     onAcceptTransferConsent: () -> Unit = {},
     onDismissTransferConsent: () -> Unit = {},
@@ -1076,7 +1086,17 @@ internal fun ChatScreenContent(
                     // position (a text-only channel, and a text-only room), and the bridged one has no peer to
                     // block — its authors are not peers, and blocking the gateway would silence a contact over
                     // somebody else's post.
-                    if (state.canCall) CallButton(onStartCall)
+                    // The call this chat puts first sits in the bar and the other in the overflow (§3.11): the live one
+                    // while a live path looks possible, the mesh one while none does.
+                    val callGate = if (state.canCall) rememberCallMicGate() else null
+                    val meshFirst = state.canMeshCall && meshCallFirst
+                    if (callGate != null) {
+                        if (meshFirst) {
+                            CallButton(callGate, Icons.Filled.Podcasts, R.string.chat_mesh_call, "chat_mesh_call", onStartMeshCall)
+                        } else {
+                            CallButton(callGate, Icons.Filled.Call, R.string.chat_call, "chat_call", onStartCall)
+                        }
+                    }
                     if (!state.isBridged && !state.isCommons) {
                         Box {
                             IconButton(onClick = { headerMenuOpen = true }, modifier = Modifier.size(48.dp)) {
@@ -1115,6 +1135,20 @@ internal fun ChatScreenContent(
                                         },
                                     )
                                 } else if (!state.isRoom) {
+                                    // The call the top bar does not show (§3.11).
+                                    if (callGate?.hasMicrophone == true && state.canMeshCall) {
+                                        DropdownMenuItem(
+                                            text = { Text(stringResource(if (meshFirst) R.string.chat_call else R.string.chat_mesh_call)) },
+                                            leadingIcon = {
+                                                Icon(if (meshFirst) Icons.Filled.Call else Icons.Filled.Podcasts, contentDescription = null)
+                                            },
+                                            modifier = Modifier.testTag(if (meshFirst) "chat_call_menu" else "chat_mesh_call_menu"),
+                                            onClick = {
+                                                headerMenuOpen = false
+                                                callGate.runOrRequest(if (meshFirst) onStartCall else onStartMeshCall)
+                                            },
+                                        )
+                                    }
                                     // A direct transfer rides a one-shot Wi-Fi Direct link, not the mesh, so it is
                                     // a DM affair: one peer, in range, running a build that answers.
                                     DropdownMenuItem(
@@ -4243,7 +4277,7 @@ private fun MessageInput(
                     when (action) {
                         SendAction.Sending -> stringResource(R.string.chat_sending)
                         SendAction.Send -> stringResource(R.string.action_send)
-                        SendAction.Attach -> stringResource(R.string.action_attach_media)
+                        SendAction.Attach -> stringResource(R.string.action_attach_photo)
                     }
                 // The byte counter belongs to the button it constrains, not to the thread: it says what the
                 // *send* will carry, so it rides directly over the send button rather than across the width of
@@ -4331,9 +4365,8 @@ private fun MessageInput(
                                     }
 
                                     SendAction.Attach -> {
-                                        // The gallery, not "add a photo": the picker behind it offers videos too.
                                         Icon(
-                                            imageVector = Icons.Filled.PhotoLibrary,
+                                            imageVector = Icons.Filled.AddPhotoAlternate,
                                             contentDescription = null,
                                             modifier = Modifier.size(24.dp),
                                         )
@@ -4455,21 +4488,32 @@ private fun AttachFileButton(onClick: () -> Unit) {
     }
 }
 
-/**
- * The top bar's voice-call button (experimental). The microphone is asked for on the press that finds it missing and,
- * like the voice-note mic, the call does not start on the grant: the user taps again.
- */
+/** The microphone gate both calls go through; a refusal says why the press did nothing. */
 @Composable
-private fun CallButton(onStartCall: () -> Unit) {
+private fun rememberCallMicGate(): MicGate {
     val context = LocalContext.current
     val denied = stringResource(R.string.chat_call_mic_denied)
-    val gate = rememberMicGate(onDenied = { Toast.makeText(context, denied, Toast.LENGTH_LONG).show() })
+    return rememberMicGate(onDenied = { Toast.makeText(context, denied, Toast.LENGTH_LONG).show() })
+}
+
+/**
+ * The top bar's call button (experimental): a live voice call or a mesh call (§3.11). The microphone is asked for on
+ * the press that finds it missing and, like the voice-note mic, the call does not start on the grant: the user taps again.
+ */
+@Composable
+private fun CallButton(
+    gate: MicGate,
+    icon: ImageVector,
+    @StringRes label: Int,
+    tag: String,
+    onStart: () -> Unit,
+) {
     if (!gate.hasMicrophone) return
     IconButton(
-        onClick = { gate.runOrRequest(onStartCall) },
-        modifier = Modifier.size(48.dp).testTag("chat_call"),
+        onClick = { gate.runOrRequest(onStart) },
+        modifier = Modifier.size(48.dp).testTag(tag),
     ) {
-        Icon(Icons.Filled.Call, contentDescription = stringResource(R.string.chat_call))
+        Icon(icon, contentDescription = stringResource(label))
     }
 }
 

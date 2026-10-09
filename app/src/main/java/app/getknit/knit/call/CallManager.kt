@@ -36,10 +36,17 @@ data class CallState(
     val speaker: Boolean = false,
     // Why it ended (a [CallPayload] REASON_*), once [phase] is [CallPhase.Ended].
     val reason: Int? = null,
-    // §3.11: a walkie-talkie session — no media; the user holds to talk and each burst rides the mesh as a voice note.
+    // §3.11: a walkie-talkie session — no media; the user holds to talk and each burst streams over the mesh in chunks.
     val walkie: Boolean = false,
     // The walkie took over a live call whose path was lost or never came.
     val degraded: Boolean = false,
+)
+
+/** One chunk of the peer's walkie burst in the connected session [callId] (§3.11), stamped [at] on this phone's clock. */
+class TalkIn(
+    val callId: String,
+    val chunk: TalkChunk,
+    val at: Long,
 )
 
 /** Why [CallManager.start] dialled nothing. */
@@ -178,6 +185,11 @@ class CallManager(
     /** Calls this phone missed, for the one collector that notifies them; buffered so none is lost before it subscribes. */
     val missed: Flow<MissedCall> = missedCalls.receiveAsFlow()
 
+    private val talkIn = Channel<TalkIn>(TALK_BUFFER, BufferOverflow.DROP_OLDEST)
+
+    /** The peer's walkie chunks for the connected session (§3.11), for the one collector that plays them. */
+    val talk: Flow<TalkIn> = talkIn.receiveAsFlow()
+
     /**
      * Relay every new call through TURN and send no host or server-reflexive candidate (C-3.7-3). A debug-bridge
      * toggle on this branch, not a setting: in-memory, read when a call opens its media.
@@ -214,7 +226,7 @@ class CallManager(
             when (kind) {
                 CallKind.LIVE -> false
                 CallKind.WALKIE -> walkie.enabled
-                CallKind.AUTO -> walkie.enabled && walkie.capable(peerId) && !walkie.liveLikely(peerId)
+                CallKind.AUTO -> prefersWalkie(peerId)
             }
         val l =
             mutex.withLock {
@@ -230,6 +242,15 @@ class CallManager(
         setup(l) { if (asWalkie) dialWalkie(l) else dial(l) }
         return null
     }
+
+    /** Whether this build runs the walkie at all (§3.11): the chat offers a mesh call beside the live one. */
+    val walkieEnabled: Boolean get() = walkie.enabled
+
+    /**
+     * Whether a call to [peerId] is better placed as a walkie right now (§3.11): the peer runs one and no live path
+     * looks possible. What [CallKind.AUTO] decides on, and which call the chat puts first.
+     */
+    suspend fun prefersWalkie(peerId: String): Boolean = walkie.enabled && walkie.capable(peerId) && !walkie.liveLikely(peerId)
 
     /** Answers the call [id] is alerting for; false when it no longer is. */
     suspend fun answer(id: String): Boolean {
@@ -311,6 +332,23 @@ class CallManager(
                 }
             }
         deliver(sends)
+    }
+
+    /**
+     * One chunk of [senderId]'s walkie burst ([TalkWire], a `talk` frame's opened plaintext, §3.11): passed on only
+     * while this phone's call is a connected walkie session with that peer and the chunk names it. Returns at once; a
+     * talk frame is never re-served, and the player orders and dedups by burst and chunk.
+     */
+    suspend fun onTalk(
+        senderId: String,
+        bytes: ByteArray,
+    ) {
+        val (tag, chunk) = TalkWire.decode(bytes) ?: return
+        val id =
+            mutex.withLock {
+                live?.takeIf { it.peerId == senderId && it.walkie && it.phase == CallPhase.Connected && TalkWire.tagOf(it.id) == tag }?.id
+            } ?: return
+        talkIn.trySend(TalkIn(id, chunk, clock()))
     }
 
     @Suppress("ReturnCount") // a ladder of refusals ahead of the one admit
@@ -985,6 +1023,9 @@ class CallManager(
         const val MAX_EARLY_CANDS = 64
 
         const val MISSED_BUFFER = 16
+
+        // Chunks waiting on the player: a minute of a burst at the chunk length, so a busy player drops none.
+        const val TALK_BUFFER = 256
 
         const val MS_PER_S = 1_000L
 

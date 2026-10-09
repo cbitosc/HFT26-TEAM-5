@@ -9,9 +9,10 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.getknit.knit.R
 import app.getknit.knit.TextLimits
-import app.getknit.knit.clampToUtf16
+import app.getknit.knit.call.CallKind
 import app.getknit.knit.call.CallManager
 import app.getknit.knit.call.CallRefusal
+import app.getknit.knit.clampToUtf16
 import app.getknit.knit.data.AttachmentIdentities
 import app.getknit.knit.data.AttachmentStore
 import app.getknit.knit.data.BlobRepository
@@ -464,6 +465,9 @@ data class ChatUiState(
     // Whether the top bar offers a voice call (experimental, docs/VOICE_CALLS.md): a 1:1 thread in a build that wires
     // calls. Not gated on the peer's CAP_CALL, for [canSendFile]'s reason; [ChatViewModel.startCall] explains instead.
     val canCall: Boolean = false,
+    // Whether it offers a mesh call too — a walkie-talkie over the mesh (docs/VOICE_CALLS.md §3.11) — in a build that
+    // runs one. Which of the two the top bar shows, and which the overflow, is [ChatViewModel.meshCallFirst].
+    val canMeshCall: Boolean = false,
     // True when this thread is the **Meshtastic room** — the paired radio's primary channel, mirrored into a
     // room on this phone. It is a public room like Nearby, and shares its glyph and its "no attachments"
     // refusal, but its authors are not Knit peers: no verified badge, nothing to tap through to, and a contact
@@ -651,6 +655,15 @@ class ChatViewModel(
     private var recordingTicker: Job? = null
 
     /** One-shot UI messages (a string res id), surfaced as toasts — e.g. the result of saving an image. */
+    private val _meshCallFirst = MutableStateFlow(false)
+
+    /**
+     * True while a mesh call is the one to offer first (§3.11): the peer runs the walkie and no live path looks
+     * possible. The top bar shows that call and the overflow the other. Re-read while the chat is on screen, since the
+     * Internet route and the neighbours it rests on come and go.
+     */
+    val meshCallFirst: StateFlow<Boolean> = _meshCallFirst.asStateFlow()
+
     private val _events = MutableSharedFlow<Int>(extraBufferCapacity = 1)
     val events: SharedFlow<Int> = _events.asSharedFlow()
 
@@ -782,6 +795,16 @@ class ChatViewModel(
 
     init {
         viewModelScope.launch { myNodeId.value = identity.nodeId() }
+        calls?.takeIf { it.walkieEnabled }?.let { calls ->
+            viewModelScope.launch {
+                chatForeground.collectLatest { foreground ->
+                    while (foreground) {
+                        _meshCallFirst.value = calls.prefersWalkie(conversationId)
+                        delay(MESH_CALL_RECHECK_MS)
+                    }
+                }
+            }
+        }
         watchDraftForLinks()
         watchRetrySources()
         // Decode every link-preview card in this thread whose blob has landed, once; the store dedups and the
@@ -1260,6 +1283,7 @@ class ChatViewModel(
                 needsPublicConsent = isBridged && !publicConsented,
                 isBlocked = isPeerThread && conversationId in blocked,
                 canCall = calls != null && isPeerThread && conversationId !in blocked,
+                canMeshCall = calls?.walkieEnabled == true && isPeerThread && conversationId !in blocked,
                 verified = isPeerThread && peersByNode[conversationId]?.verified == true,
                 isGroup = isGroup,
                 memberCount = members.size,
@@ -2174,11 +2198,16 @@ class ChatViewModel(
     }
 
     /** Calls this thread's peer (experimental). The call screen opens from the call layer; a refusal is a toast. */
-    fun startCall() {
+    fun startCall() = placeCall(CallKind.LIVE)
+
+    /** Calls this thread's peer as a walkie-talkie over the mesh (§3.11); a peer without one is a toast. */
+    fun startMeshCall() = placeCall(CallKind.WALKIE)
+
+    private fun placeCall(kind: CallKind) {
         val calls = calls ?: return
         viewModelScope.launch {
             val refusal =
-                refusalForCall() ?: when (calls.start(conversationId)) {
+                refusalForCall() ?: refusalForMeshCall(kind) ?: when (calls.start(conversationId, kind)) {
                     null -> null
                     CallRefusal.BUSY -> R.string.chat_call_busy
                     CallRefusal.SELF -> R.string.chat_call_needs_dm
@@ -2186,6 +2215,12 @@ class ChatViewModel(
             refusal?.let { _events.tryEmit(it) }
         }
     }
+
+    /** A mesh call goes only toward a pinned profile carrying [Protocol.CAP_WALKIE] (C-3.11-1). */
+    private suspend fun refusalForMeshCall(kind: CallKind): Int? =
+        R.string.chat_mesh_call_peer_too_old.takeIf {
+            kind == CallKind.WALKIE && (peers.find(conversationId)?.capabilities ?: 0L) and Protocol.CAP_WALKIE == 0L
+        }
 
     /**
      * Why this thread cannot be called, or null when it can: a DM only, toward a pinned profile carrying
@@ -2729,6 +2764,9 @@ class ChatViewModel(
 
         /** Recording UI refresh — fast enough for a level meter to look live, slow enough to stay cheap. */
         const val VOICE_TICK_MS = 60L
+
+        /** How often an open chat re-asks which call to put first: a route or a neighbour can come or go meanwhile. */
+        const val MESH_CALL_RECHECK_MS = 5_000L
 
         /**
          * Shortest voice note worth staging. Below this it is a fumbled press rather than speech, and

@@ -355,6 +355,11 @@ val meshModule =
                     runCatching { getKoin().getOrNull<CallManager>()?.onSignal(sender, payload, sentAt) }
                         .onFailure { Log.w("KnitCall", "call signal dropped: ${it.javaClass.simpleName}") }
                 },
+                // A walkie chunk (§3.11) goes the same late-bound, never-throwing way.
+                onCallTalk = { sender, chunk ->
+                    runCatching { getKoin().getOrNull<CallManager>()?.onTalk(sender, chunk) }
+                        .onFailure { Log.w("KnitCall", "walkie chunk dropped: ${it.javaClass.simpleName}") }
+                },
                 extraCapabilities = (if (CALLS_WIRED) Protocol.CAP_CALL else 0L) or (if (WALKIE_WIRED) Protocol.CAP_WALKIE else 0L),
                 identities = get(),
                 quotes = get(),

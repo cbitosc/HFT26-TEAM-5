@@ -13,7 +13,6 @@ import app.getknit.knit.fieldlog.FieldJournal
 import app.getknit.knit.identity.IdentitySource
 import app.getknit.knit.mesh.RadioSupport
 import app.getknit.knit.moderation.TextModerator
-import app.getknit.knit.ui.voice.VoiceRecorder
 import com.google.crypto.tink.KeysetHandle
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
@@ -79,9 +78,8 @@ class KoinGraphVerifyTest {
                 Long::class,
                 // The direct leg's link, handed to the media as a field of the DirectCallPath it already holds.
                 StateFlow::class,
-                // The walkie's seam over the same late-bound reads, and its recorder at the burst rate (§3.11).
+                // The walkie's seam over the same late-bound reads (§3.11).
                 CallWalkie::class,
-                VoiceRecorder::class,
             )
     }
 }

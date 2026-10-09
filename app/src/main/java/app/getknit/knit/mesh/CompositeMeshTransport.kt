@@ -294,6 +294,13 @@ class CompositeMeshTransport(
         return armed
     }
 
+    /** A live call's hold, forwarded to every child like [expectBulkTransfer]; true if any holds or raises a link. */
+    override fun holdLink(nodeId: String): Boolean {
+        var held = false
+        for (child in children) if (child.holdLink(nodeId)) held = true
+        return held
+    }
+
     /** The high-throughput child's answer: the plane an attachment would ride, whichever child carries the ask. */
     override fun bulkRouteTo(nodeId: String): BulkRoute = children.firstOrNull { it.highThroughput }?.bulkRouteTo(nodeId) ?: BulkRoute.None
 
@@ -518,6 +525,16 @@ class CompositeMeshTransport(
         hint: FanoutHint,
     ) {
         for (child in children) child.longRangeFanout(wire, hint)
+    }
+
+    // A live frame (a walkie chunk) rides the high-throughput child when it holds a link to [to]: an NDP's latency is
+    // a Wi-Fi radio's, not a connection interval's. Everything else keeps the Bluetooth-first order of [send].
+    override suspend fun sendLive(
+        wire: WireEnvelope,
+        to: Peer,
+    ) {
+        val fast = children.firstOrNull { c -> c.highThroughput && c.neighbors.value.any { it.nodeId == to.nodeId } }
+        if (fast != null) fast.send(wire, to) else send(wire, to)
     }
 
     /** First child (preference order) that currently holds a live data-path link to [nodeId], or null. */

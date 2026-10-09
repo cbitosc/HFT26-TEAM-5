@@ -1049,6 +1049,9 @@ class LabNode internal constructor(
 
     /** Everything the LoRa plane logged this boot — `lora tx <label> parts=N` lines are the air oracle. */
     val loraLog = CopyOnWriteArrayList<String>()
+
+    /** Every walkie chunk's plaintext this node's pipeline opened and handed the call layer (§3.11). */
+    val talks = CopyOnWriteArrayList<ByteArray>()
     lateinit var manager: MeshManager
         private set
     lateinit var messages: MessageRepository
@@ -1259,6 +1262,7 @@ class LabNode internal constructor(
                 ingressBudget = IngressBudget(burst = limits.ingressBurst, perMinute = limits.ingressPerMinute, clock = now),
                 spoolDialer = spool,
                 commons = commons,
+                onCallTalk = { _, chunk -> talks += chunk },
             )
         manager.start()
         // The session's collectors subscribe asynchronously; a frame sent before that is emitted into nobody.
@@ -1414,6 +1418,12 @@ class LabNode internal constructor(
 
     /** Runs one round of the 60 s re-offer to every linked neighbour (custody digest, blob and key re-asks), now. */
     suspend fun reoffer() = manager.reofferToNeighbors()
+
+    /** Sends one chunk of a walkie burst to [to], as `WalkieTalk` streams one (docs/VOICE_CALLS.md §3.11). */
+    suspend fun sendTalk(
+        to: LabNode,
+        chunk: ByteArray,
+    ): Boolean = spaced { manager.sendCallTalk(to.nodeId, chunk) }
 
     /** Sends a DM; the frame the app's composer would send. */
     suspend fun sendDm(

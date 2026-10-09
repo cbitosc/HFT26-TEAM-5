@@ -27,6 +27,7 @@ import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -368,6 +369,39 @@ class CompositeMeshTransportTest {
             composite.send(wire(), Peer("p"))
             assertEquals(0, bt.sends.size)
             assertEquals(1, nan.sends.size)
+        }
+
+    @Test
+    fun aLiveFrameRidesTheHighThroughputLinkAndFallsBackToBluetooth() =
+        runTest(UnconfinedTestDispatcher()) {
+            val bt = FakeChild()
+            val nan = FakeChild(highThroughput = true)
+            val composite = CompositeMeshTransport(listOf(bt, nan), backgroundScope)
+            bt.setNeighbors(Peer("p"), Peer("q"))
+            nan.setNeighbors(Peer("p"))
+            advanceUntilIdle()
+            // A walkie chunk to a peer both radios link: the NDP, not Bluetooth's first claim (§3.11).
+            composite.sendLive(wire(), Peer("p"))
+            assertEquals(0, bt.sends.size)
+            assertEquals(1, nan.sends.size)
+            // Only Bluetooth links q: the live frame goes the ordinary way.
+            composite.sendLive(wire(), Peer("q"))
+            assertEquals(1, bt.sends.size)
+            assertEquals(1, nan.sends.size)
+        }
+
+    @Test
+    fun aCallsHoldReachesEveryChildAndHoldsIfAnyDoes() =
+        runTest(UnconfinedTestDispatcher()) {
+            val bt = FakeChild()
+            val nan = FakeChild(highThroughput = true)
+            val composite = CompositeMeshTransport(listOf(bt, nan), backgroundScope)
+            // The fakes keep the default hold, which is their bulk hint.
+            assertFalse(composite.holdLink("p"))
+            nan.armBulk = true
+            assertTrue(composite.holdLink("p"))
+            assertEquals(listOf("p", "p"), bt.expectBulkCalls)
+            assertEquals(listOf("p", "p"), nan.expectBulkCalls)
         }
 
     @Test

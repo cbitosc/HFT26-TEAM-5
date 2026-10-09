@@ -392,6 +392,9 @@ class WifiAwareTransport(
     // recovery machinery. TTL'd + capped + fail-cooled (see BulkWantTracker); cleared on link-up and stop().
     private val bulkWanted = BulkWantTracker(SystemClock::elapsedRealtime)
 
+    // Peers a live call holds a link to ([holdLink], docs/VOICE_CALLS.md §3.11): their link outlasts its idle teardown.
+    private val linkHolds = NanLinkHolds(SystemClock::elapsedRealtime)
+
     // Peers currently served by a higher-preference plane (Bluetooth), pushed by CompositeMeshTransport: we
     // don't bring up an NDP sync to them (BLE carries their data) until they drop off it. Volatile — written
     // from the composite's collector, read on the discovery/handler threads.
@@ -1001,6 +1004,7 @@ class WifiAwareTransport(
         reachablePeers.clear()
         digestTracker.clear()
         bulkWanted.clearAll()
+        linkHolds.clearAll()
         lonelySince = 0L
         healRearmOwed = false
         lonelyRelaxedLogged = false
@@ -1137,6 +1141,21 @@ class WifiAwareTransport(
         Log.d(TAG, "bulk arm $nodeId (seen ${ageMs}ms ago)")
         healSignal.trySend(Unit) // re-evaluate driveSync now instead of waiting out the idle tick
         return true
+    }
+
+    /**
+     * A live call's hold on its link to [nodeId] (docs/VOICE_CALLS.md §3.11): while it lasts, [superviseLink] does not
+     * tear the link down for being idle, and the peer stays bulk-wanted, so a link its window ends (or the radio drops)
+     * is raised again at once — through [expectBulkTransfer]'s own gates when there is none. Renewed by the call's next
+     * ask; it lapses on its own ([NanLinkHolds]).
+     */
+    override fun holdLink(nodeId: String): Boolean {
+        linkHolds.note(nodeId)
+        if (peers.containsKey(nodeId)) {
+            bulkWanted.note(nodeId)
+            return true
+        }
+        return expectBulkTransfer(nodeId)
     }
 
     override suspend fun send(
@@ -2807,6 +2826,8 @@ class WifiAwareTransport(
             val now = SystemClock.elapsedRealtime()
             val idle = now - conn.link.lastActivityAt
             val held = now - conn.link.linkStartedAt
+            // A live call's link is not idle between its bursts ([holdLink]); its window still ends it.
+            val callHeld = linkHolds.isHeld(conn.nodeId)
             val done =
                 if (isInitiator) {
                     // Cut the post-backfill linger short when another pair is waiting on our single NDI, so a
@@ -2814,16 +2835,19 @@ class WifiAwareTransport(
                     // main lever on multi-node propagation latency (one NDP at a time). Full linger only when no
                     // one else is sync-wanted, so an active 1:1 chat still re-uses the warm NDP.
                     val quiescence = if (initiateOwed()) CONTENDED_QUIESCENCE_MS else QUIESCENCE_MS
-                    idle >= quiescence || held >= SYNC_MAX_WINDOW_MS
+                    NanLinkLife.done(idle, held, quiescence, SYNC_MAX_WINDOW_MS, callHeld)
                 } else {
-                    idle >= RESPONDER_QUIESCENCE_MS || held >= RESPONDER_MAX_HOLD_MS
+                    NanLinkLife.done(idle, held, RESPONDER_QUIESCENCE_MS, RESPONDER_MAX_HOLD_MS, callHeld)
                 }
             if (done) {
                 // Record the sync at our *post-backfill* digest: if we gained nothing new after ingesting the
                 // peer's data, our version now equals theirs and the pair stays quiet (the identical-digest
                 // skip); if we later gain something, the version moves and re-triggers. Initiator-only — see kdoc.
                 if (isInitiator) digestTracker.onReconciled(conn.nodeId, storeDigest.current())
-                Log.i(TAG, "sync with ${conn.nodeId} done (initiator=$isInitiator idle=${idle}ms held=${held}ms) — disconnecting")
+                Log.i(
+                    TAG,
+                    "sync with ${conn.nodeId} done (initiator=$isInitiator idle=${idle}ms held=${held}ms call=$callHeld) — disconnecting",
+                )
                 teardownPeer(conn.nodeId, backoffMs = 0) // clean sync: no anti-churn backoff needed
                 break
             }

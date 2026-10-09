@@ -2059,9 +2059,10 @@ class DebugBridgeReceiver :
      *
      * The walkie-talkie (§3.11, ADR 2026-10.79yb): `start --es kind auto|live|walkie` places the call as the Call button
      * would (`auto`, the default) or forces its kind; `talk --ei ms <500-8000>` holds the talk button that long in a
-     * connected walkie session and sends the burst (the call's microphone service must be up — the call screen starts
-     * it). `state` adds `walkie`/`degraded` to the call and the `walkie` block: the talk button's state and the bursts
-     * `sent`, `heard` (played by themselves) and `skipped` (arrived too late to play, left as voice notes).
+     * connected walkie session, streaming the burst as it records (the call's microphone service must be up — the call
+     * screen starts it). `state` adds `walkie`/`degraded` to the call and the `walkie` block: the talk button's state,
+     * the bursts `sent` and `heard` (played to their end), the chunks `chunksOut`, `chunksIn` and `lost` (skipped as
+     * never come), and `link`: DIRECT, MESH or NONE, the link a chunk to the peer would take (null outside a walkie).
      */
     @Suppress("CyclomaticComplexMethod", "ReturnCount", "LongMethod") // a flat dispatch over the ops
     private suspend fun handleCall(
@@ -2116,7 +2117,10 @@ class DebugBridgeReceiver :
                 if (!walkie.press()) return reply("error", "no walkie session, or the microphone would not open")
                 delay(ms.toLong())
                 walkie.release()
-                return reply("ok", "talked ${ms}ms: ${walkie.talk.value}").put("sent", walkie.sent.get())
+                return reply(
+                    "ok",
+                    "talked ${ms}ms: ${walkie.talk.value}",
+                ).put("sent", walkie.sent.get()).put("chunksOut", walkie.chunksOut.get())
             }
 
             "relay" -> {
@@ -2206,9 +2210,12 @@ class DebugBridgeReceiver :
                 getKoin().getOrNull<WalkieTalk>()?.let {
                     JSONObject()
                         .put("talk", it.talk.value.toString())
+                        .put("link", it.link.value?.name ?: JSONObject.NULL)
                         .put("sent", it.sent.get())
                         .put("heard", it.heard.get())
-                        .put("skipped", it.skipped.get())
+                        .put("chunksOut", it.chunksOut.get())
+                        .put("chunksIn", it.chunksIn.get())
+                        .put("lost", it.lost.get())
                 } ?: JSONObject.NULL,
             )
     }

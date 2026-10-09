@@ -82,6 +82,7 @@ import app.getknit.knit.mesh.protocol.ReactionPayload
 import app.getknit.knit.mesh.protocol.ReceiptContent
 import app.getknit.knit.mesh.protocol.RelayEnvelope
 import app.getknit.knit.mesh.protocol.ReplyRef
+import app.getknit.knit.mesh.protocol.TalkSeal
 import app.getknit.knit.mesh.protocol.TransferPayload
 import app.getknit.knit.mesh.protocol.TypingContent
 import app.getknit.knit.mesh.protocol.VideoInfo
@@ -223,6 +224,9 @@ class InboundPipeline(
     // handed on post-commit from an accepted thread only. The call layer owns ringing and every notification, and the
     // hook must return without waiting — it runs on this frame's inbound path.
     private val onCallCtl: suspend (senderId: String, payload: CallPayload, sentAt: Long) -> Unit = { _, _, _ -> },
+    // A walkie chunk's plaintext ([handleTalk], docs/VOICE_CALLS.md §3.11), from an accepted contact once its seal
+    // opened. The call layer decides whether it belongs to a session; the hook returns without waiting, like the above.
+    private val onCallTalk: suspend (senderId: String, chunk: ByteArray) -> Unit = { _, _ -> },
     // A commons' advertised name for its notification title (`CommonsStore.find`), null when the operator
     // set none — the notifier then uses the generic room title.
     commonsTitle: suspend (conversationId: String) -> String? = { null },
@@ -434,8 +438,62 @@ class InboundPipeline(
             // for types nobody has minted yet.
             FrameType.COMMONS -> {}
 
+            FrameType.TALK -> {
+                handleTalk(env, signed = wire.sig.isNotEmpty())
+            }
+
             else -> {}
         }
+    }
+
+    /**
+     * One walkie chunk (docs/VOICE_CALLS.md §3.11): a [FrameType.TALK] frame addressed to us, its payload a [TalkSeal]
+     * (or a [ChatContent], for a header that form cannot carry). Unsigned by design, so the ratchet's AEAD is what
+     * authenticates it: nothing acts on it before it opens, and a failure is never a reset trigger. Opened and committed
+     * like any DM, from an accepted contact only, and its plaintext handed to the call layer. Never custodied ([onDeliver]
+     * carries custodial types alone), never acked, and never a message.
+     */
+    @Suppress("ReturnCount") // a ladder of refusals ahead of the one hand-off
+    private suspend fun handleTalk(
+        env: RelayEnvelope,
+        signed: Boolean,
+    ) {
+        val me = identity.nodeId()
+        if (env.group != null || env.recipientId != me || env.senderId == me) return
+        if (env.senderId in settings.blockedNodeIds.first() || !isAccepted(env.senderId, me)) return
+        val sealed = talkSealOf(env.payload)
+        if (sealed == null) {
+            metrics.onDropped(DropReason.RATCHET_BAD_HEADER)
+            return
+        }
+        val peerIkPub = pinnedDhKey(env.senderId) ?: return
+        val aad = MessageCrypto.header(env.id, env.senderId, env.sentAt, me)
+        val now = System.currentTimeMillis()
+        val peek = ratchet.peekOpen(me, env.senderId, peerIkPub, sealed.header, sealed.nonce, sealed.ct, aad, now)
+        if (peek !is RatchetEngine.OpenOutcome.Opened) return onRatchetFailure(env, peek, me, now, authenticated = signed)
+        val committed =
+            db.withWriteTransaction { ratchet.commitOpen(me, env.senderId, peerIkPub, sealed.header, sealed.nonce, sealed.ct, aad, now) {} }
+        if (!committed) return
+        onPeerFrameOpened(env.senderId, sealed.header.init?.eph, sealed.header.flags and RatchetHeader.FLAG_RESET != 0)
+        onCallTalk(env.senderId, peek.plaintext)
+    }
+
+    /** A talk frame's seal: the ratchet header, the nonce (v2 only; v3 derives it) and the ciphertext. */
+    private class TalkSealed(
+        val header: RatchetHeader,
+        val nonce: ByteArray?,
+        val ct: ByteArray,
+    )
+
+    private fun talkSealOf(payload: ByteArray): TalkSealed? {
+        TalkSeal.decode(payload)?.let { (r, ct) -> return TalkSealed(r, null, ct) }
+        val enc =
+            WireCodec
+                .decodePayload<ChatContent>(payload)
+                ?.enc
+                ?.takeIf { EncEnvelope.isDmRatchetVersion(it.v) && it.g == null && nonceShapeValid(it) }
+        val r = enc?.r ?: return null
+        return TalkSealed(r, enc.nonce.takeIf { enc.v != EncEnvelope.VERSION_DM_V3 }, enc.ct)
     }
 
     /**
@@ -609,7 +667,17 @@ class InboundPipeline(
         }
 
     /**
-     * The one frame shape that may arrive unsigned (ADR 059): `relay = false` DM-form chat addressed to us
+     * The other shape that may arrive unsigned: a walkie chunk addressed to us by someone else (§3.11), flooded or not.
+     * The [isUnsignedTickShape] argument again: its AEAD binds the id, sender, sentAt and recipient, so [handleTalk]'s
+     * open is the whole check, and nothing acts on it before that.
+     */
+    private suspend fun isTalkShape(env: RelayEnvelope): Boolean {
+        val me = identity.nodeId()
+        return env.type == FrameType.TALK && env.group == null && env.recipientId == me && env.senderId != me
+    }
+
+    /**
+     * The one chat shape that may arrive unsigned (ADR 059): `relay = false` DM-form chat addressed to us
      * by someone else — the live-link delivery tick. Everything a flooded frame's signature protects is
      * either fixed by this shape (`type`, `group`, `relay`) or bound into the tick's AEAD (id, sender,
      * sentAt, recipient, the ratchet header), so the shape plus a successful open is the whole check.
@@ -687,7 +755,7 @@ class InboundPipeline(
                 // The unsigned door: exactly one shape — a point-to-point v3 sealed tick addressed to us — and
                 // only its shape is judged here. The pinned bundle above is still required: the session it
                 // names is what will open the frame, and nothing downstream may act on it before that opens.
-                if (isUnsignedTickShape(env, wire)) return true
+                if (isUnsignedTickShape(env, wire) || isTalkShape(env)) return true
                 metrics.onDropped(DropReason.UNSIGNED_REFUSED)
                 return false
             }
@@ -3906,6 +3974,7 @@ class InboundPipeline(
                 FrameType.PROFILE,
                 FrameType.TYPING,
                 FrameType.COMMONS,
+                FrameType.TALK,
                 FrameType.BLOB_HAVE,
                 FrameType.BLOB_HAS,
                 FrameType.BLOB_PROGRESS,

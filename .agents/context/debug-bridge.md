@@ -228,14 +228,22 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
     debug).
     - `start --es kind auto|live|walkie`: `auto` is what the Call button does. It picks a walkie only with no Internet
       route here and no Wi-Fi Direct leg to a neighbour, so `walkie` is how a lab phone on Wi-Fi gets one.
-    - `--es op talk --ei ms 500-8000`: holds the talk button that long in a connected walkie session and sends the
-      burst as a DM voice note. The call screen must have started the microphone service, so answer from the screen,
-      not the shade.
-    - `state`: adds `walkie` and `degraded` to the call, and a `walkie` block: the button's `talk` state and the bursts
-      `sent`, `heard` (played by themselves) and `skipped` (arrived too late, left as voice notes).
+    - `--es op talk --ei ms 500-8000`: holds the talk button that long in a connected walkie session, streaming the
+      burst in chunks as it records. The call screen must have started the microphone service, so answer from the
+      screen, not the shade.
+    - `state`: adds `walkie` and `degraded` to the call, and a `walkie` block: the button's `talk` state, the bursts
+      `sent` and `heard` (played to their end), the chunks `chunksOut`, `chunksIn` and `lost` (skipped as never
+      come), and `link`: `DIRECT`, `MESH` or `NONE`, the link a chunk to the peer would take (null outside a walkie
+      call).
     - To see a live call degrade, set `relay --ez on true` with no TURN spool: ICE fails and both phones drop to
       `degraded` without an END.
-    - Logcat: `call <id>: no live path; a walkie session now`, then `walkie: session …`, `walkie: burst of <n>ms to … sent`.
+    - Logcat: `call <id>: no live path; a walkie session now`, then `walkie: session …`, and `walkie: Wi-Fi Aware
+      link to … asked for` (or `not available now`) each time the call's hold changes its answer. A held link's end
+      logs `sync with … done (… call=true)`: its window, not idleness. Each burst sent logs
+      `walkie: burst <b> of <n>ms to … in <q> chunks (<B> B before the seal), <k> sealed; cut>sent ms …` (when each chunk was cut and its send
+      returned, from the press). Each burst heard logs `walkie: heard burst <b>: <q> chunks, <s> skipped, arrivals +…
+      ms, began +<ms>` (arrivals from the first chunk's, and when playback began). Read the pair across both phones to
+      place a gap at the sender, the link or the player.
 - `…debug.RATCHET` — dumps the **DM ratchet's per-peer state** and, with `--es reset <peerNodeId>`, forces a
   session reset past the heuristic that guards it. Exists because every gate in the recovery path returns
   *silently*: a peer we hold no prekey for (`peerPrekeyPinned:false` — a reset from this side is impossible

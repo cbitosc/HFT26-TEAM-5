@@ -129,16 +129,18 @@ class MeshRouter(
 
     /**
      * Sends a locally-originated frame to [to] (or the whole mesh when null), marking [id] seen so an
-     * echo arriving back from the mesh isn't re-delivered or re-relayed.
+     * echo arriving back from the mesh isn't re-delivered or re-relayed. [live] sends to [to] over its quickest link
+     * ([MeshTransport.sendLive]).
      */
     suspend fun sendOwn(
         wire: WireEnvelope,
         id: String,
         to: Peer? = null,
+        live: Boolean = false,
     ) {
         seen.add(id)
         metrics.onOriginated()
-        transport.send(wire, to)
+        if (live && to != null) transport.sendLive(wire, to) else transport.send(wire, to)
     }
 
     /** Cancels all pending relays and clears bookkeeping. Call from [MeshManager.stop]. */

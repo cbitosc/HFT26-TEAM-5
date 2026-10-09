@@ -83,3 +83,170 @@ Rejected:
   - `CallManagerTest`'s §3.11 cases: the auto pick, the media-less session, the decline from a build without it,
     both degrade paths with no frame, the un-echoed bit, and glare.
   - `WalkiePolicyTest`: every autoplay clause.
+
+## Amendment 2026-10-09: two buttons in the chat
+
+The first rejection above did not survive use: the user asked for a mesh call they can place on purpose. The chat's
+top bar now shows one of two calls, and its overflow the other:
+
+- the live **Voice call** (`CallKind.LIVE`) while a live path looks possible;
+- the **Mesh call** (`CallKind.WALKIE`) while none does.
+
+What decides is the AUTO rule, `CallManager.prefersWalkie`. `ChatViewModel.meshCallFirst` re-reads it every 5 s
+while the chat is on screen, since a route or a neighbour can come or go meanwhile. A mesh call toward a peer
+without `CAP_WALKIE` is refused with a toast (`chat_mesh_call_peer_too_old`).
+
+A live call still drops to a walkie when its path fails. The profile's Call button keeps the AUTO kind for now.
+
+On the call screen, the hold-to-talk button takes the centre where the red hang-up sits on a live call. It is green,
+never red, and End steps aside to the start.
+
+Guard: `ChatViewModelTest`'s two call cases.
+
+## Amendment 2026-10-09: bursts stream, and never reach the thread
+
+A whole-clip burst was too slow even between Wi-Fi Aware neighbours. Playback waited for the release, then for the
+note's frame, then for its blob to be asked for and pulled. The user also did not want bursts in the thread. So a burst
+now streams while it is spoken, and the voice-note path above (the autoplay rule, the notifier slot, the read
+watermark) is gone. The second and third rejections above are reversed.
+
+- **A chunk is a sealed call signal in a frame of its own type, `talk`.** `CallPayload` gains `ph = 8` (TALK) and
+  `tk = TalkChunk(b, q, a, e)`: the burst, the chunk, whole AAC-ADTS frames, and the end mark. `MeshManager.sendCallTalk`
+  seals the chunk on the DM ratchet exactly like a `CTL_CALL`, but signs it into a `talk` frame and hands it to the
+  router alone:
+  - a live neighbour gets it with `ttl = 0`;
+  - anyone else gets a flood of `ttl = 3`.
+
+  No custody, no fast plane, no LoRa, no spool. The type is the point. Carriers cannot read a sealed DM, so a chunk in
+  a `chat` frame would be custodied by every node it crossed: a minute of talk would be about 190 rows against the
+  sender's 200-row quota, and served back as history. `FrameType.isCustodial` is a fixed list, and a new type stays off
+  it, which is the `commons` precedent: an older build relays the frame like any unknown type and delivers nothing.
+  `InboundPipeline.handleTalk` opens it on the ratchet and hands it to the call layer from an accepted contact only.
+  A `talk` frame that opens to anything but a `CTL_CALL` is dropped, so the type cannot put a row in a thread.
+- **`CallManager` passes chunks on and does nothing else with them.** A TALK skips the `(id, ph, gen)` dedup, since
+  every chunk of a call shares it. It goes to `CallManager.talk` only while it is the connected walkie session with
+  that peer.
+- **The sender cuts chunks from the recorder's own stream.** `VoiceRecorder.start(onBytes)` hands each pipe read to
+  `debug/call/WalkieTalk`. There `AdtsFramer` recovers whole frames, and `TalkChunker` sends a chunk each time 320 ms of
+  audio is in hand: five frames at 16 kHz, about 0.7 KB, and under 3 KB/s with the frame overhead. A release sends the
+  rest with the end mark. A press released before its first chunk sends nothing.
+- **The receiver puts the chunks back in order and plays them as they come.** `TalkQueue` is pure and JVM-tested:
+  - a burst starts at two chunks, or its last, or 400 ms after its first;
+  - a missing chunk is waited for 500 ms while a later one is held, then skipped;
+  - a burst ends on its end mark, or after 4 s of silence.
+
+  `debug/call/TalkPlayer` decodes with the platform AAC decoder, configured from the first header as an extractor
+  would, into a streaming `AudioTrack`. Talking holds playback, and what arrives meanwhile plays after the release.
+
+Rejected:
+
+- **A chunk in a `chat` frame sent `relay = false`.** It needs no new type and is never custodied, but it reaches only a
+  neighbour, or one more hop through `MeshRouter.handOn`.
+- **A per-session stream key, instead of a ratchet step per chunk.** It saves about three seals and three committed
+  opens a second, but it is new crypto beside the ratchet for a debug-only experiment.
+- **A thread copy of each burst.** That sends every burst twice, and the receiver must then not autoplay a copy it
+  already heard. The user was indifferent to it.
+- **Opus.** It is still the better codec at this rate. AAC-ADTS keeps the recorder the chat already uses, and every
+  phone decodes it.
+
+What it costs:
+
+- **A wire type on this branch.** `talk` is claimed here like bit 0x8000, and the WIRE_COMPAT entry is owed at merge.
+  The type is cleartext, so a carrier can tell a walkie burst from chat. Its timing would tell it anyway.
+- **`CAP_WALKIE` now means the streamed form.** The only builds with the voice-note form were this branch's lab phones.
+- **Live or lost.** A chunk is not re-sent. A peer out of reach for a moment misses that part of a burst, and nothing
+  shows it later.
+- **Load.** A non-neighbour's chunks flood up to four hops, to every node there.
+- **The guards:**
+  - `WalkieStreamTest` covers the framing, the chunker and every rule of the queue.
+  - `CallManagerTest`'s chunk case covers what reaches `talk`.
+  - `WalkieTalkLabTest` covers two hops through a relay with no thread row and no custody row anywhere, and a neighbour
+    that relays nothing.
+
+## Amendment 2026-10-09 (2): sized for Coded PHY
+
+The streamed form ran at about 3.4 KB/s: 1,076-byte frames, three a second. That is more than Coded PHY's measured
+2.1 KB/s, and the 16 kbps AAC alone filled it. The user asked for frames as compact as they can be, so that a walkie
+works over Coded. A chunk frame is now about 714 bytes per 480 ms, about 1.5 KB/s. `TalkSealTest` pins that budget.
+
+- **Opus at 8 kbps instead of AAC at 16.** `debug/call/TalkRecorder` runs `AudioRecord` at 16 kHz mono into the
+  platform Opus encoder and hands each 20 ms packet on as it comes out. `TalkPlayer` decodes them with the platform
+  decoder, which takes the same `OpusHead` an extractor would hand it. Every lab phone has both:
+  `c2.android.opus.encoder` on API 31 to 37. The burst no longer touches the chat's `VoiceRecorder`; the edits to that
+  file, v1's included, are reverted.
+- **A binary chunk in a binary seal.**
+  - The chunk's plaintext is `call/TalkWire`: flags, a 16-bit call tag, varint burst and chunk numbers, then the Opus
+    packets, each behind a one-byte length. It replaces a `CallPayload` in a `MessageContent`'s named CBOR.
+  - The frame's payload is `mesh/protocol/TalkSeal`: the v3 seal, with its nonce derived, under a bare ratchet header,
+    in place of a `ChatContent`'s CBOR. A header it cannot carry (an init, a reset flag) still rides the CBOR form.
+  - The chunk reaches the call layer as bytes through `MeshManager`'s `onCallTalk`, and `CallManager.onTalk` decodes
+    it. `CallPayload` gains no field.
+- **Unsigned.** The frame carries no signature, a 66-byte saving. The ratchet's AEAD authenticates it to its addressee
+  and binds its id, sender, sentAt and recipient: the ADR 059 argument for the tick, extended to a second shape
+  (`InboundPipeline.isTalkShape`), flooded or not.
+  - Nothing acts on the frame before it opens.
+  - A failed open is never a reset trigger.
+  - It counts as no evidence that its sender was heard (`isHeardEvidence` wants a signature).
+  - A relay could already flood any unknown type unverified, so a spoofed chunk costs a relay nothing it could not
+    already be made to spend.
+- **An 11-character frame id**, since it is a dedup key for minutes and nothing else, and **480 ms chunks** instead of
+  320, which amortise the roughly 200 bytes of envelope that are left.
+
+The bytes left are the envelope's: type, id, sender, recipient and sentAt (140 bytes of named CBOR), the ratchet's
+32-byte key, and the AEAD tag. Shrinking those would take a new envelope, which is a wire break.
+
+The guards:
+
+- `TalkSealTest` covers the layout, its refusals and the Coded budget.
+- `WalkieStreamTest` covers the TOC durations, the packet join, the chunker and the chunk bytes.
+- `CallManagerTest`'s chunk case covers the tag and the session.
+- `WalkieTalkLabTest` covers unsigned compact frames over a relay and to a neighbour.
+
+## Amendment 2026-10-09 (3): the call raises its own link, and says when it has none
+
+On the device trial, a session connected while one phone had no data link to the other. Its app had just restarted,
+and Bluetooth took 45–190 s to link the pair while Wi-Fi Aware discovery saw both at once. The call's own signals
+crossed on Wi-Fi Aware's message plane, which is too small for a chunk. Every burst in that direction went nowhere, and
+the screen still said "Sent".
+
+- **The call asks for a Wi-Fi Aware link.** From the ring to the hang-up, every 10 s (`WalkiePolicy.LINK_ASK_MS`,
+  inside the radio's 25 s bulk-want window), `WalkieTalk` gives the radios the hint an attachment fetch gives,
+  `MeshTransport.expectBulkTransfer`. All its bounds stay: a fresh sighting, the initiator hold, the failure cooldown.
+  Nothing new reaches the Wi-Fi Aware transport.
+- **A chunk to a neighbour rides its quickest link.** `MeshTransport.sendLive` defaults to `send`. The composite
+  overrides it to prefer the high-throughput child when that child holds a link to the peer; `MeshRouter.sendOwn` takes
+  `live`. Without it, the link the call raised would carry nothing and idle out, because frames go Bluetooth-first.
+  Every other frame keeps that order.
+- **The screen says when there is no link.** `TalkLink` is direct (a link of this phone's own), through the mesh (the
+  peer's frames reached this phone through another one lately: `heardIndirectly`, ADR 2026-10.fw8g), or none. The
+  walkie controls show a notice for the second and a warning for the third. With no link at all,
+  `MeshManager.sendCallTalk` seals nothing and returns false, and the burst's note says it did not go.
+
+- **The call holds its link (the user's follow-up the same day).** On the phones the raised link came down five or
+  six seconds into every pause, because `WifiAwareTransport.superviseLink` ends a quiet sync link, and the next ask
+  raised it again. `MeshTransport.holdLink` (the default is `expectBulkTransfer`; the composite forwards it to every
+  child) now carries the call's ask. On Wi-Fi Aware it notes a 25 s hold (`NanLinkHolds`), and keeps a linked peer
+  bulk-wanted.
+  - **What it lifts.** A held link is exempt from the idle teardown alone (`NanLinkLife.done`).
+  - **What it keeps.** The absolute windows stay (30 s initiator, 45 s responder), because they are the responder's
+    only defence against an initiator that died without a FIN. So a held link comes round every 30 s or so, and the
+    bulk mark raises it again at once, not at the next ask.
+  - **The gap.** A chunk that finds no link at that instant retries for up to 2.5 s. On the phones the recycle ran
+    about 1.9 s from the window's teardown to the next link-up.
+  - **Device-verified on 2026-10-09** (P7 ↔ P9, 15 s pauses): held links survived 18 s idle (`call=true`) and ended
+    only at their 30 s window; 35 of 35 chunks were delivered.
+  - **The cost.** It holds the initiator's single outbound NDI for the length of the call, so that phone's Wi-Fi Aware
+    syncs to others wait; Bluetooth goes on carrying them. The responder side multiplexes.
+
+Rejected: asking only while no link of any kind exists. The pair the trial found was Bluetooth-linked within minutes
+anyway; what the user asked for is a call that runs on Wi-Fi Aware when it can.
+
+What it costs: a Wi-Fi Aware link held for the length of a walkie call, which is a Wi-Fi radio kept awake.
+
+The guards:
+
+- `CompositeMeshTransportTest`'s live-frame and hold cases.
+- `NanLinkHoldTest`: the hold's TTL and cap, and that it lifts the idle teardown but not the window.
+- `WalkieStreamTest`'s link rule.
+- `WalkieTalkLabTest`'s no-link case.
+

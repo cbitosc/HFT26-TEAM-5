@@ -404,6 +404,14 @@ interface MeshTransport {
     fun expectBulkTransfer(nodeId: String): Boolean = false
 
     /**
+     * Keeps a link to [nodeId] open, or raises one, for a live call that wants its link between its bursts (a walkie
+     * call, docs/VOICE_CALLS.md §3.11): a transport that tears idle links down keeps this one for a short TTL, which the
+     * call renews by calling again. True when this transport holds or is raising a link. The default is
+     * [expectBulkTransfer]: a transport whose links never idle out has nothing to hold.
+     */
+    fun holdLink(nodeId: String): Boolean = expectBulkTransfer(nodeId)
+
+    /**
      * How a file from [nodeId] would most likely reach us: over a live high-throughput link, over one such a plane
      * can raise, or over neither ([BulkRoute]). A read of the plane's own sets, cheap and non-blocking, for
      * `BlobExchange` to put a Wi-Fi Aware neighbour ahead of a Bluetooth-only one when it picks whom to ask first.
@@ -550,6 +558,16 @@ interface MeshTransport {
         wire: WireEnvelope,
         to: Peer? = null,
     )
+
+    /**
+     * Sends [wire] to the neighbor [to] over the quickest link this transport holds to it: for a frame that is live or
+     * lost and wants latency over the steadiest plane — a walkie chunk (docs/VOICE_CALLS.md §3.11). The default is
+     * [send]; the composite prefers its [highThroughput] child when that child holds a link to [to].
+     */
+    suspend fun sendLive(
+        wire: WireEnvelope,
+        to: Peer,
+    ) = send(wire, to)
 
     /**
      * Best-effort **coordination-plane** fan-out of [wire] to every neighbor at once, with **no data path** —

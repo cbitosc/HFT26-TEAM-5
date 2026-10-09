@@ -43,7 +43,9 @@ import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.outlined.Cloud
+import androidx.compose.material.icons.outlined.Hub
 import androidx.compose.material.icons.outlined.Insights
+import androidx.compose.material.icons.outlined.LinkOff
 import androidx.compose.material.icons.outlined.Podcasts
 import androidx.compose.material.icons.outlined.Sensors
 import androidx.compose.material.icons.outlined.WifiTethering
@@ -88,6 +90,7 @@ import androidx.lifecycle.lifecycleScope
 import app.getknit.knit.call.CallManager
 import app.getknit.knit.call.CallPhase
 import app.getknit.knit.call.CallState
+import app.getknit.knit.call.TalkLink
 import app.getknit.knit.data.PeerRepository
 import app.getknit.knit.mesh.protocol.CallPayload
 import app.getknit.knit.ui.components.Avatar
@@ -184,6 +187,7 @@ class CallActivity :
             }
         }
         val talk by (walkie?.talk ?: NO_TALK).collectAsState()
+        val link by (walkie?.link ?: NO_LINK).collectAsState()
         CallScreen(
             state = state,
             name = name,
@@ -196,6 +200,7 @@ class CallActivity :
             onMute = { on -> lifecycleScope.launch { calls.setMuted(on) } },
             onSpeaker = { on -> lifecycleScope.launch { calls.setSpeaker(on) } },
             talk = talk,
+            link = link,
             onTalk = { lifecycleScope.launch { walkie?.press() } },
             onTalkSend = { lifecycleScope.launch { walkie?.release() } },
             onTalkCancel = { lifecycleScope.launch { walkie?.cancel() } },
@@ -245,6 +250,7 @@ class CallActivity :
 // Red and green as every phone's call screen draws them, whatever the theme: the hang-up must read as one at a glance.
 internal val HangUpRed = Color(0xFFD93025)
 private val AnswerGreen = Color(0xFF1E8E3E)
+private val TalkingGreen = Color(0xFF34A853)
 private val AvatarSize = 144.dp
 
 // With the diagnostics card up the face gives it room: smaller on a tall phone, beside the name on a short one.
@@ -256,6 +262,7 @@ private val RingReach = 40.dp
 private val ActionSize = 72.dp
 private val TalkSize = 120.dp
 private val NO_TALK = MutableStateFlow<Talk>(Talk.Idle())
+private val NO_LINK = MutableStateFlow<TalkLink?>(null)
 private val ToggleSize = 64.dp
 private const val RING_MS = 1_800
 private const val RING_ALPHA = 0.28f
@@ -282,6 +289,7 @@ internal fun CallScreen(
     modifier: Modifier = Modifier,
     clock: () -> Long = System::currentTimeMillis,
     talk: Talk = Talk.Idle(),
+    link: TalkLink? = null,
     onTalk: () -> Unit = {},
     onTalkSend: () -> Unit = {},
     onTalkCancel: () -> Unit = {},
@@ -311,7 +319,7 @@ internal fun CallScreen(
                     Spacer(Modifier.weight(1f))
                 }
                 if (state?.walkie == true && phase == CallPhase.Connected) {
-                    WalkieControls(state, name, talk, onHangUp, onTalk, onTalkSend, onTalkCancel)
+                    WalkieControls(state, name, talk, link, onHangUp, onTalk, onTalkSend, onTalkCancel)
                 } else {
                     Controls(state, onAnswer, onDecline, onHangUp, onMute, onSpeaker)
                 }
@@ -507,20 +515,25 @@ private fun Controls(
 }
 
 /**
- * A connected walkie session's controls (§3.11): where the last burst stands, why this is a walkie when a live call
- * dropped to one, and the hold-to-talk button beside the hang-up.
+ * A connected walkie session's controls (§3.11): whether a burst can reach the peer, where the last one stands, why
+ * this is a walkie when a live call dropped to one, and the hold-to-talk button beside the hang-up.
  */
 @Composable
 private fun WalkieControls(
     state: CallState,
     name: String,
     talk: Talk,
+    link: TalkLink?,
     onHangUp: () -> Unit,
     onTalk: () -> Unit,
     onTalkSend: () -> Unit,
     onTalkCancel: () -> Unit,
 ) {
     Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+        if (link == TalkLink.NONE || link == TalkLink.MESH) {
+            LinkNotice(link, name)
+            Spacer(Modifier.height(12.dp))
+        }
         if (state.degraded) {
             Text(
                 "No live connection — switched to walkie-talkie",
@@ -532,13 +545,44 @@ private fun WalkieControls(
         }
         Text(talkLine(talk, name), style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center)
         Spacer(Modifier.height(24.dp))
+        // The talk button takes the centre a call screen gives its red hang-up; the hang-up steps aside to the start.
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom) {
+            Box(Modifier.weight(1f), contentAlignment = Alignment.BottomCenter) {
+                CallAction("End", Icons.Filled.CallEnd, HangUpRed, onHangUp)
+            }
+            Box(Modifier.weight(1f), contentAlignment = Alignment.BottomCenter) {
+                TalkButton(recording = talk is Talk.Recording, onTalk, onTalkSend, onTalkCancel)
+            }
+            Spacer(Modifier.weight(1f))
+        }
+    }
+}
+
+/**
+ * Why a burst may not reach the peer (§3.11): no link this phone can see — the radios are asked for one meanwhile — or
+ * only a path through other phones, which works but is slower and less sure.
+ */
+@Composable
+private fun LinkNotice(
+    link: TalkLink,
+    name: String,
+) {
+    val none = link == TalkLink.NONE
+    Surface(
+        shape = MaterialTheme.shapes.medium,
+        color = if (none) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.secondaryContainer,
+        contentColor = if (none) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSecondaryContainer,
+    ) {
         Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceEvenly,
-            verticalAlignment = Alignment.Bottom,
+            Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            CallAction("End", Icons.Filled.CallEnd, HangUpRed, onHangUp)
-            TalkButton(recording = talk is Talk.Recording, onTalk, onTalkSend, onTalkCancel)
+            Icon(if (none) Icons.Outlined.LinkOff else Icons.Outlined.Hub, contentDescription = null, modifier = Modifier.size(20.dp))
+            Text(
+                if (none) "Not linked to $name yet. Linking…" else "No direct link to $name. Going through other phones",
+                style = MaterialTheme.typography.bodyMedium,
+            )
         }
     }
 }
@@ -566,6 +610,7 @@ private fun talkLine(
                 Talk.Note.SENT -> "Sent"
                 Talk.Note.NO_MIC -> "The microphone is busy"
                 Talk.Note.NOT_SENT -> "Couldn't send that one"
+                Talk.Note.NO_LINK -> "Not linked, so that one didn't go"
                 Talk.Note.TOO_SHORT, null -> "Hold to talk"
             }
         }
@@ -586,7 +631,9 @@ private fun TalkButton(
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Surface(
             shape = CircleShape,
-            color = if (recording) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.primaryContainer,
+            // Never the hang-up's red: green as the answer button, brighter while it records.
+            color = if (recording) TalkingGreen else AnswerGreen,
+            contentColor = Color.White,
             modifier =
                 Modifier
                     .size(TalkSize)
@@ -615,7 +662,7 @@ private fun TalkButton(
     }
 }
 
-/** Where a walkie session's audio goes: over the mesh as voice notes, never a live stream. */
+/** Where a walkie session's audio goes: over the mesh in chunks as it is spoken, never a live media path. */
 @Composable
 private fun WalkiePill() {
     Surface(shape = CircleShape, color = MaterialTheme.colorScheme.secondaryContainer) {
@@ -771,6 +818,7 @@ private fun PreviewCall(
     walkie: Boolean = false,
     degraded: Boolean = false,
     talk: Talk = Talk.Idle(),
+    link: TalkLink? = null,
 ) = KnitPreview {
     CallScreen(
         state =
@@ -798,6 +846,7 @@ private fun PreviewCall(
         onSpeaker = {},
         clock = { PREVIEW_NOW },
         talk = talk,
+        link = link,
     )
 }
 
@@ -859,3 +908,12 @@ fun CallScreenEndedPreview() = PreviewCall(CallPhase.Ended, reason = CallPayload
 @Preview(name = "Walkie, degraded, dark", widthDp = 411, heightDp = 891, uiMode = Configuration.UI_MODE_NIGHT_YES)
 @Composable
 fun CallScreenWalkiePreview() = PreviewCall(CallPhase.Connected, walkie = true, degraded = true, talk = Talk.Recording(4_200, 0.6f))
+
+@Preview(name = "Walkie, not linked", widthDp = 411, heightDp = 891)
+@Preview(name = "Walkie, not linked, dark", widthDp = 411, heightDp = 891, uiMode = Configuration.UI_MODE_NIGHT_YES)
+@Composable
+fun CallScreenWalkieUnlinkedPreview() = PreviewCall(CallPhase.Connected, walkie = true, link = TalkLink.NONE)
+
+@Preview(name = "Walkie, through the mesh", widthDp = 411, heightDp = 891)
+@Composable
+fun CallScreenWalkieMeshPreview() = PreviewCall(CallPhase.Connected, walkie = true, link = TalkLink.MESH)

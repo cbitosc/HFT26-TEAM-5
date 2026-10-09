@@ -81,6 +81,16 @@ object FrameType {
     const val COMMONS = "commons"
 
     /**
+     * One chunk of a walkie-talkie burst (experimental, docs/VOICE_CALLS.md §3.11): opaque audio sealed on the DM
+     * ratchet, its payload a [TalkSeal]. A type of its own so that nobody custodies it — audio is live or lost, and a
+     * carrier that held a minute of it would spend its sender's custody quota on history. Unsigned (the seal
+     * authenticates it at its addressee, the ADR 059 argument) and flooded a few hops at most (none to a live
+     * neighbour); not custodial, replayable or fanned out, so an older build relays it like any unknown type and
+     * delivers nothing.
+     */
+    const val TALK = "talk"
+
+    /**
      * Whether a frame of [type] is worth parking for replay when it's dropped for a missing sender key
      * (see `app.getknit.knit.mesh.PendingInbound`): the locally-delivered types only. PROFILE and KEY_REQ
      * are excluded (they bootstrap keys, never wait on one), as are the point-to-point BLOB_REQ and any
@@ -858,9 +868,10 @@ data class CallPayload(
 
         /**
          * [m]'s walkie bit (§3.11, ADR 2026-10.79yb; 2 stays video's). Alone, on an OFFER with no [sdp], it is a
-         * walkie session — no media, each burst a voice note over the mesh — which a build without it declines for
-         * its media, the audio bit being absent. Beside [MEDIA_AUDIO] on a live OFFER, and echoed on the ANSWER, it
-         * says that side can drop to a walkie when the call's path is lost; a build that ignores it only never does.
+         * walkie session — no media, each burst streamed over the mesh in [FrameType.TALK] frames — which a build
+         * without it declines for its media, the audio bit being absent. Beside [MEDIA_AUDIO] on a live OFFER, and
+         * echoed on the ANSWER, it says that side can drop to a walkie when the call's path is lost; a build that
+         * ignores it only never does.
          */
         const val MEDIA_WALKIE = 4
 

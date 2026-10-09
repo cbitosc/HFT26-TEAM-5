@@ -1203,6 +1203,45 @@ class CallManagerTest {
             assertEquals(CallPayload.MEDIA_WALKIE, bob.sent.last().m)
         }
 
+    @Test
+    fun aConnectedWalkiePassesOnEveryChunkOfItsPeersBurstAndNothingElse() =
+        runTest {
+            val (_, alice, bob) = walkies(live = false)
+            val heard = Collections.synchronizedList(mutableListOf<TalkIn>())
+            backgroundScope.launch { bob.manager.talk.collect { heard += it } }
+
+            suspend fun chunk(
+                q: Int,
+                from: String = ALICE,
+                tag: Int = TalkWire.tagOf(bob.state!!.id),
+            ) = bob.manager.onTalk(from, TalkWire.encode(tag, TalkChunk(b = 0, q = q, a = byteArrayOf(q.toByte()))))
+            alice.manager.start(BOB)
+            runCurrent()
+            // Alerting is not a session yet: nothing plays.
+            chunk(0)
+            runCurrent()
+            assertTrue(heard.isEmpty())
+
+            bob.manager.answer(bob.state!!.id)
+            runCurrent()
+            (1..3).forEach { chunk(it) }
+            // Another call's tag, another peer, and bytes that are no chunk are not this session's.
+            chunk(4, tag = TalkWire.tagOf(bob.state!!.id) xor 1)
+            chunk(5, from = CAROL)
+            bob.manager.onTalk(ALICE, byteArrayOf(1))
+            runCurrent()
+            assertEquals(listOf(1, 2, 3), heard.map { it.chunk.q })
+            assertTrue(heard.all { it.callId == bob.state!!.id })
+            // A chunk is not a signal: nothing answers it.
+            assertEquals(listOf(CallPayload.PHASE_RINGING, CallPayload.PHASE_ANSWER), bob.phases())
+
+            bob.manager.hangUp()
+            runCurrent()
+            chunk(6)
+            runCurrent()
+            assertEquals(3, heard.size)
+        }
+
     private companion object {
         const val ALICE = "alice"
         const val BOB = "bob"

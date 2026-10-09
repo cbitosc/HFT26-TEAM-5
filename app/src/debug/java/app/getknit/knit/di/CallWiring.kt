@@ -10,32 +10,34 @@ import app.getknit.knit.call.CallSignals
 import app.getknit.knit.call.CallTimings
 import app.getknit.knit.call.CallWalkie
 import app.getknit.knit.call.DirectCallPath
+import app.getknit.knit.call.TalkLink
 import app.getknit.knit.call.TurnSource
-import app.getknit.knit.call.WalkiePolicy
-import app.getknit.knit.data.AttachmentStore
-import app.getknit.knit.data.MessageRepository
 import app.getknit.knit.data.PeerRepository
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.debug.call.CallAudio
 import app.getknit.knit.debug.call.CallBarHost
 import app.getknit.knit.debug.call.CallController
 import app.getknit.knit.debug.call.CallFaces
+import app.getknit.knit.debug.call.TalkLinks
+import app.getknit.knit.debug.call.TalkPlayer
+import app.getknit.knit.debug.call.TalkRecorder
 import app.getknit.knit.debug.call.WalkieTalk
 import app.getknit.knit.debug.call.WebRtcCallMedia
 import app.getknit.knit.identity.Identity
 import app.getknit.knit.mesh.MeshController
 import app.getknit.knit.mesh.MeshManager
+import app.getknit.knit.mesh.MeshTransport
 import app.getknit.knit.mesh.power.AppVisibility
 import app.getknit.knit.mesh.protocol.Protocol
 import app.getknit.knit.net.InternetGate
-import app.getknit.knit.notifications.Notifier
 import app.getknit.knit.transfer.DirectWifiLease
-import app.getknit.knit.ui.voice.VoicePlayer
-import app.getknit.knit.ui.voice.VoiceRecorder
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -52,8 +54,8 @@ import org.koin.dsl.module
 const val CALLS_WIRED: Boolean = true
 
 /**
- * The walkie-talkie (docs/VOICE_CALLS.md §3.11, ADR 2026-10.79yb): a call with no live path is hold-to-talk voice notes
- * over the mesh. The one read of `BuildConfig.WALKIE` — off, [CallManager] gets [CallWalkie.None], no [WalkieTalk] is
+ * The walkie-talkie (docs/VOICE_CALLS.md §3.11, ADR 2026-10.79yb): a call with no live path is hold-to-talk bursts
+ * streamed over the mesh. The one read of `BuildConfig.WALKIE` — off, [CallManager] gets [CallWalkie.None], no [WalkieTalk] is
  * built and the profile carries no `CAP_WALKIE`, so every call is a live one as before.
  */
 const val WALKIE_WIRED: Boolean = BuildConfig.WALKIE
@@ -105,17 +107,15 @@ fun callModule(): Module? =
             )
         }
         if (WALKIE_WIRED) {
+            single { TalkPlayer(androidContext()) }
+            single { TalkRecorder(get<CoroutineScope>()) }
             single {
                 WalkieTalk(
                     calls = get(),
-                    recorder = VoiceRecorder(androidContext(), get<CoroutineScope>(), bitRate = WalkiePolicy.BIT_RATE),
-                    attachments = get<AttachmentStore>(),
-                    mesh = get<MeshController>(),
-                    messages = get<MessageRepository>(),
-                    player = get<VoicePlayer>(),
-                    notifier = get<Notifier>(),
-                    settings = get<SettingsStore>(),
-                    selfId = { get<Identity>().nodeId() },
+                    recorder = get(),
+                    player = get(),
+                    send = { peerId, chunk -> get<MeshManager>().sendCallTalk(peerId, chunk) },
+                    links = talkLinks(),
                     scope = get<CoroutineScope>(),
                     log = { Log.i(TAG, it) },
                 )
@@ -151,6 +151,22 @@ private fun Scope.walkieRoute(): CallWalkie =
             val direct = (get<PeerRepository>().find(peerId)?.capabilities ?: 0L) and Protocol.CAP_DIRECT_TRANSFER != 0L
             return neighbour && direct && !get<SettingsStore>().debugDirectCallsOff.first()
         }
+    }
+
+/**
+ * The walkie's view of the mesh (§3.11): a chunk's link to a peer, from the live links and the peers heard through
+ * them, and the call's hold on a Wi-Fi Aware link to it (`MeshTransport.holdLink`).
+ */
+private fun Scope.talkLinks(): TalkLinks =
+    object : TalkLinks {
+        override fun linkTo(peerId: String): Flow<TalkLink> {
+            val mesh = get<MeshController>()
+            return combine(mesh.neighbors, mesh.heardIndirectly) { linked, heard ->
+                TalkLink.of(peerId, linked.mapTo(HashSet()) { it.nodeId }, heard.keys)
+            }.distinctUntilChanged()
+        }
+
+        override fun raise(peerId: String): Boolean = get<MeshTransport>().holdLink(peerId)
     }
 
 /** Starts the call surfaces' collectors at process start, on a background thread — never on main. */

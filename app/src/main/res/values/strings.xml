@@ -276,6 +276,8 @@
     <string name="chat_call_peer_too_old">They need a build of Knit with calls to take one</string>
     <string name="chat_call_busy">You\'re already in a call</string>
     <string name="chat_call_mic_denied">Knit needs the microphone to call</string>
+    <string name="chat_mesh_call">Mesh call</string>
+    <string name="chat_mesh_call_peer_too_old">They need a build of Knit with mesh calls to take one</string>
 
     <!-- Direct file transfer (transfer/): a large file over a one-shot Wi-Fi Direct link, never through the mesh -->
     <string name="chat_send_large_file">Direct file send</string>

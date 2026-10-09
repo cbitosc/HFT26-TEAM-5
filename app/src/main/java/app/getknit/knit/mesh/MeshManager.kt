@@ -74,6 +74,7 @@ import app.getknit.knit.mesh.protocol.ReactionContent
 import app.getknit.knit.mesh.protocol.ReactionPayload
 import app.getknit.knit.mesh.protocol.RelayEnvelope
 import app.getknit.knit.mesh.protocol.ReplyRef
+import app.getknit.knit.mesh.protocol.TalkSeal
 import app.getknit.knit.mesh.protocol.TransferPayload
 import app.getknit.knit.mesh.protocol.TypingContent
 import app.getknit.knit.mesh.protocol.WireCodec
@@ -242,6 +243,9 @@ class MeshManager(
     // late-bound for onTransferSignal's reason. Called on the inbound path, so the far end must return without
     // waiting on the network or the media. The default ignores it — every test, and every build without calls.
     onCallSignal: suspend (senderId: String, payload: CallPayload, sentAt: Long) -> Unit = { _, _, _ -> },
+    // A walkie chunk's plaintext from an accepted contact (a `talk` frame, docs/VOICE_CALLS.md §3.11), late-bound and
+    // bound to return at once the same way. The default drops it.
+    onCallTalk: suspend (senderId: String, chunk: ByteArray) -> Unit = { _, _ -> },
     // Capability bits this build advertises beyond [Protocol.LOCAL_CAPABILITIES] — [Protocol.CAP_CALL] when the call
     // media is wired (di/CallWiring). OR-ed into our own profile; a change republishes it at the next start.
     private val extraCapabilities: Long = 0L,
@@ -554,6 +558,7 @@ class MeshManager(
             onPeerFrameOpened = { senderId, initEph, flagged -> introSync.onPeerFrameOpened(senderId, initEph, flagged) },
             onTransferCtl = onTransferSignal,
             onCallCtl = onCallSignal,
+            onCallTalk = onCallTalk,
             commonsTitle = { commons?.find(it)?.name },
             noteVerified = ::noteVerified,
         )
@@ -3144,6 +3149,41 @@ class MeshManager(
     ): Boolean = sendCtlDm(peerId, MessageContent(body = "", ctl = MessageContent.CTL_CALL, cl = payload), null, identity.nodeId())
 
     /**
+     * One walkie chunk to [peerId] (docs/VOICE_CALLS.md §3.11): [chunk] sealed on the DM ratchet into a [FrameType.TALK]
+     * frame, as small as the frame can be made, since a burst sends two a second over links as slow as Coded PHY's:
+     *  - its payload is a [TalkSeal], the v3 seal under a binary header ([ChatContent] CBOR only for a header that form
+     *    cannot carry);
+     *  - it is unsigned, because the seal authenticates it to its addressee (the ADR 059 argument), and a relay never
+     *    needs to read it;
+     *  - its id is [TALK_ID_CHARS] of a fresh one: it is a dedup key for minutes and nothing else.
+     * No node custodies it, and it never rides the Internet plane or LoRa. A live neighbour takes it alone, over its
+     * quickest link ([MeshTransport.sendLive]), and relays it nowhere (ttl 0); anyone further gets a flood of at most
+     * [TALK_TTL] relays. False when nothing could be sealed, or there is no link to hand it to (nothing is sealed then).
+     */
+    suspend fun sendCallTalk(
+        peerId: String,
+        chunk: ByteArray,
+    ): Boolean {
+        val links = transport.neighbors.value
+        if (links.isEmpty()) return false
+        val peer = peers.find(peerId)
+        val bundle = peer?.pubKey?.let { PublicKeyBundle.decode(it) } ?: return false
+        val me = identity.nodeId()
+        val id = FrameId.new().take(TALK_ID_CHARS)
+        val now = clock()
+        val aad = MessageCrypto.header(id, me, now, peerId)
+        val scheme = if (peer.readsCryptoV3()) EncEnvelope.VERSION_DM_V3 else EncEnvelope.VERSION_RATCHET
+        val sealed = ratchet.sealDm(peerId, bundle.dhPublicKey(), ratchetPrekeyOf(peer), chunk, aad, now, scheme) ?: return false
+        val compact = sealed.r?.takeIf { sealed.v == EncEnvelope.VERSION_DM_V3 }?.let { TalkSeal.encode(it, sealed.ct) }
+        val payload = compact ?: WireCodec.encodePayload(ChatContent(enc = sealed))
+        val env = RelayEnvelope(type = FrameType.TALK, id = id, senderId = me, sentAt = now, recipientId = peerId, payload = payload)
+        val neighbour = links.firstOrNull { it.nodeId == peerId }
+        val wire = WireEnvelope(ttl = if (neighbour != null) 0 else TALK_TTL, sig = ByteArray(0), signed = WireCodec.encodeEnvelope(env))
+        router.sendOwn(wire, id, neighbour, live = true)
+        return true
+    }
+
+    /**
      * [TurnSource]: TURN credentials from the connected spools carrying [peerId]'s DM scope, or holding a ticket of
      * ours (ADR 2026-10.xkp4); empty without the plane.
      */
@@ -3820,6 +3860,12 @@ class MeshManager(
 
         /** Per-(group, member) floor on proactive/responder seed re-sends (docs/GROUP_FORWARD_SECRECY.md #10). */
         const val SEED_RESEND_FLOOR_MS = 15 * 60_000L
+
+        /** Relays a walkie chunk to a peer that is not a neighbour may take: reach of four hops, not the mesh's whole. */
+        const val TALK_TTL = 3
+
+        /** A walkie chunk's id: 66 random bits, ample for a dedup key that lives minutes, and 11 bytes off every chunk. */
+        const val TALK_ID_CHARS = 11
 
         /** Payload for a frame whose content lives entirely in the routing envelope (e.g. a group update). */
         val EMPTY_PAYLOAD = ByteArray(0)

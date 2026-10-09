@@ -258,6 +258,7 @@ CallPayload {
     m:    Int = 1    // media bitmask: 1 audio; 2 video reserved; 4 walkie-talkie (§3.11)
     dw:   DirectInvite?  // OFFER: the Wi-Fi Direct group the caller will host (§3.10)
     dx:   Int?       // RINGING, ANSWER: 1 = the callee is joining that group (§3.10)
+    tk:   TalkChunk? // TALK: one chunk of a walkie burst, {b, q, a, e} (§3.11)
 }
 ```
 
@@ -270,6 +271,7 @@ CallPayload {
 | 5    | `CANCEL`  | caller | Withdraw before an answer, with `rsn`                                      |
 | 6    | `END`     | either | Hang up after connecting, with `rsn`                                       |
 | 7    | `CANDS`   | either | Late candidates for this `gen` (§3.6)                                      |
+| 8    | `TALK`    | either | A chunk of a walkie burst, in a `talk` frame (§3.11)                       |
 
 Reasons, in one registry as `TransferPayload` has: `1` user · `2` busy · `3` timeout · `4` no route
 (ICE failed or no network) · `5` media unsupported · `6` error.
@@ -418,10 +420,11 @@ first keeps it, the other is refused `Busy`, and neither can release the other's
 
 ### 3.11 A call with no live path: the walkie-talkie
 
-When no live path exists, the call screen becomes a walkie-talkie over the mesh. The user holds a button to talk and
-releases it to send the clip as an ordinary DM voice note (ADR 034). While the session is up, the peer's clips play
-by themselves. It is not real time: a burst plays once its whole clip has crossed the mesh. ADR 2026-10.79yb records
-why. It is an experiment behind `BuildConfig.WALKIE` (`-Pwalkie=`, on in debug and off in release), read once as
+When no live path exists, the call screen becomes a walkie-talkie over the mesh. The user holds a button to talk, and
+the burst streams to the peer in small chunks while it is spoken. The peer's phone plays them as they land. Nothing is
+stored: a chunk that is lost is skipped, and no burst appears in the thread. It is not a live call: playback trails
+the speaker by a chunk and the mesh's latency, about a second between neighbours. ADR 2026-10.79yb records why. It is
+an experiment behind `BuildConfig.WALKIE` (`-Pwalkie=`, on in debug and off in release), read once as
 `di/CallWiring.WALKIE_WIRED`.
 
 - **C-3.11-1** A build that runs the walkie advertises `CAP_WALKIE` (`0x8000`). It is never in
@@ -431,9 +434,12 @@ why. It is an experiment behind `BuildConfig.WALKIE` (`-Pwalkie=`, on in debug a
   and glares exactly as §3.3–3.5 say. Answering connects both sides at once, with `m = 4` on the ANSWER: there are
   no ICE servers, no connect timer and no grace. A build without the walkie declines it with `rsn = 5`, because the
   audio bit is absent.
-- **C-3.11-3** The caller places a walkie session only when the peer carries `CAP_WALKIE` and no live path looks
-  possible: no validated Internet route here, and no Wi-Fi Direct leg (§3.10) to a neighbour. Anything else is a
-  live call.
+- **C-3.11-3** A call placed without a kind (the profile's Call button) is a walkie session only when the peer carries
+  `CAP_WALKIE` and no live path looks possible. "Possible" means a validated Internet route here, or a Wi-Fi Direct
+  leg (§3.10) to a neighbour. Anything else is a live call.
+
+  The chat offers both kinds by the same rule: the call it prefers in its top bar, the other in its overflow.
+  A mesh call placed on purpose is a walkie session whatever the route.
 - **C-3.11-4** A live OFFER carries `m = 1 | 4` when the caller can drop to a walkie. The callee echoes `4` on its
   ANSWER when it can too. With both bits, each of C-3.3-3's `no_route` endings drops the call to a connected walkie
   session instead:
@@ -443,18 +449,59 @@ why. It is an experiment behind `BuildConfig.WALKIE` (`-Pwalkie=`, on in debug a
 
   The drop closes the media and ends any direct leg, and sends nothing. The other side's ICE sees the media go and
   drops on its own timer. Without both bits, the call ends as before.
-- **C-3.11-5** A burst is a sealed DM voice note: `audio/aac`, at 16 kbps, 0.5–60 s. There is no new frame and no
-  new MIME.
-- **C-3.11-6** While a session is connected, a voice note plays by itself only if it meets all of these, judged on
-  this phone's clock except the lag:
-  - it is from the session's peer and has no file name;
-  - it arrived after the session connected and has not played yet;
-  - its `sentAt` is no more than 60 s before its arrival;
-  - its clip landed within 90 s of its arrival.
+- **C-3.11-5** A burst is Opus at 8 kbps, captured at 16 kHz mono, in 20 ms packets, up to 60 s. It is cut into
+  chunks: one each time 480 ms of audio is in hand, then the rest marked as the last. A chunk's plaintext is binary:
 
-  The notes play one at a time, in arrival order. A note that misses stays a voice note in the thread. A played
-  note advances the thread's read watermark. The session suppresses the thread's notifications and hangs up after
-  10 min with no burst either way.
+  ```text
+  flags (bit 0: last) · call tag (2 bytes, big-endian) · varint b · varint q · packets
+  ```
+
+  - `b` is the sender's burst number in the call, and `q` the chunk number from 0.
+  - Each packet sits behind a one-byte length.
+  - The tag is the low 16 bits of the call id's Java `String.hashCode`, so a chunk names its session.
+
+  A burst released before its first chunk went out sends nothing. A cancelled one that had sent sends an empty
+  last chunk.
+- **C-3.11-6** A chunk rides a frame of type `talk`, sealed on the DM ratchet and sent unsigned: its AEAD
+  authenticates it to its addressee, as ADR 059's tick is authenticated, and only the addressee reads it.
+  - **Payload.** `0x01 · varint se · varint pe · varint n · ek (32 bytes) · ciphertext`: the v3 seal with its nonce
+    derived. A header that form cannot carry (an init, a reset flag), or a peer that reads only v2, gets a
+    `ChatContent` instead, whose CBOR never begins with `0x01`.
+  - **Id.** Its frame id is 11 characters.
+  - **Reach.** No node custodies it, parks it, re-serves it or fans it onto the coordination plane, LoRa or a spool.
+    A neighbour of the sender gets it alone, with `ttl = 0`. Anyone else gets a flood of at most `ttl = 3` relays. A
+    build that does not know the type relays it like any unknown type and delivers nothing.
+  - **Receipt.** The addressee admits the frame unsigned only in this shape: addressed to it, by someone else, in no
+    group. It hands the opened plaintext to the call layer only from an accepted contact, and a failed open is never
+    a reset trigger. Only a connected walkie session with the sender, under the chunk's tag, takes the chunk.
+  - **Size.** A 480 ms chunk's frame is about 714 bytes, about 1.5 KB/s, inside Coded PHY's 2.1 KB/s.
+- **C-3.11-7** The receiver plays bursts one after another, in the order of `b`, and each in the order of `q`:
+  - It starts a burst once it holds two chunks, or the last one, or 400 ms after the first chunk arrived.
+  - When chunks after a missing one are held, it waits 500 ms for the missing one, then skips it.
+  - A burst ends on its `e` chunk, or after 4 s with nothing held and nothing new.
+  - A chunk of a burst that ended, or one behind the play position, is dropped.
+
+  Talking holds playback: what arrives meanwhile plays after the release. The session hangs up after 10 min with no
+  burst either way.
+- **C-3.11-8** From the ring to the hang-up, a walkie call holds a Wi-Fi Aware link to its peer
+  (`MeshTransport.holdLink`), renewing the hold every 10 s; a hold lapses 25 s after its last renewal.
+  - **No link yet.** The hold raises one through the hint an attachment fetch gives
+    (`MeshTransport.expectBulkTransfer`), within its bounds: a fresh sighting, the initiator hold, the cooldown after a
+    failed initiate.
+  - **A link.** The hold keeps it open past its idle teardown (5 s for the initiator, 8 s for the responder) but not
+    past its absolute window (30 s, 45 s). The window is the only way a responder can tell a dead initiator from a
+    quiet one, so a held link comes round every 30 s or so, and the hold raises it again at once.
+  - **No link at a send.** A chunk retries for up to 2.5 s, past the recycle's gap of about 1.9 s. A chunk to a neighbour goes over its
+  quickest link (`MeshTransport.sendLive`): Wi-Fi Aware when that radio holds one, else Bluetooth. Every other frame
+  keeps the Bluetooth-first order.
+
+  The call screen shows how a chunk would reach the peer (`TalkLink`):
+  - **direct:** over a link of this phone's own; nothing is shown;
+  - **through the mesh:** no link of its own, but the peer's frames reached it through another phone lately; a notice
+    says the chunks go through other phones;
+  - **none:** no link it can see; a warning says it is linking.
+
+  With no link at all, nothing is sealed, and the burst says it did not go.
 
 ## 4. Tests this would add
 
