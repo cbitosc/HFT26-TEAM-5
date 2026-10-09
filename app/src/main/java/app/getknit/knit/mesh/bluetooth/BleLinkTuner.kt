@@ -6,6 +6,7 @@ import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothProfile
 import android.content.Context
 import android.util.Log
+import app.getknit.knit.mesh.power.ElapsedWait
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -36,10 +37,14 @@ internal class BleLinkTuner(
     private val nodeId: String,
     private val scope: CoroutineScope,
     private val isLive: () -> Boolean,
+    // The elapsed clock (`SystemClock.elapsedRealtime`): the second close's wait runs on it.
     private val now: () -> Long,
     // Every update the link reports, whoever asked (binder thread), and the loop's end: whether it had attached.
     private val onParams: (LinkParams, ok: Boolean) -> Unit = { _, _ -> },
     private val onEnded: (attached: Boolean) -> Unit = {},
+    // What its log lines begin with: `bt tune` for the boost's and the bridge's tuners (the drain trial reads those
+    // lines), `bt acl arm` for the transport's link-up arm (#142), which asks nothing and must not read as a tuner.
+    private val label: String = "bt tune",
 ) {
     private class Ask(
         val request: LinkTuneRequest,
@@ -63,6 +68,9 @@ internal class BleLinkTuner(
     @Volatile private var disconnected = false
 
     @Volatile private var closed = false
+
+    // Set once the loop let its client go: a client that registers after that is let go again (the race below).
+    @Volatile private var released = false
 
     @Volatile private var txPhy: LinkPhy? = null
 
@@ -142,18 +150,18 @@ internal class BleLinkTuner(
             val started = now()
             val g = runCatching { device.connectGatt(context, false, callback, BluetoothDevice.TRANSPORT_LE) }.getOrNull()
             if (g == null) {
-                Log.i(TAG, "bt tune $nodeId: connectGatt refused")
+                Log.i(TAG, "$label $nodeId: connectGatt refused")
                 return
             }
             gatt = g
             // stretches: give-up on a GATT attach over the link's own ACL; a sleep only delays closing the client.
             if (withTimeoutOrNull(ATTACH_TIMEOUT_MS) { attachedSignal.await() } != true) {
-                Log.i(TAG, "bt tune $nodeId: attach failed")
+                Log.i(TAG, "$label $nodeId: attach failed")
                 return
             }
             attached = true
             everAttached = true
-            Log.i(TAG, "bt tune $nodeId attached (${device.address}) in ${now() - started}ms")
+            Log.i(TAG, "$label $nodeId attached (${device.address}) in ${now() - started}ms")
             for (ask in asks) {
                 if (!disconnected) serve(g, ask.request, ask.waits)
                 ask.done.complete(Unit)
@@ -168,13 +176,32 @@ internal class BleLinkTuner(
                     ?.done
                     ?.complete(Unit) ?: break
             }
+            released = true
             gatt?.let {
                 // disconnect() drops this client's hold on the link (the channel keeps the ACL); close() unregisters it.
                 runCatching { it.disconnect() }
                 runCatching { it.close() }
+                if (!everAttached) closeAgainLater(it)
             }
             gatt = null
             if (!closed) onEnded(everAttached)
+        }
+    }
+
+    /**
+     * A client that never attached may not have registered yet, and on Android 12 `close()` before `onClientRegistered`
+     * does nothing (`unregisterApp` returns while the client id is 0): the late registration then connects and holds the
+     * link, and with it the ACL. [released] makes its connect callback let go; this second close is the net for a
+     * registration whose connect never reports — a direct connect to an ACL already gone, which would dial.
+     */
+    private fun closeAgainLater(g: BluetoothGatt) {
+        scope.launch(Dispatchers.IO) {
+            // On the elapsed clock: a registration's pending direct connect is a radio user, and a sleep must not
+            // stretch it (ADR 2026-10.pj9w). The transport's scope is the app's and outlives a stop; were it cancelled,
+            // the connect callback's let-go still holds, and a registration dies with the process's binder.
+            ElapsedWait(now).sleep(SECOND_CLOSE_MS)
+            runCatching { g.disconnect() }
+            runCatching { g.close() }
         }
     }
 
@@ -202,7 +229,7 @@ internal class BleLinkTuner(
             }
         phyReports.tryReceive()
         val asked = runCatching { g.setPreferredPhy(mask, mask, BluetoothDevice.PHY_OPTION_NO_PREFERRED) }.isSuccess
-        Log.i(TAG, "bt tune $nodeId ask phy=${phy.name} requested=$asked")
+        Log.i(TAG, "$label $nodeId ask phy=${phy.name} requested=$asked")
         // stretches: the bridge's give-up on one PHY update (a boost's ask never waits); a sleep only delays its reply.
         if (asked && waits) withTimeoutOrNull(REPORT_TIMEOUT_MS) { phyReports.receive() }
     }
@@ -220,7 +247,7 @@ internal class BleLinkTuner(
             }
         paramReports.tryReceive()
         val asked = runCatching { g.requestConnectionPriority(code) }.getOrDefault(false)
-        Log.i(TAG, "bt tune $nodeId ask priority=${priority.name} requested=$asked")
+        Log.i(TAG, "$label $nodeId ask priority=${priority.name} requested=$asked")
         // stretches: the bridge's give-up on one parameter update (a boost's ask never waits); a link already on the asked
         // values reports nothing, and a sleep only delays the bridge's reply.
         if (asked && waits) withTimeoutOrNull(REPORT_TIMEOUT_MS) { paramReports.receive() }
@@ -234,7 +261,7 @@ internal class BleLinkTuner(
         mtuReports.tryReceive()
         mtuAsked = size
         val asked = runCatching { g.requestMtu(size) }.getOrDefault(false)
-        Log.i(TAG, "bt tune $nodeId ask mtu=$size requested=$asked")
+        Log.i(TAG, "$label $nodeId ask mtu=$size requested=$asked")
         // stretches: the bridge's give-up on one ATT MTU exchange (a boost's ask never waits); a sleep only delays its reply.
         if (asked && waits) withTimeoutOrNull(MTU_TIMEOUT_MS) { mtuReports.receive() }
     }
@@ -262,7 +289,7 @@ internal class BleLinkTuner(
             txPhy = linkPhyOf(tx)
             rxPhy = linkPhyOf(rx)
         }
-        Log.i(TAG, "bt tune $nodeId phy tx=${linkPhyOf(tx)} rx=${linkPhyOf(rx)} status=$status ($what)")
+        Log.i(TAG, "$label $nodeId phy tx=${linkPhyOf(tx)} rx=${linkPhyOf(rx)} status=$status ($what)")
         phyReports.trySend(status)
     }
 
@@ -275,6 +302,12 @@ internal class BleLinkTuner(
             ) {
                 when (newState) {
                     BluetoothProfile.STATE_CONNECTED -> {
+                        if (released) {
+                            // Registered after the loop let go (the Android 12 race in closeAgainLater): let go again.
+                            Log.i(TAG, "$label $nodeId: late attach let go")
+                            runCatching { g.disconnect() }
+                            runCatching { g.close() }
+                        }
                         attachedSignal.complete(true)
                     }
 
@@ -309,7 +342,7 @@ internal class BleLinkTuner(
                 paramsStatus = status
                 Log.i(
                     TAG,
-                    "bt tune $nodeId params interval=${params.intervalUs}us latency=${params.latency} " +
+                    "$label $nodeId params interval=${params.intervalUs}us latency=${params.latency} " +
                         "timeout=${params.timeoutMs}ms status=$status",
                 )
                 paramReports.trySend(ok)
@@ -323,7 +356,7 @@ internal class BleLinkTuner(
             ) {
                 // The size is what the exchange settled on whatever the status says (as MeshtasticGatt reads it).
                 this@BleLinkTuner.mtu = mtu
-                Log.i(TAG, "bt tune $nodeId mtu=$mtu asked=$mtuAsked status=$status")
+                Log.i(TAG, "$label $nodeId mtu=$mtu asked=$mtuAsked status=$status")
                 mtuReports.trySend(mtu)
             }
 
@@ -353,5 +386,9 @@ internal class BleLinkTuner(
 
         // Every step of one ask, with room to spare; the bridge's reply waits no longer.
         const val TUNE_TIMEOUT_MS = 20_000L
+
+        // How long after letting go of a client that never attached it is closed again: a registration answers in
+        // milliseconds, and a direct connect it made to a gone ACL is cancelled by the close.
+        const val SECOND_CLOSE_MS = 5_000L
     }
 }

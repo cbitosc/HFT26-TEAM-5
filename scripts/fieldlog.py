@@ -43,6 +43,7 @@ KINDS: dict[str, set[str] | None] = {
     "bt_fail": {"peer", "reason", "dur", "streak"},
     "bt_phy": {"peer", "coded", "rssi"},
     "bt_scan": {"links", "le", "sighted", "hunting", "coded"},
+    "bt_orphan": {"peer", "linked", "armed", "tries", "cleared", "age"},
     "bt_link": {"peer", "age", "tx", "rx", "phy", "rssi", "interval", "mtu", "earned"},
     "bt_peer": {"peer", "linked", "rssi", "rssi1m", "rssiCoded", "codedLag"},
     "nan_up": {"peer", "initiator", "links"},
@@ -147,6 +148,9 @@ def summarise(logs: list[Log]) -> dict:
                 out["bt fails"][f"{dev} {e['reason']}"].append(e["dur"] / 1000)
             elif kind == "bt_link" and "rssi" in e:
                 out["bt link rssi"][f"{dev} {e.get('phy', '?')}"].append(e["rssi"])
+            elif kind == "bt_orphan":
+                outcome = "cleared" if e["cleared"] else "kept"
+                out["bt orphan s"][f"{dev} {outcome} linked={e['linked']} armed={e['armed']} tries={e['tries']}"].append(e["age"] / 1000)
             elif kind == "bt_phy" and "rssi" in e:
                 out["bt step rssi"][f"{dev} {'to CODED' if e['coded'] else 'up'}"].append(e["rssi"])
             elif kind == "nan_down":

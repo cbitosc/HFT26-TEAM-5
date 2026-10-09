@@ -267,6 +267,34 @@ sealed interface FieldEvent {
         }
     }
 
+    /**
+     * A Bluetooth channel's LE connection outlived the channel past the grace (#142, ADR 2026-10.b8yf): written once per
+     * such connection. [linked]: the channel was a link; else it never became one (a refused dialer, a failed HELLO or
+     * dial). [armed]: its arm attached (the link-up arm, an iPhone's doorbell, or the arm at the failed channel's end),
+     * so the stack ignored the arm rather than the arm failing. [tries]: the releases it got (0 with the arm switched
+     * off, and for one handed over as the transport stopped). [cleared]: it went down; else it was still up after the
+     * last try. [ageMs]: how long it outlived its channel, to its disconnect or to this record.
+     */
+    data class BtOrphan(
+        val peer: String,
+        val linked: Boolean,
+        val armed: Boolean,
+        val tries: Int,
+        val cleared: Boolean,
+        val ageMs: Long,
+    ) : FieldEvent {
+        override val kind get() = "bt_orphan"
+
+        override fun write(out: FieldWriter) {
+            out.peer("peer", peer)
+            out.flag("linked", linked)
+            out.flag("armed", armed)
+            out.num("tries", tries.toLong())
+            out.flag("cleared", cleared)
+            out.num("age", ageMs)
+        }
+    }
+
     /** A Wi-Fi Aware data path came up; [initiator] when this phone requested it, else it served the peer's. */
     data class NanUp(
         val peer: String,

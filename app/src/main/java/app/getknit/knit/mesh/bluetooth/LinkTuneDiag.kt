@@ -74,6 +74,14 @@ internal object LinkTuneDiag {
     @Volatile var boostOn: Boolean = true
 
     /**
+     * The ACL arm's A/B switch (#142): on, every ACL a channel opened on is armed to idle out when the channel closes (at
+     * link-up, at the end of a channel that never became a link, at stop), and an orphan the arms missed is released;
+     * off, nothing is armed or released and an orphan is only reported (`…debug.LINKTUNE --ez arm false`). On in every
+     * build; a release build, which binds no bridge, keeps it.
+     */
+    @Volatile var aclArm: Boolean = true
+
+    /**
      * The feed window's A/B switch (nsr7's phase 2): on, a 1M/2M file to an Android peer that reports its progress is
      * clocked by those reports; off, it is paced as before (`…debug.LINKTUNE --es feed window|pace`). Starts at the
      * build's default, so a release build, which binds no bridge, keeps it.

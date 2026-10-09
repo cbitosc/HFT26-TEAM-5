@@ -89,9 +89,10 @@ internal object BleFeedPolicy {
     ): Boolean = canEarn && (earned || earnedRecently() || interactive)
 
     /**
-     * This phone's LE connections: its [meshLinks], and every other device a GATT client or server holds in [connected]
-     * (a ring, a watch's LE fallback, a LoRa board), which take a share of the controller's buffers too. A mesh link
-     * appears there only while a tuner holds a client on it, so the addresses in [ours] are not counted twice.
+     * This phone's LE connections: its [meshLinks], and every other device in [connected] (a ring, a watch's LE fallback,
+     * a LoRa board, a closed link's orphaned ACL), which take a share of the controller's buffers too. [connected] is
+     * `getConnectedDevices(GATT)`: every app's GATT clients' connections, and every LE connection while any app has a GATT
+     * server registered (#142), so a mesh link may appear there or not; the addresses in [ours] are never counted twice.
      */
     fun leLinks(
         meshLinks: Int,

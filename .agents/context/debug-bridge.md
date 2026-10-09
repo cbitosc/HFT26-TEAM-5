@@ -352,7 +352,11 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   receiver; a build without `BLE_FEED_WINDOW` starts with it off. `--ez boost false` stops the link boost in this process — every boost
   lets go at once, asks nothing and attaches no new client until `--ez boost true` (a client already attached stays:
   relink between cells) — the A/B switch on one build (a build without `BLE_LINK_BOOST` never boosts, and its reply
-  says `boost: false`). The client a
+  says `boost: false`). `--ez arm false` stops the ACL arm (#142, ADR 2026-10.b8yf) in this process — nothing more is
+  armed to idle out when its channel closes (at link-up, at a refused or failed channel's end, at stop), and no orphan
+  is released, but each orphan is still logged (`bt acl orphan <id> <addr> kept tries=0 …`, or `… unarmed at stop`)
+  and recorded as `bt_orphan` — the A/B switch for the orphan trial; `--ez arm true` puts it back (relink between
+  cells: a link armed before the switch stays armed). The client a
   boost made and the one this action makes are the same `BleLinkTuner`; `close` lets it go and the boost makes another
   at its next ask. No node reads the budget and the links' last-heard state without making a client. An iPhone link is refused
   (`refused`: its doorbell owns the parameters, ADR 2026-09.dqvb), and no PHY is asked while the Coded experiment runs
@@ -361,7 +365,7 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   before a PHY ask; `codedOwned` says a Coded handle steps the link here. From Android 14 the first `mtu` ask on an ACL
   exchanges 517 whatever it names and a later one exchanges nothing, so read `mtu` (settled) against `mtuAsked`, and
   judge that lever by the snoop's data-length change, not the ATT MTU (which does not bound an L2CAP channel). The
-  reply: `filePace`, `fileChunk`, `boostPace`, `crowdedPace`, `leLinks` (this phone's LE connections), `boost`, `feed`,
+  reply: `filePace`, `fileChunk`, `boostPace`, `crowdedPace`, `leLinks` (this phone's LE connections), `boost`, `arm`, `feed`,
   `windowQueueMs`,
   `feeding` (links feeding a file now), `earned` (every one of them earned the boost) and `links[]` (`nodeId`,
   `address`, `attached`,
@@ -369,7 +373,8 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   change after the client attached, so an ask the link already satisfies leaves them null — `paramsStatus`, `mtu`,
   `mtuAsked`, `rssi`, `codedOwned`, `refused`, and the link's boost's `boosting` / `earned`, null before its first
   file). Logcat carries `bt tune <id> attached|ask …|params interval=…us latency=… timeout=…ms status=…|phy tx=… rx=…
-  status=… (read|update)|mtu=… asked=…` and `bt boost <id> high|release|earned …|unearned …`; the
+  status=… (read|update)|mtu=… asked=…` and `bt boost <id> high|release|earned …|unearned …` (the arm's own lines read
+  `bt acl arm <id> attached …` and a release's `bt acl release <id> …` instead, so the drain trial never counts them); the
   HCI snoop is the oracle, read with `scripts/btsnoop-drain.py summary <snoop> --logcat <dump>` (per-link parameter,
   PHY and data-length timelines with who asked, packets per connection event, the controller's queue, and a verdict
   per file). `scripts/ble-drain-trial.py run` drives a whole cell: budget, relink, ask, quiet wait, a fresh file, texts

@@ -242,10 +242,13 @@ import java.nio.ByteBuffer
  *   off in this process, and `--ei windowQueueMs N` (100..5000) sets the queue it keeps ahead of the receiver; a build
  *   without `BLE_FEED_WINDOW` starts with it off. `--ez boost false` stops the link boost in this
  *   process — every boost lets go and asks nothing until `--ez boost true` — the A/B switch on one build (a build
- *   without `BLE_LINK_BOOST` never boosts). An iPhone link is refused
+ *   without `BLE_LINK_BOOST` never boosts). `--ez arm false` stops the ACL arm in this process (#142, ADR
+ *   2026-10.b8yf): nothing more is armed to idle out when its channel closes (at link-up, at a refused or failed
+ *   channel's end, at stop) and no orphan is released, while orphans are still logged (`bt acl orphan …`) and recorded;
+ *   `--ez arm true` puts it back for channels that open after. An iPhone link is refused
  *   (its doorbell owns the parameters), and no PHY is asked while the Coded experiment runs here (a mask lasts the link's
  *   life, so it would block either side's stepper: set `…debug.PHY --es mode off` on both phones first). The reply:
- *   `filePace`, `fileChunk`, `boostPace`, `crowdedPace`, `leLinks` (this phone's LE connections), `boost`, `feed`,
+ *   `filePace`, `fileChunk`, `boostPace`, `crowdedPace`, `leLinks` (this phone's LE connections), `boost`, `arm`, `feed`,
  *   `windowQueueMs`, `feeding`
  *   (links feeding a file now), `earned` (every one of them earned the boost) and `links[]` (nodeId, address, attached, txPhy, rxPhy, intervalUs / latency / timeoutMs —
  *   reported only on a change after the client attached — paramsStatus, mtu and mtuAsked — from Android 14 the first
@@ -2397,6 +2400,7 @@ class DebugBridgeReceiver :
             CodedPhyDiag.tuning = CodedPhyDiag.tuning.copy(crowdedBoostPaceBytesPerSec = intent.getIntExtra("crowdedPace", 0))
         }
         if (intent.hasExtra("boost")) LinkTuneDiag.boostOn = intent.getBooleanExtra("boost", true)
+        if (intent.hasExtra("arm")) LinkTuneDiag.aclArm = intent.getBooleanExtra("arm", true)
         intent.getStringExtra("feed")?.let { raw ->
             LinkTuneDiag.feedWindow =
                 when (raw.lowercase()) {
@@ -2421,6 +2425,7 @@ class DebugBridgeReceiver :
             .put("crowdedPace", tuned.crowdedBoostPaceBytesPerSec)
             .put("leLinks", report.leLinks)
             .put("boost", BuildConfig.BLE_LINK_BOOST && LinkTuneDiag.boostOn)
+            .put("arm", LinkTuneDiag.aclArm)
             .put("feed", if (LinkTuneDiag.feedWindow) "window" else "pace")
             .put("windowQueueMs", tuned.feedWindowQueueMs)
             .put("feeding", report.feeding)

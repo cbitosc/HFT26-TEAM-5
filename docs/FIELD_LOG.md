@@ -57,6 +57,7 @@ Schema 1. A new field is additive. Renaming or removing a field, or changing a f
 | `bt_fail` | A Bluetooth dial failed | `peer`, `reason` (ConnectFailReason), `dur` ms, `streak` |
 | `bt_phy` | A link stepped PHY (Coded experiment) | `peer`, `coded` (to Coded, else up to 1M/2M), `rssi` |
 | `bt_scan` | Every 5 min | `links`, `le` (LE connections the phone holds), `sighted`, `hunting`, `coded` (Coded mode) |
+| `bt_orphan` | A Bluetooth channel's LE connection outlived it past 15 s (#142), once per connection | `peer`, `linked` (the channel was a link; else a refused dialer, a failed HELLO or dial), `armed` (its arm attached: link-up, an iPhone's doorbell, or at the failed channel's end), `tries` (releases; 0 with the arm off, or when handed over at stop), `cleared` (it went down, else still up after the last try), `age` ms (outlived its channel by, to its disconnect or to this line) |
 | `bt_link` | Every 5 min, one per link | `peer`, `age` ms, `tx` feeding a file, `rx` receiving one, `phy`, `rssi`, `interval` µs, `mtu`, `earned` (boosted budget) |
 | `bt_peer` | Every 5 min, the four strongest sightings | `peer`, `linked`, `rssi` (smoothed, 1M scale), `rssi1m`, `rssiCoded`, `codedLag` ms |
 | `nan_up` | A Wi-Fi Aware data path came up | `peer`, `initiator`, `links` |

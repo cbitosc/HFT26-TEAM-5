@@ -211,6 +211,21 @@ Sourced; cite these by their ADR, and treat anything not here or in an ADR as a 
 - `connectGatt(TRANSPORT_LE)` over a live ACL attaches in milliseconds; with the ACL gone it dials. An open GATT
   client holds the ACL. 32 GATT client registrations per device across all apps; 8 LE connections per host, the
   mesh's L2CAP links among them, and an app can neither see nor reserve one (dqvb, wetm).
+- An LE ACL can outlive Knit's CoC (#142, b8yf).
+  - On Android 12 the ATT channel never idles out unless a local GATT client held the link and left.
+  - On Android 16, by source, a link that carried a CoC idles out by itself (`l2cu_allocate_ccb` marks it active),
+    and an Android 17 peripheral did. Yet #142's Android 16/17 *centrals* kept theirs, for a reason not yet
+    identified.
+  - A client that attaches and leaves sets the 1 s idle timeout, and the ACL drops 1–4 s after the channel closes.
+    That is certain on the Android 12 side, and either end's disconnect ends the ACL on both phones.
+  - When the timer fires, `l2c_link_timeout` disconnects only while the link has no channel, so a CoC opened
+    meanwhile keeps the link.
+  - Android 12 re-dials a dropped LE peer from its controller's accept list within 2–3 s, Knit or not, and that
+    ACL carries no channel.
+  - On Android 12, `close()` before `onClientRegistered` does nothing, and the late registration connects and holds
+    the link.
+  - `getConnectedDevices(GATT)` lists another device's LE connection only while some app's GATT server is
+    registered. The `ACTION_ACL_*` edges are the oracle (b8yf, #142).
 - `onConnectionUpdated` is hidden through compileSdk 37.1 (keep `@Keep`, no `override`); the 37.2 stub makes it
   public, so that bump needs `override` at both declarations (`BleDoorbell.Client`, `LinkParamsCallback`); the link
   boost's `earned` rests on the second (2da4), so never drop it. Discovery's unlock re-sends the central's first parameters, which can land
@@ -259,7 +274,10 @@ One line per invariant, by subsystem, with the ADR to read. Not exhaustive and n
 - **Coded PHY.** Release reads AUTO whatever is stored (the mode knob is debug-only); `codedOnly` on 1M listening time; a Coded-alone dialer is unsighted only while
   the experiment runs; the larger id drives steps; OFF leaves a link on its PHY; a Coded dial gets a 25 s watchdog
   (yvn6 and amendments). On in release since 2026-10-08.
-- **GATT clients.** The doorbell rings only for a HELLO with `CAP_DOORBELL` (Android never claims it), at the
+- **GATT clients.** Every ACL a channel opened on is armed by a client that attaches and leaves — at link-up (the
+  doorbell's lookup is an iPhone link's arm), and after a refused or failed channel only while its edges say it is up
+  and no link or dial of ours is on it — outside `tuners` and never cancelled at teardown; an orphaned ACL is released
+  at most twice (once after a re-dial) from the ACL edges, never from `getConnectedDevices(GATT)` (b8yf). The doorbell rings only for a HELLO with `CAP_DOORBELL` (Android never claims it), at the
   enqueue, as a write without response, never for `typing`/`blobreq`/`keyreq`; BALANCED re-asked at most twice a
   lookup (dqvb). The payload reader holds the arbiter, never reads a linked address or during a dial, never
   `requestMtu`s (kwq2). A board gets three direct dials, then `autoConnect` with an hourly net; the pacer parks

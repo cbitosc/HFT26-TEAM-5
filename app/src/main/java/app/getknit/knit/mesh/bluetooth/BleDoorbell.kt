@@ -64,6 +64,9 @@ internal class BleDoorbell(
     private val isLive: () -> Boolean,
     private val onRang: () -> Unit,
     private val now: () -> Long,
+    // A lookup's client attached to the link's ACL (binder thread): that attach arms the ACL to idle out when the link's
+    // channel closes, as the transport's link-up arm does for every other link (#142, ADR 2026-10.b8yf).
+    private val onAttached: () -> Unit = {},
 ) {
     private val pokes = Channel<Unit>(Channel.CONFLATED)
     private var job: Job? = null
@@ -282,6 +285,7 @@ internal class BleDoorbell(
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
                     attached.complete(true)
+                    onAttached()
                 }
 
                 BluetoothProfile.STATE_DISCONNECTED -> {

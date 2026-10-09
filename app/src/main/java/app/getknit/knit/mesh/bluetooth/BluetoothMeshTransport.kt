@@ -16,9 +16,11 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.SystemClock
 import android.util.Log
 import androidx.core.content.ContextCompat
+import androidx.core.content.IntentCompat
 import app.getknit.knit.BuildConfig
 import app.getknit.knit.fieldlog.BtDownReason
 import app.getknit.knit.fieldlog.FieldEvent
@@ -294,6 +296,14 @@ class BluetoothMeshTransport(
     // Each link's boost (#120): made at the link's first file either way when the build allows it and the peer is not an
     // iPhone, it asks for a short interval while this side feeds and says whether the link earned the larger budget.
     private val boosts = ConcurrentHashMap<FramedLink, BleLinkBoost>()
+
+    // The LE connections closed channels left up (#142, ADR 2026-10.b8yf): fed by the ACL edges and the channels' ends,
+    // read on [diagLoop]'s minute. [aclArms] counts the arms begun ([armAcl]: at link-up, at the end of a channel that never
+    // became a link, and at stop) and [aclArmsAttached] those that attached, for the debug state line; a release is
+    // counted by [orphans] alone (`released=`).
+    private val orphans = OrphanAclPolicy<BluetoothDevice>()
+    private val aclArms = AtomicInteger()
+    private val aclArmsAttached = AtomicInteger()
 
     // Which frames already crossed which link, either way: the router's flood copy and the fast path's link
     // copy are the same frame twice for the same stream, and a relayed frame's fast copy would go straight
@@ -585,6 +595,21 @@ class BluetoothMeshTransport(
         }
         _neighbors.value = emptySet()
         _reachable.value = emptySet()
+        disarmAtStop() // after the links' ends: nothing watches an ACL once the transport has stopped
+    }
+
+    /**
+     * Hands each watched ACL still up whose arm never attached one more arm, and records it (#142): with the edge
+     * receiver gone and the tick cancelled, nothing would release it, and a Pause would keep it for its length. Its
+     * `isLive` is true — the edges stopped with the receiver, and these channels closed a moment ago. The arm runs on the
+     * app's scope, which a stop does not cancel; its `finally` closes the client whatever ends it.
+     */
+    private fun disarmAtStop() {
+        orphans.stop(elapsed()).forEach { u ->
+            Log.i(TAG, "bt acl orphan ${u.nodeId} ${u.address} unarmed at stop (ended ${u.endedAgoMs}ms ago)")
+            armAcl(u.device, u.nodeId, isLive = { true }, AclArm.STOP)
+            field.record(FieldEvent.BtOrphan(u.nodeId, u.linked, armed = false, tries = 0, cleared = false, ageMs = u.endedAgoMs))
+        }
     }
 
     override fun heal() {
@@ -1194,10 +1219,12 @@ class BluetoothMeshTransport(
     }
 
     /**
-     * This phone's LE connections: the mesh's links, and every other device a GATT client or server on this phone is
-     * connected to (a ring, a watch's LE fallback, a LoRa board), which take a share of the controller's buffers too.
-     * A mesh link appears there only while a tuner holds a client on it, so those are not counted twice. Counted at
-     * most every [LE_COUNT_MS].
+     * This phone's LE connections: the mesh's links, and every other device `getConnectedDevices(GATT)` names (a ring, a
+     * watch's LE fallback, a LoRa board, a link's orphaned ACL), which take a share of the controller's buffers too. That
+     * list is every app's GATT clients' connections and, while any app has a GATT server registered (GMS does on the
+     * Pixels), every LE connection on the phone, since the stack tells each server of each one (#142). So a mesh link may
+     * be there or not, and its address is never counted twice; a phone with no server registered undercounts what no
+     * client holds. Counted at most every [LE_COUNT_MS].
      */
     private fun leLinkCount(): Int {
         val now = elapsed()
@@ -1317,6 +1344,122 @@ class BluetoothMeshTransport(
         }
         fresh.start()
         return fresh
+    }
+
+    /**
+     * Arms [device]'s ACL to idle out once its last channel closes (#142, ADR 2026-10.b8yf): a GATT client attaches to
+     * the ACL and leaves at once, asking nothing. An LE ACL can outlive Knit's CoC. Android 12's ATT channel never
+     * idles out unless a local client held it and left, and #142's Android 16/17 centrals kept theirs for a reason not
+     * yet identified. A client that held it and left sets the stack's 1 s idle timeout, which runs once no dynamic
+     * channel remains, so the stack drops the ACL a second or so after the link's channel closes. That is certain where
+     * Android 12 armed it, and either end's disconnect ends it on both phones. Never in [tuners], so the boost and
+     * `…debug.LINKTUNE close` cannot take it over; it ends by itself.
+     *
+     * [isLive] is checked just before `connectGatt`, which on a gone ACL would dial instead. A `false` from
+     * `LinkTuneDiag.aclArm` (the debug A/B switch) arms nothing. Only an [AclArm.ARM] tells [orphans] how it fared (the
+     * record's `armed`); a release logs as `bt acl release`, so `bt acl arm` lines and `arms=` count arms alone.
+     */
+    private fun armAcl(
+        device: BluetoothDevice,
+        nodeId: String,
+        isLive: () -> Boolean,
+        kind: AclArm = AclArm.ARM,
+    ) {
+        if (!LinkTuneDiag.aclArm) return
+        val address = device.address
+        if (kind != AclArm.RELEASE) aclArms.incrementAndGet()
+        if (kind == AclArm.ARM) orphans.onArming(address)
+        BleLinkTuner(
+            context = appContext,
+            device = device,
+            nodeId = nodeId,
+            scope = scope,
+            isLive = isLive,
+            now = SystemClock::elapsedRealtime,
+            onEnded = { attached ->
+                if (kind != AclArm.RELEASE && attached) aclArmsAttached.incrementAndGet()
+                if (kind == AclArm.ARM) orphans.onArmed(address, attached)
+            },
+            label = if (kind == AclArm.RELEASE) "bt acl release" else "bt acl arm",
+        ).apply {
+            start()
+            finish(LinkTuneRequest(node = nodeId)) // asks nothing: attach, then disconnect() and close() in its finally
+        }
+    }
+
+    /**
+     * One round of [orphans] (#142): an ACL a closed channel left up past the grace is released by a fresh [armAcl], and
+     * each orphan is logged and recorded in the field log once. Runs on [diagLoop]'s minute, whose wait stretches while
+     * the CPU sleeps: a release is the net under the arms, and no relink waits on it. An address a live link or a dial in
+     * flight uses is left alone, at the tick and again at the attach ([releasable]), so a release never lands on an ACL
+     * our own L2CAP connect is opening.
+     */
+    private fun checkOrphans() {
+        val busy = linkAddresses.values.toSet() + dialingAddresses()
+        orphans.check(elapsed(), busy, LinkTuneDiag.aclArm).forEach { action ->
+            when (action) {
+                is OrphanAclPolicy.Release -> {
+                    Log.i(
+                        TAG,
+                        "bt acl orphan ${action.nodeId} ${action.address} release try=${action.tries} " +
+                            "(link ended ${action.endedAgoMs}ms ago)",
+                    )
+                    val address = action.address
+                    // Read again at the attach, not only at the tick: a dial of ours may have started on it since.
+                    armAcl(action.device, action.nodeId, isLive = { releasable(address) }, AclArm.RELEASE)
+                }
+
+                is OrphanAclPolicy.Report -> {
+                    Log.i(
+                        TAG,
+                        "bt acl orphan ${action.nodeId} ${action.address} ${if (action.cleared) "cleared" else "kept"} " +
+                            "tries=${action.tries} armed=${action.armed} age=${action.ageMs}ms",
+                    )
+                    field.record(
+                        FieldEvent.BtOrphan(action.nodeId, action.linked, action.armed, action.tries, action.cleared, action.ageMs),
+                    )
+                }
+            }
+        }
+    }
+
+    /** The addresses our dials in flight target, on either PHY. */
+    private fun dialingAddresses(): Set<String> =
+        synchronized(lock) { inFlight.toList() }
+            .flatMap { listOfNotNull(deviceFor[it]?.address, codedDeviceFor[it]?.address) }
+            .toSet()
+
+    /**
+     * Whether an attach to [address]'s ACL may go now: its connect edge was seen and no disconnect since (else
+     * `connectGatt` would dial), and no live link or dial of ours is on it — a release or an unlinked arm must not land
+     * on an ACL our own L2CAP connect is opening.
+     */
+    private fun releasable(address: String): Boolean =
+        orphans.aclUp(address) && address !in linkAddresses.values && address !in dialingAddresses()
+
+    /**
+     * A channel on [device]'s ACL closed without becoming a link (#142): a dialer refused or whose HELLO failed, or a
+     * dial of ours that failed after its connect returned. Nothing arms that ACL at link-up, so it is armed here and
+     * watched as an unlinked channel's end under [nodeId] (unknown for a HELLO that never came: armed, not watched).
+     *
+     * It waits [UNLINKED_SETTLE_MS] first, on the elapsed clock: the channel is ms old, and the ACL's connect edge comes
+     * from another process and can trail it, while an ACL that never came up must arm nothing and dial nothing. A link
+     * that came up on the address meanwhile (a cross-dial over the same ACL) takes it over. A cross-dial that starts
+     * after the arm stays safe: the arm only arms the idle timer, and when it fires `l2c_link_timeout` disconnects only
+     * while the link holds no channel (`if (!p_lcb->ccb_queue.p_first_ccb)`, android12 and android16 alike).
+     */
+    private fun armUnlinked(
+        device: BluetoothDevice,
+        nodeId: String?,
+    ) {
+        val address = device.address
+        val endedAt = elapsed()
+        scope.launch(Dispatchers.IO) {
+            elapsedWait.sleep(UNLINKED_SETTLE_MS)
+            if (address in linkAddresses.values) return@launch
+            if (nodeId != null) orphans.onLinkEnded(address, nodeId, device, endedAt, linked = false)
+            armAcl(device, nodeId ?: "(no hello)", isLive = { releasable(address) })
+        }
     }
 
     /** Gives [link] a PHY handle if the experiment runs, its peer was heard on Coded, and it has none yet. */
@@ -1993,12 +2136,14 @@ class BluetoothMeshTransport(
             if (!settled.compareAndSet(false, true)) {
                 // The watchdog already timed this attempt out and released the slot; just tidy up and stop.
                 runCatching { socket.close() }
+                armUnlinked(device, nodeId) // only if its ACL came up after all
                 return@launch
             }
             watchdog.cancel()
             if (connectErr != null) {
                 runCatching { socket.close() }
-                return@launch failConnect(nodeId, ConnectFailClassifier.classify(connectErr), startedAt, connectErr, device)
+                failConnect(nodeId, ConnectFailClassifier.classify(connectErr), startedAt, connectErr, device)
+                return@launch armUnlinked(device, nodeId) // only if its ACL came up: a refused channel
             }
             val link = BluetoothSocketLink(socket)
             // Two-way HELLO: send our identity first, then read the responder's reply and require it to match
@@ -2009,7 +2154,8 @@ class BluetoothMeshTransport(
             val helloErr = runCatching { LinkHandshake.writeHello(link.output, localNodeId) }.exceptionOrNull()
             if (helloErr != null) {
                 link.close()
-                return@launch failConnect(nodeId, ConnectFailReason.HANDSHAKE, startedAt, helloErr)
+                failConnect(nodeId, ConnectFailReason.HANDSHAKE, startedAt, helloErr)
+                return@launch armUnlinked(device, nodeId)
             }
             val replyWatchdog =
                 scope.launch {
@@ -2022,12 +2168,13 @@ class BluetoothMeshTransport(
                 // A reply naming another node: a new node took the address our payload came from. No reply keeps it.
                 if (reply != null) forgetGattPayloadIfOther(device.address, reply.nodeId)
                 link.close()
-                return@launch failConnect(
+                failConnect(
                     nodeId,
                     ConnectFailReason.HANDSHAKE,
                     startedAt,
                     IllegalStateException("hello reply ${reply?.nodeId ?: "absent"} != expected $nodeId"),
                 )
+                return@launch armUnlinked(device, nodeId) // a refusal: the responder closed the channel (shzv, hj4a)
             }
             Log.i(TAG, "bt connect ok $nodeId durMs=${elapsed() - startedAt}")
             // The reply's full-width capabilities, as an accepted link takes the dialer's: the advert carries only
@@ -2060,6 +2207,7 @@ class BluetoothMeshTransport(
         val clientNodeId = advert?.nodeId
         if (advert == null || clientNodeId == null) {
             link.close()
+            armUnlinked(socket.remoteDevice, null)
             return
         }
         // A dialer at an address whose payload names another node took that address: forget the payload before the
@@ -2080,12 +2228,14 @@ class BluetoothMeshTransport(
                     "heldAgeMs=$heldAgeMs atCap=$atCap)",
             )
             link.close()
+            armUnlinked(socket.remoteDevice, clientNodeId) // most often a sighted lonely dialer (hj4a)
             return
         }
         // Reply with our identity so the initiator can confirm it reached us (two-way HELLO; the initiator
         // validates this before registering). We read first, then reply — no mutual block.
         if (runCatching { LinkHandshake.replyHello(link.output, localNodeId) }.isFailure) {
             link.close()
+            armUnlinked(socket.remoteDevice, clientNodeId)
             return
         }
         Log.i(TAG, "bt accepted client $clientNodeId ($verdict, sighted=$sighted codedOnly=${sighted && !admitSighted})")
@@ -2135,8 +2285,10 @@ class BluetoothMeshTransport(
         val prev = links.put(nodeId, framed)
         if (prev != null) {
             neverSighted.remove(prev)
-            linkAddresses.remove(prev)
-            linkDevices.remove(prev)
+            // Usually a different ACL from the replacement's (#142: handle 3 against 5), so its own may be left up.
+            val prevAddress = linkAddresses.remove(prev)
+            val prevDevice = linkDevices.remove(prev)
+            if (prevAddress != null && prevDevice != null) orphans.onLinkEnded(prevAddress, nodeId, prevDevice, elapsed())
             linkPhy.remove(prev)
             lastPace.remove(prev)
             phyControls.remove(prev)?.close()
@@ -2148,6 +2300,7 @@ class BluetoothMeshTransport(
                 field.record(FieldEvent.BtDown(nodeId, BtDownReason.REPLACED, elapsed() - prev.linkStartedAt, links.size - 1))
             }
         }
+        device?.let { orphans.onLinkUp(it.address) } // after the replaced link's end: the same ACL is this link's now
         // Before framed.start() and the neighbor refresh, so the link-up frames already ring it.
         if (device != null && DoorbellPolicy.serves(advert.capabilities)) {
             doorbells[framed] =
@@ -2159,7 +2312,14 @@ class BluetoothMeshTransport(
                     isLive = { links[nodeId] === framed },
                     onRang = { rings.incrementAndGet() },
                     now = SystemClock::elapsedRealtime,
+                    onAttached = { orphans.onArmed(device.address, attached = true) },
                 ).also { it.start() }
+        } else if (device != null) {
+            // An iPhone's doorbell lookup above attaches and so arms its ACL already (it reports that attach to [orphans]).
+            // Not cancelled with the link: an attach that lands after the channel closed still lets the ACL go, so it is
+            // live while the ACL is up.
+            val address = device.address
+            armAcl(device, nodeId, isLive = { links[nodeId] === framed || orphans.aclUp(address) })
         }
         ensurePhyControl(framed)
         codedPace.onLinkUp(nodeId)
@@ -2188,8 +2348,9 @@ class BluetoothMeshTransport(
         val fl = (if (only == null) links.remove(nodeId) else only.takeIf { links.remove(nodeId, it) }) ?: return false
         if (links.isEmpty()) noLinkSince = elapsed() // the lonely dial's clock runs from the last link's end (hj4a)
         neverSighted.remove(fl)
-        linkAddresses.remove(fl)
-        linkDevices.remove(fl)
+        val address = linkAddresses.remove(fl)
+        val device = linkDevices.remove(fl)
+        if (address != null && device != null) orphans.onLinkEnded(address, nodeId, device, elapsed()) // its ACL may stay (#142)
         linkPhy.remove(fl)
         lastPace.remove(fl)
         val dropStatus =
@@ -2326,6 +2487,7 @@ class BluetoothMeshTransport(
                             // even if a fast off→on bounce skipped the STATE_OFF teardown (a stuck `scanning`
                             // flag would otherwise make BleScanner.start() short-circuit and never re-acquire).
                             tearDownRadio()
+                            orphans.clear() // every ACL went with the adapter, and its edges may never have come
                             bringUp()
                             wake()
                         }
@@ -2336,6 +2498,7 @@ class BluetoothMeshTransport(
                         _health.value = TransportHealth.Unavailable // Bluetooth switched off (or airplane mode)
                         scope.launch {
                             links.keys.toList().forEach { teardownLink(it, "adapter off") }
+                            orphans.clear() // after the links' ends: no ACL outlives the adapter
                             tearDownRadio()
                             cancelGattRead()
                             presence.clear()
@@ -2385,14 +2548,32 @@ class BluetoothMeshTransport(
 
     // Every ACL that opens or closes on the adapter — a mesh link, our GATT read, a bonded watch, a Meshtastic board,
     // another app's — is a connection the stack re-enables its advertising sets around (#112). Most never reach this
-    // transport any other way. The receiver only marks the edge; [advertLoop] does the work.
+    // transport any other way. The receiver marks the edge for [advertLoop], and tells [orphans] which LE connections
+    // are up (#142): the one oracle for an ACL a closed channel left behind, since `getConnectedDevices(GATT)` shows
+    // another device's connection only while some app's GATT server is registered. Runs on the main thread.
     private val aclEdgeReceiver =
         object : BroadcastReceiver() {
             override fun onReceive(
                 context: Context,
                 intent: Intent,
             ) {
-                Log.d(TAG, "bt acl edge ${intent.action?.substringAfterLast('.')}")
+                val action = intent.action
+                val device = IntentCompat.getParcelableExtra(intent, BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
+                // The transport rides the edge from API 33; below, every edge counts (a mesh link's address is an RPA, never
+                // a BR/EDR device's).
+                val transport =
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        intent.getIntExtra(BluetoothDevice.EXTRA_TRANSPORT, BluetoothDevice.TRANSPORT_AUTO)
+                    } else {
+                        BluetoothDevice.TRANSPORT_AUTO
+                    }
+                val up = action == BluetoothDevice.ACTION_ACL_CONNECTED
+                if (device != null && transport != BluetoothDevice.TRANSPORT_BREDR) orphans.onAcl(device.address, up, elapsed())
+                Log.d(
+                    TAG,
+                    "bt acl edge ${action?.substringAfterLast('.')} ${device?.address}" +
+                        if (transport == BluetoothDevice.TRANSPORT_BREDR) " bredr" else "",
+                )
                 advertEdge()
             }
         }
@@ -2509,6 +2690,7 @@ class BluetoothMeshTransport(
             audioMonitor.refresh() // re-evaluate audio vs live AudioManager state (the playing edge can be missed)
             // R8 strips the Log.d in release, not the string this builds under the lock: debug only.
             if (BuildConfig.DEBUG) logState()
+            checkOrphans() // every build: the net under the ACL arm (#142)
             // Not debug-gated: a release-shaped `-PbleCodedPhy=true` build is walked too.
             if (codedOn()) logCodedHeard() else codedTallies.clear()
         }
@@ -2553,6 +2735,8 @@ class BluetoothMeshTransport(
                 "alone=${aloneForMs()}ms psm=$currentPsm advert=$presenceAdvert " +
                 "doorbells=${doorbells.size} rings=${rings.get()}" +
                 (if (tuners.isNotEmpty()) " tuners=${tuners.size}" else "") +
+                " arms=${aclArmsAttached.get()}/${aclArms.get()} orphans=${orphans.watching} " +
+                "released=${orphans.released} reported=${orphans.reported}" +
                 (
                     if (boosts.isNotEmpty()) {
                         " boosts=${boosts.size} boosting=${boosts.values.count {
@@ -2567,6 +2751,9 @@ class BluetoothMeshTransport(
                 (sideChannel?.let { " ${it.diag()} $sideDecision" } ?: ""),
         )
     }
+
+    /** Why [armAcl] attaches: an arm [orphans] records, the stop's last arm, or an orphan's release. */
+    private enum class AclArm { ARM, STOP, RELEASE }
 
     companion object {
         const val TAG = "BluetoothMeshTransport"
@@ -2619,6 +2806,10 @@ class BluetoothMeshTransport(
 
         // How often a feed recounts this phone's LE connections for the boosted budget ([leLinkCount]).
         private const val LE_COUNT_MS = 10_000L
+
+        // How long a channel that never became a link waits before its ACL is armed and watched ([armUnlinked]): the
+        // ACL's connect edge comes from the Bluetooth app's process and can trail the channel.
+        private const val UNLINKED_SETTLE_MS = 2_000L
         private const val CODED_DARK_INTERNAL = "dark ${AdvertisingSetCallback.ADVERTISE_FAILED_INTERNAL_ERROR}"
         private const val CODED_RETRYING = "retrying"
 

@@ -89,13 +89,29 @@ Bluetooth-adjacent routing that stays in `AGENTS.md`, because another subsystem 
 - **When touching `mesh/bluetooth/BleDoorbell`, `DoorbellPolicy`, `Protocol.CAP_DOORBELL`, or what
   `BluetoothMeshTransport.writeOnce` rings:** READ ADR 2026-09.dqvb (companion change A4 for the iOS port). A link
   rings only when the peer's HELLO carries `CAP_DOORBELL`, which Android never claims, so Android↔Android links never
-  ring (they open a GATT client only for 2da4's link boost, never with discovery). The doorbell UUIDs are cross-platform law, and the schedule is the port's. `typing`, `blobreq`,
+  ring (their GATT clients are b8yf's link-up arm, 2da4's link boost and yvn6's PHY control, never with discovery). The doorbell UUIDs are cross-platform law, and the schedule is the port's. `typing`, `blobreq`,
   `blobhave`, `blobhas`, `blobprog`, `blobcancel` and `keyreq` don't ring. The GATT client attaches to the link's own ACL, closes on a 2 s attach timeout, and lives
   and dies with the link. A ring is a write without response, poked at the enqueue, never after the socket write.
   The lookup runs at link-up and each one that finds the doorbell asks for `CONNECTION_PRIORITY_BALANCED`: an
   iPhone central runs the link at a 720 ms supervision timeout, BALANCED carries 5 s (#102, the ADR's amendment).
   The stack's put-back of the central's own timeout can land after that ask, so `DoorbellPolicy.Balanced` asks again,
   on the hidden `onConnectionUpdated` or a 2 s settle check, at most twice a lookup (the put-back amendment).
+- **When touching `OrphanAclPolicy`, `BluetoothMeshTransport.armAcl` / `armUnlinked` / `checkOrphans` / `releasable` /
+  `disarmAtStop`, the ACL edge receiver's `EXTRA_DEVICE` read, a refusal or failure path in `superviseAccepted` /
+  `initiateTo`, `BleLinkTuner`'s `label` / `released` / `closeAgainLater`, `BleDoorbell`'s `onAttached`,
+  `LinkTuneDiag.aclArm` (`…debug.LINKTUNE --ez arm`), `FieldEvent.BtOrphan`, or `leLinkCount`:** READ ADR 2026-10.b8yf
+  (#142). An LE ACL can outlive Knit's CoC: Android 12's ATT channel never idles out unless a local GATT client held it
+  and left, and #142's Android 16/17 centrals kept theirs for a reason not yet identified, though by source a CoC link
+  should idle out there. So every ACL a channel opened on is
+  armed: a `BleLinkTuner` that asks nothing attaches and leaves, `autoConnect = false`, outside `tuners`, never cancelled
+  at teardown — at link-up for every link not served by the doorbell (whose lookup's attach is the arm), and 2 s after
+  a channel that never became a link (a refusal, a failed HELLO or dial), only while the ACL's edges say it is up and no
+  link or dial of ours is on it. A late Android 12 registration is let go by the tuner's `released` guard. The net is the
+  ACL broadcasts, never `getConnectedDevices(GATT)` (it lists other connections only while some GATT server is
+  registered): an ended channel's address is watched only while its connect edge was seen and no disconnect followed, is
+  released on `diagLoop`'s minute at most twice past a 15 s grace (once after an Android 12 accept-list re-dial; a
+  disconnect counts only after 15 s down), re-checked for our own dials at the attach, and is recorded once
+  (`bt_orphan`); `stop()` arms and records what is still up and unarmed. Tests: `OrphanAclPolicyTest`.
 - **When touching `mesh/bluetooth/GattPayloads`, `BleGattPayloadReader`, `BleAdvertPayload.FLAG_DIALS_GATT_PEERS`,
   `BuildConfig.BLE_GATT_PEERS`, `BleScanner`'s UUID filter, or `BluetoothMeshTransport.onScanResult` / `sight`:**
   READ ADR 2026-09.kwq2 (companion change A3; knit-ios ADR 2026-09.xzpt) and its section in

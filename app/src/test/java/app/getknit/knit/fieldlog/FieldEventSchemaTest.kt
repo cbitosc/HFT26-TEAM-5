@@ -91,6 +91,10 @@ class FieldEventSchemaTest {
             line(FieldEvent.BtScan(links = 2, leLinks = 3, sighted = 5, hunting = false, codedMode = CodedPhyMode.OFF)),
         )
         assertEquals(
+            """{"t":42,"e":"bt_orphan","peer":"$p","linked":true,"armed":true,"tries":2,"cleared":false,"age":181000}""",
+            line(FieldEvent.BtOrphan(peer, linked = true, armed = true, tries = 2, cleared = false, ageMs = 181_000)),
+        )
+        assertEquals(
             """{"t":42,"e":"nan_up","peer":"$p","initiator":true,"links":1}""",
             line(FieldEvent.NanUp(peer, initiator = true, links = 1)),
         )

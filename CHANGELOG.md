@@ -99,6 +99,9 @@ document:
   picked from some file managers. Both now arrive animated.
 - A voice message could show a flat waveform and no length if its audio reached your phone before the message
   did, which happens most often in groups. It now shows its length and waveform in either order.
+- When a Bluetooth connection to a nearby phone ended while both phones stayed close, part of it could stay
+  open until Bluetooth was turned off, and photos and files from either phone moved more slowly. Your phone
+  now closes it within a few seconds.
 
 ## [2.8.0](https://github.com/getknit/knit/releases/tag/v2.8.0) — 2026-10-03T03:55:42Z
 
