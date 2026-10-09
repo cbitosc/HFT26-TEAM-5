@@ -75,6 +75,16 @@ cp "$OUT/BaselineProfileGenerator_startupProfileForDexLayout-startup-prof.txt"  
 ./gradlew :app:assembleRelease
 ```
 
+**With a live peer** (`scripts/ble-pair-profile.sh all`, then `apply`): the two-emulator rig of
+`ble-pair-test.sh`, with the collector on `Knit_Mesh_BT` (still the profile's AVD, on dongle A) and a debug Knit
+on the lean `Knit_BLE_Pair` (dongle B) posting to the Nearby room. Both bridges are isolated, so the pair hears
+nobody else and nothing reaches a lab phone (adb server 5038). The thread the journey opens then draws incoming
+bubbles too. The baseline flavour holds each iteration on the chat list for `KNIT_BP_DWELL_S` (30 s) so the link
+forms while the process lives (`-e knitLinkDwellMs`). The startup flavour never dwells, but a peer already known
+relinks within its seconds, so its profile names some link setup too (first run, 2026-10-08).
+`KNIT_BP_DWELL_S=0` runs the journey as it always was. The peer's STATE snapshots in
+`build/ble-pair-profile/<stamp>/peer.log` are the evidence the link formed.
+
 Regenerate when the startup or chat path changes shape — not on every commit. A stale profile is not a
 correctness problem, only a smaller win; a *churning* one is a large, unreviewable diff on every PR.
 **Regenerate on the same AVD as last time**, because the device is most of the diff otherwise: collecting
@@ -129,14 +139,13 @@ What the journey still does not create: file attachments, link-preview cards and
 kinds are absent from the profile by construction, and adding them means deciding they are first-impression
 code, which they are not — a first-session user has not been sent a file.
 
-The mesh transports are covered only as far as **bring-up**. On `Knit_Mesh_BT` the radio is real, so the
-run does start the advertiser, open the L2CAP responder, and scan and parse advertisements off the air —
-`BleAdvertPayload$Parsed`, `BleScanner` and `BlePresenceTracker$Sighting` are all in the profile because
-they genuinely ran. What never happens is a *link*: the journey is over in seconds, long before a peer is
-connected, so nothing past discovery is named. Wi-Fi Aware is absent entirely — there is no NAN in an
-emulator, so the node is BLE-only.
-
-That is the right trade rather than a gap to close. Radio code runs in a foreground service over seconds
-and minutes, where interpretation costs nothing a user can feel; the profile's job is the sixteen
-milliseconds after a tap. The bring-up path is worth having because it is on the cold-start critical path —
-the rest of the transport is not.
+The mesh transports are covered through **a live link** since the profile moved to the peer rig (2026-10-08,
+`scripts/ble-pair-profile.sh`). Before that the journey was over in seconds, long before a peer was connected, so
+nothing past discovery (advertiser, L2CAP responder, scanning and parsing adverts) was named. Now the peer in range
+links within the baseline flavour's dwell, so link setup, framing, digest sync, the inbound pipeline and the
+ratchet are compiled ahead of time too. That is deliberate: Knit's foreground service runs that code on every cold
+start, boot and update, and until ART's own background compile catches up an interpreted handshake costs CPU and
+battery. A known peer relinks within the startup flavour's seconds as well, so some link setup sits in the dex
+layout, which is also what a user who opens the app with someone nearby runs. File serving and long sessions stay
+out: they get hot enough for the JIT on their own. Wi-Fi Aware is absent entirely: there is no NAN in an emulator,
+so the node is BLE-only.

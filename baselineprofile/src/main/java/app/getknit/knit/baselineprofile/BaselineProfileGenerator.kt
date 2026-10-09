@@ -1,5 +1,6 @@
 package app.getknit.knit.baselineprofile
 
+import android.os.SystemClock
 import androidx.benchmark.macro.MacrobenchmarkScope
 import androidx.benchmark.macro.junit4.BaselineProfileRule
 import androidx.test.platform.app.InstrumentationRegistry
@@ -11,7 +12,7 @@ import org.junit.Test
 
 /**
  * Produces the ART baseline profile that ships as `app/src/main/baseline-prof.txt`, and the startup
- * profile that ships beside it as `app/src/main/startup-prof.txt`.
+ * profile that ships beside it as `app/src/main/baselineProfiles/startup-prof.txt`.
  *
  * Run it, then copy both results over those files (see `.agents/context/baseline-profile.md`); this module
  * is not in the build unless `-Pknit.baselineProfile=true` asks for it, and nothing it contains is packaged.
@@ -50,8 +51,8 @@ class BaselineProfileGenerator {
     fun startupAndFirstConversation() = collectJourney(startupFlavour = false)
 
     /**
-     * The startup profile — `app/src/main/startup-prof.txt`. A *separate* AGP feature from the baseline
-     * profile: R8 reorders dex so startup classes sit together, for page locality rather than
+     * The startup profile — `app/src/main/baselineProfiles/startup-prof.txt`. A *separate* AGP feature from
+     * the baseline profile: R8 reorders dex so startup classes sit together, for page locality rather than
      * ahead-of-time compilation.
      *
      * It needs its own run because `includeInStartupProfile` is a **flavour switch, not an additive flag**
@@ -93,8 +94,21 @@ class BaselineProfileGenerator {
             // rows have a last-message preview to draw, which an empty room never gave them.
             device.pressBack()
             device.wait(Until.hasObject(By.res(CHAT_ROW_NEARBY)), TIMEOUT_MS)
+
+            // Opt-in, and the baseline flavour only: with a live peer in range (scripts/ble-pair-profile.sh)
+            // the process is kept alive on the chat list long enough for the link to form, so the profile
+            // dumped at the end of the iteration names the link path too. The dex layout stays narrow.
+            if (!startupFlavour) SystemClock.sleep(linkDwellMs())
         }
     }
+
+    /** `-e knitLinkDwellMs <ms>`; 0, the journey as it always was, when the argument is absent. */
+    private fun linkDwellMs(): Long =
+        InstrumentationRegistry
+            .getArguments()
+            .getString(LINK_DWELL_ARG)
+            ?.toLongOrNull()
+            ?.coerceAtLeast(0) ?: 0
 
     /**
      * Puts one message in the room through the composer, so the list has a bubble to draw.
@@ -159,6 +173,8 @@ class BaselineProfileGenerator {
 
         /** Keeps a fling off the gesture-navigation edges, which would go to the system instead of the list. */
         const val GESTURE_MARGIN_DIVISOR = 5
+
+        const val LINK_DWELL_ARG = "knitLinkDwellMs"
 
         const val MAX_ITERATIONS = 12
         const val STABLE_ITERATIONS = 3
