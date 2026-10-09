@@ -25,6 +25,13 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // sherpa-onnx (the walkie transcript's speech runtime, debug only: docs/VOICE_CALLS.md C-3.11-9) publishes its
+        // Android AAR nowhere else. Exclusive, so its one group resolves from here and nothing else ever does; F-Droid's
+        // scanner allows the host, and the release build never resolves the group at all.
+        exclusiveContent {
+            forRepository { maven("https://jitpack.io") }
+            filter { includeGroup("com.github.k2-fsa.sherpa-onnx") }
+        }
     }
 }
 

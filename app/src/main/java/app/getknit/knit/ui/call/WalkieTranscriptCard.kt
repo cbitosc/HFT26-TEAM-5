@@ -1,0 +1,250 @@
+package app.getknit.knit.ui.call
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.ClosedCaption
+import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.unit.dp
+import app.getknit.knit.call.SttModelState
+import app.getknit.knit.call.TranscriptLine
+import app.getknit.knit.ui.theme.LocalReduceMotion
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.time.format.FormatStyle
+
+/** What the transcript card draws: the session's bursts, and where the speech model stands on this phone. */
+internal data class TranscriptUi(
+    val lines: List<TranscriptLine>,
+    val model: SttModelState,
+    // What the model costs to fetch, and whether the route a fetch would take now is mobile data or under Data Saver.
+    val modelBytes: Long,
+    val metered: Boolean,
+)
+
+/**
+ * The walkie session's transcript (docs/VOICE_CALLS.md C-3.11-9), in the call screen's card slot while the header's
+ * diagnostics toggle is off: each burst from [name] as text once it has played, newest at the bottom, and while the
+ * speech model is not on the phone, what it costs and the button that fetches it. Experimental, debug only. The text
+ * is the model's guess at 8 kbps speech, made on this phone; nothing here leaves it.
+ */
+@Composable
+internal fun WalkieTranscript(
+    ui: TranscriptUi,
+    name: String,
+    onDownload: () -> Unit,
+    onCancel: () -> Unit,
+    modifier: Modifier = Modifier,
+    zone: ZoneId = ZoneId.systemDefault(),
+) {
+    val ready = ui.model == SttModelState.Ready
+    val list = rememberLazyListState()
+    val reduceMotion = LocalReduceMotion.current
+    // The newest burst in view as it comes, and again as its text lands — once the model is in. Before that the
+    // panel at the top is what matters, and a short screen would scroll it away.
+    LaunchedEffect(ui.lines.size, ui.lines.lastOrNull()?.state, ready) {
+        if (!ready || ui.lines.isEmpty()) return@LaunchedEffect
+        val last = ui.lines.lastIndex
+        if (reduceMotion) list.scrollToItem(last) else list.animateScrollToItem(last)
+    }
+    // The configuration's locale, read so a change of language redraws the times.
+    val locale = LocalConfiguration.current.locales[0]
+    val times = remember(locale, zone) { DateTimeFormatter.ofLocalizedTime(FormatStyle.MEDIUM).withLocale(locale).withZone(zone) }
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+    ) {
+        Column(Modifier.padding(top = 16.dp)) {
+            Box(Modifier.padding(horizontal = 16.dp)) { Title("Transcript", "ON DEVICE", Icons.Outlined.ClosedCaption) }
+            // Everything under the title is one list, so a short screen scrolls the card rather than clipping it.
+            LazyColumn(
+                modifier = Modifier.weight(1f, fill = false),
+                state = list,
+                contentPadding = PaddingValues(start = 16.dp, top = 12.dp, end = 16.dp, bottom = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                transcriptItems(ui, name, ready, times, onDownload, onCancel)
+            }
+        }
+    }
+}
+
+private fun LazyListScope.transcriptItems(
+    ui: TranscriptUi,
+    name: String,
+    ready: Boolean,
+    times: DateTimeFormatter,
+    onDownload: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    if (!ready) {
+        item(key = "model") {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                ModelPanel(ui, onDownload, onCancel)
+                if (ui.lines.isNotEmpty()) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            }
+        }
+    } else if (ui.lines.isEmpty()) {
+        item(key = "empty") {
+            Text(
+                "What ${name.ifBlank { "the other phone" }} says shows here as text, once each burst has played.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+    items(ui.lines, key = { it.burst }) { line -> Line(line, times.format(Instant.ofEpochMilli(line.heardAt))) }
+}
+
+@Composable
+private fun Line(
+    line: TranscriptLine,
+    time: String,
+) {
+    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text(
+            time,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.width(TimeWidth).padding(top = 3.dp),
+        )
+        when (val state = line.state) {
+            is TranscriptLine.State.Text -> {
+                // Read out as it lands, for a user who cannot hear the burst.
+                Text(
+                    state.text,
+                    style = MaterialTheme.typography.bodyLarge,
+                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                )
+            }
+
+            else -> {
+                Text(
+                    noteOf(state),
+                    style = MaterialTheme.typography.bodyMedium.copy(fontStyle = FontStyle.Italic),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+// What a line without text says.
+private fun noteOf(state: TranscriptLine.State): String =
+    when (state) {
+        TranscriptLine.State.Listening -> "Listening…"
+        TranscriptLine.State.Pending -> "Transcribing…"
+        TranscriptLine.State.NoSpeech -> "No speech heard"
+        TranscriptLine.State.NoModel -> "Not transcribed: the speech model isn't on this phone"
+        TranscriptLine.State.Failed -> "Couldn't transcribe this one"
+        is TranscriptLine.State.Text -> state.text
+    }
+
+/** Where the speech model stands, with the one action that moves it on. */
+@Composable
+private fun ModelPanel(
+    ui: TranscriptUi,
+    onDownload: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        when (val model = ui.model) {
+            // The card draws no panel then.
+            SttModelState.Ready -> {}
+
+            SttModelState.Absent -> {
+                Text(
+                    "Turn the bursts you hear into text, on this phone. The speech model is a one-time ${mb(ui.modelBytes)} " +
+                        "download from getknit.app.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                if (ui.metered) MeteredNote()
+                DownloadButton("Download", onDownload)
+            }
+
+            is SttModelState.Downloading -> {
+                LinearProgressIndicator(
+                    progress = { if (model.total > 0) (model.done.toFloat() / model.total).coerceIn(0f, 1f) else 0f },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "Downloading the speech model · ${mb(model.done)} of ${mb(model.total)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = onCancel) { Text("Cancel") }
+                }
+            }
+
+            is SttModelState.Failed -> {
+                Text(
+                    "The speech model didn't download. ${model.reason}.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                if (ui.metered) MeteredNote()
+                DownloadButton("Try again", onDownload)
+            }
+        }
+    }
+}
+
+@Composable
+private fun MeteredNote() {
+    Text(
+        "You're on mobile data or Data Saver now.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+}
+
+@Composable
+private fun DownloadButton(
+    label: String,
+    onClick: () -> Unit,
+) {
+    FilledTonalButton(onClick = onClick, contentPadding = ButtonDefaults.ButtonWithIconContentPadding) {
+        Icon(Icons.Outlined.Download, contentDescription = null, modifier = Modifier.size(ButtonDefaults.IconSize))
+        Text(label, Modifier.padding(start = ButtonDefaults.IconSpacing))
+    }
+}
+
+/** "44 MB": whole megabytes (10^6 bytes, as a download size is read). */
+internal fun mb(bytes: Long): String = "${(bytes + BYTES_PER_MB / 2) / BYTES_PER_MB} MB"
+
+private const val BYTES_PER_MB = 1_000_000L
+private val TimeWidth = 64.dp

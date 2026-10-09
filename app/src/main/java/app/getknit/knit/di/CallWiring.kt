@@ -24,6 +24,7 @@ import app.getknit.knit.call.SystemCallSync
 import app.getknit.knit.call.SystemCalls
 import app.getknit.knit.call.TalkLink
 import app.getknit.knit.call.TurnSource
+import app.getknit.knit.call.WalkieTranscriber
 import app.getknit.knit.data.MessageRepository
 import app.getknit.knit.data.PeerRepository
 import app.getknit.knit.data.settings.CallTombStore
@@ -40,7 +41,9 @@ import app.getknit.knit.mesh.indirectPeers
 import app.getknit.knit.mesh.power.AppVisibility
 import app.getknit.knit.mesh.protocol.Protocol
 import app.getknit.knit.mesh.spool.spoolPresentPeers
+import app.getknit.knit.moderation.ModelLoadGuard
 import app.getknit.knit.moderation.modelGuardStamp
+import app.getknit.knit.net.AndroidInternetGate
 import app.getknit.knit.net.InternetGate
 import app.getknit.knit.transfer.DirectWifiLease
 import app.getknit.knit.ui.call.CallBarHost
@@ -55,6 +58,8 @@ import app.getknit.knit.ui.call.TelecomCalls
 import app.getknit.knit.ui.call.ToneGeneratorPlayer
 import app.getknit.knit.ui.call.WalkieTalk
 import app.getknit.knit.ui.call.WebRtcCallMedia
+import app.getknit.knit.ui.call.stt.SherpaSpeech
+import app.getknit.knit.ui.call.stt.SttModelStore
 import app.getknit.knit.ui.callsettings.CallSettingsViewModel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -203,7 +208,20 @@ private fun callGraph(): Module =
             )
         }
         if (WALKIE_WIRED) {
-            single { TalkPlayer() }
+            // The transcript (C-3.11-9): a model the user downloads, run here on the bursts this phone hears.
+            single { SttModelStore(androidContext(), get<AndroidInternetGate>(), get<CoroutineScope>(), log = { Log.i(TAG, it) }) }
+            single { SherpaSpeech(get(), get<ModelLoadGuard>(), get<CoroutineScope>(), log = { Log.i(TAG, it) }) }
+            single {
+                WalkieTranscriber(
+                    speech = get<SherpaSpeech>(),
+                    ready = { get<SttModelStore>().paths() != null },
+                    scope = get<CoroutineScope>(),
+                    // One burst at a time, in the order they ended, off the player's loop.
+                    dispatcher = Dispatchers.Default.limitedParallelism(1),
+                    log = { Log.i(TAG, it) },
+                )
+            }
+            single { TalkPlayer(tap = get<WalkieTranscriber>()) }
             single { TalkRecorder(get<CoroutineScope>()) }
             single {
                 WalkieTalk(
@@ -221,6 +239,7 @@ private fun callGraph(): Module =
                             ?.current
                             ?.headset == true
                     },
+                    transcript = get(),
                 )
             }
         }
@@ -353,6 +372,7 @@ fun startCallsIfWired(koin: Koin) {
         runCatching { koin.get<CallController>().start() }.onFailure { Log.w(TAG, "calls not started", it) }
         runCatching { koin.get<CallLog>().start() }.onFailure { Log.w(TAG, "call records not started", it) }
         if (WALKIE_WIRED) runCatching { koin.get<WalkieTalk>().start() }.onFailure { Log.w(TAG, "walkie not started", it) }
+        if (WALKIE_WIRED) runCatching { koin.get<SttModelStore>().start() }.onFailure { Log.w(TAG, "walkie stt not started", it) }
     }
 }
 

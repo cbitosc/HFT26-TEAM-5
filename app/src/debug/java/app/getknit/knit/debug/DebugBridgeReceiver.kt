@@ -28,9 +28,14 @@ import app.getknit.knit.call.CaptureProfile
 import app.getknit.knit.call.DirectCallPath
 import app.getknit.knit.call.DirectMode
 import app.getknit.knit.call.OverridingTurnSource
+import app.getknit.knit.call.SttModelState
+import app.getknit.knit.call.SttPolicy
 import app.getknit.knit.call.StunServers
 import app.getknit.knit.call.SystemCallSync
+import app.getknit.knit.call.TranscriptLine
 import app.getknit.knit.call.WalkieStats
+import app.getknit.knit.call.WalkieTranscriber
+import app.getknit.knit.call.segments
 import app.getknit.knit.crash.ProcessExitReasons
 import app.getknit.knit.data.AttachmentIdentities
 import app.getknit.knit.data.AttachmentStore
@@ -131,8 +136,12 @@ import app.getknit.knit.transfer.TransferManager
 import app.getknit.knit.ui.call.CallActivity
 import app.getknit.knit.ui.call.DefaultPath
 import app.getknit.knit.ui.call.DirectNetworkDetector
+import app.getknit.knit.ui.call.TalkPlayer
+import app.getknit.knit.ui.call.TalkRecorder
 import app.getknit.knit.ui.call.WalkieTalk
 import app.getknit.knit.ui.call.WebRtcCallMedia
+import app.getknit.knit.ui.call.stt.SherpaSpeech
+import app.getknit.knit.ui.call.stt.SttModelStore
 import app.getknit.knit.ui.chat.ChatWindow
 import app.getknit.knit.ui.chat.quoteLabels
 import app.getknit.knit.ui.invite.prepareKnitApk
@@ -151,7 +160,9 @@ import org.webrtc.NetworkChangeDetector
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.security.SecureRandom
+import java.util.concurrent.ConcurrentLinkedQueue
 
 /**
  * Debug-only ADB "bridge" that lets an automation agent drive the app headlessly — originating a chat
@@ -426,6 +437,10 @@ class DebugBridgeReceiver :
 
                         ACTION_CALL -> {
                             handleCall(context, intent)
+                        }
+
+                        ACTION_STT -> {
+                            handleStt(intent)
                         }
 
                         ACTION_WEBPPROBE -> {
@@ -1248,6 +1263,7 @@ class DebugBridgeReceiver :
             val (resident, lastUsedAt) =
                 when (model) {
                     ModelLoadGuard.TOXICITY -> textModel.isResident to textModel.lastUsedAt
+                    ModelLoadGuard.STT -> (getKoin().getOrNull<SherpaSpeech>()?.resident == true) to 0L
                     else -> imageModel.isResident to imageModel.lastUsedAt
                 }
             models.put(
@@ -2389,7 +2405,12 @@ class DebugBridgeReceiver :
 
             "talk" -> {
                 val walkie = getKoin().getOrNull<WalkieTalk>() ?: return reply("error", "this build wires no walkie")
-                val ms = intent.getIntExtra("ms", TALK_DEFAULT_MS).coerceIn(TALK_MIN_MS, TALK_MAX_MS)
+                // `--es pcm <file>`: the burst says what that raw 16 kHz mono s16le file says, held as long as it lasts.
+                val pcm = intent.getStringExtra("pcm")?.let(::File)
+                if (pcm != null && !pcm.canRead()) return reply("error", "can't read $pcm")
+                pcm?.let { getKoin().get<TalkRecorder>().nextFrom = it }
+                val spoken = pcm?.let { (it.length() / PCM_BYTES_PER_MS + TALK_PCM_TAIL_MS).toInt() }
+                val ms = intent.getIntExtra("ms", spoken ?: TALK_DEFAULT_MS).coerceIn(TALK_MIN_MS, TALK_MAX_MS)
                 if (!walkie.press()) return reply("error", "no walkie session, or the microphone would not open")
                 delay(ms.toLong())
                 walkie.release()
@@ -2579,6 +2600,21 @@ class DebugBridgeReceiver :
                         .put("chunksIn", it.chunksIn.get())
                         .put("lost", it.lost.get())
                         .put("stats", walkieStatsJson(it.stats()))
+                        .put(
+                            "transcript",
+                            getKoin()
+                                .getOrNull<WalkieTranscriber>()
+                                ?.lines
+                                ?.value
+                                ?.let(::transcriptJson) ?: JSONObject.NULL,
+                        ).put(
+                            "stt",
+                            getKoin()
+                                .getOrNull<SttModelStore>()
+                                ?.state
+                                ?.value
+                                ?.let(::sttStateJson) ?: JSONObject.NULL,
+                        )
                 } ?: JSONObject.NULL,
             )
     }
@@ -2609,6 +2645,147 @@ class DebugBridgeReceiver :
             .put("current", routing.current?.let(::json) ?: JSONObject.NULL)
             .put("available", JSONArray().also { arr -> routing.available.forEach { arr.put(json(it)) } })
     }
+
+    /**
+     * The walkie transcript's speech model and the session's transcript (docs/VOICE_CALLS.md C-3.11-9). `status` (the
+     * default) dumps both; `download` fetches the model from its host as the card's button does, `sideload --es dir
+     * <dir>` installs it from the four files pushed there (world-readable, e.g. under /data/local/tmp), each checked
+     * against the same pins; `cancel`, `delete` and `unload` (release the recognizer now) do what they say. `pcm --es
+     * path <file>` runs the model over a raw 16 kHz mono s16le file, cut as a burst is, and replies with the text and
+     * the time it took — the engine's own regression, with no call and no radio. `loop --es path <file>` sends that file
+     * the whole walkie way but the radio — the recorder's Opus encoder at 8 kbps, the player's decoder and its tap, the
+     * transcriber — as burst [LOOP_BURST] of a fresh transcript, and replies at once; poll `status` for its line. It
+     * plays aloud, and refuses while a walkie call is up.
+     */
+    @Suppress("CyclomaticComplexMethod", "ReturnCount") // a flat dispatch over the ops
+    private suspend fun handleStt(intent: Intent): JSONObject {
+        val store = getKoin().getOrNull<SttModelStore>() ?: return reply("error", "this build wires no walkie")
+        val speech = getKoin().get<SherpaSpeech>()
+        when (val op = intent.getStringExtra("op") ?: "status") {
+            // Nothing to do but the dump below.
+            "status" -> {}
+
+            "download" -> {
+                if (!store.download()) return reply("error", "no route to fetch over").put("stt", sttStateJson(store.state.value))
+            }
+
+            "sideload" -> {
+                val dir = intent.getStringExtra("dir")?.let(::File) ?: return reply("error", "missing 'dir' extra")
+                store.sideload(dir)
+            }
+
+            "cancel" -> {
+                store.cancel()
+            }
+
+            "delete" -> {
+                speech.unload()
+                store.delete()
+            }
+
+            "unload" -> {
+                speech.unload()
+            }
+
+            "loop" -> {
+                val file = intent.getStringExtra(EXTRA_PATH)?.let(::File) ?: return reply("error", "missing 'path' extra")
+                if (!file.canRead()) return reply("error", "can't read $file")
+                if (getKoin()
+                        .getOrNull<CallManager>()
+                        ?.state
+                        ?.value
+                        ?.walkie == true
+                ) {
+                    return reply("error", "a walkie call is up")
+                }
+                getKoin().get<CoroutineScope>().launch { loopBack(file) }
+                return reply("ok", "looping $file; poll status")
+            }
+
+            "pcm" -> {
+                val file = intent.getStringExtra(EXTRA_PATH)?.let(::File) ?: return reply("error", "missing 'path' extra")
+                if (store.paths() == null) return reply("error", "the model isn't installed")
+                val samples = withContext(Dispatchers.IO) { readPcm16(file) } ?: return reply("error", "can't read $file")
+                val began = System.currentTimeMillis()
+                val parts = segments(samples)
+                val texts =
+                    parts.map { r ->
+                        withContext(Dispatchers.Default) { speech.transcribe(samples.copyOfRange(r.first, r.last + 1)) }
+                    }
+                return reply("ok", "transcribed")
+                    .put("audioMs", samples.size * MILLIS_PER_SEC / SttPolicy.SAMPLE_RATE)
+                    .put("tookMs", System.currentTimeMillis() - began)
+                    .put("parts", parts.size)
+                    .put("text", if (texts.any { it == null }) JSONObject.NULL else texts.filterNotNull().joinToString(" ") { it.trim() })
+            }
+
+            else -> {
+                return reply("error", "unknown op '$op'")
+            }
+        }
+        return reply("ok", "stt")
+            .put("model", store.model.id)
+            .put("bytes", store.model.bytes)
+            .put("stt", sttStateJson(store.state.value))
+            .put("resident", speech.resident)
+            .put(
+                "transcript",
+                getKoin()
+                    .getOrNull<WalkieTranscriber>()
+                    ?.lines
+                    ?.value
+                    ?.let(::transcriptJson) ?: JSONObject.NULL,
+            )
+    }
+
+    // The `loop` op: [file] through the recorder's encoder, then the player's decoder and tap, into the transcript.
+    private suspend fun loopBack(file: File) {
+        val recorder = getKoin().get<TalkRecorder>()
+        val player = getKoin().get<TalkPlayer>()
+        val transcript = getKoin().get<WalkieTranscriber>()
+        val packets = ConcurrentLinkedQueue<ByteArray>()
+        recorder.nextFrom = file
+        if (!recorder.start(headset = false) { packets.add(it) }) return
+        delay(file.length() / PCM_BYTES_PER_MS + TALK_PCM_TAIL_MS)
+        recorder.stop()
+        transcript.reset()
+        transcript.begin(LOOP_BURST)
+        withContext(Dispatchers.IO) { player.play(packets.toList(), first = true, last = true) }
+        transcript.end(LOOP_BURST)
+    }
+
+    private fun sttStateJson(state: SttModelState): JSONObject =
+        when (state) {
+            SttModelState.Absent -> JSONObject().put("state", "absent")
+            SttModelState.Ready -> JSONObject().put("state", "ready")
+            is SttModelState.Downloading -> JSONObject().put("state", "downloading").put("done", state.done).put("total", state.total)
+            is SttModelState.Failed -> JSONObject().put("state", "failed").put("reason", state.reason)
+        }
+
+    // Debug builds only, on a lab phone: the text is what a trial checks, so it is here, never in logcat.
+    private fun transcriptJson(lines: List<TranscriptLine>): JSONArray =
+        JSONArray().also { array ->
+            lines.forEach { line ->
+                val state = line.state
+                array.put(
+                    JSONObject()
+                        .put("burst", line.burst)
+                        .put("heardAt", line.heardAt)
+                        .put("state", if (state is TranscriptLine.State.Text) "Text" else state.toString())
+                        .put("text", (state as? TranscriptLine.State.Text)?.text ?: JSONObject.NULL)
+                        .put("audioMs", line.audioMs)
+                        .put("tookMs", line.tookMs),
+                )
+            }
+        }
+
+    // Raw 16-bit little-endian mono PCM at the model's rate, as −1..1 floats; null when the file won't read.
+    private fun readPcm16(file: File): FloatArray? =
+        runCatching {
+            val bytes = file.readBytes()
+            val shorts = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
+            FloatArray(shorts.remaining()) { shorts.get(it) / PCM_FULL_SCALE }
+        }.getOrNull()
 
     /** The walkie's diagnostics card as numbers (§3.11): what `CallActivity` draws, null where not yet measured. */
     private fun walkieStatsJson(s: WalkieStats): JSONObject =
@@ -3331,6 +3508,7 @@ class DebugBridgeReceiver :
         const val ACTION_LORAPROV = "app.getknit.knit.debug.LORAPROV"
         const val ACTION_XFER = "app.getknit.knit.debug.XFER"
         const val ACTION_CALL = "app.getknit.knit.debug.CALL"
+        const val ACTION_STT = "app.getknit.knit.debug.STT"
         const val ACTION_BACKUP = "app.getknit.knit.debug.BACKUP"
         const val ACTION_PURGE = "app.getknit.knit.debug.PURGE"
         const val ACTION_RESETDB = "app.getknit.knit.debug.RESETDB"
@@ -3438,3 +3616,12 @@ class DebugBridgeReceiver :
 private const val TALK_DEFAULT_MS = 3_000
 private const val TALK_MIN_MS = 500
 private const val TALK_MAX_MS = 8_000
+
+// A `talk --es pcm` file's length in ms (16 kHz s16: 32 bytes a millisecond), and the hold past its end, so its last
+// packets are out before the release.
+private const val PCM_BYTES_PER_MS = 32L
+private const val TALK_PCM_TAIL_MS = 400L
+private const val PCM_FULL_SCALE = 32_768f
+
+// The burst number `…debug.STT --es op loop` gives its one burst.
+private const val LOOP_BURST = 0

@@ -9,6 +9,7 @@ import android.media.MediaCodec
 import android.media.MediaFormat
 import android.util.Log
 import app.getknit.knit.call.OpusPackets
+import app.getknit.knit.call.TalkPcmTap
 import app.getknit.knit.call.WalkiePolicy
 import kotlinx.coroutines.delay
 import java.nio.ByteBuffer
@@ -24,8 +25,13 @@ import java.nio.ByteOrder
  * Driven by one coroutine (`WalkieTalk`'s player loop, on the IO dispatcher); only [hold] comes from another thread.
  * Writes never block: a full or held track is waited on with [delay], so the loop stays cancellable when the session
  * ends and [close] runs after it, never beside it.
+ *
+ * [tap] sees the decoded PCM on its way to the track — the burst's audio and nothing else, not the silence [playOut]
+ * pads it with — for the walkie transcript (C-3.11-9). This is the one place a burst exists as PCM.
  */
-internal class TalkPlayer {
+internal class TalkPlayer(
+    private val tap: TalkPcmTap? = null,
+) {
     private val info = MediaCodec.BufferInfo()
     private val trackLock = Any()
 
@@ -36,6 +42,10 @@ internal class TalkPlayer {
     private var written = 0L
     private var frameBytes = 2
     private var ptsUs = 0L
+
+    // The decoder's output as the track was last made for it: what [tap] is told the PCM is.
+    private var outRate = OPUS_RATE
+    private var outChannels = 1
 
     @Volatile
     private var held = false
@@ -132,6 +142,8 @@ internal class TalkPlayer {
             track = t
             written = 0L
             frameBytes = channels * PCM_BYTES
+            outRate = rate
+            outChannels = channels
             if (!held) t.play()
         }
     }
@@ -176,7 +188,10 @@ internal class TalkPlayer {
             when {
                 index >= 0 -> {
                     val eos = info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
-                    c.getOutputBuffer(index)?.takeIf { info.size > 0 }?.let { write(it, info.offset, info.size) }
+                    c.getOutputBuffer(index)?.takeIf { info.size > 0 }?.let {
+                        tapped(it, info.offset, info.size)
+                        write(it, info.offset, info.size)
+                    }
                     c.releaseOutputBuffer(index, false)
                     if (eos) return
                 }
@@ -190,6 +205,26 @@ internal class TalkPlayer {
                 }
             }
         }
+    }
+
+    // Shows [tap] the PCM through a view of its own, so the write that follows reads the buffer untouched; a tap that
+    // throws costs the transcript, never the playback.
+    private fun tapped(
+        pcm: ByteBuffer,
+        offset: Int,
+        size: Int,
+    ) {
+        val t = tap ?: return
+        val view = pcm.duplicate()
+        view.limit(offset + size)
+        view.position(offset)
+        runCatching {
+            t.pcm(
+                view,
+                outRate,
+                outChannels,
+            )
+        }.onFailure { Log.w(TAG, "walkie transcript tap failed: ${it.javaClass.simpleName}") }
     }
 
     // A decoder that settles on another rate or layout than the header said (SBR, say) gets a track to match.

@@ -104,9 +104,12 @@ import app.getknit.knit.call.CallPhase
 import app.getknit.knit.call.CallRouting
 import app.getknit.knit.call.CallState
 import app.getknit.knit.call.CaptureWatch
+import app.getknit.knit.call.SttModelState
 import app.getknit.knit.call.SystemCallSync
 import app.getknit.knit.call.TalkLink
+import app.getknit.knit.call.TranscriptLine
 import app.getknit.knit.call.WalkieStats
+import app.getknit.knit.call.WalkieTranscriber
 import app.getknit.knit.data.GroupRepository
 import app.getknit.knit.data.MessageRepository
 import app.getknit.knit.data.PeerRepository
@@ -115,6 +118,7 @@ import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.identity.Identity
 import app.getknit.knit.mesh.protocol.CallPayload
 import app.getknit.knit.notifications.MessageNotifier
+import app.getknit.knit.ui.call.stt.SttModelStore
 import app.getknit.knit.ui.chat.messagePreview
 import app.getknit.knit.ui.components.Avatar
 import app.getknit.knit.ui.preview.KnitPreview
@@ -131,7 +135,9 @@ import org.koin.core.component.inject
 /**
  * The one call screen (experimental, `CALLS_WIRED`): the peer's face and name, incoming Answer/Decline, then status, the
  * route (direct or relayed), mute, speaker and hang up, with who is calling ([CallerContext]) in the middle — or, once
- * the header's toggle asks for it, a live diagnostics card ([CallDiagnostics]) in its place; a walkie session (§3.11) trades mute and speaker for a hold-to-talk button over [WalkieTalk].
+ * the header's toggle asks for it, a live diagnostics card ([CallDiagnostics]) in its place; a walkie session (§3.11)
+ * trades mute and speaker for a hold-to-talk button over [WalkieTalk], and with its diagnostics toggled off shows the
+ * transcript of what the peer said instead ([WalkieTranscript], C-3.11-9).
  * [CallScreen] is the stateless half the previews draw.
  * Shows over the lock screen for the full-screen ring. While it is in the foreground it starts [CallService], the
  * microphone's foreground service, once the call is live and RECORD_AUDIO is granted.
@@ -150,6 +156,10 @@ class CallActivity :
 
     // Null in a build with the walkie off (`di/CallWiring.WALKIE_WIRED`): no call is ever a walkie there.
     private val walkie: WalkieTalk? = getKoin().getOrNull()
+
+    // The walkie's transcript and its speech model; null where the walkie is.
+    private val transcriber: WalkieTranscriber? = getKoin().getOrNull()
+    private val stt: SttModelStore? = getKoin().getOrNull()
     private var pendingAnswer: String? = null
     private var serviceStarted = false
 
@@ -251,6 +261,10 @@ class CallActivity :
         val talk by (walkie?.talk ?: NO_TALK).collectAsState()
         val link by (walkie?.link ?: NO_LINK).collectAsState()
         val routing by system.routing.collectAsState()
+        val lines by (transcriber?.lines ?: NO_LINES).collectAsState()
+        val model by (stt?.state ?: NO_MODEL).collectAsState()
+        // Read again as the model's state moves: a tap on Download is when the route matters.
+        val metered = remember(model) { stt?.metered() == true }
         CallScreen(
             state = state,
             name = name,
@@ -277,6 +291,9 @@ class CallActivity :
             onTalkSend = { lifecycleScope.launch { walkie?.release() } },
             onTalkCancel = { lifecycleScope.launch { walkie?.cancel() } },
             walkieStats = walkieStats.takeIf { walkieUp },
+            transcript = stt?.let { TranscriptUi(lines, model, it.model.bytes, metered) },
+            onSttDownload = { stt?.download() },
+            onSttCancel = { stt?.cancel() },
         )
     }
 
@@ -349,6 +366,8 @@ private val ActionSize = 72.dp
 private val TalkSize = 120.dp
 private val NO_TALK = MutableStateFlow<Talk>(Talk.Idle())
 private val NO_LINK = MutableStateFlow<TalkLink?>(null)
+private val NO_LINES = MutableStateFlow<List<TranscriptLine>>(emptyList())
+private val NO_MODEL = MutableStateFlow<SttModelState>(SttModelState.Absent)
 internal val ToggleSize = 64.dp
 private const val RING_MS = 1_800
 private const val RING_ALPHA = 0.28f
@@ -365,7 +384,8 @@ private val CallState.dropped: Boolean
 /**
  * The call screen proper: the peer's face and name, where the call stands, the controls its phase offers and, between
  * them, who is calling ([caller]) — or, while the media is up and the header's toggle is on, the diagnostics card for
- * [stats] instead. The toggle starts off unless [statsShown] (the previews' way to draw the card).
+ * [stats] instead. The toggle starts off unless [statsShown] (the previews' way to draw the card); in a walkie session,
+ * off trades the card for the [transcript].
  */
 @Composable
 internal fun CallScreen(
@@ -398,6 +418,9 @@ internal fun CallScreen(
     hideFlagged: Boolean = true,
     statsShown: Boolean = false,
     onOpenChat: () -> Unit = {},
+    transcript: TranscriptUi? = null,
+    onSttDownload: () -> Unit = {},
+    onSttCancel: () -> Unit = {},
 ) {
     val phase = state?.phase
     var showStats by rememberSaveable { mutableStateOf(statsShown) }
@@ -409,23 +432,35 @@ internal fun CallScreen(
             walkieUp -> walkieStats?.let { s -> { m -> WalkieDiagnostics(s, m) } }
             else -> stats?.let { s -> { m -> CallDiagnostics(s, m, capture) } }
         }
+    // With the diagnostics off, a walkie session shows what the peer said in the card's place (C-3.11-9).
+    val transcribed = transcript?.takeIf { walkieUp && !showStats }
+    val card = diagnostics != null || transcribed != null
     Surface(modifier = modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
         BoxWithConstraints(Modifier.fillMaxSize().safeDrawingPadding().padding(horizontal = 24.dp, vertical = 16.dp)) {
             // With the card up, a phone too short for the stacked face puts it beside the name instead.
-            val inline = diagnostics != null && maxHeight < StackedMinHeight
+            val inline = card && maxHeight < StackedMinHeight
             val view = route?.let { routeView(it, stats) }
             val note = callNote(state, name, quality, view, capture)
             val callerShown = phase != null && phase != CallPhase.Ended && !walkieUp
             Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
-                Header(stats = if (phase in MEDIA_UP) showStats else null, onStats = { showStats = it })
+                Header(
+                    stats = if (phase in MEDIA_UP) showStats else null,
+                    onStats = { showStats = it },
+                    transcript = transcript != null && walkieUp,
+                )
                 if (inline) {
                     Spacer(Modifier.height(8.dp))
                     InlineFace(state, name, avatarHash, caller?.status, view, note, clock)
                 } else {
-                    if (diagnostics != null) Spacer(Modifier.height(8.dp)) else Spacer(Modifier.weight(0.6f))
-                    StackedFace(state, name, avatarHash, caller?.status, view, note, compact = diagnostics != null, clock)
+                    if (card) Spacer(Modifier.height(8.dp)) else Spacer(Modifier.weight(0.6f))
+                    StackedFace(state, name, avatarHash, caller?.status, view, note, compact = card, clock)
                 }
-                if (diagnostics != null) {
+                if (transcribed != null) {
+                    // The transcript scrolls itself, to keep its newest line in view.
+                    Box(Modifier.weight(1f).fillMaxWidth().padding(vertical = 16.dp)) {
+                        WalkieTranscript(transcribed, name, onSttDownload, onSttCancel, Modifier.fillMaxSize())
+                    }
+                } else if (diagnostics != null) {
                     // The room between the face and the controls; a short screen scrolls the card rather than clip it.
                     Box(Modifier.weight(1f).fillMaxWidth().padding(vertical = 16.dp), contentAlignment = Alignment.Center) {
                         diagnostics(Modifier.verticalScroll(rememberScrollState()))
@@ -591,11 +626,15 @@ private fun InlineFace(
     }
 }
 
-/** The experimental label, with the diagnostics card's toggle at its end while there is a card to show ([stats]). */
+/**
+ * The experimental label, with the diagnostics card's toggle at its end while there is a card to show ([stats]); with a
+ * [transcript] behind it, the toggle's other side shows that.
+ */
 @Composable
 private fun Header(
     stats: Boolean?,
     onStats: (Boolean) -> Unit,
+    transcript: Boolean = false,
 ) {
     Box(Modifier.fillMaxWidth().heightIn(min = 48.dp), contentAlignment = Alignment.Center) {
         Text(
@@ -605,7 +644,14 @@ private fun Header(
         )
         if (stats != null) {
             IconToggleButton(checked = stats, onCheckedChange = onStats, modifier = Modifier.align(Alignment.CenterEnd)) {
-                Icon(Icons.Outlined.Insights, contentDescription = if (stats) "Hide call diagnostics" else "Show call diagnostics")
+                val description =
+                    when {
+                        transcript && stats -> "Show transcript"
+                        transcript -> "Show walkie diagnostics"
+                        stats -> "Hide call diagnostics"
+                        else -> "Show call diagnostics"
+                    }
+                Icon(Icons.Outlined.Insights, contentDescription = description)
             }
         }
     }
@@ -1196,7 +1242,8 @@ private fun PreviewCall(
     quality: Quality? = null,
     caller: CallerContext? = null,
     locked: Boolean = false,
-    statsShown: Boolean = stats != null || walkieStats != null,
+    transcript: TranscriptUi? = null,
+    statsShown: Boolean = transcript == null && (stats != null || walkieStats != null),
     connected: Boolean = phase == CallPhase.Connected || phase == CallPhase.Reconnecting,
     unreachable: Boolean = false,
 ) = KnitPreview {
@@ -1233,6 +1280,7 @@ private fun PreviewCall(
         caller = caller,
         locked = locked,
         statsShown = statsShown,
+        transcript = transcript,
     )
 }
 
@@ -1438,3 +1486,66 @@ fun CallScreenWalkieDiagnosticsPreview() =
                 path = "Bluetooth Coded · direct",
             ),
     )
+
+@Preview(name = "Walkie, transcript", widthDp = 411, heightDp = 891)
+@Preview(name = "Walkie, transcript, small", widthDp = 360, heightDp = 640)
+@Preview(name = "Walkie, transcript, dark", widthDp = 411, heightDp = 891, uiMode = Configuration.UI_MODE_NIGHT_YES)
+@Composable
+fun CallScreenWalkieTranscriptPreview() =
+    PreviewCall(
+        CallPhase.Connected,
+        walkie = true,
+        link = TalkLink.DIRECT,
+        talk = Talk.Hearing,
+        transcript =
+            TranscriptUi(
+                lines =
+                    listOf(
+                        TranscriptLine(0, PREVIEW_NOW - 64_000, TranscriptLine.State.Text("Are you at the north gate yet?")),
+                        TranscriptLine(1, PREVIEW_NOW - 41_000, TranscriptLine.State.NoSpeech),
+                        TranscriptLine(
+                            2,
+                            PREVIEW_NOW - 22_000,
+                            TranscriptLine.State.Text("Okay. I'll wait by the food trucks, the blue one with the long line."),
+                        ),
+                        TranscriptLine(3, PREVIEW_NOW - 4_000, TranscriptLine.State.Listening),
+                    ),
+                model = SttModelState.Ready,
+                modelBytes = PREVIEW_MODEL_BYTES,
+                metered = false,
+            ),
+    )
+
+@Preview(name = "Walkie, transcript, no model", widthDp = 411, heightDp = 891)
+@Composable
+fun CallScreenWalkieTranscriptNoModelPreview() =
+    PreviewCall(
+        CallPhase.Connected,
+        walkie = true,
+        link = TalkLink.MESH,
+        transcript =
+            TranscriptUi(
+                lines = listOf(TranscriptLine(0, PREVIEW_NOW - 12_000, TranscriptLine.State.NoModel)),
+                model = SttModelState.Absent,
+                modelBytes = PREVIEW_MODEL_BYTES,
+                metered = true,
+            ),
+    )
+
+@Preview(name = "Walkie, transcript, downloading", widthDp = 411, heightDp = 891)
+@Composable
+fun CallScreenWalkieTranscriptDownloadingPreview() =
+    PreviewCall(
+        CallPhase.Connected,
+        walkie = true,
+        link = TalkLink.DIRECT,
+        transcript =
+            TranscriptUi(
+                lines = emptyList(),
+                model = SttModelState.Downloading(17_400_000, PREVIEW_MODEL_BYTES),
+                modelBytes = PREVIEW_MODEL_BYTES,
+                metered = false,
+            ),
+    )
+
+private const val PREVIEW_MODEL_BYTES = 44_256_550L

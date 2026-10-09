@@ -142,8 +142,14 @@ class ModelLoadGuard(
          */
         const val NSFW = "nsfw"
 
-        /** Every model under the poison-pill. */
-        val ALL = listOf(TOXICITY, NSFW)
+        /**
+         * The walkie transcript's speech model (docs/VOICE_CALLS.md C-3.11-9): debug builds only, downloaded on a tap,
+         * loaded on the first burst heard after. A fault here is "Knit dies whenever a walkie burst ends".
+         */
+        const val STT = "stt"
+
+        /** Every model under the poison-pill. A release build never loads [STT], so it never latches there. */
+        val ALL = listOf(TOXICITY, NSFW, STT)
 
         const val FAULT_SEGV = "segv"
         const val FAULT_KILL = "kill"

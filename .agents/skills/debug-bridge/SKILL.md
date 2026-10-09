@@ -86,6 +86,7 @@ done
 | Why didn't a transfer start? | `XFER` | `refusal` **first**, then the live transfers |
 | Why didn't a call connect? (experimental) | `CALL` | `call.phase` + `reason`, then `route`; `op=turn` for TURN; `direct` for the Wi-Fi Direct leg |
 | Where is a call's audio going? (experimental) | `CALL` | `call.audio.current` among `available`; `op=audio --es to <kind>` moves it |
+| Did a walkie burst transcribe? (experimental) | `STT` | `stt.state` `ready`, then the burst's `transcript` line `state` + `text` |
 | Is the mesh paused? | `STATE` | `meshPaused` / `meshPausedUntil` |
 
 Each row's caveats (the `retiring` and `accounted` spool fields, the TTL edge on `allFingerprint`) are in
@@ -102,7 +103,8 @@ Extras and reply fields: the action's bullet in `.agents/context/debug-bridge.md
 - **Mesh state:** `STATE`, `STORE`, `HEAL`, `PAUSE`, `RESUME`, `BLECAP`, `NANOFF` (Wi-Fi Aware off, Bluetooth
   alone), `LOWPOWER` (low-power mode's switch and posture), `PHY` (the Coded PHY experiment), `LINKTUNE` (ask a Bluetooth link for a PHY, priority or MTU; the 1M/2M
   file budget and the link boost's A/B switch on any debug build — the #120 drain trial).
-- **Planes:** `SPOOL`, `COMMONS`, `LORA`, `LORATX`, `LORAPROV`, `XFER`, `CALL` (experimental voice calls).
+- **Planes:** `SPOOL`, `COMMONS`, `LORA`, `LORATX`, `LORAPROV`, `XFER`, `CALL` (experimental voice calls), `STT`
+  (the walkie transcript's model and lines).
 - **Identity, crypto, data:** `INTRO` (contact cards), `RATCHET`, `BACKUP`.
 - **Fault injection and trials:** `NANFAIL`, `NANSTORM`, `NANREFUSE`, `NANICM`, `NANDIAL`, `NANINIT`,
   `NANMSG`, `MODEL`. Each has a negative control in its bullet; run it too.

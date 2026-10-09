@@ -335,6 +335,28 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
       returned, from the press). Each burst heard logs `walkie: heard burst <b>: <q> chunks, <s> skipped, arrivals +…
       ms, began +<ms>` (arrivals from the first chunk's, and when playback began). Read the pair across both phones to
       place a gap at the sender, the link or the player.
+    - `--es op talk --es pcm <file>`: the burst says what that file says (raw 16 kHz mono s16le, world-readable, e.g.
+      under `/data/local/tmp`), read at the microphone's pace in place of it, held as long as the file lasts plus
+      400 ms (an `--ei ms` still wins). Make one with `ffmpeg -i in.wav -ar 16000 -ac 1 -f s16le out.raw`. The
+      transcript's end-to-end trial: send a known sentence and read it back on the receiver.
+    - `state`'s `walkie` block also carries `transcript` and `stt`, as `…debug.STT` reports them (below).
+- `…debug.STT` — the **walkie transcript** (C-3.11-9, ADR 2026-10.nz3g; debug builds only). `--es op status` (the
+  default) replies with the model's id and size, `stt` (`absent`, `downloading` with `done`/`total`, `ready`, or
+  `failed` with its `reason`), `resident` (a recognizer in memory) and `transcript`: the session's lines, each
+  `burst`, `heardAt`, `state` (`Listening`, `Pending`, `Text`, `NoSpeech`, `NoModel`, `Failed`), `text`, `audioMs`
+  and `tookMs`. The text appears here and on screen only, never in logcat.
+  - `download` fetches the model from getknit.app as the card's button does (refused with no validated route);
+    `sideload --es dir <dir>` installs it from its four files pushed there (`scripts/stt-model.py --out` stages
+    them; `chmod 755` the directory and `644` the files), each checked against the same pins; `cancel`; `delete`;
+    `unload` releases the recognizer now (otherwise 2 min idle).
+  - `pcm --es path <file>` runs the model over a raw 16 kHz mono s16le file, cut as a burst is, and replies with
+    `text`, `audioMs`, `tookMs` and `parts`: the engine alone, no call.
+  - `loop --es path <file>` sends the file the whole walkie way but the radio (the recorder's Opus encoder at 8 kbps,
+    the player's decoder and tap, the transcriber) as burst 0 of a fresh transcript, and replies at once; poll
+    `status`. It plays aloud and refuses during a walkie call. This is the single-device check of the audio path.
+  - Logcat (`KnitCall`): `walkie stt: <what> of <model> (<bytes> B)`, `… installed` or `… failed: …`, `walkie stt:
+    recognizer built in <ms> ms`, and per burst `walkie: transcribed burst <b>: <ms> ms of audio in <ms> ms, <n>
+    part(s), <n> chars`. A recognizer that won't build latches `stt` under `…debug.MODEL` like the moderation models.
 - `…debug.RATCHET` — dumps the **DM ratchet's per-peer state** and, with `--es reset <peerNodeId>`, forces a
   session reset past the heuristic that guards it. Exists because every gate in the recovery path returns
   *silently*: a peer we hold no prekey for (`peerPrekeyPinned:false` — a reset from this side is impossible

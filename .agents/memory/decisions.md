@@ -247,6 +247,7 @@ carries; never renumber an old one.
 | [2026-10.mr88](decisions/2026-10-mr88-own-stun-and-turn-servers-replace-the-spool-s-per-kind.md) | Own STUN and TURN servers replace the spool's per kind | calls, spool, settings |
 | [2026-10.nsr7](decisions/2026-10-nsr7-a-file-s-receiver-reports-its-progress.md) | A file's receiver reports its progress, and the holder times parked asks by it | ble, mesh, blobs |
 | [2026-10.nxfb](decisions/2026-10-nxfb-a-blob-is-not-asked-of-a-peer-streaming-to-us.md) | A blob is not asked of a peer streaming to us, and a fed file stays in flight while its link keeps feeding | mesh, attachments, blob-exchange, bluetooth |
+| [2026-10.nz3g](decisions/2026-10-nz3g-walkie-bursts-are-transcribed-on-the-receiver-by-a-model-it-downloads.md) | Walkie bursts are transcribed on the receiver by a model it downloads | calls, voice, ml |
 | [2026-10.pj9w](decisions/2026-10-pj9w-ble-discovery-waits-run-on-the-elapsed-clock.md) | BLE discovery waits run on the elapsed clock, and a dial wakes when its dwell ripens | ble, transport, power |
 | [2026-10.qjap](decisions/2026-10-qjap-android-refuses-a-signed-envelope-whose-text-isn-t-utf-8.md) | Android refuses a signed envelope whose text isn't UTF-8, as iOS does | wire, crypto, interop |
 | [2026-10.r99s](decisions/2026-10-r99s-supporter-badges-ride-the-sealed-profile-only.md) | Supporter badges ride the sealed profile only, verified on display | profile, wire, anywhere, ui |

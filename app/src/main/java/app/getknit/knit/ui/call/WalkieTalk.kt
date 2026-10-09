@@ -13,6 +13,7 @@ import app.getknit.knit.call.TalkWire
 import app.getknit.knit.call.WalkieMeter
 import app.getknit.knit.call.WalkiePolicy
 import app.getknit.knit.call.WalkieStats
+import app.getknit.knit.call.WalkieTranscriber
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
@@ -107,6 +108,9 @@ internal enum class TalkPath(
  *
  * Lives as long as the process (a Koin single, started with the call surfaces), so a session keeps talking with the call
  * screen off; `CallService` holds the microphone's foreground state meanwhile.
+ *
+ * [transcript], where wired, writes each burst heard out as text (C-3.11-9): this loop tells it where a burst begins and
+ * ends, and the player's tap hands it the audio between.
  */
 internal class WalkieTalk(
     private val calls: CallManager,
@@ -121,6 +125,7 @@ internal class WalkieTalk(
     private val links: TalkLinks? = null,
     // Whether a headset has the call's audio now (§3.13): a burst is then spoken into its microphone.
     private val headset: () -> Boolean = { false },
+    private val transcript: WalkieTranscriber? = null,
 ) {
     private val _talk = MutableStateFlow<Talk>(Talk.Idle())
     val talk: StateFlow<Talk> = _talk.asStateFlow()
@@ -362,6 +367,7 @@ internal class WalkieTalk(
         burst = 0
         lastActivity = clock()
         meter.reset()
+        transcript?.reset()
         log("walkie: session ${call.id} with ${call.peerId}${if (call.degraded) " (degraded from a live call)" else ""}")
         coroutineScope {
             launch { hangUpWhenIdle() }
@@ -396,9 +402,12 @@ internal class WalkieTalk(
                                 playedAt = clock()
                                 arrivals[step.burst]?.minOrNull()?.let { meter.started(it, playedAt) }
                                 if (_talk.value is Talk.Idle) _talk.value = Talk.Hearing
+                                transcript?.begin(step.burst)
                             }
                             withContext(Dispatchers.IO) { player.play(OpusPackets.split(step.audio), step.first, step.last) }
                             if (step.last) {
+                                // Played out: every sample has been through the tap, so the burst is whole.
+                                transcript?.end(step.burst)
                                 logHeard(step.burst, arrivals.remove(step.burst).orEmpty(), playedAt, queue.skipped - skipped)
                                 heard.incrementAndGet()
                                 if (_talk.value == Talk.Hearing) _talk.value = Talk.Idle()
@@ -422,6 +431,7 @@ internal class WalkieTalk(
                 }
             } finally {
                 player.close()
+                transcript?.abandon()
                 if (_talk.value == Talk.Hearing) _talk.value = Talk.Idle()
             }
         }

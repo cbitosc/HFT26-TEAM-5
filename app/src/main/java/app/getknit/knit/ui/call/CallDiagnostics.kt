@@ -21,6 +21,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -130,13 +131,14 @@ internal fun WalkieDiagnostics(
 
 /** The card's title, with its live marker at the end. */
 @Composable
-private fun Title(
+internal fun Title(
     title: String,
     marker: String,
+    icon: ImageVector = Icons.Outlined.Insights,
 ) {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Icon(
-            Icons.Outlined.Insights,
+            icon,
             contentDescription = null,
             modifier = Modifier.size(18.dp),
             tint = MaterialTheme.colorScheme.primary,

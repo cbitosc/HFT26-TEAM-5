@@ -132,6 +132,17 @@ doc). **Don't start a deferred item without explicit direction.**
 
 ## Still deferred (by design)
 
+- **The walkie transcript past its experiment** (ADR 2026-10.nz3g, 2026-10-09). The receiver writes heard bursts
+  out as text in debug builds, from a tap-to-download Moonshine tiny EN v2. Left out on purpose:
+  - **Release.** It would need sherpa-onnx (an ONNX Runtime prebuilt) on the F-Droid path, so a scanner and
+    reproducibility check, notices rows and a Data Safety answer for the download.
+  - **Other languages.** Moonshine's non-English models are under a non-commercial licence, and multilingual
+    Whisper tiny is 30 s-padded.
+  - **Our own bursts, and words appearing while a burst plays.** Moonshine has a streaming mode; the partials
+    would need a VAD and twice the CPU.
+  - **Hosting.** The four files must be uploaded to `getknit.app/models/stt/<id>/` before Download works
+    (`scripts/stt-model.py --out`).
+
 - **Enforcing the mesh-lab chaos job** (`mesh-lab-chaos` in `.github/workflows/ci.yml`, 2026-09-24). The first
   whole-package heavy-tail sweep failed nine scenarios on main; triaged 2026-09-24. Four are mesh bugs, filed as
   work items: **#83** a both-initiate loser's late opening DM fails AEAD and is never recovered (fixed by ADR

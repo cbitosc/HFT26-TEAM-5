@@ -769,6 +769,29 @@ an experiment behind `BuildConfig.WALKIE` (`-Pwalkie=`, on in debug and off in r
   - **none:** no link it can see; a warning says it is linking.
 
   With neither a link nor a relay that would cast, nothing is sealed, and the burst says it did not go.
+- **C-3.11-9** *(experimental, where `BuildConfig.CALLS` is on; ADR 2026-10.nz3g)*
+  The receiver may write each burst it hears out as text, on the phone, after the burst has played. Nothing about
+  it is on the wire: no field, no frame, no capability bit, and the text is never sent, stored, logged or kept past
+  the session.
+  - **The audio.** The player's decoded PCM (48 kHz mono s16) is tapped on its way to the track
+    (`TalkPlayer`'s `TalkPcmTap`), averaged down to 16 kHz (`BurstPcm`), capped at the burst's 60 s. A burst under
+    300 ms is no speech, and never reaches the model.
+  - **The model.** Moonshine tiny EN v2 (int8, ORT; MIT) through sherpa-onnx 1.13.8's ONNX Runtime, packaged
+    only where calls are, like libwebrtc. It reads at most about 9 s at once, so a longer burst is cut at its quietest 50 ms
+    between 5 s and 8 s from each cut (`segments`) and the parts' text joined. Bursts go to it one at a time, in the
+    order they ended, off the player's loop. Its recognizer is held on a `ModelLease` (released after 2 min idle;
+    about 60 MB of native heap while held) and built under `ModelLoadGuard` as `stt`, a probe decode included.
+  - **The download.** Not in the APK: 44 MB in four files under `https://getknit.app/models/stt/<model id>/`,
+    fetched only on the user's tap (the card's Download), each pinned by size and SHA-256 in `SttModel`, streamed
+    through the hash to a `.part` and renamed in, the model counted as installed only once a marker follows the last
+    file. Stored in `noBackupFilesDir`. The fetch binds to the validated default network
+    (`AndroidInternetGate.currentNetwork`, never the Wi-Fi Aware link) through `Network.openConnection`: https,
+    `Accept-Encoding: identity`, no redirect followed, the server's declared length checked first. The pins come
+    from `scripts/stt-model.py`, which also stages the files for upload.
+  - **The screen.** With the walkie's diagnostics toggled off, the card's place shows the transcript: each burst
+    `Listening…` while it plays, `Transcribing…` while the model has it, then its text (a polite live region) or why
+    not (no speech, no model, failed). While the model is not on the phone, the card says what it costs, flags a
+    metered or Data Saver route, and offers Download, Cancel or Try again.
 
 ### 3.12 Call records in the thread
 

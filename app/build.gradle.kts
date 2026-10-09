@@ -1115,10 +1115,14 @@ dependencies {
     compileOnly(libs.androidx.core.telecom)
     debugImplementation(libs.webrtc.android)
     debugImplementation(libs.androidx.core.telecom)
+    // The walkie transcript's speech runtime (docs/VOICE_CALLS.md C-3.11-9), packaged beside the walkie it serves.
+    compileOnly(libs.sherpa.onnx)
+    debugImplementation(libs.sherpa.onnx)
     if (callsInRelease) {
         android.buildTypes.names.filter { it != "debug" }.forEach { buildType ->
             add("${buildType}RuntimeOnly", libs.webrtc.android)
             add("${buildType}RuntimeOnly", libs.androidx.core.telecom)
+            add("${buildType}RuntimeOnly", libs.sherpa.onnx)
         }
     }
     // Compose Preview Screenshot Testing: `@PreviewTest` plus the preview renderer's tooling, for the

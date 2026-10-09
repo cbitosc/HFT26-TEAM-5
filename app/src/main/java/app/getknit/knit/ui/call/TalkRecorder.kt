@@ -14,6 +14,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import java.io.File
+import java.io.InputStream
 import java.util.Locale
 import kotlin.math.abs
 
@@ -26,6 +28,9 @@ import kotlin.math.abs
  *
  * One burst at a time: `WalkieTalk` calls [start], [stop] and [cancel] under its lock. The capture loop runs on one IO
  * coroutine, which alone feeds and drains the encoder and releases both at its end.
+ *
+ * [nextFrom] is the debug bridge's stand-in for a voice: the next burst reads that file of raw PCM, paced as the
+ * microphone would deliver it, so a trial can send the same known sentence every time (the transcript, C-3.11-9).
  */
 internal class TalkRecorder(
     private val scope: CoroutineScope,
@@ -47,6 +52,10 @@ internal class TalkRecorder(
     // One gain per microphone, kept across bursts and sessions (§3.11, C-3.11-5): the phone's and a headset's differ.
     private val gains = mapOf(false to TalkGain(), true to TalkGain())
 
+    /** Raw 16 kHz mono 16-bit little-endian PCM the next burst reads in place of the microphone, once. */
+    @Volatile
+    var nextFrom: File? = null
+
     /** Milliseconds since [start], or 0 when not recording. */
     fun elapsedMs(): Long = startedAt.let { if (it == 0L) 0L else System.currentTimeMillis() - it }
 
@@ -66,10 +75,10 @@ internal class TalkRecorder(
         onPacket: (ByteArray) -> Unit,
     ): Boolean {
         if (job != null) return false
-        val record = openRecord(headset) ?: return false
+        val record = nextFrom?.also { nextFrom = null }?.let(::openFile) ?: openRecord(headset) ?: return false
         val codec = openEncoder()
         if (codec == null) {
-            record.release()
+            record.close()
             return false
         }
         stopping = false
@@ -98,7 +107,7 @@ internal class TalkRecorder(
     // The capture loop: 20 ms of PCM in, whatever packets the encoder has out, until a stop; then the flush.
     @Suppress("LoopWithTooManyJumpStatements") // a failed read or a refused queue ends the burst, an empty read skips
     private fun pump(
-        record: AudioRecord,
+        record: Capture,
         codec: MediaCodec,
         gain: TalkGain,
         onPacket: (ByteArray) -> Unit,
@@ -129,8 +138,7 @@ internal class TalkRecorder(
             // What the gain made of the burst, for tuning it against a call's level on the phones.
             val heard = gain.speechDb?.let { "speech at %.0f dBFS".format(Locale.ROOT, it) } ?: "no speech"
             Log.i(TAG, "walkie gain: $heard, gain %+.1f dB, %d frame(s) limited".format(Locale.ROOT, gain.gainDb, gain.limited))
-            runCatching { record.stop() }
-            runCatching { record.release() }
+            record.close()
             runCatching { codec.stop() }
             runCatching { codec.release() }
         }
@@ -182,13 +190,71 @@ internal class TalkRecorder(
         }
     }
 
+    /** Where a burst's PCM comes from: the microphone, or [nextFrom]'s file. */
+    private interface Capture {
+        /** Fills [buffer] up to [size] bytes; the count read, or -1 at the end. */
+        fun read(
+            buffer: ByteArray,
+            offset: Int,
+            size: Int,
+        ): Int
+
+        fun close()
+    }
+
+    private class Microphone(
+        private val record: AudioRecord,
+    ) : Capture {
+        override fun read(
+            buffer: ByteArray,
+            offset: Int,
+            size: Int,
+        ) = record.read(buffer, offset, size)
+
+        override fun close() {
+            runCatching { record.stop() }
+            runCatching { record.release() }
+        }
+    }
+
+    // A file read no faster than the microphone would deliver it, so the burst streams as a spoken one does.
+    private class PacedFile(
+        private val input: InputStream,
+    ) : Capture {
+        private val began = System.nanoTime()
+        private var bytes = 0L
+
+        override fun read(
+            buffer: ByteArray,
+            offset: Int,
+            size: Int,
+        ): Int {
+            val n = input.read(buffer, offset, size)
+            if (n <= 0) return -1
+            bytes += n
+            val dueNs = bytes / PCM_BYTES * NS_PER_S / WalkiePolicy.SAMPLE_RATE
+            val aheadMs = (dueNs - (System.nanoTime() - began)) / NS_PER_MS
+            if (aheadMs > 0) Thread.sleep(aheadMs)
+            return n
+        }
+
+        override fun close() {
+            runCatching { input.close() }
+        }
+    }
+
+    private fun openFile(file: File): Capture? =
+        runCatching { PacedFile(file.inputStream().buffered()) }
+            .onFailure { Log.w(TAG, "walkie test PCM would not open: ${it.javaClass.simpleName}") }
+            .getOrNull()
+
     /**
      * The phone's own microphone through VOICE_RECOGNITION first (no call-tuned AGC pumping on speech), MIC where the HAL
      * refuses it. With a [headset] on the call, VOICE_COMMUNICATION: the one source sure to follow the call's route
      * (Telecom's, §3.13) to the headset's microphone, a Bluetooth one's over its call link.
      */
     @SuppressLint("MissingPermission") // the call screen holds RECORD_AUDIO before a walkie session can connect
-    private fun openRecord(headset: Boolean): AudioRecord? {
+    private fun openRecord(headset: Boolean): Capture? {
         val min = AudioRecord.getMinBufferSize(WalkiePolicy.SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
         for (source in if (headset) HEADSET_SOURCES else SOURCES) {
             val record =
@@ -205,7 +271,7 @@ internal class TalkRecorder(
                 runCatching { record.startRecording() }
                 if (record.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
                     Log.i(TAG, "walkie in: source $source, ${record.routedDevice?.type?.let(::deviceName) ?: "unrouted"}")
-                    return record
+                    return Microphone(record)
                 }
             }
             runCatching { record.release() }
@@ -256,6 +322,8 @@ internal class TalkRecorder(
         const val FRAME_BYTES = WalkiePolicy.SAMPLE_RATE / 50 * PCM_BYTES
         const val BUFFER_FRAMES = 4
         const val US_PER_S = 1_000_000L
+        const val NS_PER_S = 1_000_000_000L
+        const val NS_PER_MS = 1_000_000L
         const val DEQUEUE_US = 10_000L
         const val INPUT_TRIES = 20
         const val END_TRIES = 20

@@ -4,6 +4,8 @@ import android.app.Application
 import android.content.Context
 import app.getknit.knit.call.CallSignals
 import app.getknit.knit.call.CallWalkie
+import app.getknit.knit.call.SpeechToText
+import app.getknit.knit.call.SttModel
 import app.getknit.knit.call.TonePlayer
 import app.getknit.knit.call.TurnSource
 import app.getknit.knit.data.crypto.KeystoreSecret
@@ -18,6 +20,7 @@ import app.getknit.knit.mesh.spool.SpoolTicketJournal
 import app.getknit.knit.mesh.spool.TicketKeyJournal
 import app.getknit.knit.moderation.TextModerator
 import com.google.crypto.tink.KeysetHandle
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 import org.junit.Test
@@ -92,6 +95,11 @@ class KoinGraphVerifyTest {
                 CallWalkie::class,
                 // The caller's tones' player (C-3.13-14), a ToneGeneratorPlayer built in CallToneSync's definition.
                 TonePlayer::class,
+                // The walkie transcript's model (C-3.11-9): the store's default pins, the engine handed over as the seam it
+                // implements, and the one-lane dispatcher the module writes inline.
+                SttModel::class,
+                SpeechToText::class,
+                CoroutineDispatcher::class,
             )
     }
 }

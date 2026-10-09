@@ -103,6 +103,13 @@ webrtc = "150.7871.01"
 # Android 14-16; 1.1.0-alpha05/06 fixed both. Move to 1.1.0
 # when it goes stable. minCompileSdk 36.1.
 coreTelecom = "1.1.0-rc01"
+# sherpa-onnx (k2-fsa, Apache-2.0): ONNX Runtime 1.27.1 plus its own feature extraction and decoders, for the walkie
+# transcript's on-device speech model (Moonshine tiny EN v2; docs/VOICE_CALLS.md C-3.11-9). Packaged only where calls are, like
+# webrtc (`compileOnly` + debug, `-Pcalls`), every com.k2fsa import in ui/call/stt/. From JitPack (settings.gradle.kts, exclusive to this
+# group): the coordinate is the bare Android AAR, byte-identical to the GitHub release's sherpa-onnx-1.13.8.aar
+# (sha256 633c2432…). No transitive deps, minCompileSdk 1, Kotlin metadata 1.7.1, every .so 16 KB-aligned with RELRO
+# filling its first RW LOAD. 1.13.8 fixes Moonshine v2 hallucinating text on silence.
+sherpaOnnx = "1.13.8"
 # QR identity verification. zxing core is the pure-Java codec — it both *generates* the identity QR
 # (ui/image/QrCode.kt) and *decodes* camera frames (ui/scan/QrDecoder.kt). Being Android-free is what
 # keeps QrDecoder a plain-JVM unit-test target (see QrDecoderTest).
@@ -312,6 +319,7 @@ coil-gif = { group = "io.coil-kt.coil3", name = "coil-gif", version.ref = "coil"
 litert = { group = "com.google.ai.edge.litert", name = "litert", version.ref = "litert" }
 tink-android = { group = "com.google.crypto.tink", name = "tink-android", version.ref = "tink" }
 webrtc-android = { group = "io.github.webrtc-sdk", name = "android", version.ref = "webrtc" }
+sherpa-onnx = { group = "com.github.k2-fsa.sherpa-onnx", name = "sherpa-onnx", version.ref = "sherpaOnnx" }
 zxing-core = { group = "com.google.zxing", name = "core", version.ref = "zxingCore" }
 
 # CameraX: the QR identity scanner's camera stack (see the cameraX version pin for the constraints).
