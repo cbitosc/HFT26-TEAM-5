@@ -50,6 +50,7 @@ import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.data.webp.WebpTranscode
 import app.getknit.knit.debug.call.CallActivity
 import app.getknit.knit.debug.call.DirectNetworkDetector
+import app.getknit.knit.debug.call.WebRtcCallMedia
 import app.getknit.knit.identity.Identity
 import app.getknit.knit.identity.displayNameFor
 import app.getknit.knit.mesh.ForwardStore
@@ -2046,7 +2047,9 @@ class DebugBridgeReceiver :
      * raises its Wi-Fi Direct group; `off` is Diagnostics' persisted "Wi-Fi Direct calls" switch, so every call goes
      * over STUN/TURN until a timing is set again), `nettype --es as ethernet|wifi` (what the group is reported to libwebrtc as —
      * the steering trial's A/B), and `dropgroup` (closes the live leg's lane as if the peer walked away: the radio
-     * goes back and ICE must fail over). A `route` ending `/wifi-direct` is a pair on the group.
+     * goes back and ICE must fail over). A `route` ending `/wifi-direct` is a pair on the group. `turntls --es check
+     * off|on` opens the next calls' `turns:` legs without checking the certificate, a diagnosis switch held in memory
+     * (libwebrtc's own roots hold no Let's Encrypt root); `webrtc: relays …` then says whether a `tls` relay came.
      *
      * `start` and `answer` need Knit in the foreground (`am start` it first): the call's microphone service and its
      * screen can only start from there. `answer` opens the call screen, which answers, so it asks for the microphone
@@ -2122,6 +2125,17 @@ class DebugBridgeReceiver :
                 return reply("ok", "the group is reported as ${DirectNetworkDetector.reportAs} from the next call on")
             }
 
+            "turntls" -> {
+                WebRtcCallMedia.turnTlsUnchecked =
+                    when (intent.getStringExtra("check")) {
+                        "off" -> true
+                        "on" -> false
+                        else -> return reply("error", "check must be on|off")
+                    }
+                val what = if (WebRtcCallMedia.turnTlsUnchecked) "UNCHECKED (diagnosis only)" else "checked"
+                return reply("ok", "turns: certificates $what from the next call on")
+            }
+
             "dropgroup" -> {
                 val dropped = getKoin().get<DirectCallPath>().dropGroup()
                 return reply(if (dropped) "ok" else "error", if (dropped) "lane closed; the radio goes back" else "no live leg")
@@ -2143,6 +2157,7 @@ class DebugBridgeReceiver :
             .put("status", "ok")
             .put("foreground", foreground)
             .put("relayOnly", calls.relayOnly)
+            .put("turnTls", if (WebRtcCallMedia.turnTlsUnchecked) "unchecked" else "checked")
             .put("directMode", if (getKoin().get<SettingsStore>().debugDirectCallsOff.first()) "off" else calls.directMode.name.lowercase())
             .put("direct", getKoin().getOrNull<DirectCallPath>()?.describe() ?: JSONObject.NULL)
             .put(

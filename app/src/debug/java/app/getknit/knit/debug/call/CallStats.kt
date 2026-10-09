@@ -75,6 +75,20 @@ internal fun pairSummary(report: List<StatEntry>): String {
     return if (lines.isEmpty()) "none answered yet ($pending pending)" else lines.joinToString() + " ($pending pending)"
 }
 
+/**
+ * This phone's relay candidates by the leg to their TURN server — "udp 4, tcp 4, tls 2" — or "none". What tells a
+ * `turns:` server that allocated from one that did not, since an SDP relay line carries no such field.
+ */
+internal fun relaySummary(report: List<StatEntry>): String =
+    report
+        .filter { it.type == "local-candidate" && it.members["candidateType"] == "relay" }
+        .groupingBy { it.members["relayProtocol"] as? String ?: "?" }
+        .eachCount()
+        .entries
+        .sortedBy { it.key }
+        .joinToString { "${it.key} ${it.value}" }
+        .ifEmpty { "none" }
+
 private fun pairRttMs(pair: StatEntry): Double? {
     (pair.members["currentRoundTripTime"] as? Number)?.toDouble()?.let { return it * 1_000.0 }
     val total = (pair.members["totalRoundTripTime"] as? Number)?.toDouble() ?: return null

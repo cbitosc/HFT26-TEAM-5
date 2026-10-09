@@ -219,7 +219,10 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
     turns it back on; `state`'s `directMode` reads `off` while it is set. Either phone off keeps the call off the group
     (logcat `call <id>: no direct leg (switched off)` on a caller); `--es op nettype --es as ethernet|wifi` sets what the group is reported to libwebrtc as from the next
     call on (the steering A/B); `--es op dropgroup` closes the live leg's lane as if the peer walked away, so the
-    radio goes back and ICE must fail over. Logcat lines: `the peer is joining; hosting the group`, `group up on …`,
+    radio goes back and ICE must fail over. `--es op turntls --es check off|on` opens the next calls' `turns:` legs without
+    checking the certificate (in memory, `state`'s `turnTls`; a diagnosis switch, never a default — libwebrtc checks
+    TURN/TLS against built-in roots that hold no Let's Encrypt root); `webrtc: relays udp N, tcp N, tls N` after each
+    offer or answer says which legs to the TURN server allocated. Logcat lines: `the peer is joining; hosting the group`, `group up on …`,
     `lane up`, `lane over (…)`, `direct leg over; radio back to the mesh`, `webrtc: the group is a network …`.
 - `…debug.RATCHET` — dumps the **DM ratchet's per-peer state** and, with `--es reset <peerNodeId>`, forces a
   session reset past the heuristic that guards it. Exists because every gate in the recovery path returns

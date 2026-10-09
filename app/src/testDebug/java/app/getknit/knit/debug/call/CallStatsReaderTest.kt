@@ -154,4 +154,22 @@ class CallStatsReaderTest {
         assertEquals("*relay/prflx udp/turn-tcp 98ms, srflx/srflx udp 142ms (1 pending)", pairSummary(report))
         assertEquals("none answered yet (0 pending)", pairSummary(emptyList()))
     }
+
+    @Test
+    fun theRelaySummaryCountsRelayCandidatesByTheirLegToTheServer() {
+        fun relay(
+            id: String,
+            leg: String,
+        ) = StatEntry(id, "local-candidate", 0.0, mapOf("candidateType" to "relay", "relayProtocol" to leg, "address" to "198.51.100.9"))
+        val report =
+            listOf(
+                relay("A", "udp"),
+                relay("B", "udp"),
+                relay("C", "tls"),
+                relay("D", "tcp"),
+                StatEntry("E", "local-candidate", 0.0, mapOf("candidateType" to "srflx")),
+            )
+        assertEquals("tcp 1, tls 1, udp 2", relaySummary(report))
+        assertEquals("none", relaySummary(emptyList()))
+    }
 }

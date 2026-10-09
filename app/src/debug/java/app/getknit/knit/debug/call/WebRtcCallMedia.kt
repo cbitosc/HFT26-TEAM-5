@@ -86,6 +86,17 @@ internal class WebRtcCallMedia(
 
     /** The newest open session's stats, for the call screen's diagnostics card; null with no session or no report. */
     suspend fun stats(): CallStats? = open.lastOrNull()?.stats()
+
+    companion object {
+        /**
+         * A diagnosis switch, never a default: true opens the next calls' `turns:` legs without checking the server's
+         * certificate (`TLS_CERT_POLICY_INSECURE_NO_CHECK`). libwebrtc checks TURN/TLS against its own built-in roots,
+         * which hold no Let's Encrypt root, so a `turns:` server on a Let's Encrypt certificate gathers no relay; a
+         * `tls` relay appearing with this on is what pins that down. In memory, set by `…debug.CALL --es op turntls`.
+         */
+        @Volatile
+        var turnTlsUnchecked: Boolean = false
+    }
 }
 
 private class WebRtcSession(
@@ -183,11 +194,15 @@ private class WebRtcSession(
     private val pc: PeerConnection
 
     init {
+        val tlsUnchecked = WebRtcCallMedia.turnTlsUnchecked
         val ice =
             servers.map {
                 val builder = PeerConnection.IceServer.builder(it.urls)
                 // A STUN-only fallback carries no credential (CallManager.servers).
                 if (it.user.isNotEmpty()) builder.setUsername(it.user).setPassword(it.pass)
+                if (tlsUnchecked && it.urls.any { url -> url.startsWith("turns:") }) {
+                    builder.setTlsCertPolicy(PeerConnection.TlsCertPolicy.TLS_CERT_POLICY_INSECURE_NO_CHECK)
+                }
                 builder.createIceServer()
             }
         val config =
@@ -211,7 +226,7 @@ private class WebRtcSession(
         pc = checkNotNull(factory.createPeerConnection(config, observer)) { "no peer connection" }
         pc.addTrack(track, listOf("knit"))
         audio.begin()
-        log("webrtc: opened (${servers.size} TURN, relay=$relayOnly, direct=$direct)")
+        log("webrtc: opened (${servers.size} TURN, relay=$relayOnly, direct=$direct${if (tlsUnchecked) ", turns unchecked" else ""})")
     }
 
     override suspend fun offer(): String? {
@@ -298,6 +313,8 @@ private class WebRtcSession(
         }
         val sdp = pc.localDescription?.description
         log("webrtc: $kind carries ${summary(sdp.orEmpty().lines().filter { it.startsWith("a=candidate:") })}")
+        // An SDP relay line does not say how this phone reaches its TURN server; the stats do (udp, tcp or tls).
+        scope.launch { report()?.let { log("webrtc: relays ${relaySummary(it)}") } }
         scope.launch {
             delay(LATE_WINDOW_MS)
             reportLate()
