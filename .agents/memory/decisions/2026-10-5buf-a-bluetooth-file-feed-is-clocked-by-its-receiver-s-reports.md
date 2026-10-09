@@ -347,13 +347,45 @@ backlog's silence, the floor not passed to the window, the floors fixed at 1M's,
 constants, and the crossing's cap each fail their test. The simulation's writer now takes the paced fallback as
 `FramedLink` does, and the Coded runs assert it never did once steady.
 
-**Device checks owed** (two of the P7, P8 and P9: the Pixel 3 answers a Coded ask with nothing).
+**Desk trial, 2026-10-08 16:10–17:03** (e8458feb; the P9 → the P8 a metre apart, both `…debug.PHY --es mode coded`, the
+link on Coded S=8 at −60 to −67 dBm, Wi-Fi Aware and the spool off, the P3, P7 and Moto paused, boost off, 200 KB random
+files, `scripts/ble-drain-trial.py`):
 
-- **Desk:** both pinned `…debug.PHY --es mode coded`, `scripts/ble-drain-trial.py --feed window` against `--feed pace`,
+| Cell | Drain, KB/s | Held | Texts behind it |
+|---|---|---|---|
+| Fixed 1 KiB/s pace (4 reps, dark and lit receiver) | 1.02–1.03 | 198–200 s | 0.6–3.9 s |
+| Window, both dark, the P8 also linked to an iPhone | 1.79, 1.87 | 111, 117 s | 1.6–3.2 s |
+| Window, both dark, the P8 linked to the P9 alone | 2.39, 2.61 | 80, 88 s | 1.6–4.8 s |
+| Unbounded (`--ei codedPace 0`), the same | 2.47, 2.67 | 78, 84 s | 23–78 s |
+| Unbounded, earlier the same hour | 3.54, 3.60 | 58, 59 s | 32–54 s |
+| Window, receiver lit (its screen kept dozing) | 2.75 | 76 s | 1.6–3.1 s |
+
+- **The window drains 97–98% of what the air gave an unbounded feed in the paired reps,** 2.3–2.6× the fixed pace,
+  with texts on time where the unbounded feed held them a minute. The air itself moved between 2.4 and 3.6 KB/s within
+  the hour. An iPhone the receiver also held cut the window to about half that, and the fixed pace not at all.
+- **A longer queue gains nothing:** `--window-queue-ms` 750 drained 2.03 and 2.49 KB/s with texts up to 7.6 s, and 500
+  drained 2.24. `QUEUE_MS` stays 250 on Coded.
+- **The silence fallback fires one to four times a file,** each back at the next report 0.5–2.6 s later, at drains
+  where three chunks take about a second: the link stalled for 3 s or more now and then, with the receiver dark or
+  lit. Each costs one 2 KiB paced chunk.
+- **A step mid-file** (the link held on 1M, both lit, boost earned at 15 ms and 20–31 KB/s, then `mode coded` 9.6 s
+  in): 1M's backlog was all reported 5 s after the step with no silence while it crossed, and the window probed. The
+  probe's first chunk then took about 7 s (the one silence of the step, 8.4 s after it), so the round trip read its
+  3 s ceiling until the next probe brought it to 1.5 s (22 s after the step) and 0.9 s (28 s). The queue stayed under
+  about 4 KiB, about a second of the drain; texts took 1.6–3.2 s, and 7.1 s for the one sent into the stall. In a
+  rep where the link dropped and came back on 1M, the stepper's own step to Coded mid-resume probed in 445 ms with no
+  silence.
+- **One link drop:** at −63 dBm on Coded, 76 s into a file, the P8 lost its links to the P9 and to the iPhone at the
+  same instant (both `eof`), 7 s after it entered Doze; the link came back on 1M after 55 s and the file resumed.
+
+**Device checks still owed** (two of the P7, P8 and P9: the Pixel 3 answers a Coded ask with nothing).
+
+- **Desk (done above; kept for a re-run):** both pinned `…debug.PHY --es mode coded`, `scripts/ble-drain-trial.py --feed window` against `--feed pace`,
   the receiver lit, then dark. Read the receiver's `rx … in` line, the texts, and the `bt file window rate=… rtt=…`
   line. Pass: the window drains at least what the pace does, texts within about 3 s (4 s at a file's start), and no
   `paced: receiver silent` once steady.
-- **A step mid-file:** a photo on a lit, boosted 1M link, then `--es mode coded`. Pass: at most one
+- **A step mid-file (done once above; the stall after the step wants a second rep):** a photo on a lit, boosted 1M
+  link, then `--es mode coded`. Pass: at most one
   `bt file window paced: receiver silent` across the step, the queue `queued` ÷ rate implies under 12 s across it and
   3 s within 30 s, and `rtt=` under 3000 within about 10 s.
 - **A walk** with the receiver dark in a pocket until the drain falls under 1 KB/s: no `paced: two-second reporter`
