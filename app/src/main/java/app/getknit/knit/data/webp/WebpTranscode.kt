@@ -10,6 +10,7 @@ import android.graphics.PorterDuffXfermode
 import android.graphics.RectF
 import android.util.Log
 import androidx.core.graphics.createBitmap
+import androidx.core.graphics.withClip
 import app.getknit.knit.data.decodeBoundedFromBytes
 import app.getknit.knit.data.downscale
 import app.getknit.knit.data.lossyWebpFormat
@@ -300,10 +301,7 @@ object WebpTranscode {
 
                     AnimatedFrames.Dispose.Background -> {
                         {
-                            canvas.save()
-                            canvas.clipRect(target)
-                            canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
-                            canvas.restore()
+                            canvas.withClip(target) { drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR) }
                         }
                     }
 

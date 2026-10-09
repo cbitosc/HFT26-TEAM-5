@@ -18,8 +18,7 @@ internal object BleFeedPolicy {
     fun windowed(
         feedWindowOn: Boolean,
         capabilities: Long,
-    ): Boolean =
-        feedWindowOn && capabilities and Protocol.CAP_BLOB_HAVE != 0L
+    ): Boolean = feedWindowOn && capabilities and Protocol.CAP_BLOB_HAVE != 0L
 
     /**
      * A link's [base] pace, marked [windowed] when its receiver's reports clock it, with the window's queue and its

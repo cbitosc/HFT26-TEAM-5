@@ -771,7 +771,7 @@ if (labChaosShards > 0) {
             testClassesDirs = base.testClassesDirs
             classpath = base.classpath
             javaLauncher.set(base.javaLauncher)
-            jvmArgs(base.jvmArgs.orEmpty())
+            jvmArgs(base.jvmArgs)
             maxHeapSize = base.maxHeapSize
             systemProperties(base.systemProperties)
             systemProperty("knit.labChaos", seed.toString())

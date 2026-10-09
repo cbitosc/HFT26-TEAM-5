@@ -121,7 +121,7 @@ class PeerRepository(
             val pending = HashMap<String, Long>()
             for (id in heard.keys.toList()) heard.remove(id)?.let { pending[id] = it }
             if (!primed) {
-                for (row in dao.namesAll()) written.merge(row.nodeId, row.lastSeenAt, ::maxOf)
+                dao.namesAll().forEach { written.merge(it.nodeId, it.lastSeenAt, ::maxOf) }
                 primed = true
             }
             val due = pending.filter { (id, at) -> written[id].let { held -> held == null || at - held >= LabelFade.SEEN_GATE_MS } }

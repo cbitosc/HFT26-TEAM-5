@@ -105,10 +105,10 @@ internal fun shortcutFingerprint(
     field(palette)
     field(title)
     bytes(conversation.avatarBytes)
-    for (face in conversation.faces) {
-        field(face.nodeId)
-        field(face.name)
-        bytes(face.avatarBytes)
+    for ((nodeId, name, avatarBytes) in conversation.faces) {
+        field(nodeId)
+        field(name)
+        bytes(avatarBytes)
     }
     return digest.digest().take(FINGERPRINT_BYTES).joinToString("") { "%02x".format(it) }
 }

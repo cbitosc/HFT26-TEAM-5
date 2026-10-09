@@ -84,5 +84,5 @@ internal fun labelAnchors(
     buildSet {
         accepted.filterTo(this) { Conversations.kindFor(it) == ConversationKind.DM }
         authored.filterTo(this) { Conversations.kindFor(it) == ConversationKind.DM }
-        for (group in groups) if (!group.left) addAll(GroupMembersStore.decode(group.members))
+        groups.filterNot { it.left }.flatMapTo(this) { GroupMembersStore.decode(it.members) }
     }

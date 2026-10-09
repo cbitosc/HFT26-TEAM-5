@@ -46,11 +46,11 @@ class FieldJournal(
 
     private fun endsTorn(): Boolean {
         val file = current
-        if (file.length() == 0L) return false
-        return RandomAccessFile(file, "r").use { raf ->
-            raf.seek(raf.length() - 1)
-            raf.read() != '\n'.code
-        }
+        return file.length() != 0L &&
+            RandomAccessFile(file, "r").use { raf ->
+                raf.seek(raf.length() - 1)
+                raf.read() != '\n'.code
+            }
     }
 
     /** Every kept line, oldest first, no older than [keepMs] before [now]. */

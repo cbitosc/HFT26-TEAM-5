@@ -62,10 +62,10 @@ class FramedLink(
     val peer: Peer,
     private val socket: LinkSocket,
     private val scope: CoroutineScope,
-    private val cacheDir: File,
+    cacheDir: File,
     // Where a cut attachment's prefix goes, and where a resumed one is spliced from (#116) — one store for every
     // link, so any holder can finish what another started.
-    private val partials: PartialBlobs,
+    partials: PartialBlobs,
     private val metrics: MeshMetrics,
     private val callbacks: LinkCallbacks,
     private val now: () -> Long,
@@ -86,11 +86,11 @@ class FramedLink(
     private val onFeedChanged: () -> Unit = {},
     // Called on the reader every [PROGRESS_EVERY_MS] of chunks of a file streaming in, with its key, the bytes held
     // and the ms since its header, outside every lock: the owner sends it back to the sender (ADR 2026-10.nsr7).
-    private val onRxProgress: (key: String, held: Long, ms: Long) -> Unit = { _, _, _ -> },
+    onRxProgress: (key: String, held: Long, ms: Long) -> Unit = { _, _, _ -> },
     // Whether this side reports a file streaming in the way a windowed sender needs (ADR 2026-10.5buf): every
     // [WINDOWED_PROGRESS_EVERY_MS], and once more that long after the last chunk if no other came. Off, every
     // [PROGRESS_EVERY_MS] of chunks only, as nsr7 shipped it. Read at each report.
-    private val windowedReports: () -> Boolean = { false },
+    windowedReports: () -> Boolean = { false },
 ) {
     private val outbound = Channel<Outbound>(Channel.UNLIMITED)
 
@@ -615,6 +615,7 @@ class FramedLink(
      * as header→chunks→end, but pending frames are flushed *between* chunks so a large blob never stalls
      * live traffic. Only one file streams at a time (later files wait in [stash]).
      */
+    @Suppress("BlockingMethodInNonBlockingContext") // only under [start]'s launch(Dispatchers.IO), on an IO worker
     private suspend fun writeLoop() {
         try {
             val out = BufferedOutputStream(socket.output)
@@ -683,6 +684,7 @@ class FramedLink(
      * receiver's reports leave room (ADR 2026-10.nsr7's phase 2) and is paced the old way while the receiver is silent;
      * coming back to the pace restarts its window.
      */
+    @Suppress("BlockingMethodInNonBlockingContext") // on [writeLoop]'s IO thread, as [writeLoop] says
     private suspend fun feedChunks(
         out: OutputStream,
         input: FileInputStream,
@@ -721,7 +723,7 @@ class FramedLink(
     }
 
     /** Writes [input]'s next chunk to [out] and paces it (a paced feed); false at its end. */
-    @Suppress("LongParameterList") // one chunk: its sink, source, buffer, pace, clocking and pace window
+    @Suppress("LongParameterList", "BlockingMethodInNonBlockingContext") // a chunk's six inputs; [writeLoop]'s IO thread
     private suspend fun feedChunk(
         out: OutputStream,
         input: FileInputStream,

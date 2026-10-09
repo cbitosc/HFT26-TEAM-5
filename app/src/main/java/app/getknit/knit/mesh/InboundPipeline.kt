@@ -200,7 +200,7 @@ class InboundPipeline(
     private val onTransferCtl: suspend (senderId: String, payload: TransferPayload, sentAt: Long) -> Boolean = { _, _, _ -> false },
     // A commons' advertised name for its notification title (`CommonsStore.find`), null when the operator
     // set none — the notifier then uses the generic room title.
-    private val commonsTitle: suspend (conversationId: String) -> String? = { null },
+    commonsTitle: suspend (conversationId: String) -> String? = { null },
     // Every frame that passed verifyInbound, with the hop that handed it to us and its plane — the radio mesh's
     // indirect-reach tracker (MeshManager → RelayedPresence.note, ADR 2026-10.fw8g), which applies its own rule.
     // Presentation only: it sees the frame after the gate and decides nothing about it.

@@ -1959,10 +1959,10 @@ class BluetoothMeshTransport(
      *  RSSI floor (so it can actually promote), and off connect backoff. Mirrors the [floorScan] candidate gate. */
     private fun isBoostTrigger(nodeId: String): Boolean {
         // Before the RSSI read, which takes the presence lock: a scan result for a linked or larger peer stops here.
-        if (!::localNodeId.isInitialized || localNodeId <= nodeId || nodeId in links.keys) return false
-        return DialPlan.promotable(localNodeId, nodeId, presence.smoothedRssiFor(nodeId), links.keys, PROMOTE_RSSI_FLOOR) {
-            it in activeBackoff(elapsed())
-        }
+        return ::localNodeId.isInitialized && localNodeId > nodeId && nodeId !in links.keys &&
+            DialPlan.promotable(localNodeId, nodeId, presence.smoothedRssiFor(nodeId), links.keys, PROMOTE_RSSI_FLOOR) {
+                it in activeBackoff(elapsed())
+            }
     }
 
     // --- Connection engine (promotion → L2CAP links) ---

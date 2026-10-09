@@ -130,13 +130,9 @@ object ImageStrip {
                     }
 
                     APP14 -> {
-                        if (!bytes.matchesAt(ADOBE, payload)) {
-                            false
-                        } else if (payloadSize == ADOBE_SIZE) {
-                            true
-                        } else {
-                            return null // the decode depends on it, and it carries more than it should
-                        }
+                        val adobe = bytes.matchesAt(ADOBE, payload)
+                        if (adobe && payloadSize != ADOBE_SIZE) return null // the decode depends on it, and it carries more than it should
+                        adobe
                     }
 
                     in APP1..APP15, COM -> {
@@ -179,9 +175,9 @@ object ImageStrip {
                 continue
             }
             val next = bytes.u8(i + 1)
-            when {
-                next == 0x00 || next in RST0..RST7 -> i += 2
-                next == 0xFF -> i++
+            when (next) {
+                0x00, in RST0..RST7 -> i += 2
+                0xFF -> i++
                 else -> return i
             }
         }

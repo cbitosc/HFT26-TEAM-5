@@ -190,7 +190,7 @@ class MeshManager(
     // ([AckSync.TICK_BATCH_DEBOUNCE_MS]). A policy number, injectable like [clock] so the multi-node JVM
     // harness (`mesh/lab`) can watch a tick cross a relay in milliseconds rather than wait out the field
     // value; production wiring takes the default.
-    private val tickDebounceMs: Long = AckSync.TICK_BATCH_DEBOUNCE_MS,
+    tickDebounceMs: Long = AckSync.TICK_BATCH_DEBOUNCE_MS,
     // How long a room tick waits for a ride before it is sealed and sent by itself
     // ([AckSync.RIDE_HOLD_MS], ADR 2026-09.y5f3). Injectable for `mesh/lab` exactly like [tickDebounceMs].
     private val rideHoldMs: Long = AckSync.RIDE_HOLD_MS,
@@ -208,7 +208,7 @@ class MeshManager(
     // Whether this build queries neighbours for a blob's holders before it asks (ADR 2026-10.6e5t;
     // `BuildConfig.BLOB_QUERY`, on in every build by default), and how long it waits for their answers.
     // Off, every neighbour gets ADR 2026-10.f7gg's blind round; answering a query is never gated.
-    private val blobHolderQuery: BlobExchange.HolderQuery = BlobExchange.HolderQuery(),
+    blobHolderQuery: BlobExchange.HolderQuery = BlobExchange.HolderQuery(),
     // What the session's collectors and everything they launch run on. Production takes the default; the
     // `mesh/lab` harness hands in its seeded chaos dispatcher (`LabChaos`), a busy pool on demand.
     private val sessionDispatcher: CoroutineDispatcher = Dispatchers.Default,

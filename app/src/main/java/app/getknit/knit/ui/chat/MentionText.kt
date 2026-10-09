@@ -218,7 +218,7 @@ class MentionChips(
                 }
             keepChipsWhole(before, edits)?.let { widened ->
                 revertAllChanges()
-                for (edit in widened.asReversed()) replace(edit.start, edit.end, edit.text)
+                for ((start, end, text) in widened.asReversed()) replace(start, end, text)
                 val last = widened.last()
                 val shift = widened.dropLast(1).sumOf { it.text.length - (it.end - it.start) }
                 placeCursorBeforeCharAt(last.start + shift + last.text.length)

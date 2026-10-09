@@ -700,7 +700,7 @@ class BlobExchange(
         val blind = live.filter { it.id !in answered && it.id !in w.blindAsked && !(it.streaming && it.id in w.askedAt) }
         if (blind.isEmpty()) return false
         if (!w.blindWidened) {
-            val pick = blind.minWith(compareBy<Candidate>({ rankOf(w, it) }, { it.id }))
+            val pick = blind.minWith(compareBy({ rankOf(w, it) }, { it.id }))
             // A holder that can raise the Wi-Fi Aware link waits for it before it falls back to Bluetooth.
             val grace =
                 firstAskGraceMs + rttOf(pick.id) + if (pick.route == BulkRoute.Reachable) CompositeMeshTransport.BULK_GRACE_MS else 0L
@@ -1754,8 +1754,8 @@ class BlobExchange(
          */
         fun withdraw(peer: String): Boolean {
             val asked = askedAt[peer] ?: return false
-            if (answers[peer]?.let { it.state !in HELD && it.receivedAt >= asked } == true) return false
-            return (withdrawnAt[peer] != asked).also { withdrawnAt[peer] = asked }
+            return answers[peer]?.let { it.state !in HELD && it.receivedAt >= asked } != true &&
+                (withdrawnAt[peer] != asked).also { withdrawnAt[peer] = asked }
         }
 
         // ADR 2026-10.f7gg's round over the neighbours nobody can query, and the neighbours asked to pull it through.
