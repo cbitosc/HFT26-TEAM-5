@@ -221,6 +221,14 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   window scanned per thread (default 5000), `--es group <g-…>` also drops that group row locally (no leave
   frame). Nothing goes over the mesh; a reaction's own custody frame is left to its TTL. The reply's
   `matched` / `deleted` / `custodyRemoved` / `byConversation` are the accounting.
+- `…debug.RESETDB` — **empties the database** for a fresh lab run and keeps who the phone is: the identity and
+  prekeys (`files/identity.key`), the database key and the DataStore (name, status, profile stamps, settings, the
+  accepted set) live outside it, and the own avatar's blob row is read out and put back under its hash. The blob
+  caches (`cache/blobtx`, `cache/blob-partials`, `cache/link-rx-*`) go too. Refused (`error`) unless the mesh is
+  paused, so `PAUSE --ei minutes 60` first; the process is killed a second after the reply (`avatarKept` names
+  the hash kept, or null), and the next start comes up paused — `RESUME`, then start the service as after an
+  install. Run it on every lab phone in one pass, or a peer's custody walks the old traffic back in. Take a
+  `BACKUP` first if the history might be wanted.
 - `…debug.NANFAIL` / `…debug.NANSTORM` — reproduce **getknit/Knit#9** (ADR 052 + 055) on hardware that does
   not have the bug. `NANFAIL --ei count N` arms N Wi-Fi Aware attaches to take their failure path without
   reaching `mgr.attach` (0 disarms) — the stand-in for a vendor HAL with no STA+NAN interface combination.

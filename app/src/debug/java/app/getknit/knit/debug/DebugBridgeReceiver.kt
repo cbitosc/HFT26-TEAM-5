@@ -27,6 +27,8 @@ import app.getknit.knit.data.PeerRepository
 import app.getknit.knit.data.ReactionRepository
 import app.getknit.knit.data.decodeBoundedFromBytes
 import app.getknit.knit.data.downscale
+import app.getknit.knit.data.KnitDatabase
+import app.getknit.knit.data.blob.BlobEntity
 import app.getknit.knit.data.forward.ForwardDao
 import app.getknit.knit.data.group.GroupEntity
 import app.getknit.knit.data.group.GroupMembersStore
@@ -255,6 +257,8 @@ import java.nio.ByteBuffer
  *   (`--ei minutes 15|60`, the two offered spans): `MeshService` follows `SettingsStore.meshPausedUntil`, so
  *   this drives the same path as the chat list's banner and also lands on a service that is not running
  *   (its next start comes up paused). [ACTION_STATE] reports `meshPausedUntil` / `meshPaused`.
+ * - [ACTION_RESETDB] — empties the database for a fresh lab run, keeping the identity, the profile (the own
+ *   avatar's blob put back) and the settings; refused unless paused, and the process dies after the reply.
  *
  * Each action replies as a one-line JSON object: it is returned via the ordered-broadcast result
  * (`am broadcast` prints `Broadcast completed: result=0, data="…"`) and also logged under the [TAG] tag
@@ -296,6 +300,7 @@ class DebugBridgeReceiver :
     private val backupWriter: app.getknit.knit.data.backup.BackupWriter by inject()
     private val restoreStager: app.getknit.knit.data.backup.RestoreStager by inject()
     private val directWifi: app.getknit.knit.transfer.DirectWifi by inject()
+    private val database: KnitDatabase by inject()
 
     override fun onReceive(
         context: Context,
@@ -379,6 +384,10 @@ class DebugBridgeReceiver :
 
                         ACTION_PURGE -> {
                             handlePurge(intent)
+                        }
+
+                        ACTION_RESETDB -> {
+                            handleResetDb(context)
                         }
 
                         ACTION_REVIEW -> {
@@ -2092,6 +2101,38 @@ class DebugBridgeReceiver :
     }
 
     /**
+     * Empties the database for a fresh lab run and keeps who this phone is. The identity and its prekeys
+     * (`files/identity.key`), the database key and the DataStore (name, status, profile stamps, settings, the
+     * accepted set) live outside it already; the own avatar's bytes are a blob row, so they are read out first
+     * and put back under the same hash. The blob caches beside the database go too. Refused unless the mesh is
+     * paused ([ACTION_PAUSE]), so no frame lands mid-wipe, and the process is killed just after the reply, so no
+     * singleton's in-memory mirror (the custody digest, the SeenSet, the ratchet caches) outlives its rows. The
+     * next start comes up paused: [ACTION_RESUME] it, and start the service as after an install.
+     */
+    private suspend fun handleResetDb(context: Context): JSONObject {
+        val pausedUntil = settings.meshPausedUntil.first()
+        if (pausedUntil == null || pausedUntil <= System.currentTimeMillis()) {
+            return reply("error", "pause the mesh first (debug.PAUSE)")
+        }
+        val dao = database.blobDao()
+        val avatar =
+            settings.ownAvatarHash.first()?.let { hash ->
+                dao.bytes(hash)?.let { BlobEntity(hash, dao.mimeFor(hash) ?: "image/jpeg", it) }
+            }
+        database.clearAllTables()
+        avatar?.let { dao.insert(it) }
+        File(context.cacheDir, "blobtx").deleteRecursively()
+        File(context.cacheDir, "blob-partials").deleteRecursively()
+        context.cacheDir.listFiles { f -> f.name.startsWith("link-rx-") }?.forEach { it.delete() }
+        scope.launch {
+            delay(RESET_KILL_AFTER_MS)
+            android.os.Process.killProcess(android.os.Process.myPid())
+        }
+        return reply("ok", "database emptied; the process dies in $RESET_KILL_AFTER_MS ms")
+            .put("avatarKept", avatar?.hash ?: JSONObject.NULL)
+    }
+
+    /**
      * Arms (or disarms, with `count` 0 or absent) forced Wi-Fi Aware attach failures — the lab stand-in for
      * getknit/Knit#9's chipset. Pair it with [ACTION_NANSTORM]: the failures are what make the attach path
      * reachable at all, since a transport that is attached returns from `attach()` before any of it.
@@ -2529,6 +2570,7 @@ class DebugBridgeReceiver :
         const val ACTION_XFER = "app.getknit.knit.debug.XFER"
         const val ACTION_BACKUP = "app.getknit.knit.debug.BACKUP"
         const val ACTION_PURGE = "app.getknit.knit.debug.PURGE"
+        const val ACTION_RESETDB = "app.getknit.knit.debug.RESETDB"
 
         const val EXTRA_TEXT = "text"
         const val EXTRA_MINUTES = "minutes"
@@ -2608,6 +2650,9 @@ class DebugBridgeReceiver :
 
         /** Newest-N window [handlePurge] scans per thread — far past a night of injected traffic, still bounded. */
         const val PURGE_SCAN_LIMIT = 5000
+
+        /** Long enough for the ordered broadcast to deliver [ACTION_RESETDB]'s reply before the process dies. */
+        const val RESET_KILL_AFTER_MS = 1_000L
 
         /** Default cap on per-row detail in the [ACTION_STORE] dump (`allIds`/`expiredIds` are always complete). */
         const val DEFAULT_STORE_LIMIT = 100

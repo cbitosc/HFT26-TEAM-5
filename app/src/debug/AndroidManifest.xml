@@ -58,6 +58,7 @@
                 <action android:name="app.getknit.knit.debug.XFER" />
                 <action android:name="app.getknit.knit.debug.BACKUP" />
                 <action android:name="app.getknit.knit.debug.PURGE" />
+                <action android:name="app.getknit.knit.debug.RESETDB" />
             </intent-filter>
         </receiver>
     </application>

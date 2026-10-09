@@ -93,7 +93,8 @@ Extras and reply fields: the action's bullet in `.agents/context/debug-bridge.md
 
 - **Messaging:** `SEND`, `SENDIMG` (stage the file into app storage with `run-as` first; `--ez file true` for a
   non-image), `SAVEATT` (Save into app storage, to pick it again), `REACT`,
-  `TYPING`, `MKGROUP`, `LEAVE`, `PURGE` (clean soak traffic off every phone).
+  `TYPING`, `MKGROUP`, `LEAVE`, `PURGE` (clean soak traffic off every phone), `RESETDB` (empty the database, keep
+  the identity, profile and settings; pause first).
 - **Mesh state:** `STATE`, `STORE`, `HEAL`, `PAUSE`, `RESUME`, `BLECAP`, `NANOFF` (Wi-Fi Aware off, Bluetooth
   alone), `PHY` (the Coded PHY experiment), `LINKTUNE` (ask a Bluetooth link for a PHY, priority or MTU; the 1M/2M
   file budget and the link boost's A/B switch on any debug build — the #120 drain trial).
