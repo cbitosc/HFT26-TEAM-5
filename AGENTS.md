@@ -48,50 +48,14 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
 - **When your first prompt opens with "# Paired change", or a message arrives from the `knit-pair` supervisor
   or a `knit-ios-*` worker:** obey `.agents/rules/paired-change.md`. The iOS half runs in its own session
   under knit-ios's rules; never edit that repo.
-- **When touching `mesh/bluetooth/BleSideChannel`, `SideCarousel`, `SideScanPolicy`, `SideCapableTracker`,
-  `BleFastRoutePolicy`, `BleAdvertPayload`'s flags byte, or `BluetoothMeshTransport.fastFanout`/`fastSend`:**
-  READ ADR 2026-09.sjaa and the "page carousel" section of `.agents/context/mesh-transport.md`. The BLE side
-  channel carries `shouldFastFanout` frames on non-connectable extended-advertising pages — one
-  `FastFrameCodec` unit per 236-B page, never a chain, never presence, never a DM-form frame — gated per
-  peer on the advert's flags byte and dark in release behind `BuildConfig.BLE_SIDE_PLANE` until its device
-  trial (CHECK `.agents/memory/roadmap.md`). The receive scan is Off for an all-linked clique with nothing
-  streaming (ADR 2026-09.u8qj) — the link copy already reaches every linked peer; don't widen that gate. `hasFastPlane` is now true for Bluetooth: the link copy the
-  composite used to send lives inside the transport's `fastFanout`/`fastSend`; don't add it back upstream.
-- **When touching `CodedPhyPolicy`, `PhyStepper`, `BlePhyControl`, `CodedPhyDiag`, `CodedAdvertPace`, `RangeHunt`,
-  `AppVisibility`,
-  `BleAdvertiser.codedParams` / `setInterval`, `BleScanner.phys`, `BlePresenceTracker`'s per-PHY RSSI,
-  `BuildConfig.BLE_CODED_PHY` or `…debug.PHY`:** READ ADR
-  2026-10.yvn6 and the Coded PHY section of `.agents/context/mesh-transport.md`. An experiment, dark in release: a
-  second presence set on Coded (the legacy advert stays), an all-PHY scan, a Coded sighting scored on the 1M scale
-  (+12 dB) so every −90 floor is untouched, and per-link 1M ↔ Coded S=8 steps driven by the larger id through a GATT
-  handle on the link's ACL. Capability is inferred from hearing the Coded advert — no flags-byte bit. A dialer heard on
-  Coded alone is admitted as unsighted (shzv's tie-break holds for 1M), and OFF leaves a link on its PHY. A Coded dial
-  gets a 25 s watchdog, and a link that drops at range makes the dialed side's Coded advert fast for 3 min, its
-  interval moved in place (`CodedAdvertPace`, `BleAdvertiser.setInterval`; the amendment of 2026-10-02), while the
-  dialing side hunts it — lonely gap, Coded windows, no settled floor, whatever other links it holds — for those
-  3 min, or up to 30 while Knit is open on a lit screen, which hunts on its own too (`RangeHunt`, the 2026-10-04
-  amendment). CHECK
-  `.agents/memory/roadmap.md` for what the release flag waits on.
-- **When touching `CodedPhyPolicy.pace`, `PhyTuning.filePaceBytesPerSec` / `BLE_PACE_BYTES_PER_SEC`, `PaceConfig` /
-  `PaceWindow` / `TransferPacePolicy`, `BluetoothMeshTransport.paceFor`, or `FramedLink`'s `pace`:** READ ADR
-  2026-10.8jwn. **Before touching `FeedWindow`, `PaceConfig.windowed`, `BluetoothMeshTransport.windowed`,
-  `FramedLink.feedChunks` / `awaitReport`, `RxReports`, or `BuildConfig.BLE_FEED_WINDOW`:** READ ADR
-  2026-10.5buf — a file to an Android peer that reports is clocked by those reports on any PHY (written and not yet held kept under
-  the measured drain over the round trip plus a quarter second, BBR-style, no split, no earned budget; on Coded in 1 KiB
-  chunks, its amendment of 2026-10-08 (2)), the old pace only for a silent receiver, an iPhone or an older build; dark in release until its A/B, switched on a debug build by `…debug.LINKTUNE --es feed window|pace`. A Bluetooth file is fed below what the air drains, from one budget split evenly among the 1M/2M links
-  feeding a file at once (`txInProgress`), in chunks of two seconds of the share; a paced Coded link keeps its own pace outside the
-  split (yvn6's #114 amendment). The stack's queue hides the drain from the sender, so tune against the receiver's
-  `rx … in <ms>ms` line — never the sender's `file … in`, which reads size ÷ pace. No wire change.
-  **Before touching `LinkBoostPolicy`, `BleLinkBoost`, `BleLinkTuner`, `LinkParamsCallback`, `FramedLink`'s `onBusy` /
-  `feeding` / `busy`, `PhyTuning.boostPaceBytesPerSec`, `BuildConfig.BLE_LINK_BOOST`, `LinkTuneDiag` or
-  `…debug.LINKTUNE`, or measuring a drain:** READ ADR 2026-10.2da4 (and work item #120). A link's drain is the host's
-  buffer share times the interval, so while a file moves either way, a side whose screen is on asks for
-  `CONNECTION_PRIORITY_HIGH` (and the MTU once) through one GATT client per link, and lets go 15 s after neither
-  direction streams, or at once on screen-off; a dark side only listens. A link's budget rises to 18 KiB/s (12 past four
-  LE connections) only while that link *reported* ≤ 15 ms (`earned`; per link since ADR 2026-10.g24x), else 8jwn's
-  4 KiB/s. Dark in release until
-  its trial. The trial is `scripts/ble-drain-trial.py --boost on|off`, and the oracle is both phones' HCI snoops read
-  by `scripts/btsnoop-drain.py` — the sender's, since only it shows the queue.
+- **When touching the Bluetooth mesh transport** — `mesh/bluetooth/` outside `meshtastic/` and `wear/`, or
+  `BluetoothMeshTransport`'s loops, links, adverts, scans, pace or PHY: READ `.agents/context/bluetooth.md`, the
+  symbol → ADR routing for the plane (side channel, Coded PHY, pace / feed window / link boost, admission and the
+  lonely dial, discovery clocks and TX power, advert re-assert, doorbell, GATT payloads). `grep` it for every symbol
+  you touch. For implementation work there, DELEGATE (Claude Code: spawn) the `bluetooth-owner` persona in
+  `.agents/personas/bluetooth-owner.md` with a self-contained brief — the goal, the issue or ADR, whether a wire,
+  lab or cross-platform change is in scope — then run `bluetooth-reviewer` on what it wrote (below), apply the
+  findings and relay the device trial both name.
 - **When touching `mesh/lora/` or `mesh/bluetooth/meshtastic/` (the LoRa/Meshtastic bridge):** READ
   `.agents/context/lora-bridge.md` — a Meshtastic board over BLE GATT extends the **Nearby room and 1:1
   DMs** over LoRa as a fast-plane-only `MeshTransport` child, shipped visible since 2.5.0 behind
@@ -109,55 +73,6 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   pacer does while the link is down:** READ ADR 2026-09.hp88 — three direct dials, then the controller's
   `autoConnect` with an hourly direct net and no arbiter while waiting; a refusal backs off, only a spent window
   doesn't; the pacer parks on `link.state`, never its 1 s tick.
-- **When touching `BluetoothMeshTransport.superviseAccepted`, `BleAdmissionPolicy`, `teardownLink`, `LinkEvents`,
-  `neverSighted`, `LonelyDialPolicy` / `noLinkSince`, or what a held link scores for eviction:** READ ADR
-  2026-09.shzv and ADR 2026-09.hj4a. A dialer presence holds is judged by the old tie-break, unchanged — the
-  Android mesh must not move. Only an unsighted dialer (an iPhone
-  advertises no service data, so it is never sighted and never dialed) is admitted whatever the id order, and its
-  second link replaces the first only once the held one is 30 s old. A teardown passes the link it means
-  (`only =`) — never re-key it by node id alone — and only a never-sighted link scores the −90 floor. The one
-  exception to "larger dials" is hj4a's lonely dial: after 180 s with **no** link (`noLinkSince`, the clock the
-  scan's lonely cadence shares) a node dials the strongest larger id it sights, one at a time, and it rests on the unsighted admit:
-  a responder that sighted the newcomer refuses it and dials it itself. Its oracle, `bt lonely dial <id> (…)`, is
-  keyed by the iOS interop harness — don't reword it.
-- **When touching a TX power in `BleAdvertiser` (`presenceParams` / `sideParams` / `codedParams`), an RSSI threshold
-  on an advert reading, `PromotionPolicy.msUntilDue`, `nextConnectWaitMs`, `mesh/power/ElapsedWait`, or any wait in
-  `BluetoothMeshTransport`'s scan loop, connect loop or dial/HELLO watchdogs or `BleGattPayloadReader`'s give-up:**
-  READ ADR 2026-10.ryak and ADR 2026-10.pj9w, and the "Discovery keeps wall time" section of
-  `.agents/context/mesh-transport.md`. The presence
-  advert is `TX_POWER_HIGH` and every discovery set goes out at its power (pinned by `BleAdvertiserTest`); every −90
-  floor reads it, so a new advert threshold is sized against HIGH. A dial gated on the clock gets a wake when it comes
-  due — the next sighting is not one on a screen-off phone. The waits a relink waits on (connect loop, dial/HELLO
-  watchdogs, scan window and pause, the hunting gap, the GATT payload read's give-up) go through `elapsedWait`, never
-  `delay` / `withTimeoutOrNull`, which stop while the CPU sleeps; the settled, linked and relaxed scan gaps keep
-  stretching on purpose (power budgets — moving one is a battery change). Measure with `scripts/ble-link-trial.py`.
-- **When touching `BleAdvertiser.reassert` / `onAdvertisingEnabled`, `AdvertReassertPolicy`, or the transport's
-  `advertLoop` / ACL edge receiver:** READ ADR 2026-10.9utz. The stack re-enables its advertising sets around every
-  connection and the controller can refuse that (0x0d), reporting it only for a connection *to* the set — never for
-  one the phone made — and never retrying. So the transport enables the live presence set again itself: 2.5 s after
-  each ACL edge, on a doubling wait after a reported refusal, on a 10 s (no link) / 60 s net, and at once on `heal()`.
-  A stopped set must stay down (`stop()` clears what `reassert` would restart). The ACL receiver is
-  `RECEIVER_EXPORTED` on purpose: the Bluetooth app (uid 1002), not `system_server`, sends `ACTION_ACL_*`, so a
-  non-exported receiver never fires (the ADR's amendment). Tests: `AdvertReassertPolicyTest`, `BleAdvertiserTest`.
-- **When touching `mesh/bluetooth/BleDoorbell`, `DoorbellPolicy`, `Protocol.CAP_DOORBELL`, or what
-  `BluetoothMeshTransport.writeOnce` rings:** READ ADR 2026-09.dqvb (companion change A4 for the iOS port). A link
-  rings only when the peer's HELLO carries `CAP_DOORBELL`, which Android never claims, so Android↔Android links never
-  ring (they open a GATT client only for 2da4's link boost, never with discovery). The doorbell UUIDs are cross-platform law, and the schedule is the port's. `typing`, `blobreq`,
-  `blobhave`, `blobhas`, `blobprog`, `blobcancel` and `keyreq` don't ring. The GATT client attaches to the link's own ACL, closes on a 2 s attach timeout, and lives
-  and dies with the link. A ring is a write without response, poked at the enqueue, never after the socket write.
-  The lookup runs at link-up and each one that finds the doorbell asks for `CONNECTION_PRIORITY_BALANCED`: an
-  iPhone central runs the link at a 720 ms supervision timeout, BALANCED carries 5 s (#102, the ADR's amendment).
-  The stack's put-back of the central's own timeout can land after that ask, so `DoorbellPolicy.Balanced` asks again,
-  on the hidden `onConnectionUpdated` or a 2 s settle check, at most twice a lookup (the put-back amendment).
-- **When touching `mesh/bluetooth/GattPayloads`, `BleGattPayloadReader`, `BleAdvertPayload.FLAG_DIALS_GATT_PEERS`,
-  `BuildConfig.BLE_GATT_PEERS`, `BleScanner`'s UUID filter, or `BluetoothMeshTransport.onScanResult` / `sight`:**
-  READ ADR 2026-09.kwq2 (companion change A3; knit-ios ADR 2026-09.xzpt) and its section in
-  `.agents/context/mesh-transport.md`. A foreground iPhone is found by reading its GATT payload and dialed by the
-  unchanged rule (larger id dials); `GattPayloads` is the iOS pacing line for line (one read at a time, 12 s,
-  30 s / 10 min waits) plus a 64-address LRU, and a payload lives until one of the contract's three rules forgets it: a
-  dial failing before its channel opens (never on HANDSHAKE), a HELLO on a link to the address naming another node,
-  or 60 s of scanning unheard with no link up. The flag is set only while the reader runs — one build switch gates filter, reader and flag, dark in
-  release until the trial. A1 (shzv) stays whole: it is the fallback that makes a clear flag safe.
 - **When touching `linkpreview/`, `net/`, `mesh/protocol/LinkPreviewBlob`, or anything that opens an
   Internet socket outside the spool plane:** READ ADR 2026-09.n752 (and 2026-09.7x8k: a send holds up to 5 s
   for the card its link is fetching, or the share sheet never carries one; a LoRa thread takes a card exactly
@@ -677,6 +592,11 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   defect from a catalogue of the ones this repo already shipped and fixed, and never edits. A new reviewer is a
   persona, its symlink in `.claude/agents/`, a line in `.claude/hooks/review-gate.conf` (the paths its Stop hook
   gate watches) and a routing bullet here.
+- DELEGATE implementation in a subsystem to its owner persona from `.agents/personas/` when its routing bullet
+  says so (today `bluetooth-owner`). An owner writes and tests code inside its scope, never commits, and reports
+  what its subsystem's reviewer then checks — the reviewer is never the agent that wrote the change. A new owner is
+  a persona, its symlink in `.claude/agents/`, a `.agents/context/<subsystem>.md` its reviewer reads too (the
+  subsystem's routing, moved out of this file) and one routing bullet here.
 - ADD a durable decision with `python3 scripts/adr.py new "<title>" --topics a,b`, write the body it
   scaffolds, then `python3 scripts/adr.py index`. Never hand-edit `.agents/memory/decisions.md` (generated)
   and never pick an ADR number: ids are minted `YYYY-MM.suffix` so parallel worktrees can't collide, while
