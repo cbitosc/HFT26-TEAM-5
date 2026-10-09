@@ -100,6 +100,9 @@ internal class WebRtcCallMedia(
     }
 }
 
+/** The route's trailing mark for a pair on the call's Wi-Fi Direct group: "host/host/wifi-direct" (§3.10). */
+internal const val ROUTE_DIRECT = "wifi-direct"
+
 private class WebRtcSession(
     factory: PeerConnectionFactory,
     servers: List<TurnServer>,
@@ -286,7 +289,12 @@ private class WebRtcSession(
     /** One stats report, read: the first call's counters are the bitrates' baseline, so those come on the second. */
     suspend fun stats(): CallStats? {
         val report = report() ?: return null
-        return statsReader.read(report, wifiDirect = selected?.endsWith("/$ROUTE_DIRECT") == true)
+        val prefer =
+            synchronized(lock) { config.networkPreference }
+                .takeIf { it != PeerConnection.AdapterType.UNKNOWN }
+                ?.name
+                ?.lowercase()
+        return statsReader.read(report, wifiDirect = selected?.endsWith("/$ROUTE_DIRECT") == true).copy(prefer = prefer)
     }
 
     /** One raw stats report, or null once closed or after [STATS_MS]. */
@@ -449,7 +457,6 @@ private class WebRtcSession(
         const val FIRST_CANDIDATE_DIRECT_MS = 1_000L
         const val DIRECT_DEBOUNCE_MS = 250L
         const val BACKUP_PING_MS = 5_000
-        const val ROUTE_DIRECT = "wifi-direct"
         const val GATHER_MS = 1_500L
         const val LATE_WINDOW_MS = 4_000L
         const val SDP_MS = 10_000L

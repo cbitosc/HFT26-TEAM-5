@@ -188,4 +188,74 @@ class CallStatsReaderTest {
         assertEquals("tcp 1, tls 1, udp 2", relaySummary(report))
         assertEquals("none", relaySummary(emptyList()))
     }
+
+    @Test
+    fun lossIsReadEachWayOverTheLastReadingAndTheRelaysServerByName() {
+        fun report(
+            atUs: Double,
+            received: Long,
+            lost: Long,
+        ) = listOf(
+            StatEntry("T", "transport", atUs, mapOf("selectedCandidatePairId" to "CP")),
+            StatEntry("CP", "candidate-pair", atUs, mapOf("localCandidateId" to "L", "responsesReceived" to 4L)),
+            StatEntry(
+                "L",
+                "local-candidate",
+                atUs,
+                mapOf(
+                    "candidateType" to "relay",
+                    "relayProtocol" to "udp",
+                    "url" to "turn:stun.lab.lax.spool.getknit.app:3478?transport=udp",
+                    "address" to "198.51.100.9",
+                ),
+            ),
+            StatEntry("IN", "inbound-rtp", atUs, mapOf("kind" to "audio", "packetsReceived" to received, "packetsLost" to lost)),
+            StatEntry("RIN", "remote-inbound-rtp", atUs, mapOf("kind" to "audio", "fractionLost" to 0.25)),
+        )
+        val reader = CallStatsReader()
+        val first = reader.read(report(0.0, 100, 0), wifiDirect = false)
+        assertNull(first.recentLossPercent)
+        assertNull(first.recentPacketsReceived)
+        assertEquals(25.0, first.sentLossPercent!!, 1e-9)
+        assertEquals("stun.lab.lax.spool.getknit.app", first.relayHost)
+        assertEquals("udp 1", first.relays)
+        assertEquals(1, first.pairs.size)
+        // 40 heard and 10 lost since the last reading is 20 % now, though the call as a whole lost 10 of 150.
+        val second = reader.read(report(1_000_000.0, 140, 10), wifiDirect = false)
+        assertEquals(20.0, second.recentLossPercent!!, 1e-9)
+        assertEquals(40L, second.recentPacketsReceived)
+        assertEquals(10.0 * 100 / 150, second.lossPercent!!, 1e-9)
+        // Nothing heard since: no loss figure, and the zero the quality judge reads as "not hearing".
+        val third = reader.read(report(2_000_000.0, 140, 10), wifiDirect = false)
+        assertNull(third.recentLossPercent)
+        assertEquals(0L, third.recentPacketsReceived)
+    }
+
+    @Test
+    fun aServerUrlGivesItsHostName() {
+        assertEquals("stun.lab.lax.spool.getknit.app", hostOf("turn:stun.lab.lax.spool.getknit.app:3478?transport=udp"))
+        assertEquals("lab.lax.spool.getknit.app", hostOf("turns:lab.lax.spool.getknit.app:5349?transport=tcp"))
+        assertEquals("turn.example", hostOf("turn:turn.example"))
+        assertEquals("[2001:db8::1]", hostOf("turn:[2001:db8::1]:3478"))
+        assertNull(hostOf(null))
+        assertNull(hostOf("nonsense"))
+    }
+
+    @Test
+    fun theDiagnosticsCardListsEveryAnsweredPairAndTheRelay() {
+        val stats =
+            CallStats(
+                relayHost = "stun.lab.lax.spool.getknit.app",
+                relays = "tcp 4, udp 5",
+                pairs =
+                    listOf(
+                        PairInfo(true, "relay", "srflx", "udp", "tcp", "wifi", 81.0),
+                        PairInfo(false, "srflx", "srflx", "udp", null, "cellular", null),
+                    ),
+                pendingPairs = 3,
+            )
+        assertEquals("★ relay/srflx udp/turn-tcp Wi-Fi 81 ms\n· srflx/srflx udp Cellular —\n3 unanswered", pairsText(stats))
+        assertEquals("stun.lab.lax.spool.getknit.app · gathered tcp 4, udp 5", relayOf(stats))
+        assertEquals("—", relayOf(CallStats()))
+    }
 }

@@ -51,20 +51,29 @@ internal fun CallDiagnostics(
             Row(Modifier.fillMaxWidth()) {
                 Metric("Round trip", ms(stats.rttMs), Modifier.weight(1f))
                 Metric("Jitter", ms(stats.jitterMs), Modifier.weight(1f))
-                Metric("Loss", percent(stats.lossPercent), Modifier.weight(1f))
+                Metric("Buffer", ms(stats.jitterBufferMs), Modifier.weight(1f))
             }
             Row(Modifier.fillMaxWidth()) {
                 Metric("↑ Send", kbps(stats.sendKbps), Modifier.weight(1f))
                 Metric("↓ Receive", kbps(stats.receiveKbps), Modifier.weight(1f))
-                Metric("Buffer", ms(stats.jitterBufferMs), Modifier.weight(1f))
+                Spacer(Modifier.weight(1f))
+            }
+            // Loss each way now, then over the whole call: the first two are what the screen's warning reads.
+            Row(Modifier.fillMaxWidth()) {
+                Metric("↑ Loss now", percent(stats.sentLossPercent), Modifier.weight(1f))
+                Metric("↓ Loss now", percent(stats.recentLossPercent), Modifier.weight(1f))
+                Metric("↓ Loss, call", percent(stats.lossPercent), Modifier.weight(1f))
             }
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Detail("Path", pathOf(stats))
+                Detail("Relay", relayOf(stats))
+                Detail("Prefer", stats.prefer?.replace('_', ' ') ?: NONE)
                 Detail("Codec", codecOf(stats))
                 Detail("DTLS", dtlsOf(stats))
                 Detail("SRTP", stats.srtpCipher ?: NONE)
                 Detail("ICE", "${stats.localCandidates} local · ${stats.remoteCandidates} remote candidates")
+                Detail("Pairs", pairsText(stats), lines = stats.pairs.size + 1)
             }
         }
     }
@@ -145,6 +154,7 @@ private fun Metric(
 private fun Detail(
     label: String,
     value: String,
+    lines: Int = 2,
 ) {
     Row(Modifier.clearAndSetSemantics { contentDescription = "$label: $value" }) {
         Text(
@@ -156,7 +166,7 @@ private fun Detail(
         Text(
             value,
             style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-            maxLines = 2,
+            maxLines = lines,
             overflow = TextOverflow.Ellipsis,
         )
     }
@@ -208,17 +218,46 @@ private fun decimal(value: Double): String =
 internal fun pathOf(stats: CallStats): String {
     val local = stats.localType ?: return NONE
     val turn = stats.relayProtocol?.let { " (TURN/${it.uppercase(Locale.ROOT)})" }.orEmpty()
-    val network =
-        when {
-            stats.wifiDirect -> "Wi-Fi Direct"
-            stats.networkType == "wifi" -> "Wi-Fi"
-            stats.networkType == "cellular" -> "Cellular"
-            stats.networkType == "ethernet" -> "Ethernet"
-            stats.networkType == "vpn" -> "VPN"
-            else -> stats.networkType
-        }
-    return listOfNotNull("$local$turn ↔ ${stats.remoteType ?: "?"}", stats.protocol?.uppercase(Locale.ROOT), network)
+    return listOfNotNull("$local$turn ↔ ${stats.remoteType ?: "?"}", stats.protocol?.uppercase(Locale.ROOT), networkOf(stats))
         .joinToString(" · ")
+}
+
+/** The selected pair's network on this phone, as people say it: "Wi-Fi", "Cellular", "Wi-Fi Direct"; null unknown. */
+internal fun networkOf(stats: CallStats): String? =
+    when {
+        stats.wifiDirect -> "Wi-Fi Direct"
+        else -> stats.networkType?.let(::networkName)
+    }
+
+private fun networkName(type: String): String =
+    when (type) {
+        "wifi" -> "Wi-Fi"
+        "cellular" -> "Cellular"
+        "ethernet" -> "Ethernet"
+        "vpn" -> "VPN"
+        else -> type
+    }
+
+/** "stun.lab.lax.spool.getknit.app · tcp 4, tls 2, udp 5": the selected relay's server, then every relay gathered. */
+internal fun relayOf(stats: CallStats): String =
+    listOfNotNull(stats.relayHost, stats.relays?.let { "gathered $it" }).joinToString(" · ").ifEmpty { NONE }
+
+/**
+ * One line per answered pair, fastest first, the selected one starred: "★ relay/srflx udp/turn-tcp Wi-Fi 98 ms",
+ * then how many are still unanswered.
+ */
+internal fun pairsText(stats: CallStats): String {
+    val lines =
+        stats.pairs.map { pair ->
+            listOfNotNull(
+                if (pair.selected) "★" else "·",
+                "${pair.localType ?: "?"}/${pair.remoteType ?: "?"}",
+                (pair.protocol ?: "?") + pair.relayProtocol?.let { "/turn-$it" }.orEmpty(),
+                pair.networkType?.let(::networkName),
+                ms(pair.rttMs),
+            ).joinToString(" ")
+        }
+    return (lines + "${stats.pendingPairs} unanswered").joinToString("\n")
 }
 
 /** "Opus · 48 kHz · 2 ch · FEC". */

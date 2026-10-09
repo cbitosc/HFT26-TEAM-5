@@ -48,6 +48,8 @@ import androidx.compose.material.icons.outlined.Hub
 import androidx.compose.material.icons.outlined.Insights
 import androidx.compose.material.icons.outlined.LinkOff
 import androidx.compose.material.icons.outlined.Sensors
+import androidx.compose.material.icons.outlined.SignalCellularAlt1Bar
+import androidx.compose.material.icons.outlined.SignalCellularAlt2Bar
 import androidx.compose.material.icons.outlined.SpeakerPhone
 import androidx.compose.material.icons.outlined.WifiTethering
 import androidx.compose.material3.FilledIconButton
@@ -77,9 +79,11 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -183,10 +187,14 @@ class CallActivity :
         val mediaUp = state?.walkie != true && (state?.phase == CallPhase.Connecting || state?.phase == CallPhase.Connected)
         var route by remember { mutableStateOf<String?>(null) }
         var stats by remember { mutableStateOf<CallStats?>(null) }
+        // One judge per call: its hysteresis spans the call's readings, never two calls'.
+        val judge = remember(state?.id) { QualityJudge() }
+        var quality by remember(state?.id) { mutableStateOf<Quality?>(null) }
         LaunchedEffect(mediaUp) {
             while (mediaUp) {
                 route = calls.route()
                 stats = media.stats()
+                quality = judge.next(stats)
                 delay(POLL_MS)
             }
         }
@@ -207,6 +215,7 @@ class CallActivity :
             avatarHash = avatarHash,
             route = route.takeIf { state?.walkie != true },
             stats = stats.takeIf { state?.walkie != true },
+            quality = quality.takeIf { state?.walkie != true },
             onAnswer = { state?.id?.let(::answer) },
             onDecline = { state?.id?.let { id -> lifecycleScope.launch { calls.decline(id) } } },
             onHangUp = { lifecycleScope.launch { calls.hangUp() } },
@@ -281,6 +290,7 @@ private val ToggleSize = 64.dp
 private const val RING_MS = 1_800
 private const val RING_ALPHA = 0.28f
 private const val ENDED_ALPHA = 0.5f
+private const val MOVED_NOTE_MS = 4_000L
 private val RINGING = setOf(CallPhase.Calling, CallPhase.Ringing, CallPhase.Alerting, CallPhase.Connecting)
 private val MEDIA_UP = setOf(CallPhase.Connecting, CallPhase.Connected)
 
@@ -308,6 +318,7 @@ internal fun CallScreen(
     onTalkSend: () -> Unit = {},
     onTalkCancel: () -> Unit = {},
     walkieStats: WalkieStats? = null,
+    quality: Quality? = null,
 ) {
     val phase = state?.phase
     var showStats by rememberSaveable { mutableStateOf(true) }
@@ -323,14 +334,16 @@ internal fun CallScreen(
         BoxWithConstraints(Modifier.fillMaxSize().safeDrawingPadding().padding(horizontal = 24.dp, vertical = 16.dp)) {
             // With the card up, a phone too short for the stacked face puts it beside the name instead.
             val inline = diagnostics != null && maxHeight < StackedMinHeight
+            val view = route?.let { routeView(it, stats) }
+            val note = callNote(state, name, quality, view)
             Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
                 Header(stats = if (phase in MEDIA_UP) showStats else null, onStats = { showStats = it })
                 if (inline) {
                     Spacer(Modifier.height(8.dp))
-                    InlineFace(state, name, avatarHash, route, clock)
+                    InlineFace(state, name, avatarHash, view, note, clock)
                 } else {
                     if (diagnostics != null) Spacer(Modifier.height(8.dp)) else Spacer(Modifier.weight(0.6f))
-                    StackedFace(state, name, avatarHash, route, compact = diagnostics != null, clock)
+                    StackedFace(state, name, avatarHash, view, note, compact = diagnostics != null, clock)
                 }
                 if (diagnostics != null) {
                     // The room between the face and the controls; a short screen scrolls the card rather than clip it.
@@ -356,7 +369,8 @@ private fun StackedFace(
     state: CallState?,
     name: String,
     avatarHash: String?,
-    route: String?,
+    route: RouteView?,
+    note: CallNote?,
     compact: Boolean,
     clock: () -> Long,
 ) {
@@ -410,6 +424,10 @@ private fun StackedFace(
                 RoutePill(route)
             }
         }
+        // The note's own line under the pill, held while connected so a warning coming and going moves nothing.
+        if (phase == CallPhase.Connected && !state.walkie) {
+            Box(Modifier.heightIn(min = 24.dp), contentAlignment = Alignment.Center) { note?.let { NoteLine(it) } }
+        }
     }
 }
 
@@ -419,7 +437,8 @@ private fun InlineFace(
     state: CallState?,
     name: String,
     avatarHash: String?,
-    route: String?,
+    route: RouteView?,
+    note: CallNote?,
     clock: () -> Long,
 ) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -443,6 +462,7 @@ private fun InlineFace(
             } else if (state?.phase == CallPhase.Connected && route != null) {
                 RoutePill(route)
             }
+            note?.let { NoteLine(it) }
         }
     }
 }
@@ -749,23 +769,36 @@ private fun ButtonLabel(label: String) {
     )
 }
 
+/** The route pill's content: which way the audio goes, and over which of this phone's networks. */
+internal data class RouteView(
+    val label: String,
+    val kind: RouteKind,
+)
+
+internal enum class RouteKind { WIFI_DIRECT, RELAYED, DIRECT }
+
 /**
- * Which way the audio goes, from the selected pair's candidate types ("relay/srflx"): through TURN or not — or over
- * the call's own Wi-Fi Direct group, which the media marks with a trailing "/wifi-direct" (§3.10).
+ * Which way the audio goes, from the selected pair's candidate types ("relay/srflx") — through TURN or not, or over the
+ * call's own Wi-Fi Direct group, which the media marks with a trailing "/wifi-direct" (§3.10) — and the network this
+ * phone sends it over, from [stats]: "Relayed · Cellular", "Direct · Wi-Fi".
  */
-@Composable
-private fun RoutePill(route: String) {
+internal fun routeView(
+    route: String,
+    stats: CallStats?,
+): RouteView {
     val parts = route.split('/')
-    val wifiDirect = "wifi-direct" in parts
-    val types = parts - "wifi-direct"
-    val relayed = "relay" in types
-    val label =
-        when {
-            wifiDirect -> "Wi-Fi Direct"
-            relayed -> "Relayed"
-            types.all { it == "host" } -> "Direct · same network"
-            else -> "Direct"
-        }
+    val types = parts - ROUTE_DIRECT
+    val network = stats?.let(::networkOf)
+    return when {
+        ROUTE_DIRECT in parts -> RouteView("Wi-Fi Direct", RouteKind.WIFI_DIRECT)
+        "relay" in types -> RouteView(listOfNotNull("Relayed", network).joinToString(" · "), RouteKind.RELAYED)
+        types.all { it == "host" } -> RouteView("Direct · same network", RouteKind.DIRECT)
+        else -> RouteView(listOfNotNull("Direct", network).joinToString(" · "), RouteKind.DIRECT)
+    }
+}
+
+@Composable
+private fun RoutePill(route: RouteView) {
     Surface(shape = CircleShape, color = MaterialTheme.colorScheme.secondaryContainer) {
         Row(
             Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
@@ -773,16 +806,83 @@ private fun RoutePill(route: String) {
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Icon(
-                when {
-                    wifiDirect -> Icons.Outlined.WifiTethering
-                    relayed -> Icons.Outlined.Cloud
-                    else -> Icons.Outlined.Sensors
+                when (route.kind) {
+                    RouteKind.WIFI_DIRECT -> Icons.Outlined.WifiTethering
+                    RouteKind.RELAYED -> Icons.Outlined.Cloud
+                    RouteKind.DIRECT -> Icons.Outlined.Sensors
                 },
                 contentDescription = null,
                 modifier = Modifier.size(16.dp),
             )
-            Text(label, style = MaterialTheme.typography.labelLarge)
+            Text(route.label, style = MaterialTheme.typography.labelLarge)
         }
+    }
+}
+
+/** The line under the route: a quality warning, or for a few seconds after the route moves, where it moved to. */
+internal data class CallNote(
+    val text: String,
+    val level: QualityLevel,
+)
+
+/**
+ * The note for now: a [quality] warning wins; else, for [MOVED_NOTE_MS] after the route's label changes mid-call, the
+ * new route ("Switched to Relayed · Cellular"). The first route a call settles on is not a move.
+ */
+@Composable
+private fun callNote(
+    state: CallState?,
+    name: String,
+    quality: Quality?,
+    route: RouteView?,
+): CallNote? {
+    var settled by remember(state?.id) { mutableStateOf<String?>(null) }
+    var moved by remember(state?.id) { mutableStateOf<String?>(null) }
+    val label = route?.label
+    LaunchedEffect(state?.id, label) {
+        if (label == null) return@LaunchedEffect
+        val before = settled
+        settled = label
+        if (before != null && before != label) {
+            moved = label
+            delay(MOVED_NOTE_MS)
+            moved = null
+        }
+    }
+    if (state?.phase != CallPhase.Connected || state.walkie) return null
+    quality?.issue?.takeIf { quality.level != QualityLevel.GOOD }?.let { return CallNote(issueText(it, name), quality.level) }
+    return moved?.let { CallNote("Switched to $it", QualityLevel.GOOD) }
+}
+
+/** How the screen words an issue: a direction ("breaking up for Ada"), never whose network is to blame. */
+internal fun issueText(
+    issue: QualityIssue,
+    name: String,
+): String =
+    when (issue) {
+        QualityIssue.NOT_HEARING -> "Can't hear $name right now"
+        QualityIssue.HEARING_BREAKS -> "$name's audio is breaking up"
+        QualityIssue.HEARD_BREAKS -> "Your audio is breaking up for $name"
+        QualityIssue.BOTH_BREAK -> "Poor connection both ways"
+        QualityIssue.DELAY -> "Long delay on this connection"
+    }
+
+/** The note, with bars for a warning; read out by TalkBack as it changes. */
+@Composable
+private fun NoteLine(note: CallNote) {
+    val color =
+        if (note.level == QualityLevel.POOR) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
+    Row(
+        Modifier.semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite },
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        when (note.level) {
+            QualityLevel.GOOD -> null
+            QualityLevel.FAIR -> Icons.Outlined.SignalCellularAlt2Bar
+            QualityLevel.POOR -> Icons.Outlined.SignalCellularAlt1Bar
+        }?.let { Icon(it, contentDescription = null, tint = color, modifier = Modifier.size(16.dp)) }
+        Text(note.text, style = MaterialTheme.typography.bodyMedium, color = color, maxLines = 2, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -842,6 +942,7 @@ private fun PreviewCall(
     talk: Talk = Talk.Idle(),
     link: TalkLink? = null,
     walkieStats: WalkieStats? = null,
+    quality: Quality? = null,
 ) = KnitPreview {
     CallScreen(
         state =
@@ -871,6 +972,7 @@ private fun PreviewCall(
         talk = talk,
         link = link,
         walkieStats = walkieStats,
+        quality = quality,
     )
 }
 
@@ -890,6 +992,58 @@ fun CallScreenRingingPreview() = PreviewCall(CallPhase.Ringing)
 @Preview(name = "Connected, dark", widthDp = 411, heightDp = 891, uiMode = Configuration.UI_MODE_NIGHT_YES)
 @Composable
 fun CallScreenConnectedPreview() = PreviewCall(CallPhase.Connected, route = "relay/srflx", muted = true)
+
+@Preview(name = "Connected, breaking up", widthDp = 411, heightDp = 891)
+@Preview(name = "Connected, breaking up, dark", widthDp = 411, heightDp = 891, uiMode = Configuration.UI_MODE_NIGHT_YES)
+@Composable
+fun CallScreenPoorPreview() =
+    PreviewCall(
+        CallPhase.Connected,
+        route = "srflx/srflx",
+        stats = CallStats(localType = "srflx", remoteType = "srflx", networkType = "cellular"),
+        quality = Quality(QualityLevel.POOR, QualityIssue.HEARING_BREAKS),
+    )
+
+@Preview(name = "Connected, relayed, diagnostics", widthDp = 411, heightDp = 891)
+@Composable
+fun CallScreenRelayDiagnosticsPreview() =
+    PreviewCall(
+        CallPhase.Connected,
+        route = "relay/srflx",
+        quality = Quality(QualityLevel.FAIR, QualityIssue.HEARD_BREAKS),
+        stats =
+            CallStats(
+                localType = "relay",
+                remoteType = "srflx",
+                protocol = "udp",
+                relayProtocol = "udp",
+                networkType = "wifi",
+                codec = "opus",
+                clockRate = 48_000,
+                channels = 2,
+                fec = true,
+                rttMs = 81.0,
+                jitterMs = 6.4,
+                lossPercent = 0.8,
+                recentLossPercent = 0.0,
+                sentLossPercent = 4.3,
+                sendKbps = 33.1,
+                receiveKbps = 32.4,
+                jitterBufferMs = 62.0,
+                relayHost = "stun.lab.lax.spool.getknit.app",
+                relays = "tcp 4, tls 2, udp 5",
+                prefer = "wifi",
+                localCandidates = 14,
+                remoteCandidates = 6,
+                pairs =
+                    listOf(
+                        PairInfo(true, "relay", "srflx", "udp", "udp", "wifi", 81.0),
+                        PairInfo(false, "srflx", "srflx", "udp", null, "wifi", 96.0),
+                        PairInfo(false, "srflx", "srflx", "udp", null, "cellular", 171.0),
+                    ),
+                pendingPairs = 9,
+            ),
+    )
 
 @Preview(name = "Connected, diagnostics", widthDp = 411, heightDp = 891)
 @Preview(name = "Connected, diagnostics, small", widthDp = 360, heightDp = 640)
