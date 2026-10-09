@@ -63,7 +63,8 @@ LINE_REF = re.compile(r"^([\w./-]+\.(?:kt|kts|py|sh|xml|md)):(\d+)(?:-\d+)?$")
 ADR_ID = re.compile(r"\b(20\d\d-\d\d)\.([a-z0-9]{4})\b|\bADRs? (\d{3})\b")
 ALLOW = re.compile(r"<!--\s*doc-lint:\s*allow\s+(\S+)\s+(?:—|--?)\s*\S[^>]*-->")
 RECORD = re.compile(r"<!--\s*doc-lint:\s*record\s+(?:—|--?)\s*\S[^>]*-->")
-OTHER_REPO = re.compile(r"knit-ios[^.]{0,80}$")
+# A sibling repository named just before the id (`knit-ios`, knit-spool, knit-pair, …): its decision log, not ours.
+OTHER_REPO = re.compile(r"\bknit-(?!next\b)[a-z]+\b[^.]{0,80}$")
 FILE_EXT = re.compile(r"kt|kts|py|sh|md|json|xml|yml|yaml|toml|txt|png|tflite")
 FENCE = re.compile(r"^\s*(```|~~~)")
 INLINE_CODE = re.compile(r"(`+)(.+?)\1")
@@ -286,7 +287,7 @@ def lint_text(path: str, text: str, idx: Index, adr_only: bool = False) -> list[
         for m in ADR_ID.finditer(line):
             adr = m.group(3) or f"{m.group(1)}.{m.group(2)}"
             before = (lines[n - 2] if n > 1 else "") + " " + line[: m.start()]
-            if OTHER_REPO.search(before):  # an id in the iOS port's own decision log
+            if OTHER_REPO.search(before):  # an id in a sibling repository's decision log
                 continue
             if adr not in idx.adrs and adr not in allowed:
                 findings.append(Finding(path, n, "missing-adr", f"ADR {adr} has no file in {ADR_DIR}/"))

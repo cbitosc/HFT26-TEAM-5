@@ -131,6 +131,10 @@ class MissingAdr(unittest.TestCase):
         self.assertEqual(rules("companion change (`knit-ios`, ADR 2026-09.zzzz there)"), [])
         self.assertEqual(rules("the iOS change (knit-ios\nADR 2026-09.zzzz) takes it"), [])
 
+    def test_any_sibling_repos_id_is_not_ours(self):
+        self.assertEqual(rules("a subset of knit-spool ADR 2026-10.zzzz, and `knit-pair` ADR 2026-10.yyyy"), [])
+        self.assertEqual(rules("knit-next ADR 2026-10.zzzz"), ["missing-adr"])
+
     def test_a_date_is_not_an_id(self):
         self.assertEqual(rules("since 2026-10-09"), [])
 
