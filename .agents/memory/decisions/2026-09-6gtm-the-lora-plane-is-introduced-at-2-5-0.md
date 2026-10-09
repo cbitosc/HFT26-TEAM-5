@@ -56,7 +56,10 @@ against `bridgeBudgetMs`, `SERVE_CAP_PER_HOUR` on backfill), and a spent bucket 
 flooding. Board setup writes Knit into a *secondary* channel and sets `rebroadcast_mode = LOCAL_ONLY`,
 so a Knit-provisioned board does not repeat other people's traffic. And Knit's own packets go out with
 `hop_limit = 0`, so stock nodes never relay them — the harm a bad build can do stops at its own radio
-horizon rather than propagating across a mesh. What a failure in the owed trials degrades to is "the
+horizon rather than propagating across a mesh. (Correction, 2026-10-09: this bound was already gone when it
+was written. ec251638 set `LoraMeshTransport.HOP_LIMIT = 3` on 2026-09-04, because packets with no hops left
+defeated ADR 045's reach. Stock nodes do relay Knit packets, one relaying board doubles a packet's air, and
+`LoraAirtime` does not book that cost. The other two bounds stand.) What a failure in the owed trials degrades to is "the
 bridge does not backfill" or "the plane throttles", never a lost message: LoRa is a `MeshTransport`
 child under `CompositeMeshTransport`, additive to Wi-Fi Aware and BLE custody, never a replacement.
 

@@ -28,7 +28,7 @@ init that announces its session, and the engine read it as evidence about the er
   2001, 2003 and 2005 on `SessionLabTest.aForcedResetHealsAndTheOtherSidesUnackedDmsAreResealed`.
 
 **The rule.** Three things an open records are claims about the current era: the DH-base adoption, the
-`highestPeAcked` raise, and an initiator's confirmation. They are recorded only when `openNewEpoch` derives
+`highestPeAcked` raise, and an initiator's confirmation. They are recorded only when `openNewEpoch` (now `RatchetEngine.Ladder.openFresh`) derives
 a fresh epoch under the resolved session's active root. A frame opened under any other candidate (a kept
 `prevRoot`, a race's other root, a late race loser's root) opens, delivers and stores its chain, and
 records none of them. Neither do the live-chain and skipped-key rungs. Every root change on our side purges

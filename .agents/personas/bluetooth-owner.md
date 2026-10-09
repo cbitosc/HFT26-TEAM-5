@@ -11,7 +11,7 @@ description: >-
   its own work: the caller runs bluetooth-reviewer afterwards.
 tools: Bash, Read, Edit, Write, Grep, Glob
 model: claude-opus-5-5
-effort: high
+effort: medium
 ---
 
 # Bluetooth owner

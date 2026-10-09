@@ -262,8 +262,9 @@ doc). **Don't start a deferred item without explicit direction.**
   Visible is not enabled: `loraEnabled` still defaults false, and the plane is inert until the user pairs
   a Meshtastic board and sets it up. **The two device trials that gated the flip — ADR 044's four-device
   two-pocket bridge run and ADR 054's airtime three-phone run — were not run, and now ride as shipped
-  risk** (ADR 2026-09.6gtm records what bounds it: airtime budgets, `LOCAL_ONLY` rebroadcast, `hop_limit`
-  0, and a plane that is additive to custody).
+  risk** (ADR 2026-09.6gtm records what bounds it: airtime budgets, `LOCAL_ONLY` rebroadcast, and a plane
+  that is additive to custody; its third bound, `hop_limit` 0, has not held since `LoraMeshTransport.HOP_LIMIT = 3`
+  landed in ec251638 on 2026-09-04 — a relaying board doubles a packet's air, and that cost is still unbudgeted).
   MVP shipped: `mesh/lora/` (pure, JVM-tested end-to-end over a fake board/air) + `mesh/bluetooth/meshtastic/`
   (the GATT client, device-verified only). Carries the Nearby-room broadcast subset (chat, reaction, ✓✓ tick,
   profile) and, since ADR 039 (2026-08-24), **sealed 1:1 DMs** — the whole DM form, receipts/reactions/ctl

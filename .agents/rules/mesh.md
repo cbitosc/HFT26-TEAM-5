@@ -217,7 +217,7 @@ free). Two invariants that are easy to break:
   its SENDING is `fileInFlightTo` or a *peek* at the memo, and its reads run link → `storing` → store. Neighbours
   that cannot answer keep ADR 2026-10.f7gg's round, never made one-by-one; a grace counts from the first look that
   finds the holder no longer streaming to us. Only a *dead* cycle backs off (every neighbour asked said NONE, nobody
-  asked blind): one that asked anyone blind keeps f7gg's pace, so the release build (asking off) never backs off. The
+  asked blind): one that asked anyone blind keeps f7gg's pace, as does a build with `-PblobQuery=false`. The
   puller's ask opens a due cycle before it marks the puller. A state the reader does not know is never HAVE —
   `PARTIAL` is reserved, and its serve will need a request-side gate (`BlobReqContent.end`), never the bit alone.
   Both types are unsigned and point-to-point: `FrameType.isUnsignedPointToPoint` keeps them out of presence

@@ -37,7 +37,8 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
 - **When touching `mesh/`, `protocol/`, or `data/`:** obey `.agents/rules/mesh.md`, then READ the
   relevant reference — `.agents/context/mesh-transport.md` (radios / NAN / BLE),
   `.agents/context/wire-format.md` (CBOR wire), `.agents/context/store-and-forward.md` (custody /
-  convergence), `.agents/context/e2e-encryption.md` (crypto). If a change can only be made by *breaking*
+  convergence), `.agents/context/e2e-encryption.md` (crypto; its symbol → ADR routing is
+  `.agents/context/crypto.md`). If a change can only be made by *breaking*
   the wire, don't — park it in `docs/NEXT_WIRE_BREAK.md` (the staging list, so a future break carries them
   all at once) and find the additive route per `docs/WIRE_COMPAT.md`.
 - **When touching `vectors/`, `GoldenVectorTest`, `KeyedVectorTest` or `IosEmittedVectorTest`, or when a
@@ -56,23 +57,17 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   `.agents/personas/bluetooth-owner.md` with a self-contained brief — the goal, the issue or ADR, whether a wire,
   lab or cross-platform change is in scope — then run `bluetooth-reviewer` on what it wrote (below), apply the
   findings and relay the device trial both name.
-- **When touching `mesh/lora/` or `mesh/bluetooth/meshtastic/` (the LoRa/Meshtastic bridge):** READ
-  `.agents/context/lora-bridge.md` — a Meshtastic board over BLE GATT extends the **Nearby room and 1:1
-  DMs** over LoRa as a fast-plane-only `MeshTransport` child, shipped visible since 2.5.0 behind
-  `BuildConfig.LORA_PLANE` and off until the user pairs a board (ADR 038 + 039, introduced by ADR
-  2026-09.6gtm — it is no longer a gate that keeps anything out of shipped builds). `mesh/lora/` is
-  pure/JVM-tested; the only `android.bluetooth.*` importer is `mesh/bluetooth/meshtastic/MeshtasticGatt`.
-  **Before touching `noteReachable`, `airedByPocket` / `boardOwners` / `heardVia`, `fastSend`'s `targetedKey`, or
-  `AckSync.backOff`:** READ ADR 2026-09.6gk8 — a co-pocket board's airing is not LoRa reach (but a far
-  gateway's still is, ADR 2026-09.wkbk), and a cleartext owed tick backs off like the sealed one.
-  **Before touching `DmAutoReplyPolicy`, `Destination.Reply`, `OutboundFrame.to`, or `MeshtasticLink.send`'s
-  `to`:** READ ADR 2026-09.4n5p — a Meshtastic DM to a set-up board is answered once with a fixed unicast
-  (once per sender per day, once per 30 s for anybody, the room's air share, never from a stock or a
-  dedicated-slot board), and that reply is the only unicast the plane sends.
-  **Before touching `MeshtasticSession.connectLoop`, `BoardDialPolicy`, `MeshtasticGatt.dial`'s modes, or what the
-  pacer does while the link is down:** READ ADR 2026-09.hp88 — three direct dials, then the controller's
-  `autoConnect` with an hourly direct net and no arbiter while waiting; a refusal backs off, only a spent window
-  doesn't; the pacer parks on `link.state`, never its 1 s tick.
+- **When touching the LoRa plane** — `mesh/lora/` or `mesh/bluetooth/meshtastic/`, a Meshtastic board over BLE GATT
+  that extends the Nearby room and 1:1 DMs over LoRa as a fast-plane-only `MeshTransport` child (visible since 2.5.0
+  behind `BuildConfig.LORA_PLANE`, off until the user pairs a board): READ `.agents/context/lora.md`, the symbol → ADR
+  routing for the plane (frame policy and codec, airtime and pacing, send-time gates, reach, the bridge, persisted
+  limiters, board setup and dial, the Meshtastic room and its DM auto-reply, the plane's face), and
+  `.agents/context/lora-bridge.md` for the mechanism. `grep` the routing for every symbol you touch. `mesh/lora/` is
+  pure/JVM-tested; the only `android.bluetooth.*` importer is `mesh/bluetooth/meshtastic/MeshtasticGatt`. For
+  implementation work there, DELEGATE (Claude Code: spawn) the `lora-owner` persona in `.agents/personas/lora-owner.md`
+  with a self-contained brief — the goal, the issue or ADR, whether a wire, paired-profile or lab change is in scope —
+  then run `lora-reviewer` on what it wrote (and `bluetooth-reviewer` too when `meshtastic/` changed), apply the
+  findings and relay the trial both name.
 - **When touching `linkpreview/`, `net/`, `mesh/protocol/LinkPreviewBlob`, or anything that opens an
   Internet socket outside the spool plane:** READ ADR 2026-09.n752 (and 2026-09.7x8k: a send holds up to 5 s
   for the card its link is fetching, or the share sheet never carries one; a LoRa thread takes a card exactly
@@ -144,31 +139,15 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   re-arm keeps a screen-on node aggressive on purpose (a 30 s tick leaves ICM lit) — so don't flip one radio's
   interactive case without the other's device trial. Charging never relaxes. Tests: `PowerPolicyTest`,
   `NanLonelyPolicyTest`.
-- **When touching the responder's `onUnavailable`, `refileResponder`, `NanResponderPolicy`, or what refunds
-  `responderRefusals` / `responderCycles` in `WifiAwareTransport`:** READ ADR 2026-09.bgk3. A verdict with a
-  link, handshake or accept of ours live is the documented knock refusal — re-filed after the floor, never
-  counted; a verdict with the interface free is about the request — counted, backed off, and at five in a row
-  given up for a session cycle, three per episode, refunded only by the responder's `onAvailable` (never a
-  fresh session or the availability edge: the cycle produces both). The tests are in `NanResponderPolicyTest`.
-- **When touching `NanInitiatorPolicy`, the `TRANSPORT_WIFI` watch in `WifiAwareTransport` (`onStaLost` /
-  `onStaAvailable`), `initiatorHeld` / `releaseInitiatorHold`, `NanInitiatorJournal`, or what `digestSyncWanted`
-  / `bulkSyncWanted` gate on:** READ ADR 2026-09.m8kc. A Wi-Fi blip (lost → available in 15 s) within two minutes
-  *after* an unlinked initiate of ours is a strike; three hold the initiator role — the responder, discovery,
-  cues and the fast plane keep running — refunded only by an initiator link, the user's Try again, or the
-  build+ROM stamp, never by `stop`, `heal`, a session cycle or the Aware edge; one probe initiate a day on the
-  wall clock. The hold lives in those two gates so the wedge watchdog never counts a held peer as owed (Tier-2 is
-  a process kill and the hold is journaled): never read `reconcileWanted` / `bulkWanted.isWanted` around them.
-  Not a `NanConnectPolicy` streak. Tests: `NanInitiatorPolicyTest`.
-- **When touching `NanMessagePlanePolicy`, `checkMessagePlane`, `sendCoord` / `msgInFlight`, the
-  `onMessageSendSucceeded` / `onMessageSendFailed` callbacks, or `…debug.NANMSG`:** READ ADR 2026-09.jjhg. The
-  coordination plane (cues + fast path) freezes after a burst while discovery keeps working — a blocked framework
-  send queue, or a firmware that fails every follow-up — and the one cure is a NAN restart, which our session
-  cycle is because Knit is the sole Aware client. The watchdog reads acks, not health: a send unanswered for a
-  watchdog tick with no ack since, or two heartbeats of failures with zero acks *and a fresh sighting*, cycles the
-  session under Tier 1's budget (shared `lastReattachAt`, 3 per episode, never with a live link); the episode ends
-  only on an ack after it began — never on the cycle or on its own NAN-down beat (that refund is the 9dnk
-  livelock). A send on a closed session gets no callback ever, so it is never recorded as in flight. Tests:
-  `NanMessagePlanePolicyTest`; on hardware the soak's `nan-outbound-dead` rule.
+- **When touching the Wi-Fi Aware mesh transport** — `mesh/wifiaware/` (`WifiAwareTransport`, the `Nan*Policy`
+  classes), `data/settings/NanAttachJournal` / `NanInitiatorJournal`, or the transport's attach, responder, initiator,
+  watchdog, message plane, cues or ICM: READ `.agents/context/wifi-aware.md`, the symbol → ADR routing for the plane
+  (two-plane design and the accept-any responder, the 0-NDP ghost, the attach leak budget, the wedge watchdog's tiers,
+  responder re-files, the initiator hold, the message-plane watchdog, hop attribution). `grep` it for every symbol you
+  touch. For implementation work there, DELEGATE (Claude Code: spawn) the `wifi-aware-owner` persona in
+  `.agents/personas/wifi-aware-owner.md` with a self-contained brief — the goal, the issue or ADR, whether a wire,
+  lab or hard-cut (`SERVICE_NAME`, `PMK`, SSI) change is in scope — then run `wifi-aware-reviewer` on what it wrote,
+  apply the findings and relay the device trial both name. Never toggle Wi-Fi on a lab phone to test it.
 - **When touching `moderation/MlTextModerator`, `NsfwImageModerator`, `ModelLease`, `TfLiteModels`,
   `ModelLoadGuard`, the `…debug.MODEL` bridge, or `noCompress` in `app/build.gradle.kts`:** READ ADR 037 and
   ADR 2026-09.cq9z. Each interpreter is mmapped from the APK's **Stored** `.tflite` entry (`noCompress "tflite"`
@@ -305,65 +284,18 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   is a live-link send and is never worded "delivered". "Nearby" and "met" both derive from
   `MeshController.neighbors` (ADR 2026-09.2ajk) — don't add a second gate. Counters flush on the 60 s tick,
   never per frame, and nothing here leaves the phone.
-- **When touching `mesh/BlobExchange`, `FramedLink`'s `rxKey` / pending-file count, `MeshTransport.arrivingFiles`
-  / `fileInFlightTo`, or what re-asks for a blob (`rewantMissingBlobs`, the tick's `reask`):** READ
-  ADR 2026-09.4tx5 (and 2026-09.ptv8 for the database re-arm). A blob is served only to a fresh ask — nothing
-  is pushed to a peer that did not just ask, there is no wanter set — and "is it on the way" is a read of the
-  link (and of the store, `BlobStore.storing`: a blob is screened before it is held, #109), never a memo with a
-  TTL: the receiver stays quiet for a hash whose header is in (and, past its end, until the consumer has taken it
-  with `MeshTransport.fileTaken`; every read runs link, then `storing`, then held, #138), the holder refuses a
-  re-ask for a key still queued or streaming to that peer. The Bluetooth stack's buffer sits between those reads
-  (ADR 2026-10.nxfb, #121): a peer asked before is not asked again while its file is streaming in
-  (`fileArrivingFrom`), and a file the link fed in full stays in flight while the link goes on feeding that peer. The
-  lab pins it with `LabTransport.holdFiles` and the `files` recorder (one copy per (hash, link)). **Before touching
-  `BlobExchange.want`'s hints, its round (`nextAsk`, `FIRST_ASK_GRACE_MS`, `ROUND_MS`) or
-  `MeshTransport.bulkRouteTo`:** READ ADR 2026-10.f7gg — a round asks the likeliest holder alone (author, then Wi-Fi
-  Aware linked, then reachable, then the source hop) and widens to everyone only after its grace, because every
-  holder serves a fresh ask; there is no negative answer on the wire, so never make it one-at-a-time without one.
-  A link-up clears its newcomer's asks (`BlobExchange.linked`), since an ask can die with a link.
-  Lab: `BlobFirstAskLabTest`. **Before touching the holder query — `BlobExchange.onHaveQuery` / `onHaveAnswer` /
-  `decide` / `wantAll`, `FrameType.BLOB_HAVE` / `BLOB_HAS` / `isUnsignedPointToPoint`, `BlobHaveContent` /
-  `BlobHasContent`, `Protocol.CAP_BLOB_HAVE`, `BlobStore.servable`, `MeshTransport.feedingLoad` / `slowLinkTo`, or
-  `BuildConfig.BLOB_QUERY`:** READ ADR 2026-10.6e5t — a neighbour whose link carries the bit is queried first, the
-  best holder by plane and load asked alone, a silent one confirmed then held to its ask's floor (the amendment of
-  2026-10-06, #140: only a no, a gone link or the floor moves on; waits stretch to the neighbour's measured round
-  trip); the rest keep f7gg's round. A query is not an ask (it serves, pulls and stamps nothing), HAVE is the serve predicate read without materialising,
-  SENDING peeks the memo, an unknown state is never HAVE (PARTIAL is reserved for a range ask), every build answers
-  and the asking is on in every build since 2026-10-08 (`BuildConfig.BLOB_QUERY`). Wire change: the iOS port owes the responder as a companion change.
-  Lab: `BlobHaveLabTest`; unit: `BlobHolderQueryTest`. **Before touching `CarrierPullPolicy`,
-  `ForwardStore.carriedAttachments`, what `onCarriedFrame` / `rewantMissingBlobs` hold back, `BlobExchange`'s parked
-  asks (`parkBehindFeed`, `waitsBehindFeed`, `serveParked`), or `answersIn`'s author rule:** READ ADR 2026-10.g24x. A
-  carrier leaves a DM's picture to its linked recipient for up to 10 min, and a group's it is not in to the members
-  while the author is linked (never a member's own copy, #132), a holder feeds one 1M/2M copy of a blob at a
-  time, and a linked author's HAVE decides the fetch. Lab: `PictureFanoutLabTest`. **Before touching `blobprog` /
-  `BlobProgressContent`, `blobcancel` / `BlobCancelContent`, `FramedLink.cancelQueued`, `BlobHasItem.eta`, `FeedMeter`, `FramedLink.feed` / `onProgress` / `onRxProgress`,
-  `MeshTransport.fileFeed` / `expectedFileRate` / `fileProgress`, or how long a parked ask or a held asker waits:** READ
-  ADR 2026-10.nsr7. A file's receiver reports what it holds every 2 s by its own clock, the sender measures the drain
-  from it, and a parked ask waits for a live feed however long (no bound of its own) until it ends, stalls (15 s with no
-  progress) or passes its deadline (first measured ETA × 1.25 + 30 s); the fastest asker goes next, and one goes
-  beside a feed only when its own copy would end first. Members go before carriers, and an asker lets go of a
-  neighbour its ask found lacking the blob, or whose other stream to it has more than 30 s left while an idle holder
-  waits, withdrawing its ask with a `blobcancel` (the amendments). Phase 2 (an in-flight window instead of the pace caps) is recorded there and not built. **Before touching `FramedLink.rxFile`, `ArrivingFile`,
-  `FileHeaderWire.size`, `MeshController.arrivals` / `arrivalTicker`, `ChatViewModel.arrivals` or
-  `ui/chat/ArrivalIndicator`:** READ ADR 2026-10.y9qh — the chat's progress ring is the same read of the link
-  (bytes in, and the size the header declared: a label, never a bound), polled only while an attachment the
-  window shows is awaited, finite on screen, and a `size` that will not decode costs the label, never the file.
-  **Before touching `PartialBlobs`, `mesh/link/FileIntake`, `BlobReqContent.offset` / `FileHeaderWire.offset`, or
-  what `FramedLink.close()` keeps:** READ ADR 2026-10.wtyc — a link cut mid-stream keeps an attachment's prefix
-  (session-scoped, keep-the-longer, never written in place), the ask names its length, the holder streams the
-  tail (`size` is the tail's; the whole is `offset + size`), and a spliced file that fails its hash drops the
-  prefix and re-asks from 0. Receive-side changes go through `FileIntake` under the link's lock.
-- **When touching `data/AttachmentIdentities`, `messages.attachmentPlainHash` / `attachmentSourceHash`,
-  `AttachmentStore.ingestPicked` or its reuse check, `AttachmentStore.Ingested.reuse`, `MeshManager.sealAttachment`,
-  `InboundPipeline.copyFromOwnStore`, or `MessageDao.sealedHolding`:** READ ADR 2026-10.mptm. A phone seals a
-  plaintext once: a pick it already holds goes out as that identity (a sealed copy's hash and key, or a room picture's
-  plaintext hash with no key — key-less first, then earliest), its bytes unchanged. A key-less frame naming a
-  plaintext held sealed is shown from our own copy (through `MeshBlobStore.ingest`) **only when its author was party
-  to the conversation that copy came through** — never from `BlobExchange.want`, which an unsigned `blobreq` or a
-  stranger's post reaches: that would be a confirmation oracle. The plaintext name is recorded at send, on arrival
-  and on save, never by a bulk decrypt, and `identityFor` must skip a sealed row without one. Carriers see equality
-  on purpose; convergent encryption was rejected. Lab: `AttachmentReuseLabTest`.
-  **Before touching `data/ImageStrip` or `AttachmentStore.passThrough`:** READ ADR 2026-10.unqn — a picture already
+- **When touching blob exchange or custody** — `mesh/BlobExchange` and what asks, serves, parks or resumes a blob
+  (`CarrierPullPolicy`, `PartialBlobs`, `IncomingFiles`, `mesh/link/FileIntake` / `FeedMeter` / `LandingFiles`,
+  `data/AttachmentIdentities`), or what custody keeps and serves (`ForwardStore`, `ForwardSync`, `StoreDigest`,
+  `DigestTracker`, `SeenSet`, `PendingInbound`, `KeyExchange`, `data/forward/`): READ `.agents/context/blobs.md`, the
+  symbol → ADR routing for the plane (fresh-ask serving, the first ask and the holder query, the carrier's pull and
+  the parked ask, progress reports, the progress ring, resume, attachment identity, the carried profile, custody's
+  bounds, carry gate, receipts, own frames, the stranger backlog, the digest slot, the room flood). `grep` it for
+  every symbol you touch. For implementation work there, DELEGATE (Claude Code: spawn) the `blobs-owner` persona in
+  `.agents/personas/blobs-owner.md` with a self-contained brief — the goal, the issue or ADR, whether a wire,
+  convergence, schema, lab or iOS change is in scope — then run `blobs-reviewer` on what it wrote (and
+  `bluetooth-reviewer` too if a `FramedLink` line moved), apply the findings and relay the trial both name.
+- **When touching `data/ImageStrip` or `AttachmentStore.passThrough`:** READ ADR 2026-10.unqn — a picture already
   bounded, upright and no sharper than the q85 re-encode goes out as its own bytes with the metadata stripped, so the
   "no GPS leaves the phone" invariant rests on the strip's allow-list: anything it does not fully understand answers
   null (the long way), and a segment is kept only if a decoder needs it. Tests: `ImageStripTest`,
@@ -394,14 +326,6 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   per (frame id, peer) per `SeenSet.DEFAULT_TTL_MS` — the receivers' own window, so every copy it withholds is
   one they would drop — and a newcomer the 30 s floor skipped is never memoed. Keep `ackSync.onReachable` ahead
   of every throttle (ADR 2026-09.y5f3). Regression: `MeshManagerTest.aLingerFlap…` / `aProfileEditIsReflooded…`.
-- **When touching `KeyExchange`'s cache / `profileFor` / `serveKey`, `peer_profiles` (`PeerProfileEntity`,
-  `PeerRepository.recordProfileFrame`), or the key-ahead in `ForwardSync.onDigest` (`keylessSenders`):** READ ADR
-  2026-09.g64k (it closes the case ADR 2026-09.9xuu set aside). A carrier keeps the signed profile each pin came
-  from, so it can prove the key of anyone whose frames it serves after a restart and after custody lost the
-  profile. A key goes point to point, never flooded, and only to a peer holding none of that sender's frames we
-  hold. Don't fold the frame into `peers` (a `ByteArray` breaks its equality), and don't keep the profile in
-  custody past the quota or TTL (that moves the convergent quota rule). Regression: `StrangerBacklogLabTest`,
-  `ForwardSyncTest`'s `onDigestServes…Key…` cases.
 - **When touching `BlobDao.observeSizes`, `BlobRepository.observeSizes`, or `ChatViewModel`'s `heldHashes` /
   `heldSizes`:** READ ADR 2026-09.fjcw. The chat's one blob-table subscription is keyed to the window's
   attachment hashes plus the staged one (`IN (:hashes)`, primary-key seeks), and an empty ask never builds a
@@ -429,14 +353,15 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   cluster of its other members (`groupFaceIds`: self out, by node id, at most four, at least two — else a
   people glyph on a disc tinted by the group id) laid out by `clusterCells`, which the shade draws from the
   same cells; renderers never re-sort — READ ADR 2026-09.zapp.
-- **When touching a group's roster — `reconcileGroup`/`vetRoster`, `groupleave`, `GroupRepository.recordDeparture`
-  / `recordRejoin`, `PendingGroupKeys`, `GroupKeyPayload.group` / `pinRosterFromSeed`, or how a member learns
-  of a new group:** READ `docs/GROUP_FORWARD_SECRECY.md` §1 (the pinned founding roster) and §6.1
-  (leave-rekey), then ADR 2026-09.v6fu and ADR 2026-09.mjaj. A group's id is the hash of its member set, so
-  "the same people" is always the same group; membership shrinks only by your own signed leave and grows only
-  by your own signed rejoin — nobody can add or remove anyone else. The seed carries the founding roster, so a
-  member with no row pins the group from the seed through `reconcileGroup`'s one door (the relay-only case,
-  #47); a seed without one (an older build's) is parked, never consumed.
+- **When touching the end-to-end crypto** — `mesh/crypto/` outside `scope/`, `data/ratchet/`, `mesh/PendingGroupKeys`,
+  `IntroSync`'s init answer, or the verify / decrypt / reset / seed / roster paths of `InboundPipeline` and
+  `MeshManager`: READ `.agents/context/crypto.md`, the symbol → ADR routing for the plane (envelope and v3, two-phase
+  decrypt and lock order, races and era effects, the reset heuristic and what a peer refuses, retention and the
+  root tag, group seeds and key requests, the roster, sealed ctls, export, self). `grep` it for every symbol you
+  touch. For implementation work there, DELEGATE (Claude Code: spawn) the `crypto-owner` persona in
+  `.agents/personas/crypto-owner.md` with a self-contained brief — the goal, the issue or ADR, whether a wire,
+  vectors, schema, lab or iOS change is in scope — then run `crypto-reviewer` on what it wrote, apply the findings
+  and relay the lab scenario or device trial both name.
 - **When touching a group's photo — `groupPhotoDecision` / `photoWins` / `settleArrivedGroupPhoto` in
   `InboundPipeline`, `GroupEntity.photoHash` / `photoShownHash`, `GroupDao.awaitingPhoto` /
   `photoHashesNeedingFetch`, `BlobRepository.dropRefusedGroupPhoto`, or `GroupDetailsViewModel`'s set path:**
@@ -456,21 +381,6 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   the mesh has no clone tolerance — and the copy says so. The database copy goes
   through a raw single-connection driver on purpose (`ATTACH` is read-only to SQLite and lands on a pool
   reader; the SQLCipher layer rewrites `BEGIN` to `EXCLUSIVE`) — don't move it onto the Room connection.
-- **When touching `RatchetEngine.open`'s ladder (`Ladder`, `RootCandidate`), `RecvEpoch` / `SkippedKey`, the keys of
-  `ratchet_recv_epochs` / `ratchet_skipped_keys`, or `RatchetCrypto.rootTag`:** READ ADR 2026-10.gcrd. A receive
-  chain and a skipped key carry the tag of the root that derived it, and each root candidate reads only its own: a
-  reset restarts the resetter's numbering, and an old-era frame drained under `prevRoot` after the replacement's
-  purge used to plant a chain the new era's frames of that number were judged against (#135). When nothing opens,
-  DUPLICATE outranks the rest but never stops the ladder early; a purging resolution still reads nothing stored.
-  Regression: `RatchetEngineTest`'s #135 cases, `RatchetSessionsResetTest`, `RatchetSoakTest`'s reset,
-  `SessionLabTest.oldEraDmsReadAfterTheReset…`.
-- **When touching `RatchetSessions.sealResetDm`, `InboundPipeline.sendSessionReset` / `maybeRequestReset`,
-  `MeshManager.seedSendFloorOpen`, or anything else that sends a DM session reset:** READ ADR 2026-09.qerd and
-  `docs/FORWARD_SECRECY_RATCHET.md` §7. A reset the peer would refuse — a second root inside its one-minute
-  floor — is never sealed: over our own unanswered init it *marks* that init (the reset ctl under it, v2,
-  flagged) or declines, and on the heuristic's word over an init answered under a minute ago it declines.
-  The group seed floor counts only sends under the pairwise root held now, never `force`. Regression:
-  `RatchetSessionsResetTest`, and `RestoreLabTest` under `scripts/lab-chaos.sh`.
 - **When touching `mesh/CloneWatch`, the self branch of `InboundPipeline.handleProfile`, the `clone_`
   settings keys, `ui/chatlist/CloneBanner`, the Settings clone row, or `ui/signout/`:** READ ADR
   2026-09.ypcc. One backup restored onto two phones is detected from the **profile stamp alone** — a
@@ -557,6 +467,27 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   done — every Bluetooth fix so far was code that passed its JVM tests and broke on a phone. A Stop hook enforces
   the review. A `delay` or `withTimeout*` under `mesh/bluetooth/` either goes through `elapsedWait` or carries a
   `// stretches: <why>` line above it (`BluetoothWaitClockTest`, ADR 2026-10.pj9w's amendment).
+- **When creating or modifying anything under `mesh/wifiaware/`, `data/settings/NanAttachJournal.kt` or
+  `NanInitiatorJournal.kt`:** ADOPT (Claude Code: spawn) the `wifi-aware-reviewer` persona in
+  `.agents/personas/wifi-aware-reviewer.md` before calling the change done — the Aware framework and firmware wedge in
+  ways no JVM fake does. A Stop hook enforces the review.
+- **When creating or modifying anything under `mesh/lora/` or `mesh/bluetooth/meshtastic/`:** ADOPT (Claude Code:
+  spawn) the `lora-reviewer` persona in `.agents/personas/lora-reviewer.md` before calling the change done — every
+  LoRa fix so far was code that passed over the fake air and failed on boards in the field. A Stop hook enforces the
+  review.
+- **When creating or modifying anything under `mesh/crypto/` (outside `scope/`), `data/ratchet/`,
+  `mesh/PendingGroupKeys.kt` or `mesh/IntroSync.kt` — or the verify / decrypt / reset / seed / roster paths of
+  `InboundPipeline` and `MeshManager`, which the hook cannot see:** ADOPT (Claude Code: spawn) the `crypto-reviewer`
+  persona in `.agents/personas/crypto-reviewer.md` before calling the change done — every ratchet fix so far was code
+  that passed single-node tests and stranded a pair. A Stop hook enforces the review for the gated paths.
+- **When creating or modifying `mesh/BlobExchange.kt`, `BlobStore`, `BlobHash`, `CarrierPullPolicy`, `PartialBlobs`,
+  `IncomingFiles`, `ArrivalTicker`, `ForwardStore`, `ForwardSync`, `StoreDigest`, `DigestTracker`, `SeenSet`,
+  `PendingInbound`, `KeyExchange`, `mesh/link/FileIntake` / `FeedMeter` / `LandingFiles`, `data/forward/` or
+  `data/AttachmentIdentities.kt` — or the blob and custody wiring of `MeshManager` / `InboundPipeline`, which the hook
+  cannot see:** ADOPT (Claude Code: spawn) the `blobs-reviewer` persona in `.agents/personas/blobs-reviewer.md` before
+  calling the change done — every blob and custody fix so far was code that passed single-node tests and cost the
+  mesh a copy per neighbour, a stranded picture or a digest that never converged. A Stop hook enforces the review for
+  the gated paths.
 - **When adding, renaming or removing a `@Preview`, or touching `app/src/screenshotTest/`, a reference PNG under
   `app/src/screenshotTestDebug/reference/`, or the `composeScreenshot` plugin:** READ the "Compose preview
   screenshot tests" section of `.agents/context/testing.md` and ADR 2026-10.gtmm. Every public `@Preview` in main
@@ -593,10 +524,11 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   persona, its symlink in `.claude/agents/`, a line in `.claude/hooks/review-gate.conf` (the paths its Stop hook
   gate watches) and a routing bullet here.
 - DELEGATE implementation in a subsystem to its owner persona from `.agents/personas/` when its routing bullet
-  says so (today `bluetooth-owner`). An owner writes and tests code inside its scope, never commits, and reports
-  what its subsystem's reviewer then checks — the reviewer is never the agent that wrote the change. A new owner is
-  a persona, its symlink in `.claude/agents/`, a `.agents/context/<subsystem>.md` its reviewer reads too (the
-  subsystem's routing, moved out of this file) and one routing bullet here.
+  says so (today `bluetooth-owner`, `wifi-aware-owner`, `lora-owner`, `crypto-owner` and `blobs-owner`). An owner
+  writes and tests code inside its scope, never commits, and reports what its subsystem's reviewer then checks — the
+  reviewer is never the agent that wrote the change. A new owner is a persona and its reviewer, their symlinks in
+  `.claude/agents/`, a `.agents/context/<subsystem>.md` both read (the subsystem's routing, moved out of this
+  file), a review-gate line and one routing bullet here.
 - ADD a durable decision with `python3 scripts/adr.py new "<title>" --topics a,b`, write the body it
   scaffolds, then `python3 scripts/adr.py index`. Never hand-edit `.agents/memory/decisions.md` (generated)
   and never pick an ADR number: ids are minted `YYYY-MM.suffix` so parallel worktrees can't collide, while

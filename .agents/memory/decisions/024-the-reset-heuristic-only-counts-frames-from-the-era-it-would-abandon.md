@@ -38,7 +38,8 @@ the one outcome that cannot mean divergence. It was a proxy for the half-adopted
 is now fixed at the source, at all three sites where a root era changes. This closes the question
 `knit/knit-next#19` was opened to settle; the answer is the opposite of the guess recorded there.
 
-**`unanchoredRaceWinner` must exempt `FLAG_RESET`.** ADR 023's escape hatch — "a genuine wipe of the higher-id
+**`unanchoredRaceWinner` must exempt `FLAG_RESET`.** (The check is now `RatchetEngine.isRemnantOf` /
+`remnantCandidates`; the rule is unchanged.) ADR 023's escape hatch — "a genuine wipe of the higher-id
 peer is still recovered, their undecryptable traffic trips OUR reset heuristic" — is what field testing
 disproved. A confirmed race winner that never processed the loser's init refuses every later init from the
 higher-id peer, and it refused the peer's explicit reset request along with the re-served remnants the guard

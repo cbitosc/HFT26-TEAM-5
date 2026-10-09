@@ -7,6 +7,9 @@ operational detail. Behind `BuildConfig.LORA_PLANE`, which is **on everywhere si
 `SettingsStore.loraEnabled` still defaults false and nothing leaves over the radio until a board is paired
 and set up.
 
+This file is the mechanism. Which ADR governs which symbol is `.agents/context/lora.md`; `grep` it before you
+touch the plane.
+
 ## Shape
 
 **Nothing here ticks until a board is configured** (ADR 2026-09.5bqu). The child is in the composite on
@@ -273,8 +276,9 @@ silence the other pocket entirely (field-observed 2026-09-04: `BRIDGE 13372/1350
 against seven published, the far side hearing none and holding a room post ~30 min). What bounds gossip is the
 Trickle timer, not a share; a reserved *slice* of BRIDGE was rejected because it cannot be sized across presets
 (a 48-prefix OFFER is ~2 s at LongFast and ~13 s at LongSlow against the same 13.5 s budget). Only one OFFER is
-ever queued — `publishOffer` calls `LoraPacePolicy.dropQueued`, since a superseded snapshot names a set we have
-since changed. Serving also asks the budget **before** it queues (`serveOne` → `Serve.NO_AIR`, which **skips that
+ever queued — it is enqueued with the `"offer"` supersedes key, so a newer one replaces the queued copy
+(`OutboundFrame.supersedes`, ADR 2026-09.xdm2, which retired `LoraPacePolicy.dropQueued`), since a superseded
+snapshot names a set we have since changed. Serving also asks the budget **before** it queues (`serveOne` → `Serve.NO_AIR`, which **skips that
 candidate** — ADR 2026-09.7c8n; it used to end the round, and since `backfillRank` puts the priciest
 candidate first, a window holding a one-packet DM but not a three-packet room post served nothing at all),
 so the hourly serve cap is no longer spent on frames that only class shedding will remove — and it asks
