@@ -93,7 +93,7 @@ internal class CallController(
                 .Builder(context, CallNotifications.CHANNEL_RING)
                 .setSmallIcon(R.drawable.ic_stat_mesh)
                 .setContentTitle(face.name)
-                .setContentText("Knit voice call")
+                .setContentText(if (state.walkie) "Knit walkie-talkie" else "Knit voice call")
                 .setCategory(NotificationCompat.CATEGORY_CALL)
                 .setPriority(NotificationCompat.PRIORITY_MAX)
                 .setOngoing(true)

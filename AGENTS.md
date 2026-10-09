@@ -111,6 +111,11 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   only to the spool whose host name is its `aud` (a privacy rule), a refusal is a stored verdict, an `ent` spool gets
   no `turnreq` without a TURN-flagged ticket and a ticketed one is asked first, and every call gathers from the
   hellos' STUN under a URL rule narrower than the spec's, because one URL libwebrtc refuses ends the call.
+  **Before touching `call/Walkie.kt` (`CallWalkie`, `WalkiePolicy`), `CallKind`, `CallPayload.MEDIA_WALKIE`,
+  `Protocol.CAP_WALKIE`, `CallManager`'s `fallback` / `walkieOk`, `debug/call/WalkieTalk` or `BuildConfig.WALKIE`:** READ
+  ADR 2026-10.79yb and `docs/VOICE_CALLS.md` §3.11 — a call with no live path is a media-less walkie session whose
+  bursts are ordinary DM voice notes, autoplayed only while fresh; a live call drops to one, without a frame, only when
+  both OFFER and ANSWER carried the walkie bit; the flag is read once, as `CallWiring.WALKIE_WIRED`.
 - **When touching `location/`, the chat overflow's "Send location" item, or anything that reads the device's
   position:** READ ADR 2026-09.tss4. A shared position is a `geo:` line in the message body (no wire field,
   no capability bit); it is read only between the pin tap and the send, by `ChatViewModel.startLocation`,

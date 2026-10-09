@@ -3,6 +3,7 @@ package app.getknit.knit.di
 import android.app.Application
 import android.content.Context
 import app.getknit.knit.call.CallSignals
+import app.getknit.knit.call.CallWalkie
 import app.getknit.knit.call.TurnSource
 import app.getknit.knit.data.crypto.KeystoreSecret
 import app.getknit.knit.data.settings.ContributionJournal
@@ -12,8 +13,10 @@ import app.getknit.knit.fieldlog.FieldJournal
 import app.getknit.knit.identity.IdentitySource
 import app.getknit.knit.mesh.RadioSupport
 import app.getknit.knit.moderation.TextModerator
+import app.getknit.knit.ui.voice.VoiceRecorder
 import com.google.crypto.tink.KeysetHandle
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.StateFlow
 import org.junit.Test
 import org.koin.core.annotation.KoinExperimentalAPI
 import org.koin.dsl.module
@@ -74,6 +77,11 @@ class KoinGraphVerifyTest {
                 CallSignals::class,
                 TurnSource::class,
                 Long::class,
+                // The direct leg's link, handed to the media as a field of the DirectCallPath it already holds.
+                StateFlow::class,
+                // The walkie's seam over the same late-bound reads, and its recorder at the burst rate (§3.11).
+                CallWalkie::class,
+                VoiceRecorder::class,
             )
     }
 }

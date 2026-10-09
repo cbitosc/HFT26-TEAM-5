@@ -3,7 +3,7 @@
 | | |
 |--------------------|-------------------------------------------------------------------------------------------------------------------------------|
 | Status             | **Draft sketch, not normative.** Nothing here is on the wire                                                                  |
-| Decision           | ADR 2026-10.3tee (Proposed); §3.10, a call between neighbours over Wi-Fi Direct, is ADR 2026-10.kxnw                          |
+| Decision           | ADR 2026-10.3tee (Proposed); §3.10, a call between neighbours over Wi-Fi Direct, is ADR 2026-10.kxnw; §3.11, the walkie-talkie, is ADR 2026-10.79yb |
 | Spool side         | §2 is written to drop into `docs/SPOOL_PROTOCOL.md` as §7.6 (records) and a §10.1 bullet (observations) once accepted        |
 | Client side        | §3 is app protocol: a new `MessageContent.ctl` value, invisible to spools and relays                                          |
 
@@ -255,7 +255,7 @@ CallPayload {
     sdp:  String?    // OFFER, ANSWER
     cand: [String]?  // CANDS: "candidate:…" lines; an empty list = end of candidates
     rsn:  Int?       // DECLINE, CANCEL, END
-    m:    Int = 1    // media bitmask: 1 audio; 2 video reserved
+    m:    Int = 1    // media bitmask: 1 audio; 2 video reserved; 4 walkie-talkie (§3.11)
     dw:   DirectInvite?  // OFFER: the Wi-Fi Direct group the caller will host (§3.10)
     dx:   Int?       // RINGING, ANSWER: 1 = the callee is joining that group (§3.10)
 }
@@ -415,6 +415,46 @@ DirectInvite {           // CallPayload.dw — every field optional, so a broken
 
 The radio is shared with the direct transfer through one lease (`transfer/DirectWifiLease`): whoever holds it
 first keeps it, the other is refused `Busy`, and neither can release the other's group.
+
+### 3.11 A call with no live path: the walkie-talkie
+
+When no live path exists, the call screen becomes a walkie-talkie over the mesh. The user holds a button to talk and
+releases it to send the clip as an ordinary DM voice note (ADR 034). While the session is up, the peer's clips play
+by themselves. It is not real time: a burst plays once its whole clip has crossed the mesh. ADR 2026-10.79yb records
+why. It is an experiment behind `BuildConfig.WALKIE` (`-Pwalkie=`, on in debug and off in release), read once as
+`di/CallWiring.WALKIE_WIRED`.
+
+- **C-3.11-1** A build that runs the walkie advertises `CAP_WALKIE` (`0x8000`). It is never in
+  `LOCAL_CAPABILITIES`. A caller offers a walkie session, or the drop to one, only toward a pinned profile that
+  carries it.
+- **C-3.11-2** A walkie session's OFFER has `m = 4` and no `sdp`, `cand` or `dw`. It rings, goes stale, gets busy
+  and glares exactly as §3.3–3.5 say. Answering connects both sides at once, with `m = 4` on the ANSWER: there are
+  no ICE servers, no connect timer and no grace. A build without the walkie declines it with `rsn = 5`, because the
+  audio bit is absent.
+- **C-3.11-3** The caller places a walkie session only when the peer carries `CAP_WALKIE` and no live path looks
+  possible: no validated Internet route here, and no Wi-Fi Direct leg (§3.10) to a neighbour. Anything else is a
+  live call.
+- **C-3.11-4** A live OFFER carries `m = 1 | 4` when the caller can drop to a walkie. The callee echoes `4` on its
+  ANSWER when it can too. With both bits, each of C-3.3-3's `no_route` endings drops the call to a connected walkie
+  session instead:
+  - the connect window,
+  - ICE failed,
+  - a lost path past its grace.
+
+  The drop closes the media and ends any direct leg, and sends nothing. The other side's ICE sees the media go and
+  drops on its own timer. Without both bits, the call ends as before.
+- **C-3.11-5** A burst is a sealed DM voice note: `audio/aac`, at 16 kbps, 0.5–60 s. There is no new frame and no
+  new MIME.
+- **C-3.11-6** While a session is connected, a voice note plays by itself only if it meets all of these, judged on
+  this phone's clock except the lag:
+  - it is from the session's peer and has no file name;
+  - it arrived after the session connected and has not played yet;
+  - its `sentAt` is no more than 60 s before its arrival;
+  - its clip landed within 90 s of its arrival.
+
+  The notes play one at a time, in arrival order. A note that misses stays a voice note in the thread. A played
+  note advances the thread's read watermark. The session suppresses the thread's notifications and hangs up after
+  10 min with no burst either way.
 
 ## 4. Tests this would add
 

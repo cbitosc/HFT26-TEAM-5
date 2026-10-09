@@ -355,7 +355,7 @@ val meshModule =
                     runCatching { getKoin().getOrNull<CallManager>()?.onSignal(sender, payload, sentAt) }
                         .onFailure { Log.w("KnitCall", "call signal dropped: ${it.javaClass.simpleName}") }
                 },
-                extraCapabilities = if (CALLS_WIRED) Protocol.CAP_CALL else 0L,
+                extraCapabilities = (if (CALLS_WIRED) Protocol.CAP_CALL else 0L) or (if (WALKIE_WIRED) Protocol.CAP_WALKIE else 0L),
                 identities = get(),
                 quotes = get(),
                 notificationLabels = { notificationLabels(androidContext()) },

@@ -856,6 +856,14 @@ data class CallPayload(
 
         const val MEDIA_AUDIO = 1
 
+        /**
+         * [m]'s walkie bit (§3.11, ADR 2026-10.79yb; 2 stays video's). Alone, on an OFFER with no [sdp], it is a
+         * walkie session — no media, each burst a voice note over the mesh — which a build without it declines for
+         * its media, the audio bit being absent. Beside [MEDIA_AUDIO] on a live OFFER, and echoed on the ANSWER, it
+         * says that side can drop to a walkie when the call's path is lost; a build that ignores it only never does.
+         */
+        const val MEDIA_WALKIE = 4
+
         /** [dx]: the callee is joining the caller's group, so the caller hosts it. */
         const val DIRECT_JOINING = 1
     }

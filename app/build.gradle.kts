@@ -144,6 +144,13 @@ val bleFeedWindow = (project.findProperty("bleFeedWindow") as? String)?.toBoolea
 // `if (WEAR_STATUS)` branch), and the defaults live in source so F-Droid's -P-free rebuild stays identical.
 val wearStatus = (project.findProperty("wearStatus") as? String)?.toBoolean()
 
+// The walkie-talkie (docs/VOICE_CALLS.md §3.11, ADR 2026-10.79yb): a call with no live path becomes hold-to-talk voice
+// notes over the mesh — ON in debug, OFF in a shipped artifact, overridable with `-Pwalkie=true|false` (say, to keep it
+// out of a marketing build). It gates the one seam, `di/CallWiring.WALKIE_WIRED`; release wires no calls at all yet, so
+// its value is inert there until calls ship. Not a code strip, and the defaults live in source so F-Droid's -P-free
+// rebuild stays identical.
+val walkie = (project.findProperty("walkie") as? String)?.toBoolean()
+
 // ABIs packaged into the **debug** APK. Debug is unminified and carries both tflite models, so it is
 // ~150 MB before native libs; the four-ABI default adds ~28 MB more, of which the two 32-bit slices are
 // dead weight — every lab Pixel is arm64-v8a and every Gradle-managed emulator image is x86_64, so
@@ -297,6 +304,8 @@ android {
         buildConfigField("boolean", "BLE_FEED_WINDOW", (bleFeedWindow ?: true).toString())
         // The Wear OS status service is ON in debug so a lab phone serves a paired watch; see `wearStatus` above.
         buildConfigField("boolean", "WEAR_STATUS", (wearStatus ?: true).toString())
+        // The walkie-talkie is ON in debug so a lab build can talk over the mesh; see `walkie` above.
+        buildConfigField("boolean", "WALKIE", (walkie ?: true).toString())
         // Fault injection for the model poison-pill's acceptance test (ADR 037):
         // `-PmodelFaultOnLoad=segv` raises SIGSEGV, `=kill` sends SIGKILL, inside ModelLoadGuard right
         // after the in-flight marker is durably written. They test opposite things: only `segv` produces
@@ -405,6 +414,8 @@ android {
             buildConfigField("boolean", "BLE_FEED_WINDOW", (bleFeedWindow ?: true).toString())
             // The Wear OS status service is a prototype: dark in a shipped artifact.
             buildConfigField("boolean", "WEAR_STATUS", (wearStatus ?: false).toString())
+            // The walkie-talkie is an experiment on calls, which release does not wire: dark in a shipped artifact.
+            buildConfigField("boolean", "WALKIE", (walkie ?: false).toString())
             // Never ship a fault injector, whatever `-PmodelFaultOnLoad` said.
             buildConfigField("String", "MODEL_FAULT_ON_LOAD", "\"\"")
             // Unsigned when no keystore.properties / KNIT_UPLOAD_* creds are present (see signingConfigs).

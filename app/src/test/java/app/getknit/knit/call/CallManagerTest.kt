@@ -174,6 +174,17 @@ class CallManagerTest {
         }
     }
 
+    /** The walkie's seam (§3.11): off by default, so every other case runs the calls exactly as a build without it. */
+    private class FakeWalkie : CallWalkie {
+        override var enabled = false
+        var peerCapable = true
+        var live = true
+
+        override suspend fun capable(peerId: String) = peerCapable
+
+        override suspend fun liveLikely(peerId: String) = live
+    }
+
     private class Net(
         private val scope: CoroutineScope,
         private val clock: () -> Long,
@@ -201,6 +212,7 @@ class CallManagerTest {
         val missed: MutableList<MissedCall>,
         val turnAsks: MutableList<String>,
         val direct: FakeDirect,
+        val walkie: FakeWalkie,
     ) {
         var fail = false
         var turn: suspend (String) -> List<TurnServer> = { emptyList() }
@@ -222,6 +234,7 @@ class CallManagerTest {
         val turnAsks = Collections.synchronizedList(mutableListOf<String>())
         val media = FakeMedia()
         val direct = FakeDirect(name, backgroundScope)
+        val walkie = FakeWalkie()
         lateinit var side: Side
         val manager =
             CallManager(
@@ -247,8 +260,9 @@ class CallManagerTest {
                 clock = { testScheduler.currentTime },
                 timings = TIMINGS,
                 direct = direct,
+                walkie = walkie,
             )
-        side = Side(name, manager, media, sent, missed, turnAsks, direct)
+        side = Side(name, manager, media, sent, missed, turnAsks, direct, walkie)
         net.nodes[name] = manager
         backgroundScope.launch { manager.missed.collect { missed += it } }
         return side
@@ -1016,6 +1030,177 @@ class CallManagerTest {
             runCurrent()
             assertEquals(CallPhase.Connected, alice.state!!.phase)
             assertEquals(CallPhase.Connected, bob.state!!.phase)
+        }
+
+    // ---- §3.11: the walkie-talkie ----
+
+    /** Alice and Bob both run the walkie; [live] is whether a live call looks possible from Alice's side. */
+    private fun TestScope.walkies(live: Boolean): Triple<Net, Side, Side> =
+        pair().also { (_, alice, bob) ->
+            alice.walkie.enabled = true
+            bob.walkie.enabled = true
+            alice.walkie.live = live
+        }
+
+    @Test
+    fun aCallWithNoLivePathIsAWalkieThatConnectsWithoutMedia() =
+        runTest {
+            val (_, alice, bob) = walkies(live = false)
+            assertNull(alice.manager.start(BOB))
+            runCurrent()
+            val offer = alice.offer()
+            assertEquals(CallPayload.MEDIA_WALKIE, offer.m)
+            assertNull(offer.sdp)
+            assertNull(offer.dw)
+            assertEquals(CallPhase.Ringing, alice.state!!.phase)
+            assertEquals(CallPhase.Alerting, bob.state!!.phase)
+            assertTrue(bob.state!!.walkie)
+
+            assertTrue(bob.manager.answer(bob.state!!.id))
+            runCurrent()
+            for (side in listOf(alice, bob)) {
+                assertEquals(CallPhase.Connected, side.state!!.phase)
+                assertTrue(side.state!!.walkie)
+                assertFalse(side.state!!.degraded)
+                assertTrue(side.state!!.connectedAt != null)
+                // No media, no ICE servers, no group: a walkie session carries nothing live.
+                assertTrue(side.media.sessions.isEmpty())
+                assertTrue(side.turnAsks.isEmpty())
+            }
+            assertEquals(CallPayload.MEDIA_WALKIE, bob.lastOf(CallPayload.PHASE_ANSWER).m)
+
+            // No connect timer and no grace: it stays up until somebody hangs up.
+            advanceTimeBy(TIMINGS.directConnectMs + TIMINGS.disconnectGraceMs)
+            runCurrent()
+            assertEquals(CallPhase.Connected, alice.state!!.phase)
+            bob.manager.hangUp()
+            runCurrent()
+            assertEquals(CallPhase.Ended, alice.state!!.phase)
+            assertEquals(CallPayload.REASON_USER, alice.state!!.reason)
+            assertEquals(listOf(CallPayload.PHASE_OFFER), alice.phases())
+            assertEquals(listOf(CallPayload.PHASE_RINGING, CallPayload.PHASE_ANSWER, CallPayload.PHASE_END), bob.phases())
+        }
+
+    @Test
+    fun aCallThatLooksLiveOffersTheDropAndAPeerWithoutTheWalkieIsNeverOfferedIt() =
+        runTest {
+            val (_, alice, bob) = walkies(live = true)
+            alice.manager.start(BOB)
+            runCurrent()
+            assertEquals(CallPayload.MEDIA_AUDIO or CallPayload.MEDIA_WALKIE, alice.offer().m)
+            assertFalse(bob.state!!.walkie)
+            alice.manager.hangUp()
+            runCurrent()
+
+            // A peer whose profile carries no CAP_WALKIE gets a plain live call even with no live path in sight.
+            alice.walkie.live = false
+            alice.walkie.peerCapable = false
+            alice.manager.start(BOB)
+            runCurrent()
+            assertEquals(CallPayload.MEDIA_AUDIO, alice.sent.last { it.ph == CallPayload.PHASE_OFFER }.m)
+            assertFalse(alice.state!!.walkie)
+        }
+
+    @Test
+    fun aWalkieOfferToABuildWithoutOneIsDeclinedForItsMedia() =
+        runTest {
+            val (_, alice, bob) = walkies(live = false)
+            bob.walkie.enabled = false
+            alice.manager.start(BOB, CallKind.WALKIE)
+            runCurrent()
+            assertNull(bob.state)
+            assertEquals(CallPayload.REASON_MEDIA, bob.sent.single().rsn)
+            assertEquals(CallPhase.Ended, alice.state!!.phase)
+            assertEquals(CallPayload.REASON_MEDIA, alice.state!!.reason)
+        }
+
+    @Test
+    fun aLiveCallThatNeverConnectsDropsToAWalkieOnBothSidesWithoutAFrame() =
+        runTest {
+            val (_, alice, bob) = walkies(live = true)
+            alice.manager.start(BOB)
+            runCurrent()
+            bob.manager.answer(bob.state!!.id)
+            runCurrent()
+            assertEquals(CallPayload.MEDIA_AUDIO or CallPayload.MEDIA_WALKIE, bob.lastOf(CallPayload.PHASE_ANSWER).m)
+            advanceTimeBy(TIMINGS.connectMs + 1)
+            runCurrent()
+            for (side in listOf(alice, bob)) {
+                assertEquals(CallPhase.Connected, side.state!!.phase)
+                assertTrue(side.state!!.walkie && side.state!!.degraded)
+                assertTrue(side.media.last.closed)
+            }
+            // Each side ran its own timer: no END, nothing after the ANSWER.
+            assertEquals(listOf(CallPayload.PHASE_OFFER), alice.phases())
+            assertEquals(listOf(CallPayload.PHASE_RINGING, CallPayload.PHASE_ANSWER), bob.phases())
+        }
+
+    @Test
+    fun aLostPathDropsToAWalkieAndTheOtherSideFollowsWhenItsMediaSeesItGo() =
+        runTest {
+            val (_, alice, bob) = walkies(live = true)
+            alice.manager.start(BOB)
+            runCurrent()
+            bob.manager.answer(bob.state!!.id)
+            runCurrent()
+            alice.media.last.events(MediaEvent.Connected)
+            bob.media.last.events(MediaEvent.Connected)
+            runCurrent()
+            val connectedAt = alice.state!!.connectedAt
+
+            alice.media.last.events(MediaEvent.Failed)
+            runCurrent()
+            assertTrue(alice.state!!.walkie && alice.state!!.degraded)
+            assertEquals(connectedAt, alice.state!!.connectedAt)
+            assertTrue(alice.media.last.closed)
+            // A closing session's last word changes nothing.
+            alice.media.last.events(MediaEvent.Connected)
+            runCurrent()
+            assertTrue(alice.state!!.walkie)
+
+            // Bob's media sees the path go; past its grace he is in the walkie too.
+            bob.media.last.events(MediaEvent.Disconnected)
+            runCurrent()
+            advanceTimeBy(TIMINGS.disconnectGraceMs + 1)
+            runCurrent()
+            assertTrue(bob.state!!.walkie && bob.state!!.degraded)
+            assertEquals(CallPhase.Connected, bob.state!!.phase)
+            assertFalse(CallPayload.PHASE_END in alice.phases() + bob.phases())
+        }
+
+    @Test
+    fun aCalleeThatCannotDropLeavesTheCallToEndAsBefore() =
+        runTest {
+            val (_, alice, bob) = walkies(live = true)
+            bob.walkie.enabled = false
+            alice.manager.start(BOB)
+            runCurrent()
+            bob.manager.answer(bob.state!!.id)
+            runCurrent()
+            // Bob's build ignores the bit, so his ANSWER does not echo it and neither side may drop.
+            assertEquals(CallPayload.MEDIA_AUDIO, bob.lastOf(CallPayload.PHASE_ANSWER).m)
+            advanceTimeBy(TIMINGS.connectMs + 1)
+            runCurrent()
+            assertEquals(CallPayload.REASON_NO_ROUTE, alice.state!!.reason)
+            assertEquals(CallPayload.REASON_NO_ROUTE, bob.state!!.reason)
+            assertFalse(alice.state!!.walkie || bob.state!!.walkie)
+        }
+
+    @Test
+    fun walkieGlareLeavesTheLowerIdsSessionConnected() =
+        runTest {
+            val (_, alice, bob) = walkies(live = false)
+            bob.walkie.live = false
+            alice.manager.start(BOB)
+            bob.manager.start(ALICE)
+            runCurrent()
+            assertEquals(alice.state!!.id, bob.state!!.id)
+            for (side in listOf(alice, bob)) {
+                assertEquals(CallPhase.Connected, side.state!!.phase)
+                assertTrue(side.state!!.walkie)
+            }
+            assertEquals(CallPayload.PHASE_ANSWER, bob.sent.last().ph)
+            assertEquals(CallPayload.MEDIA_WALKIE, bob.sent.last().m)
         }
 
     private companion object {

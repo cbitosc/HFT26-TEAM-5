@@ -89,7 +89,8 @@ class CallService :
                         setShowWhen(true)
                         setUsesChronometer(true)
                     }
-                    if (state != null) {
+                    // A walkie session has no live microphone or speaker path to switch (§3.11).
+                    if (state != null && !state.walkie) {
                         addAction(
                             action(
                                 if (state.muted) R.drawable.ic_call_mic else R.drawable.ic_call_mic_off,
@@ -137,8 +138,15 @@ class CallService :
             CallPhase.Calling -> "Calling…"
             CallPhase.Ringing -> "Ringing…"
             CallPhase.Connecting -> "Connecting…"
-            CallPhase.Connected -> if (state.muted) "Voice call · muted" else "Voice call"
+            CallPhase.Connected -> connectedText(state)
             else -> "Knit call"
+        }
+
+    private fun connectedText(state: CallState): String =
+        when {
+            state.walkie -> "Walkie-talkie"
+            state.muted -> "Voice call · muted"
+            else -> "Voice call"
         }
 
     private companion object {

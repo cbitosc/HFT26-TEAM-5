@@ -16,6 +16,7 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.core.graphics.createBitmap
 import app.getknit.knit.BuildConfig
+import app.getknit.knit.call.CallKind
 import app.getknit.knit.call.CallManager
 import app.getknit.knit.call.CallPhase
 import app.getknit.knit.call.DirectCallPath
@@ -50,6 +51,7 @@ import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.data.webp.WebpTranscode
 import app.getknit.knit.debug.call.CallActivity
 import app.getknit.knit.debug.call.DirectNetworkDetector
+import app.getknit.knit.debug.call.WalkieTalk
 import app.getknit.knit.debug.call.WebRtcCallMedia
 import app.getknit.knit.identity.Identity
 import app.getknit.knit.identity.displayNameFor
@@ -2054,8 +2056,14 @@ class DebugBridgeReceiver :
      * `start` and `answer` need Knit in the foreground (`am start` it first): the call's microphone service and its
      * screen can only start from there. `answer` opens the call screen, which answers, so it asks for the microphone
      * like a tap would — pre-grant RECORD_AUDIO with `pm grant` for an unattended run.
+     *
+     * The walkie-talkie (§3.11, ADR 2026-10.79yb): `start --es kind auto|live|walkie` places the call as the Call button
+     * would (`auto`, the default) or forces its kind; `talk --ei ms <500-8000>` holds the talk button that long in a
+     * connected walkie session and sends the burst (the call's microphone service must be up — the call screen starts
+     * it). `state` adds `walkie`/`degraded` to the call and the `walkie` block: the talk button's state and the bursts
+     * `sent`, `heard` (played by themselves) and `skipped` (arrived too late to play, left as voice notes).
      */
-    @Suppress("CyclomaticComplexMethod", "ReturnCount") // a flat dispatch over the ops
+    @Suppress("CyclomaticComplexMethod", "ReturnCount", "LongMethod") // a flat dispatch over the ops
     private suspend fun handleCall(
         context: Context,
         intent: Intent,
@@ -2067,7 +2075,14 @@ class DebugBridgeReceiver :
             "start" -> {
                 val peer = intent.getStringExtra("peer") ?: return reply("error", "missing 'peer' extra")
                 if (!foreground) return reply("error", "not foreground: am start Knit first")
-                val refusal = calls.start(peer)
+                val kind =
+                    when (intent.getStringExtra("kind") ?: "auto") {
+                        "auto" -> CallKind.AUTO
+                        "live" -> CallKind.LIVE
+                        "walkie" -> CallKind.WALKIE
+                        else -> return reply("error", "kind must be auto|live|walkie")
+                    }
+                val refusal = calls.start(peer, kind)
                 return reply(if (refusal == null) "ok" else "refused", refusal?.name ?: "calling $peer")
                     .put("id", calls.state.value?.id ?: JSONObject.NULL)
             }
@@ -2093,6 +2108,15 @@ class DebugBridgeReceiver :
             "hangup" -> {
                 calls.hangUp()
                 return reply("ok", "hung up")
+            }
+
+            "talk" -> {
+                val walkie = getKoin().getOrNull<WalkieTalk>() ?: return reply("error", "this build wires no walkie")
+                val ms = intent.getIntExtra("ms", TALK_DEFAULT_MS).coerceIn(TALK_MIN_MS, TALK_MAX_MS)
+                if (!walkie.press()) return reply("error", "no walkie session, or the microphone would not open")
+                delay(ms.toLong())
+                walkie.release()
+                return reply("ok", "talked ${ms}ms: ${walkie.talk.value}").put("sent", walkie.sent.get())
             }
 
             "relay" -> {
@@ -2174,6 +2198,17 @@ class DebugBridgeReceiver :
                         .put("speaker", it.speaker)
                         .put("reason", it.reason ?: JSONObject.NULL)
                         .put("route", calls.route() ?: JSONObject.NULL)
+                        .put("walkie", it.walkie)
+                        .put("degraded", it.degraded)
+                } ?: JSONObject.NULL,
+            ).put(
+                "walkie",
+                getKoin().getOrNull<WalkieTalk>()?.let {
+                    JSONObject()
+                        .put("talk", it.talk.value.toString())
+                        .put("sent", it.sent.get())
+                        .put("heard", it.heard.get())
+                        .put("skipped", it.skipped.get())
                 } ?: JSONObject.NULL,
             )
     }
@@ -2933,3 +2968,8 @@ class DebugBridgeReceiver :
         const val MILLIS_PER_SEC = 1000L
     }
 }
+
+// `…debug.CALL --es op talk`: how long the talk button is held — a burst's floor up to what a receiver's goAsync allows.
+private const val TALK_DEFAULT_MS = 3_000
+private const val TALK_MIN_MS = 500
+private const val TALK_MAX_MS = 8_000

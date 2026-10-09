@@ -36,6 +36,10 @@ data class CallState(
     val speaker: Boolean = false,
     // Why it ended (a [CallPayload] REASON_*), once [phase] is [CallPhase.Ended].
     val reason: Int? = null,
+    // §3.11: a walkie-talkie session — no media; the user holds to talk and each burst rides the mesh as a voice note.
+    val walkie: Boolean = false,
+    // The walkie took over a live call whose path was lost or never came.
+    val degraded: Boolean = false,
 )
 
 /** Why [CallManager.start] dialled nothing. */
@@ -85,6 +89,10 @@ data class CallTimings(
  * older build) costs nothing. The group is one more network the media prefers; the Internet path, when there is one,
  * stays its fallback. While the leg is up its lane carries every signal beside the mesh, so a pair whose only mesh
  * link was the Wi-Fi Aware radio the group took over still hears ANSWER, CANDS and END.
+ *
+ * **A call with no live path is a walkie-talkie** ([walkie], §3.11, ADR 2026-10.79yb): one dialled where no live path
+ * looks possible offers a walkie session, which carries no media at all, and a live call whose path is lost (or never
+ * came) drops to one instead of ending — when both sides said they can, by the walkie bit on the OFFER and the ANSWER.
  */
 @Suppress("LargeClass") // one call's whole state machine, its direct leg's four decisions included; pure and two-sided tested
 class CallManager(
@@ -98,6 +106,7 @@ class CallManager(
     private val newId: () -> String = { FrameId.new() },
     private val log: (String) -> Unit = {},
     private val direct: CallDirect = CallDirect.None,
+    private val walkie: CallWalkie = CallWalkie.None,
 ) {
     private class Live(
         val id: String,
@@ -134,6 +143,13 @@ class CallManager(
         // whether this side has committed to it (the callee is joining, the caller hosting). One attempt per call.
         var invite: DirectInvite? = null
         var directCommitted = false
+
+        // §3.11: this is a walkie session (no media); it became one from a live call; this side offered the drop to
+        // one; and both sides can take it, so a lost path degrades rather than ends.
+        var walkie = false
+        var degraded = false
+        var offeredWalkie = false
+        var walkieOk = false
     }
 
     private class Send(
@@ -185,20 +201,33 @@ class CallManager(
 
     // ---- user actions ----
 
-    /** Dials [peerId]. Null once the call is under way; the setup runs on [scope], never the caller's. */
-    suspend fun start(peerId: String): CallRefusal? {
+    /**
+     * Dials [peerId], as a walkie session when [kind] says so or, for [CallKind.AUTO], when the peer runs one and no
+     * live path looks possible (§3.11). Null once the call is under way; the setup runs on [scope], never the caller's.
+     */
+    suspend fun start(
+        peerId: String,
+        kind: CallKind = CallKind.AUTO,
+    ): CallRefusal? {
         if (peerId == selfId()) return CallRefusal.SELF
+        val asWalkie =
+            when (kind) {
+                CallKind.LIVE -> false
+                CallKind.WALKIE -> walkie.enabled
+                CallKind.AUTO -> walkie.enabled && walkie.capable(peerId) && !walkie.liveLikely(peerId)
+            }
         val l =
             mutex.withLock {
                 if (live?.phase?.let { it != CallPhase.Ended } == true) return CallRefusal.BUSY
                 Live(id = newId(), peerId = peerId, outgoing = true, startedAt = clock(), phase = CallPhase.Calling).also {
+                    it.walkie = asWalkie
                     live = it
                     armRingOut(it)
                     publish()
                 }
             }
-        log("call ${l.id} to ${l.peerId}")
-        setup(l) { dial(l) }
+        log("call ${l.id} to ${l.peerId}${if (asWalkie) " (walkie)" else ""}")
+        setup(l) { if (asWalkie) dialWalkie(l) else dial(l) }
         return null
     }
 
@@ -207,12 +236,16 @@ class CallManager(
         val l =
             mutex.withLock {
                 val l = live?.takeIf { it.id == id && !it.outgoing && it.phase == CallPhase.Alerting } ?: return false
-                l.phase = CallPhase.Connecting
-                armConnect(l)
-                publish()
+                if (l.walkie) {
+                    connectWalkie(l)
+                } else {
+                    l.phase = CallPhase.Connecting
+                    armConnect(l)
+                    publish()
+                }
                 l
             }
-        setup(l) { answerCall(l) }
+        setup(l) { if (l.walkie) answerWalkie(l) else answerCall(l) }
         return true
     }
 
@@ -291,15 +324,20 @@ class CallManager(
         val now = clock()
         if (neverRings(sender, p, sentAt, now)) return emptyList()
         val sdp = p.sdp
-        if (p.m and CallPayload.MEDIA_AUDIO == 0 || sdp == null || !SdpGuard.accepts(sdp)) {
+        // §3.11: a walkie offer carries no media to vet; a build that runs no walkie declines it as one it cannot play.
+        val media = if (isWalkieOnly(p)) walkie.enabled else p.m and CallPayload.MEDIA_AUDIO != 0 && sdp != null && SdpGuard.accepts(sdp)
+        if (!media) {
             tombstones[p.id] = Tomb(CallPayload.PHASE_DECLINE, CallPayload.REASON_MEDIA)
             return listOf(Send(sender, CallPayload(id = p.id, ph = CallPayload.PHASE_DECLINE, rsn = CallPayload.REASON_MEDIA)))
         }
         live?.takeIf { it.phase != CallPhase.Ended }?.let { return onOfferWhileLive(it, sender, p, sdp, me, now) }
         val l = Live(p.id, sender, outgoing = false, startedAt = now, phase = CallPhase.Alerting, remoteOffer = sdp)
         live = l
-        l.invite = directInviteOf(p)
-        l.servers = scope.async { servers(sender) }
+        takeKind(l, p)
+        if (!l.walkie) {
+            l.invite = directInviteOf(p)
+            l.servers = scope.async { servers(sender) }
+        }
         armTimer(l, timings.alertMs) {
             missedCalls.trySend(MissedCall(it.peerId, it.startedAt))
             finish(it, CallPayload.REASON_TIMEOUT)
@@ -308,9 +346,24 @@ class CallManager(
         // says so leaves before the join takes the radio from the mesh (the leg waits out a grace first).
         val joining = directMode == DirectMode.PREWARM && commitJoin(l, prewarm = true)
         publish()
-        log("call ${p.id} from $sender: alerting${if (joining) ", joining its group" else ""}")
+        log("call ${p.id} from $sender: alerting${if (joining) ", joining its group" else ""}${if (l.walkie) " (walkie)" else ""}")
         return listOf(Send(sender, CallPayload(id = p.id, ph = CallPayload.PHASE_RINGING, dx = directVerdict(l))))
     }
+
+    /** §3.11: an offer with the walkie bit and no audio is a walkie session; with both, a live call that may drop to one. */
+    private fun isWalkieOnly(p: CallPayload): Boolean = p.m and CallPayload.MEDIA_AUDIO == 0 && p.m and CallPayload.MEDIA_WALKIE != 0
+
+    /** The callee's side of §3.11: what [p] offered, and whether this build takes the drop to a walkie it offers. */
+    private fun takeKind(
+        l: Live,
+        p: CallPayload,
+    ) {
+        l.walkie = isWalkieOnly(p)
+        l.walkieOk = !l.walkie && walkie.enabled && p.m and CallPayload.MEDIA_WALKIE != 0
+    }
+
+    /** What a live OFFER or ANSWER says it carries: audio, and the walkie bit when this side can drop to one (§3.11). */
+    private fun liveMedia(walkieOk: Boolean): Int = CallPayload.MEDIA_AUDIO or (if (walkieOk) CallPayload.MEDIA_WALKIE else 0)
 
     /** [p]'s Wi-Fi Direct invite, when this side may take it up at all and every part of it is usable. */
     private fun directInviteOf(p: CallPayload): DirectInvite? = p.dw?.takeIf { !relayOnly && it.isUsable() }
@@ -374,7 +427,7 @@ class CallManager(
         current: Live,
         sender: String,
         p: CallPayload,
-        sdp: String,
+        sdp: String?,
         me: String,
         now: Long,
     ): List<Send> {
@@ -397,6 +450,13 @@ class CallManager(
         drop(current)
         val l = Live(p.id, sender, outgoing = false, startedAt = now, phase = CallPhase.Connecting, remoteOffer = sdp)
         live = l
+        // The surviving offer's kind is the call's (§3.11): a walkie one connects at once, there being no media to wait on.
+        takeKind(l, p)
+        if (l.walkie) {
+            connectWalkie(l)
+            setup(l) { answerWalkie(l) }
+            return emptyList()
+        }
         l.invite = directInviteOf(p)
         armConnect(l)
         publish()
@@ -426,8 +486,16 @@ class CallManager(
     ): List<Send> {
         val l = live?.takeIf { it.id == p.id && it.peerId == sender && it.outgoing } ?: return emptyList()
         if (p.gen != 0 || (l.phase != CallPhase.Calling && l.phase != CallPhase.Ringing)) return emptyList()
+        if (l.walkie) {
+            if (p.m and CallPayload.MEDIA_WALKIE == 0) return finish(l, CallPayload.REASON_MEDIA, CallPayload.PHASE_END)
+            connectWalkie(l)
+            log("call ${l.id}: answered (walkie)")
+            return emptyList()
+        }
         val sdp = p.sdp
         if (sdp == null || !SdpGuard.accepts(sdp)) return finish(l, CallPayload.REASON_MEDIA, CallPayload.PHASE_END)
+        // §3.11: the callee echoes the walkie bit only when it, too, can drop to one.
+        l.walkieOk = l.offeredWalkie && p.m and CallPayload.MEDIA_WALKIE != 0
         commitHost(l, p, sentAt)
         l.phase = CallPhase.Connecting
         armConnect(l)
@@ -568,9 +636,12 @@ class CallManager(
     private suspend fun dial(l: Live) {
         // §3.10: a group we would host for a neighbour. Minting raises nothing; the callee's "joining" does.
         val invite = if (!relayOnly) direct.invite(l.id, l.peerId) else null
+        // §3.11: offer the drop to a walkie to a peer that runs one; it takes effect only if its ANSWER echoes it.
+        val offersWalkie = walkie.enabled && walkie.capable(l.peerId)
         mutex.withLock {
             if (!current(l)) return
             l.invite = invite
+            l.offeredWalkie = offersWalkie
         }
         val servers = servers(l.peerId)
         val session = openFor(l, servers) ?: return
@@ -585,7 +656,7 @@ class CallManager(
                 }
                 // A relay-only call goes direct nowhere: a group pair would show the peer our real address.
                 if (l.relay) l.invite = null
-                CallPayload(id = l.id, ph = CallPayload.PHASE_OFFER, sdp = sdp, dw = l.invite)
+                CallPayload(id = l.id, ph = CallPayload.PHASE_OFFER, sdp = sdp, dw = l.invite, m = liveMedia(l.offeredWalkie))
             }
         log("call ${l.id}: offering (${servers.size} TURN, relay=${l.relay}, direct=${offer.dw != null})")
         if (!signals.sendCallSignal(l.peerId, offer)) {
@@ -612,13 +683,34 @@ class CallManager(
                     return@withLock finish(l, CallPayload.REASON_MEDIA, CallPayload.PHASE_DECLINE)
                 }
                 remoteApplied(l, session)
-                listOf(Send(l.peerId, CallPayload(id = l.id, ph = CallPayload.PHASE_ANSWER, sdp = sdp, dx = directVerdict(l))))
+                val answer =
+                    CallPayload(id = l.id, ph = CallPayload.PHASE_ANSWER, sdp = sdp, dx = directVerdict(l), m = liveMedia(l.walkieOk))
+                listOf(Send(l.peerId, answer))
             }
         if (!deliver(sends)) {
             mutex.withLock { if (current(l)) finish(l, CallPayload.REASON_ERROR) }
             return
         }
         if (sends.any { it.payload.ph == CallPayload.PHASE_ANSWER }) described(l)
+    }
+
+    /** §3.11: a walkie session's OFFER — no media, no ICE servers, no group: only that it is a walkie. */
+    private suspend fun dialWalkie(l: Live) {
+        val offer = CallPayload(id = l.id, ph = CallPayload.PHASE_OFFER, m = CallPayload.MEDIA_WALKIE)
+        if (!mutex.withLock { current(l) }) return
+        log("call ${l.id}: offering a walkie session")
+        if (!signals.sendCallSignal(l.peerId, offer)) {
+            mutex.withLock { if (current(l)) finish(l, CallPayload.REASON_ERROR) }
+            return
+        }
+        described(l)
+    }
+
+    /** §3.11: the callee's ANSWER to a walkie session, which [connectWalkie] already connected on this side. */
+    private suspend fun answerWalkie(l: Live) {
+        val answer = CallPayload(id = l.id, ph = CallPayload.PHASE_ANSWER, m = CallPayload.MEDIA_WALKIE)
+        if (!mutex.withLock { current(l) }) return
+        if (!deliver(listOf(Send(l.peerId, answer)))) mutex.withLock { if (current(l)) finish(l, CallPayload.REASON_ERROR) }
     }
 
     private suspend fun applyAnswer(
@@ -675,7 +767,7 @@ class CallManager(
     ) {
         val sends =
             mutex.withLock {
-                if (!current(l)) return
+                if (!mediaLive(l)) return
                 when (event) {
                     MediaEvent.Connected -> {
                         if (l.phase == CallPhase.Connecting) {
@@ -693,7 +785,7 @@ class CallManager(
 
                     MediaEvent.Disconnected -> {
                         if (l.phase == CallPhase.Connected) {
-                            armTimer(l, timings.disconnectGraceMs) { finish(it, CallPayload.REASON_NO_ROUTE, CallPayload.PHASE_END) }
+                            armTimer(l, timings.disconnectGraceMs) { fallback(it) }
                         }
                         emptyList()
                     }
@@ -704,7 +796,7 @@ class CallManager(
                             log("call ${l.id}: ICE failed while the direct leg comes up; waiting for it")
                             emptyList()
                         } else {
-                            finish(l, CallPayload.REASON_NO_ROUTE, CallPayload.PHASE_END)
+                            fallback(l)
                         }
                     }
 
@@ -724,6 +816,9 @@ class CallManager(
     // ---- under [mutex] ----
 
     private fun current(l: Live): Boolean = live === l && l.phase != CallPhase.Ended
+
+    /** [l] is current and still has media to hear from: a session the walkie closed may report on its way out (§3.11). */
+    private fun mediaLive(l: Live): Boolean = current(l) && !l.walkie
 
     /** How this side ends [l] toward the peer: a CANCEL before an answer, a DECLINE while alerting, else END. */
     private fun endPhase(l: Live): Int =
@@ -764,8 +859,35 @@ class CallManager(
 
     private fun armConnect(l: Live) =
         armTimer(l, if (l.directCommitted || (!l.outgoing && l.invite != null)) timings.directConnectMs else timings.connectMs) {
-            if (it.phase == CallPhase.Connecting) finish(it, CallPayload.REASON_NO_ROUTE, CallPayload.PHASE_END) else emptyList()
+            if (it.phase == CallPhase.Connecting) fallback(it) else emptyList()
         }
+
+    /**
+     * [l] has no live path — it never came, failed, or stayed lost past its grace. It drops to a walkie session when
+     * both sides said they can (§3.11), else ends no_route. Nothing is sent: the peer runs its own timer, and its media
+     * sees ours close, so both sides land in the walkie without a frame between them.
+     */
+    private fun fallback(l: Live): List<Send> {
+        if (!l.walkieOk) return finish(l, CallPayload.REASON_NO_ROUTE, CallPayload.PHASE_END)
+        l.servers?.cancel()
+        l.session?.close()
+        l.session = null
+        direct.end(l.id, null)
+        l.walkie = true
+        l.degraded = true
+        log("call ${l.id}: no live path; a walkie session now")
+        connectWalkie(l)
+        return emptyList()
+    }
+
+    /** [l] is a connected walkie session: no media to wait on, so no timer either. */
+    private fun connectWalkie(l: Live) {
+        l.timer?.cancel()
+        l.timer = null
+        l.phase = CallPhase.Connected
+        if (l.connectedAt == null) l.connectedAt = clock()
+        publish()
+    }
 
     /** Replaces [l]'s phase timer. The fire clears the slot first, so [finish] never cancels the coroutine it runs on. */
     private fun armTimer(
@@ -836,6 +958,8 @@ class CallManager(
                     muted = it.muted,
                     speaker = it.speaker,
                     reason = it.reason,
+                    walkie = it.walkie,
+                    degraded = it.degraded,
                 )
             }
     }

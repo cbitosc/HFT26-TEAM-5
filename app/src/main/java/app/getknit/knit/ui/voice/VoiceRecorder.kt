@@ -40,6 +40,8 @@ import java.io.ByteArrayOutputStream
 class VoiceRecorder(
     private val context: Context,
     private val scope: CoroutineScope,
+    // The AAC rate; a walkie burst asks for less than a voice note (`call/WalkiePolicy.BIT_RATE`).
+    private val bitRate: Int = BIT_RATE,
 ) {
     private var recorder: MediaRecorder? = null
     private var readSide: ParcelFileDescriptor? = null
@@ -180,7 +182,7 @@ class VoiceRecorder(
             rec.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
             rec.setAudioChannels(CHANNELS)
             rec.setAudioSamplingRate(sampleRate)
-            rec.setAudioEncodingBitRate(BIT_RATE)
+            rec.setAudioEncodingBitRate(bitRate)
             rec.setOutputFile(write.fileDescriptor)
             // An encoder that dies mid-recording is otherwise completely silent until stop() throws.
             rec.setOnErrorListener { _, what, extra -> Log.w(TAG, "voice recorder error what=$what extra=$extra") }

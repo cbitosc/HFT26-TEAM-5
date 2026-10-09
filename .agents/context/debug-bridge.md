@@ -224,6 +224,18 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
     TURN/TLS against built-in roots that hold no Let's Encrypt root); `webrtc: relays udp N, tcp N, tls N` after each
     offer or answer says which legs to the TURN server allocated. Logcat lines: `the peer is joining; hosting the group`, `group up on …`,
     `lane up`, `lane over (…)`, `direct leg over; radio back to the mesh`, `webrtc: the group is a network …`.
+  - **The walkie-talkie** (§3.11, ADR 2026-10.79yb). Both ends need `CAP_WALKIE` pinned (`BuildConfig.WALKIE`, on in
+    debug).
+    - `start --es kind auto|live|walkie`: `auto` is what the Call button does. It picks a walkie only with no Internet
+      route here and no Wi-Fi Direct leg to a neighbour, so `walkie` is how a lab phone on Wi-Fi gets one.
+    - `--es op talk --ei ms 500-8000`: holds the talk button that long in a connected walkie session and sends the
+      burst as a DM voice note. The call screen must have started the microphone service, so answer from the screen,
+      not the shade.
+    - `state`: adds `walkie` and `degraded` to the call, and a `walkie` block: the button's `talk` state and the bursts
+      `sent`, `heard` (played by themselves) and `skipped` (arrived too late, left as voice notes).
+    - To see a live call degrade, set `relay --ez on true` with no TURN spool: ICE fails and both phones drop to
+      `degraded` without an END.
+    - Logcat: `call <id>: no live path; a walkie session now`, then `walkie: session …`, `walkie: burst of <n>ms to … sent`.
 - `…debug.RATCHET` — dumps the **DM ratchet's per-peer state** and, with `--es reset <peerNodeId>`, forces a
   session reset past the heuristic that guards it. Exists because every gate in the recovery path returns
   *silently*: a peer we hold no prekey for (`peerPrekeyPinned:false` — a reset from this side is impossible

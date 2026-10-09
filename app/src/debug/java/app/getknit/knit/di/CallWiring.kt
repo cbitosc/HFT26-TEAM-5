@@ -3,34 +3,46 @@ package app.getknit.knit.di
 import android.os.Build
 import android.util.Log
 import androidx.compose.runtime.Composable
+import app.getknit.knit.BuildConfig
 import app.getknit.knit.call.CallManager
 import app.getknit.knit.call.CallMedia
 import app.getknit.knit.call.CallSignals
 import app.getknit.knit.call.CallTimings
+import app.getknit.knit.call.CallWalkie
 import app.getknit.knit.call.DirectCallPath
 import app.getknit.knit.call.TurnSource
+import app.getknit.knit.call.WalkiePolicy
+import app.getknit.knit.data.AttachmentStore
+import app.getknit.knit.data.MessageRepository
 import app.getknit.knit.data.PeerRepository
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.debug.call.CallAudio
 import app.getknit.knit.debug.call.CallBarHost
 import app.getknit.knit.debug.call.CallController
 import app.getknit.knit.debug.call.CallFaces
+import app.getknit.knit.debug.call.WalkieTalk
 import app.getknit.knit.debug.call.WebRtcCallMedia
 import app.getknit.knit.identity.Identity
 import app.getknit.knit.mesh.MeshController
 import app.getknit.knit.mesh.MeshManager
 import app.getknit.knit.mesh.power.AppVisibility
 import app.getknit.knit.mesh.protocol.Protocol
+import app.getknit.knit.net.InternetGate
+import app.getknit.knit.notifications.Notifier
 import app.getknit.knit.transfer.DirectWifiLease
+import app.getknit.knit.ui.voice.VoicePlayer
+import app.getknit.knit.ui.voice.VoiceRecorder
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import org.koin.android.ext.koin.androidContext
 import org.koin.core.Koin
 import org.koin.core.module.Module
+import org.koin.core.scope.Scope
 import org.koin.dsl.module
 
 /**
@@ -38,6 +50,13 @@ import org.koin.dsl.module
  * only this variant has calls at all. `src/release` returns nothing and advertises no `CAP_CALL`.
  */
 const val CALLS_WIRED: Boolean = true
+
+/**
+ * The walkie-talkie (docs/VOICE_CALLS.md §3.11, ADR 2026-10.79yb): a call with no live path is hold-to-talk voice notes
+ * over the mesh. The one read of `BuildConfig.WALKIE` — off, [CallManager] gets [CallWalkie.None], no [WalkieTalk] is
+ * built and the profile carries no `CAP_WALKIE`, so every call is a live one as before.
+ */
+const val WALKIE_WIRED: Boolean = BuildConfig.WALKIE
 
 /**
  * The call graph. [CallManager]'s seams are late-bound over [MeshManager], so building it builds nothing else — the
@@ -82,7 +101,25 @@ fun callModule(): Module? =
                 selfId = { get<Identity>().nodeId() },
                 log = { Log.i(TAG, it) },
                 direct = get<DirectCallPath>(),
+                walkie = if (WALKIE_WIRED) walkieRoute() else CallWalkie.None,
             )
+        }
+        if (WALKIE_WIRED) {
+            single {
+                WalkieTalk(
+                    calls = get(),
+                    recorder = VoiceRecorder(androidContext(), get<CoroutineScope>(), bitRate = WalkiePolicy.BIT_RATE),
+                    attachments = get<AttachmentStore>(),
+                    mesh = get<MeshController>(),
+                    messages = get<MessageRepository>(),
+                    player = get<VoicePlayer>(),
+                    notifier = get<Notifier>(),
+                    settings = get<SettingsStore>(),
+                    selfId = { get<Identity>().nodeId() },
+                    scope = get<CoroutineScope>(),
+                    log = { Log.i(TAG, it) },
+                )
+            }
         }
         single { CallFaces(androidContext(), peers = { get() }, blobs = { get() }, theme = { get() }) }
         single {
@@ -96,10 +133,31 @@ fun callModule(): Module? =
         }
     }
 
+/**
+ * When a call is placed as a walkie (§3.11): the peer must run one, and a live call must look impossible — no Internet
+ * route here (no spool, no STUN or TURN), and no Wi-Fi Direct leg, which wants a neighbour that runs the transfer's
+ * radio with direct calls on. A wrong guess costs little: a live call with no path drops to a walkie anyway.
+ */
+private fun Scope.walkieRoute(): CallWalkie =
+    object : CallWalkie {
+        override val enabled = true
+
+        override suspend fun capable(peerId: String) =
+            (get<PeerRepository>().find(peerId)?.capabilities ?: 0L) and Protocol.CAP_WALKIE != 0L
+
+        override suspend fun liveLikely(peerId: String): Boolean {
+            if (get<InternetGate>().isOnline()) return true
+            val neighbour = get<MeshController>().neighbors.value.any { it.nodeId == peerId }
+            val direct = (get<PeerRepository>().find(peerId)?.capabilities ?: 0L) and Protocol.CAP_DIRECT_TRANSFER != 0L
+            return neighbour && direct && !get<SettingsStore>().debugDirectCallsOff.first()
+        }
+    }
+
 /** Starts the call surfaces' collectors at process start, on a background thread — never on main. */
 fun startCallsIfWired(koin: Koin) {
     CoroutineScope(SupervisorJob() + Dispatchers.Default).launch {
         runCatching { koin.get<CallController>().start() }.onFailure { Log.w(TAG, "calls not started", it) }
+        if (WALKIE_WIRED) runCatching { koin.get<WalkieTalk>().start() }.onFailure { Log.w(TAG, "walkie not started", it) }
     }
 }
 

@@ -18,6 +18,7 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -43,6 +44,7 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.Insights
+import androidx.compose.material.icons.outlined.Podcasts
 import androidx.compose.material.icons.outlined.Sensors
 import androidx.compose.material.icons.outlined.WifiTethering
 import androidx.compose.material3.FilledIconButton
@@ -60,6 +62,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -67,7 +70,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
@@ -86,6 +96,7 @@ import app.getknit.knit.ui.preview.PREVIEW_NOW
 import app.getknit.knit.ui.theme.KnitTheme
 import app.getknit.knit.ui.theme.LocalReduceMotion
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
@@ -93,7 +104,8 @@ import org.koin.core.component.inject
 /**
  * The one call screen (experimental, debug only): the peer's face and name, incoming Answer/Decline, then status, the
  * route (direct or relayed), mute, speaker and hang up, with a live diagnostics card ([CallDiagnostics]) the header's
- * toggle hides. [CallScreen] is the stateless half the previews draw.
+ * toggle hides; a walkie session (§3.11) trades mute and speaker for a hold-to-talk button over [WalkieTalk].
+ * [CallScreen] is the stateless half the previews draw.
  * Shows over the lock screen for the full-screen ring. While it is in the foreground it starts [CallService], the
  * microphone's foreground service, once the call is live and RECORD_AUDIO is granted.
  */
@@ -103,6 +115,9 @@ class CallActivity :
     private val calls: CallManager by inject()
     private val peers: PeerRepository by inject()
     private val media: WebRtcCallMedia by inject()
+
+    // Null in a build with the walkie off (`di/CallWiring.WALKIE_WIRED`): no call is ever a walkie there.
+    private val walkie: WalkieTalk? = getKoin().getOrNull()
     private var pendingAnswer: String? = null
     private var serviceStarted = false
 
@@ -158,7 +173,7 @@ class CallActivity :
         }
         // The selected candidate pair and the media's stats, read while the media is up: the pair can move (a relay
         // pair first, a direct one later), and the stats are the diagnostics card's.
-        val mediaUp = state?.phase == CallPhase.Connecting || state?.phase == CallPhase.Connected
+        val mediaUp = state?.walkie != true && (state?.phase == CallPhase.Connecting || state?.phase == CallPhase.Connected)
         var route by remember { mutableStateOf<String?>(null) }
         var stats by remember { mutableStateOf<CallStats?>(null) }
         LaunchedEffect(mediaUp) {
@@ -168,17 +183,22 @@ class CallActivity :
                 delay(POLL_MS)
             }
         }
+        val talk by (walkie?.talk ?: NO_TALK).collectAsState()
         CallScreen(
             state = state,
             name = name,
             avatarHash = avatarHash,
-            route = route,
-            stats = stats,
+            route = route.takeIf { state?.walkie != true },
+            stats = stats.takeIf { state?.walkie != true },
             onAnswer = { state?.id?.let(::answer) },
             onDecline = { state?.id?.let { id -> lifecycleScope.launch { calls.decline(id) } } },
             onHangUp = { lifecycleScope.launch { calls.hangUp() } },
             onMute = { on -> lifecycleScope.launch { calls.setMuted(on) } },
             onSpeaker = { on -> lifecycleScope.launch { calls.setSpeaker(on) } },
+            talk = talk,
+            onTalk = { lifecycleScope.launch { walkie?.press() } },
+            onTalkSend = { lifecycleScope.launch { walkie?.release() } },
+            onTalkCancel = { lifecycleScope.launch { walkie?.cancel() } },
         )
     }
 
@@ -234,6 +254,8 @@ private val InlineAvatarSize = 72.dp
 private val StackedMinHeight = 760.dp
 private val RingReach = 40.dp
 private val ActionSize = 72.dp
+private val TalkSize = 120.dp
+private val NO_TALK = MutableStateFlow<Talk>(Talk.Idle())
 private val ToggleSize = 64.dp
 private const val RING_MS = 1_800
 private const val RING_ALPHA = 0.28f
@@ -259,6 +281,10 @@ internal fun CallScreen(
     onSpeaker: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
     clock: () -> Long = System::currentTimeMillis,
+    talk: Talk = Talk.Idle(),
+    onTalk: () -> Unit = {},
+    onTalkSend: () -> Unit = {},
+    onTalkCancel: () -> Unit = {},
 ) {
     val phase = state?.phase
     var showStats by rememberSaveable { mutableStateOf(true) }
@@ -284,7 +310,11 @@ internal fun CallScreen(
                 } else {
                     Spacer(Modifier.weight(1f))
                 }
-                Controls(state, onAnswer, onDecline, onHangUp, onMute, onSpeaker)
+                if (state?.walkie == true && phase == CallPhase.Connected) {
+                    WalkieControls(state, name, talk, onHangUp, onTalk, onTalkSend, onTalkCancel)
+                } else {
+                    Controls(state, onAnswer, onDecline, onHangUp, onMute, onSpeaker)
+                }
             }
         }
     }
@@ -344,6 +374,8 @@ private fun StackedFace(
                         textAlign = TextAlign.Center,
                     )
                 }
+            } else if (phase == CallPhase.Connected && state.walkie) {
+                WalkiePill()
             } else if (phase == CallPhase.Connected && route != null) {
                 RoutePill(route)
             }
@@ -376,7 +408,11 @@ private fun InlineFace(
                 style = MaterialTheme.typography.titleSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            if (state?.phase == CallPhase.Connected && route != null) RoutePill(route)
+            if (state?.phase == CallPhase.Connected && state.walkie) {
+                WalkiePill()
+            } else if (state?.phase == CallPhase.Connected && route != null) {
+                RoutePill(route)
+            }
         }
     }
 }
@@ -466,6 +502,130 @@ private fun Controls(
                 CallAction("End", Icons.Filled.CallEnd, HangUpRed, onHangUp)
                 CallToggle("Speaker", Icons.AutoMirrored.Filled.VolumeUp, state.speaker, onSpeaker)
             }
+        }
+    }
+}
+
+/**
+ * A connected walkie session's controls (§3.11): where the last burst stands, why this is a walkie when a live call
+ * dropped to one, and the hold-to-talk button beside the hang-up.
+ */
+@Composable
+private fun WalkieControls(
+    state: CallState,
+    name: String,
+    talk: Talk,
+    onHangUp: () -> Unit,
+    onTalk: () -> Unit,
+    onTalkSend: () -> Unit,
+    onTalkCancel: () -> Unit,
+) {
+    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+        if (state.degraded) {
+            Text(
+                "No live connection — switched to walkie-talkie",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+            )
+            Spacer(Modifier.height(8.dp))
+        }
+        Text(talkLine(talk, name), style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center)
+        Spacer(Modifier.height(24.dp))
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.Bottom,
+        ) {
+            CallAction("End", Icons.Filled.CallEnd, HangUpRed, onHangUp)
+            TalkButton(recording = talk is Talk.Recording, onTalk, onTalkSend, onTalkCancel)
+        }
+    }
+}
+
+private fun talkLine(
+    talk: Talk,
+    name: String,
+): String =
+    when (talk) {
+        is Talk.Recording -> {
+            val seconds = talk.elapsedMs / 1_000
+            "Talking %d:%02d".format(seconds / 60, seconds % 60)
+        }
+
+        Talk.Sending -> {
+            "Sending…"
+        }
+
+        Talk.Hearing -> {
+            "$name is talking…"
+        }
+
+        is Talk.Idle -> {
+            when (talk.note) {
+                Talk.Note.SENT -> "Sent"
+                Talk.Note.NO_MIC -> "The microphone is busy"
+                Talk.Note.NOT_SENT -> "Couldn't send that one"
+                Talk.Note.TOO_SHORT, null -> "Hold to talk"
+            }
+        }
+    }
+
+/** Held, it records; let go, it sends; a gesture the system cancels drops the burst. TalkBack gets both as actions. */
+@Composable
+private fun TalkButton(
+    recording: Boolean,
+    onTalk: () -> Unit,
+    onTalkSend: () -> Unit,
+    onTalkCancel: () -> Unit,
+) {
+    val haptics = LocalHapticFeedback.current
+    val talk by rememberUpdatedState(onTalk)
+    val send by rememberUpdatedState(onTalkSend)
+    val cancel by rememberUpdatedState(onTalkCancel)
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Surface(
+            shape = CircleShape,
+            color = if (recording) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.primaryContainer,
+            modifier =
+                Modifier
+                    .size(TalkSize)
+                    .semantics {
+                        contentDescription = "Hold to talk"
+                        customActions =
+                            listOf(
+                                CustomAccessibilityAction("Start talking") { true.also { talk() } },
+                                CustomAccessibilityAction("Stop and send") { true.also { send() } },
+                            )
+                    }.pointerInput(Unit) {
+                        detectTapGestures(
+                            onPress = {
+                                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                talk()
+                                if (tryAwaitRelease()) send() else cancel()
+                            },
+                        )
+                    },
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(Icons.Filled.Mic, contentDescription = null, modifier = Modifier.size(48.dp))
+            }
+        }
+        ButtonLabel(if (recording) "Release to send" else "Hold to talk")
+    }
+}
+
+/** Where a walkie session's audio goes: over the mesh as voice notes, never a live stream. */
+@Composable
+private fun WalkiePill() {
+    Surface(shape = CircleShape, color = MaterialTheme.colorScheme.secondaryContainer) {
+        Row(
+            Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Icon(Icons.Outlined.Podcasts, contentDescription = null, modifier = Modifier.size(16.dp))
+            Text("Walkie-talkie · mesh", style = MaterialTheme.typography.labelLarge)
         }
     }
 }
@@ -578,7 +738,7 @@ internal fun statusOf(
         null -> ""
         CallPhase.Calling -> "Calling…"
         CallPhase.Ringing -> "Ringing…"
-        CallPhase.Alerting -> "Incoming voice call"
+        CallPhase.Alerting -> if (state.walkie) "Incoming walkie-talkie" else "Incoming voice call"
         CallPhase.Connecting -> "Connecting…"
         CallPhase.Connected -> "Connected"
         CallPhase.Ended -> "Call ended"
@@ -608,6 +768,9 @@ private fun PreviewCall(
     muted: Boolean = false,
     speaker: Boolean = false,
     reason: Int? = null,
+    walkie: Boolean = false,
+    degraded: Boolean = false,
+    talk: Talk = Talk.Idle(),
 ) = KnitPreview {
     CallScreen(
         state =
@@ -621,6 +784,8 @@ private fun PreviewCall(
                 muted = muted,
                 speaker = speaker,
                 reason = reason,
+                walkie = walkie,
+                degraded = degraded,
             ),
         name = name,
         avatarHash = null,
@@ -632,6 +797,7 @@ private fun PreviewCall(
         onMute = {},
         onSpeaker = {},
         clock = { PREVIEW_NOW },
+        talk = talk,
     )
 }
 
@@ -688,3 +854,8 @@ fun CallScreenDiagnosticsPreview() =
 @Preview(name = "Ended", widthDp = 411, heightDp = 891)
 @Composable
 fun CallScreenEndedPreview() = PreviewCall(CallPhase.Ended, reason = CallPayload.REASON_TIMEOUT)
+
+@Preview(name = "Walkie, degraded", widthDp = 411, heightDp = 891)
+@Preview(name = "Walkie, degraded, dark", widthDp = 411, heightDp = 891, uiMode = Configuration.UI_MODE_NIGHT_YES)
+@Composable
+fun CallScreenWalkiePreview() = PreviewCall(CallPhase.Connected, walkie = true, degraded = true, talk = Talk.Recording(4_200, 0.6f))

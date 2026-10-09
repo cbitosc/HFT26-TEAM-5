@@ -215,6 +215,7 @@ carries; never renumber an old one.
 | [2026-10.5hzt](decisions/2026-10-5hzt-a-transfer-s-ready-is-sent-until-the-receiver-connects.md) | A transfer's READY is sent until the receiver connects, and a send that ended short is retried from its card | transfer, ui |
 | [2026-10.6e5t](decisions/2026-10-6e5t-a-blob-is-fetched-from-the-best-neighbour-that-says-it-holds-it.md) | A blob is fetched from the best neighbour that says it holds it | mesh, wire, blobs |
 | [2026-10.6h2g](decisions/2026-10-6h2g-everyone-is-one-mention-per-member.md) | @everyone is one mention per member | mentions, groups |
+| [2026-10.79yb](decisions/2026-10-79yb-a-call-with-no-live-path-is-a-walkie-talkie-over-the-mesh.md) | A call with no live path is a walkie-talkie over the mesh | calls, voice |
 | [2026-10.8hmx](decisions/2026-10-8hmx-an-animated-picture-keeps-its-frames.md) | An animated picture keeps its frames | attachments, privacy |
 | [2026-10.8jwn](decisions/2026-10-8jwn-a-bluetooth-file-feed-splits-one-pace-budget-across-the-links-it-feeds.md) | A Bluetooth file feed splits one pace budget across the links it feeds | ble, mesh |
 | [2026-10.9rh6](decisions/2026-10-9rh6-block-on-send-only-in-the-public-rooms.md) | Block on send only in the public rooms | moderation, privacy |

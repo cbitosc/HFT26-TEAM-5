@@ -168,6 +168,14 @@ object Protocol {
      */
     const val CAP_CALL = 0x4000L
 
+    /**
+     * Walkie-talkie calls (experimental, docs/VOICE_CALLS.md §3.11, ADR 2026-10.79yb): this build answers a walkie
+     * offer (`CallPayload.MEDIA_WALKIE`) and plays a session's voice notes as they arrive. Like [CAP_CALL], never in
+     * [LOCAL_CAPABILITIES] — OR-ed in by a build that wires it (`di/CallWiring`, `BuildConfig.WALKIE`) — and a
+     * send-time input only: a caller offers a walkie, or the drop to one, only toward a profile carrying it.
+     */
+    const val CAP_WALKIE = 0x8000L
+
     /** This build's advertised capability bitfield. */
     const val LOCAL_CAPABILITIES: Long =
         CAP_E2E or CAP_GROUPS or CAP_REACTIONS or CAP_STORE_FORWARD or CAP_RATCHET or CAP_FAST_COMPACT or
