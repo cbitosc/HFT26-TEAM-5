@@ -19,7 +19,7 @@ import app.getknit.knit.debug.call.CallBarHost
 import app.getknit.knit.debug.call.CallController
 import app.getknit.knit.debug.call.CallFaces
 import app.getknit.knit.debug.call.TalkLinks
-import app.getknit.knit.debug.call.TalkPlane
+import app.getknit.knit.debug.call.TalkPath
 import app.getknit.knit.debug.call.TalkPlayer
 import app.getknit.knit.debug.call.TalkRecorder
 import app.getknit.knit.debug.call.WalkieTalk
@@ -170,14 +170,16 @@ private fun Scope.talkLinks(): TalkLinks =
 
         override fun raise(peerId: String): Boolean = get<MeshTransport>().holdLink(peerId)
 
-        // The composite's own order: a Wi-Fi Aware link first (sendLive), else the Bluetooth link holding the peer.
-        override fun planeTo(peerId: String): TalkPlane? {
+        // sendCallTalk's order: the peer's own link, a Wi-Fi Aware one first (sendLive), else a flood over any link.
+        override fun pathTo(peerId: String): TalkPath {
             val transport = get<MeshTransport>()
+            val linked = transport.neighbors.value
             return when {
-                transport.bulkRouteTo(peerId) == BulkRoute.Linked -> TalkPlane.WIFI_AWARE
-                transport.neighbors.value.none { it.nodeId == peerId } -> null
-                transport.slowLinkTo(peerId) -> TalkPlane.BLUETOOTH_CODED
-                else -> TalkPlane.BLUETOOTH
+                linked.isEmpty() -> TalkPath.NONE
+                transport.bulkRouteTo(peerId) == BulkRoute.Linked -> TalkPath.WIFI_AWARE
+                linked.none { it.nodeId == peerId } -> TalkPath.FLOODED
+                transport.slowLinkTo(peerId) -> TalkPath.BLUETOOTH_CODED
+                else -> TalkPath.BLUETOOTH
             }
         }
     }

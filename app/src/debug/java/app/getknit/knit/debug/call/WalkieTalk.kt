@@ -65,17 +65,22 @@ internal interface TalkLinks {
     /** Holds the Wi-Fi Aware link to [peerId] open, or raises one, for a while; false when none will come now. */
     fun raise(peerId: String): Boolean
 
-    /** The radio a chunk to [peerId] would ride now, or null when no radio links the two. */
-    fun planeTo(peerId: String): TalkPlane?
+    /**
+     * The way a chunk to [peerId] goes now, by the links `MeshManager.sendCallTalk` sends on: [TalkLink] reads the
+     * peers this phone hears, and a peer heard but not linked gets its chunks flooded through the links there are.
+     */
+    fun pathTo(peerId: String): TalkPath
 }
 
-/** A radio linking a walkie call's two phones, as the diagnostics card names it. */
-internal enum class TalkPlane(
+/** The way a walkie chunk goes to the peer, as the diagnostics card names it. */
+internal enum class TalkPath(
     val label: String,
 ) {
-    WIFI_AWARE("Wi-Fi Aware"),
-    BLUETOOTH_CODED("Bluetooth Coded"),
-    BLUETOOTH("Bluetooth"),
+    WIFI_AWARE("Wi-Fi Aware · direct"),
+    BLUETOOTH_CODED("Bluetooth Coded · direct"),
+    BLUETOOTH("Bluetooth · direct"),
+    FLOODED("Through a neighbour · flooded"),
+    NONE("No link"),
 }
 
 /**
@@ -188,20 +193,10 @@ internal class WalkieTalk(
         return meter.snapshot().copy(burstsOut = sent.get(), burstsIn = heard.get(), path = peerId?.let(::pathTo))
     }
 
-    // Where a chunk to the peer goes now: "Wi-Fi Aware · direct · held", "Through a neighbour · flooded", "No link".
-    private fun pathTo(peerId: String): String? =
-        when (_link.value) {
-            TalkLink.DIRECT -> directPath(peerId)
-            TalkLink.MESH -> "Through a neighbour · flooded"
-            TalkLink.NONE -> "No link"
-            null -> null
-        }
-
-    // The radio a chunk to a neighbour takes, and whether the call holds its Wi-Fi Aware link.
-    private fun directPath(peerId: String): String {
-        val plane = links?.planeTo(peerId) ?: return "Direct"
-        val held = holding && plane == TalkPlane.WIFI_AWARE
-        return listOfNotNull(plane.label, "direct", "held".takeIf { held }).joinToString(" · ")
+    // Where a chunk to the peer goes now ("Wi-Fi Aware · direct · held"), and whether the call holds that link.
+    private fun pathTo(peerId: String): String? {
+        val path = links?.pathTo(peerId) ?: return null
+        return path.label + if (holding && path == TalkPath.WIFI_AWARE) " · held" else ""
     }
 
     /** Starts a burst; false when no walkie session is connected, or the microphone would not open. */
