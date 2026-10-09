@@ -40,6 +40,8 @@ class DirectCallPathTest {
         val wifi = FakeDirectWifi(log)
         val lease = DirectWifiLease(wifi)
         val lines = mutableListOf<String>()
+
+        @Volatile var enabled = true
         val path =
             DirectCallPath(
                 leaseOf = { lease },
@@ -47,6 +49,7 @@ class DirectCallPathTest {
                 nearby = { true },
                 capable = { true },
                 mayJoinWhileRinging = { true },
+                enabled = { enabled },
                 timings = TIMINGS,
                 log = { synchronized(lines) { lines += it } },
             )
@@ -202,6 +205,22 @@ class DirectCallPathTest {
                 alice.radioCalls("release") == 1 && bob.radioCalls("release") == 1
             }
             assertTrue(alice.lines.none { it.contains("lane up") })
+        }
+
+    @Test
+    fun theDebugSwitchKeepsBothSidesOffTheGroupUntilItIsBackOn() =
+        runBlocking {
+            alice.enabled = false
+            bob.enabled = false
+            assertNull(alice.path.invite(ID, BOB))
+            assertFalse(bob.path.canJoin(ALICE, prewarm = false))
+            assertTrue(synchronized(alice.lines) { alice.lines.any { "switched off" in it } })
+            assertNull(alice.lease.owner)
+
+            alice.enabled = true
+            bob.enabled = true
+            assertNotNull(alice.path.invite(ID, BOB))
+            assertTrue(bob.path.canJoin(ALICE, prewarm = false))
         }
 
     @Test

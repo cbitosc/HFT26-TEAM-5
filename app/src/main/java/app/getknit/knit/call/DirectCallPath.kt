@@ -90,6 +90,9 @@ class DirectCallPath(
     private val capable: suspend (peerId: String) -> Boolean,
     // Whether this phone may join while it only rings: API 29-32 refuses Wi-Fi Direct to an app off screen.
     private val mayJoinWhileRinging: () -> Boolean,
+    // The debug build's Diagnostics switch (`SettingsStore.debugDirectCallsOff`): false sends every call over ICE as
+    // if no neighbour were near, so a lab trial reaches STUN/TURN. Either side refusing keeps the call off the group.
+    private val enabled: () -> Boolean = { true },
     private val io: CoroutineDispatcher = Dispatchers.IO,
     private val clock: () -> Long = { System.currentTimeMillis() },
     private val timings: DirectTimings = DirectTimings(),
@@ -154,6 +157,10 @@ class DirectCallPath(
         callId: String,
         peerId: String,
     ): DirectInvite? {
+        if (!enabled()) {
+            log("call $callId: no direct leg (switched off)")
+            return null
+        }
         if (lease.owner != null || !nearby(peerId) || !capable(peerId)) return null
         lease.leasedTo(callId).refusal()?.let {
             log("call $callId: no direct leg ($it)")
@@ -172,7 +179,8 @@ class DirectCallPath(
         peerId: String,
         prewarm: Boolean,
     ): Boolean =
-        lease.owner == null &&
+        enabled() &&
+            lease.owner == null &&
             nearby(peerId) &&
             (!prewarm || mayJoinWhileRinging()) &&
             lease.leasedTo(PROBE).refusal() == null

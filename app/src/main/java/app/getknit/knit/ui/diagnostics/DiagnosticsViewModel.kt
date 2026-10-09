@@ -9,6 +9,7 @@ import app.getknit.knit.crash.CrashReports
 import app.getknit.knit.data.PeerRepository
 import app.getknit.knit.data.relay.RelayStatusRepository
 import app.getknit.knit.data.settings.SettingsStore
+import app.getknit.knit.di.CALLS_WIRED
 import app.getknit.knit.identity.Identity
 import app.getknit.knit.identity.displayNameFor
 import app.getknit.knit.mesh.MeshController
@@ -199,6 +200,19 @@ class DiagnosticsViewModel(
     fun setNanOff(off: Boolean) {
         if (!nanSwitchOffered) return
         viewModelScope.launch { settings.setDebugNanOff(off) }
+    }
+
+    /** Whether this build offers the Wi-Fi Direct calls switch — debug builds, which are the only ones with calls. */
+    val directCallsSwitchOffered: Boolean = BuildConfig.DEBUG && CALLS_WIRED
+
+    /** Whether the debug switch keeps calls off Wi-Fi Direct (ADR 2026-10.kxnw), so they go over STUN/TURN. */
+    val directCallsOff: StateFlow<Boolean> =
+        settings.debugDirectCallsOff.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
+    /** Keeps the next calls off Wi-Fi Direct, or lets them use it again. A no-op outside a debug build. */
+    fun setDirectCallsOff(off: Boolean) {
+        if (!directCallsSwitchOffered) return
+        viewModelScope.launch { settings.setDebugDirectCallsOff(off) }
     }
 
     /**

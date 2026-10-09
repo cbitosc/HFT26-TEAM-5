@@ -498,6 +498,57 @@ class DiagnosticsScreenContentTest {
         assertEquals(listOf(false), sets)
     }
 
+    private fun setDirectCallsContent(
+        offered: Boolean,
+        off: Boolean,
+        onSet: (Boolean) -> Unit = {},
+    ) {
+        compose.setContent {
+            KnitTheme {
+                DiagnosticsScreenContent(
+                    state = state(),
+                    health = TransportHealth.Healthy,
+                    lastCrash = null,
+                    now = 0L,
+                    snackbarHostState = SnackbarHostState(),
+                    onBack = {},
+                    onRestartMesh = {},
+                    onScan = {},
+                    onOpenCrashLog = {},
+                    moderationLatched = false,
+                    onResetModeration = {},
+                    directCallsSwitchOffered = offered,
+                    directCallsOff = off,
+                    onSetDirectCallsOff = onSet,
+                )
+            }
+        }
+    }
+
+    @Test
+    fun theWifiDirectCallsSwitchIsAbsentUnlessOffered() {
+        setDirectCallsContent(offered = false, off = false)
+        compose.onNodeWithTag("direct_calls_switch").assertDoesNotExist()
+    }
+
+    @Test
+    fun theWifiDirectCallsSwitchTurnsTheLegOff() {
+        val sets = mutableListOf<Boolean>()
+        setDirectCallsContent(offered = true, off = false, onSet = { sets += it })
+        compose.onNode(hasScrollAction()).performScrollToNode(hasTestTag("direct_calls_switch"))
+        compose.onNodeWithTag("direct_calls_switch").assertIsOn().performClick()
+        assertEquals(listOf(true), sets)
+    }
+
+    @Test
+    fun anOffWifiDirectCallsSwitchTurnsBackOn() {
+        val sets = mutableListOf<Boolean>()
+        setDirectCallsContent(offered = true, off = true, onSet = { sets += it })
+        compose.onNode(hasScrollAction()).performScrollToNode(hasTestTag("direct_calls_switch"))
+        compose.onNodeWithTag("direct_calls_switch").assertIsOff().performClick()
+        assertEquals(listOf(false), sets)
+    }
+
     @Test
     fun anAbsentPlaneIsListedWithItsReason() {
         val bleOnly = RadioSupport(bluetooth = PlaneSupport.Supported, wifiAware = PlaneSupport.NoHardware)

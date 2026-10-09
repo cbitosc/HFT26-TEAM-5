@@ -10,6 +10,7 @@ import app.getknit.knit.call.CallTimings
 import app.getknit.knit.call.DirectCallPath
 import app.getknit.knit.call.TurnSource
 import app.getknit.knit.data.PeerRepository
+import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.debug.call.CallAudio
 import app.getknit.knit.debug.call.CallBarHost
 import app.getknit.knit.debug.call.CallController
@@ -24,6 +25,8 @@ import app.getknit.knit.transfer.DirectWifiLease
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import org.koin.android.ext.koin.androidContext
 import org.koin.core.Koin
@@ -47,6 +50,8 @@ fun callModule(): Module? =
         // §3.10 (ADR 2026-10.kxnw): a call between neighbours rides a Wi-Fi Direct group, on the radio the transfer
         // shares through one lease. "Directly linked" is the transfer's own gate, a mesh neighbour now.
         single {
+            // Read synchronously by `canJoin`, so held as a state on the app scope from the first call on.
+            val directOff = get<SettingsStore>().debugDirectCallsOff.stateIn(get<CoroutineScope>(), SharingStarted.Eagerly, false)
             DirectCallPath(
                 leaseOf = { get<DirectWifiLease>() },
                 scope = get<CoroutineScope>(),
@@ -54,6 +59,7 @@ fun callModule(): Module? =
                 capable = { id -> (get<PeerRepository>().find(id)?.capabilities ?: 0L) and Protocol.CAP_DIRECT_TRANSFER != 0L },
                 // API 29-32 refuses Wi-Fi Direct to an app off screen; 33+ gates it on NEARBY_WIFI_DEVICES alone.
                 mayJoinWhileRinging = { Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU || get<AppVisibility>().visible.value },
+                enabled = { !directOff.value },
                 log = { Log.i(TAG, it) },
             )
         }

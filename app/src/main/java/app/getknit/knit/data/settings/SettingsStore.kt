@@ -486,6 +486,14 @@ class SettingsStore(
         dataStore.data.map { prefs -> BuildConfig.DEBUG && prefs[KEY_DEBUG_NAN_OFF] == true }
 
     /**
+     * Whether the debug build's calls skip the Wi-Fi Direct leg (ADR 2026-10.kxnw), so a call between neighbours
+     * goes over ICE alone — host, STUN and TURN — the way it would between strangers. Set from Diagnostics; read by
+     * `DirectCallPath`. Gated on `BuildConfig.DEBUG` like [debugNanOff]; the `debug_` prefix keeps it out of a backup.
+     */
+    val debugDirectCallsOff: Flow<Boolean> =
+        dataStore.data.map { prefs -> BuildConfig.DEBUG && prefs[KEY_DEBUG_DIRECT_CALLS_OFF] == true }
+
+    /**
      * The BLE Coded PHY's mode (ADR 2026-10.yvn6), or null where the build keeps it dark (`BuildConfig.BLE_CODED_PHY`).
      * Unset reads [CodedPhyMode.AUTO]: a build that carries the feature runs it. Only a debug build reads the stored
      * mode, set from Diagnostics or `…debug.PHY` for a walk test; a release build is always AUTO, whatever a debug
@@ -786,6 +794,16 @@ class SettingsStore(
                 it[KEY_DEBUG_NAN_OFF] = true
             } else {
                 it.remove(KEY_DEBUG_NAN_OFF)
+            }
+        }
+
+    /** Sets [debugDirectCallsOff]; on (false) clears the key. */
+    suspend fun setDebugDirectCallsOff(off: Boolean) =
+        dataStore.edit {
+            if (off) {
+                it[KEY_DEBUG_DIRECT_CALLS_OFF] = true
+            } else {
+                it.remove(KEY_DEBUG_DIRECT_CALLS_OFF)
             }
         }
 
@@ -1119,6 +1137,7 @@ class SettingsStore(
         val KEY_DEBUG_BLE_LINK_CAP = intPreferencesKey("debug_ble_link_cap")
         val KEY_DEBUG_BLE_PHY_MODE = stringPreferencesKey("debug_ble_phy_mode")
         val KEY_DEBUG_NAN_OFF = booleanPreferencesKey("debug_nan_off")
+        val KEY_DEBUG_DIRECT_CALLS_OFF = booleanPreferencesKey("debug_direct_calls_off")
         val KEY_LORA_NODE = longPreferencesKey("lora_board_node")
         val KEY_LORA_KEY = stringPreferencesKey("lora_board_key")
         val KEY_LORA_SETUP_ADDRESS = stringPreferencesKey("lora_setup_address")

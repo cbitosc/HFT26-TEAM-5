@@ -1,6 +1,7 @@
 package app.getknit.knit.ui.diagnostics
 
 import android.text.format.Formatter
+import androidx.annotation.StringRes
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -112,6 +113,7 @@ fun DiagnosticsScreen(
     val moderationLatched by viewModel.moderationLatched.collectAsStateWithLifecycle()
     val bleLinkCap by viewModel.bleLinkCap.collectAsStateWithLifecycle()
     val nanOff by viewModel.nanOff.collectAsStateWithLifecycle()
+    val directCallsOff by viewModel.directCallsOff.collectAsStateWithLifecycle()
     val blePhyMode by viewModel.blePhyMode.collectAsStateWithLifecycle()
     val blePhys by viewModel.blePhys.collectAsStateWithLifecycle()
     var confirmingModerationReset by remember { mutableStateOf(false) }
@@ -168,6 +170,9 @@ fun DiagnosticsScreen(
         nanSwitchOffered = viewModel.nanSwitchOffered,
         nanOff = nanOff,
         onSetNanOff = viewModel::setNanOff,
+        directCallsSwitchOffered = viewModel.directCallsSwitchOffered,
+        directCallsOff = directCallsOff,
+        onSetDirectCallsOff = viewModel::setDirectCallsOff,
         blePhyMode = blePhyMode,
         onSetBlePhyMode = viewModel::setBlePhyMode,
         blePhys = blePhys,
@@ -217,6 +222,10 @@ internal fun DiagnosticsScreenContent(
     nanSwitchOffered: Boolean = false,
     nanOff: Boolean = false,
     onSetNanOff: (Boolean) -> Unit = {},
+    // The debug-only Wi-Fi Direct calls switch, defaulted off likewise: [directCallsOff] true sends calls over ICE.
+    directCallsSwitchOffered: Boolean = false,
+    directCallsOff: Boolean = false,
+    onSetDirectCallsOff: (Boolean) -> Unit = {},
     // The Coded PHY experiment's mode; null (a build that keeps it dark, and every other caller) hides the row.
     blePhyMode: CodedPhyMode? = null,
     onSetBlePhyMode: (CodedPhyMode) -> Unit = {},
@@ -285,7 +294,27 @@ internal fun DiagnosticsScreenContent(
                 item { BleLinkCapRow(cap = bleLinkCap, onSet = onSetBleLinkCap) }
             }
             if (nanSwitchOffered && state.transports.any { it is TransportRow.Live && it.kind == TransportKind.WifiAware }) {
-                item { NanSwitchRow(off = nanOff, onSet = onSetNanOff) }
+                item {
+                    DebugSwitchRow(
+                        label = R.string.diagnostics_nan_switch_label,
+                        body = R.string.diagnostics_nan_switch_body,
+                        tag = "nan_switch",
+                        off = nanOff,
+                        onSet = onSetNanOff,
+                    )
+                }
+            }
+            // Not tied to a transport row: a call's direct leg raises its own Wi-Fi Direct group.
+            if (directCallsSwitchOffered) {
+                item {
+                    DebugSwitchRow(
+                        label = R.string.diagnostics_direct_calls_switch_label,
+                        body = R.string.diagnostics_direct_calls_switch_body,
+                        tag = "direct_calls_switch",
+                        off = directCallsOff,
+                        onSet = onSetDirectCallsOff,
+                    )
+                }
             }
             if (blePhyMode != null && state.transports.any { it is TransportRow.Live && it.kind == TransportKind.Bluetooth }) {
                 item { BlePhyModeRow(mode = blePhyMode, onSet = onSetBlePhyMode) }
@@ -1069,11 +1098,15 @@ private fun BleLinkCapRow(
 }
 
 /**
- * The debug build's Wi-Fi Aware switch (`SettingsStore.debugNanOff`): on runs the plane, off stops it so the mesh
- * runs on Bluetooth alone. The whole row toggles; the transport applies it without a restart and it persists.
+ * A debug build's on/off switch, persisted: the Wi-Fi Aware plane (`SettingsStore.debugNanOff`, applied by the
+ * transport without a restart, so the mesh runs on Bluetooth alone) or calls' Wi-Fi Direct leg
+ * (`SettingsStore.debugDirectCallsOff`, read when the next call starts). The whole row toggles; [off] reads unchecked.
  */
 @Composable
-private fun NanSwitchRow(
+private fun DebugSwitchRow(
+    @StringRes label: Int,
+    @StringRes body: Int,
+    tag: String,
     off: Boolean,
     onSet: (Boolean) -> Unit,
 ) {
@@ -1084,17 +1117,17 @@ private fun NanSwitchRow(
                 .heightIn(min = 48.dp)
                 .toggleable(value = !off, onValueChange = { on -> onSet(!on) }, role = Role.Switch)
                 .padding(horizontal = 16.dp, vertical = 8.dp)
-                .testTag("nan_switch"),
+                .testTag(tag),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                text = stringResource(R.string.diagnostics_nan_switch_label),
+                text = stringResource(label),
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.Medium,
             )
             Text(
-                text = stringResource(R.string.diagnostics_nan_switch_body),
+                text = stringResource(body),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(top = 2.dp),
