@@ -1,5 +1,7 @@
 # iOS port review — risks, gaps, and pre-release changes
 
+<!-- doc-lint: record — a dated review; it names the code as it stood when written -->
+
 Reviewed 2026-07-04, against the shipped two-plane transport (BLE + Wi-Fi Aware behind
 `CompositeMeshTransport`) and the layered CBOR wire. Assumption (per direction): the iOS app will be
 largely a **separate codebase**; this review is about what the *protocol and the Android app* should

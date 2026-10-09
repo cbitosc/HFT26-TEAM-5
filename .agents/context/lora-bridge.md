@@ -199,6 +199,8 @@ Golden byte vectors pin every field number; malformed input decodes to null, nev
   Two rules to remember: a signed packet that fails against the key the *receiving* board holds is dropped
   before the phone sees it, whatever the policy — a stale or planted key silently blackholes that sender —
   and an unverifiable one (no key in the NodeDB) is passed up with the signature and the flag false.
+  <!-- doc-lint: allow Config.SecurityConfig.packet_signature_policy — a Meshtastic protobuf field, not the app's Config -->
+  <!-- doc-lint: allow NodeInfo.has_xeddsa_signed — a Meshtastic protobuf field, not the app's NodeInfo -->
 
 ## Key bootstrap (the far side has never seen the author's profile)
 
@@ -298,6 +300,8 @@ are read off the board (`FromRadio.config` → `Config.LoRaConfig`, pinned by `M
 5 % until reported). `LoraPacePolicy.take` consults it, skipping a refused frame rather than blocking behind
 it, and **dequeue is now by class then FIFO** (a reversal of ADR 039 §5 — bursts of backfill must not queue-jump
 a live message).
+<!-- doc-lint: allow LoraPacePolicy.dropQueued — the call xdm2 retired, named as history -->
+<!-- doc-lint: allow Config.LoRaConfig — a Meshtastic protobuf message, not the app's Config -->
 
 **Digest-driven backfill.** `LoraCtl` (tag **`0x10`**, beside `FastFrameCodec`'s `0x03`/`0x04`; an older build
 drops it as `UNKNOWN_TAG`, which is what makes this additive) carries an OFFER: publisher key + ≤ 48 4-byte id
@@ -617,7 +621,7 @@ alone. Two traps here:
 - **The button's label depends on which half is missing.** The screen compares `meshName` against
   `knitName`: equal names mean the board is already called what Knit calls it and the *mark* is what is
   missing, so it says "Mark this board unmonitored" instead of lying about a rename.
-- **`renameOnly` fills the recorded name in, it does not overwrite it** (`previous.owner ?: was.owner`). A
+- **`identityOnly` fills the recorded name in, it does not overwrite it** (`previous.owner ?: was.owner`). A
   board missing only the mark is *already* `Knit abcd`, and recording that would destroy the only copy of
   the stock name a Restore has to put back. Unconditional overwrite was safe only while this path was
   reachable exclusively on a stock-named board.

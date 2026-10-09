@@ -85,7 +85,7 @@ codebase:
    long before the receiver's header lands) and the time a landed file waits for the consumer (`LandingFiles`, until
    `fileTaken`). Evidence: dedd985e (#121: re-asks served again across the stack buffer), c1437646 (#138: a landed,
    unstored file re-asked).
-3. **A cache standing in for the database.** What is missing is `messages.hashesNeedingFetch()` plus the carrier-only
+3. **A cache standing in for the database.** What is missing is `messages.attachmentsNeedingFetch()` plus the carrier-only
    custody hashes, re-read at every link-up and on the 60 s tick; `BlobExchange.fetching` is a swept memo of it. A
    path that asks only from the memo strands a blob after the 30-min sweep or a restart; one that re-asks the memo
    without the store's `has` re-pulls what is held. Evidence: 121bc984 (ptv8: a want swept while isolated, the
@@ -183,7 +183,7 @@ Lead with a one-line verdict: `CLEAN`, or `FINDINGS: <n>`. Then, most likely to 
 - **Breaks:** the symptom — extra copies, a stranded blob or frame, a digest that never converges — and for which
   parties or orderings
 - **Fix:** the concrete change (name the existing helper when there is one: `arrivingFiles`, `fileInFlightTo`,
-  `hashesNeedingFetch`, `CarrierPullPolicy`, `FeedMeter`, `current()`)
+  `attachmentsNeedingFetch`, `CarrierPullPolicy`, `FeedMeter`, `current()`)
 - **Confidence:** high (traced in code or documented) or medium (inferred; say what is unverified)
 
 End with the checks' line (`checks: <classes> — X passed, Y failed; oracles: ok | broken: <reader>`) and

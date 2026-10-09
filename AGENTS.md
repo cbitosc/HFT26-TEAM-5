@@ -31,6 +31,12 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   build must not depend on the build machine (no NDK on the APK path, no foojay JDK download, no Git LFS on the
   release path — the screenshot references are its one test-only LFS rule).
 - **When editing any Kotlin/Compose/data code:** obey `.agents/rules/coding.md`.
+- **When renaming, moving or removing a class, member, file, constant or ADR, or editing anything under `.agents/` or
+  `docs/`:** run `python3 scripts/doc-lint.py` and fix what it names. It checks every code span, path and ADR id in
+  the docs against the tracked sources and their history (a retired symbol, a missing member or path, a line ref past
+  the end, an unknown ADR). A hook runs it on every doc edit, the Stop hook on a dirty tree and both CIs on every
+  push. A deliberate mention of an old name carries `<!-- doc-lint: allow <name> — <why> -->` in its paragraph; a
+  dated review opts out whole with `<!-- doc-lint: record — <why> -->`.
 - **When adding to `CHANGELOG.md`'s `## Unreleased`, or writing a fastlane changelog:** obey
   `.agents/rules/changelog.md` — two sentences, about forty words, run through the `humanizer` skill.
   A `PreToolUse` hook blocks the edit otherwise. Shipped sections are a record; never restyle them.

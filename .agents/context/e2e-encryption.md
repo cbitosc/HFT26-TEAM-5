@@ -122,7 +122,7 @@ checks the switch.
 payload as a signed link (`mesh/crypto/ContactCard`): body `{v, id, pk, name?, sp?, iat}`, Ed25519 over
 `"knit/card/v1" ‖ body`, never re-encoded to verify. Import pins + accepts, never verifies. The intro
 handshake is the existing sealed `CTL_PROFILE` DM sent to a peer with no session (`MeshManager.sendIntroTo`
-→ `sendProfileDm` → `ratchet.sealDm` initiates X3DH off the card-pinned prekey), driven by the pure
+→ `sendCtlDm` → `ratchet.sealDm` initiates X3DH off the card-pinned prekey), driven by the pure
 `mesh/IntroSync` (send when sealable, re-send every 20 h while unconfirmed, answer an init-bearing peer
 hourly, 48 h grace after confirmation). On the spool plane the pair meets at a **pair scope** before any
 session exists: `ScopeCrypto.pairSecret(IK_self, IK_peer)` (static-static X25519 over the identity DH keys,

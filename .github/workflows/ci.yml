@@ -265,6 +265,22 @@ jobs:
       - name: Lint app/src/test/.../mesh/lab/
         run: python3 scripts/lab-lint.py
 
+  doc-lint:
+    name: Docs reference live code
+    runs-on: ubuntu-latest
+    # No JDK, no Gradle: scripts/doc-lint.py reads the docs and the tracked sources with the standard library and
+    # flags a name the code dropped, a member an app type lacks, a path or an ADR id that is gone. Full history,
+    # because a retired symbol is one some commit removed. A deliberate mention carries
+    # `<!-- doc-lint: allow <name> — <why> -->` in its paragraph.
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Checker unit tests
+        run: python3 -m unittest scripts/test_doc_lint.py
+      - name: Check the docs
+        run: python3 scripts/doc-lint.py
+
   btsnoop-drain:
     name: Snoop analyser tests
     runs-on: ubuntu-latest

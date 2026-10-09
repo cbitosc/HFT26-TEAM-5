@@ -1,5 +1,7 @@
 # NAN concurrency re-audit: the one-NDP limit is per-role, and both wedges are one framework bug
 
+<!-- doc-lint: record — a dated review; it names the code as it stood when written -->
+
 **Status:** findings **verified on-device 2026-07-04** (Pixel 7/8/9 Pro XL, Android 16 `CP1A.260405.005`,
 Wi-Fi mainline module `com.google.android.wifi` vc `370547060`), on branch `perf/wifi-aware-experiments`
 (experiment build: after-serve reattach disabled, concurrent inbound accepts admitted). **Production `main`

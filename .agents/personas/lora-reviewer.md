@@ -124,6 +124,7 @@ explicitly; the incidents are the evidence that each one bit this plane:
 13. **One edit, two collectors.** Two projections of the same setting or binding let one collector miss an edit, and
     a board changes hands: an attribution is resolved once at ingest and frozen. Evidence: 691c41ca (an unbind
     sometimes never republished the profile), ADR 2026-09.26q3 (`messages.originPeerId`).
+    <!-- doc-lint: allow OutboundFrame.getBucket — the getter as the incident's stack trace named it -->
 
 Then two checks that are not shapes:
 

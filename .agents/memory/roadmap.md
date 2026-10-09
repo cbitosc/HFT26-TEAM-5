@@ -352,8 +352,8 @@ doc). **Don't start a deferred item without explicit direction.**
   triggers a beacon exchange or a re-offer), **Meshtastic unicast + `want_ack`** for DMs (needs a
   nodeNum↔nodeId map and a Routing `NONE`-is-success branch), **re-offer beyond the heard peer** (a
   board-less recipient behind another board-holder — the "true DM routing" deferral), an **in-app scan + bond flow**
-  (`MeshtasticScanner`/`MeshtasticBonder` are written but unwired — device-only verifiable, and the scan must
-  go through `BleConnectArbiter`; the picker filters bonded devices instead, ADR 040), and a **per-message
+  (the unwired scanner and bonder were deleted as dead code in a7b6e9a8 — a new one is device-only verifiable,
+  and its scan must go through `BleConnectArbiter`; the picker filters bonded devices instead, ADR 040), and a **per-message
   `loraTooBig` marker** (no persisted evidence; ADR 040's composer hint covers the sending side). **The plane's
   UI SHIPPED** (2026-08-25, ADR 040): `DeliveryPlane.LoRa` + bubble glyph, the header glyph, the board-only
   picker with a channel verdict, the LoRa-only DM notice and the long-message composer hint; the board's
@@ -691,7 +691,7 @@ doc). **Don't start a deferred item without explicit direction.**
   from the frame). The residual is `LinkFraming.FileHeaderWire.mime`: `BlobExchange.onRequest` serves a
   blob to **any** neighbour that asks, so a carrier that actually pulls the bytes still learns the type.
   **Before building it:** `mime` is a required non-null `String` under `encodeDefaults = true` and
-  `decodeFileHeader` returning null sets `rxAborted = true`, so *omitting* it hard-breaks blob transfer
+  `decodeFileHeader` returning null makes `FileIntake` skip the whole file, so *omitting* it hard-breaks blob transfer
   against deployed builds — substitute a constant instead (`image/jpeg` is already the universal fallback
   at `ScopeSync.FALLBACK_MIME`, `MeshBlobStore.fileFor` and `AVATAR_MIME`, so old builds degrade by
   nothing). Do **not** gate it on a capability bit: `Protocol.capabilities` is unauthenticated advert data,

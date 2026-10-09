@@ -21,6 +21,12 @@
             "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/review-gate.sh\"",
             "timeout": 30,
             "statusMessage": "Checking for changes a reviewer owns"
+          },
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR}/scripts/doc-lint.py\" --stop",
+            "timeout": 30,
+            "statusMessage": "Checking docs against the code (doc-lint)"
           }
         ]
       }
@@ -63,6 +69,12 @@
             "command": "python3 \"${CLAUDE_PROJECT_DIR}/scripts/lab-lint.py\" --hook",
             "timeout": 15,
             "statusMessage": "Linting mesh-lab scenarios (lab-lint)"
+          },
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR}/scripts/doc-lint.py\" --hook",
+            "timeout": 15,
+            "statusMessage": "Checking the doc against the code (doc-lint)"
           }
         ]
       }

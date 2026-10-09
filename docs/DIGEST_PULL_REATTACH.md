@@ -1,5 +1,7 @@
 # Proposal: digest-pull anti-entropy + deliberate re-attach
 
+<!-- doc-lint: record — a dated review; it names the code as it stood when written -->
+
 > **Re-audit note (2026-07-04):** the "★ load-bearing hardware facts" below were re-verified against the
 > framework source and on-device experiments and are **partially refuted** — a served accept-any responder
 > does NOT wedge (it serves indefinitely; the after-serve re-attach's only real job is releasing the NDI

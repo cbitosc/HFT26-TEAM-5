@@ -154,6 +154,10 @@ normative rule moved (an iOS port implements those files, not the Kotlin), add o
 `.agents/context/crypto.md`, and run `python3 scripts/adr.py index`. The caller decides whether the decision
 stands, so flag it in the report as a draft.
 
+If you renamed, moved or removed a class, member, file or constant, run `python3 scripts/doc-lint.py` and fix
+each doc it names, your plane's routing file first. It flags a name the code no longer has, so a rename strands
+no reader; the Stop hook runs it too. Put its result on the report's **Checks** line.
+
 ## Report
 
 Your report is all the caller sees, so make it complete without your transcript. Lead with one line:

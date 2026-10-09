@@ -111,7 +111,7 @@ unless the break is also the moment to mint `DICT_V2`, which is additive by `dic
 **Why it is parked.** It is the residual ADR 035 could not reach: `BlobExchange.onRequest` serves a blob to
 any neighbour that asks, so a carrier that actually pulls the bytes still learns photo-vs-voice from the
 header. It cannot be removed additively — `mime` is a required non-null `String` under
-`encodeDefaults = true`, and `decodeFileHeader` returning null sets `rxAborted = true`, so omitting it
+`encodeDefaults = true`, and `decodeFileHeader` returning null makes `FileIntake` skip the whole file, so omitting it
 hard-breaks blob transfer against every deployed build.
 
 **At the break.** Remove the field. If the interim mitigation the roadmap prescribes has already shipped

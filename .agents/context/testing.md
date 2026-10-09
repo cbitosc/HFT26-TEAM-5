@@ -504,8 +504,8 @@ hop (fixed in `MeshRouter.countOverheard`, pinned by `MeshRouterTest`).
 
 ## JVM Room/DAO + migration tests (Robolectric)
 
-`app/src/test/java/app/getknit/knit/data/` runs the **real** DAO SQL — the eviction/orphan/GC queries the
-`FakeForwardDao`/`FakeReactionDao` only *mirror* (finding #5 in `docs/ARCHITECTURE_REVIEW.md`) — on the JVM
+`app/src/test/java/app/getknit/knit/data/` runs the **real** DAO SQL — the eviction/orphan/GC queries that
+hand-written fake DAOs could only *mirror* (finding #5 in `docs/ARCHITECTURE_REVIEW.md`) — on the JVM
 under Robolectric 4.17, plus a `MigrationTestHelper` harness. They run inside the normal
 `:app:testDebugUnitTest` (and CI `test:unit`), no device. The wiring is non-obvious and load-bearing — read
 before "simplifying":

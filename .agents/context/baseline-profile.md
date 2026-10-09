@@ -27,6 +27,7 @@ the startup file reaches R8's layout pass and nothing else.
 `src/main/baseline-prof.txt` (verified on AGP 9.3.1: adding a rule moved its output from 5507 to 5509
 lines), merges it with the profiles the AndroidX AARs ship, hands the result to R8 — which rewrites the
 rules through its own mapping — and packages `assets/dexopt/baseline.prof` + `.profm`.
+<!-- doc-lint: allow assets/dexopt/baseline.prof — a path inside the APK, not the tree -->
 `mergeReleaseStartupProfile` takes `src/main/baselineProfiles/startup-prof.txt` and feeds R8's dex layout.
 
 That shape is chosen for `.agents/context/distribution.md`'s reproducibility contract. F-Droid rebuilds the

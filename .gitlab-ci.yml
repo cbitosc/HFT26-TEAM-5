@@ -365,6 +365,21 @@ verify:lab-lint:
     - python3 -m unittest scripts/test_hci_bridge.py
     - python3 scripts/lab-lint.py
 
+# The docs reference live code (scripts/doc-lint.py): a name the code dropped, a member an app type lacks, a path or
+# an ADR id that is gone fails here. Full history, because a retired symbol is one some commit removed; alpine needs
+# git for it. A deliberate mention carries `<!-- doc-lint: allow <name> — <why> -->`. Mirrors GitHub's `doc-lint` job.
+verify:doc-lint:
+  image: python:3.13-alpine
+  stage: verify
+  needs: []
+  variables:
+    GIT_DEPTH: 0
+  script:
+    - apk add --no-cache git
+    - git config --global --add safe.directory "$CI_PROJECT_DIR"
+    - python3 -m unittest scripts/test_doc_lint.py
+    - python3 scripts/doc-lint.py
+
 # The Bluetooth drain trial's snoop analyser (scripts/btsnoop-drain.py, #120) reads HCI snoops with the standard library;
 # its tests need nothing but Python. Mirrors GitHub's `btsnoop-drain` job.
 verify:btsnoop-drain:

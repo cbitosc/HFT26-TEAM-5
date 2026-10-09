@@ -73,6 +73,7 @@ dexdump non-free-class scan and extra-signing-block scan are clean, and `UpdateC
 `knit.versionCode`/`knit.versionName` out of `gradle.properties`. `Categories` are validated against
 fdroiddata's `config/categories.yml` (108 entries) — a bare local repo has no category config, so
 `fdroid lint` will call *every* category invalid there; that is a local artifact, not a real failure.
+<!-- doc-lint: allow config/categories.yml — a file in fdroiddata, not this tree -->
 
 Four inputs were deliberately de-machine-ified to keep it that way:
 

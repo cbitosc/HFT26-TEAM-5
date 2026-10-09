@@ -111,6 +111,7 @@ LoRa plane (2026-09.ggq4).
   with itself — a re-served copy of our own profile once pinned `peers[me]` and sealed every group's seed to self in a
   loop floored at 15 min (45763fb6), and the orphaned self session and seed rows outlived the fix (8333c858).
   `MeshLab.assertConverged` asserts no node holds either.
+  <!-- doc-lint: allow openNewEpoch — the ADR's name for today's Ladder.openFresh -->
 
 ## Adding an entry
 

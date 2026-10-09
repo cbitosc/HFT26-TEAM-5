@@ -259,7 +259,7 @@ and a picker that reports `application/octet-stream` for a JPEG would have been 
 the bytes' own signature (`FileTypes.imageMimeOf`) and hands anything that is really an image back to the
 image pipeline — downscaled, re-encoded and screened — whatever it was called. A wrong guess costs nothing:
 a failed decode falls through to storing the file as-is. And on the receive side nothing had to change,
-because `InboundPipeline.onObtained` → `screenEncryptedAttachment` already decrypts and screens **every**
+because `InboundPipeline.onObtained` → `screenHeldAttachment` already decrypts and screens **every**
 keyed attachment MIME-blind: an image mislabelled as a file still lands with a cached verdict, and the file
 bubble draws a "may contain sensitive content" line rather than a blur, there being no image to blur.
 

@@ -245,7 +245,7 @@ free). Two invariants that are easy to break:
 - **The database says which attachments are missing; `BlobExchange`'s `fetching` set is a swept memo of it**
   (ADR 2026-09.ptv8). A `want` parked with no neighbor (a frame heard over the board alone) is reclaimed by
   the 30-min `FETCH_TTL_MS` sweep, and `onNeighborAdded` re-asks only from the memo — so
-  `MeshManager.rewantMissingBlobs()` re-reads `messages.hashesNeedingFetch()` (+ the carrier-only custody
+  `MeshManager.rewantMissingBlobs()` re-reads `messages.attachmentsNeedingFetch()` (+ the carrier-only custody
   hashes under budget) on every neighbor join and 60 s re-offer tick, not only at startup. Any new "what do
   we still need" path reads the database the same way; never make the memo the source. The re-ask itself is
   the tick's `onNeighborAdded` per linked neighbour (`want` is a no-op for a hash already in the set), and it

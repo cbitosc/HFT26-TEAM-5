@@ -520,8 +520,8 @@ opaque SHA-256-addressed bytes with a MIME string beside them, which is why voic
     link's `FileIntake` splices the holder's tail onto a copy of it. A spliced file that fails the store's hash
     check drops the prefix and is asked for from byte 0 at once.
   - `onReceived(...)` — save the blob, clear `fetching`, fire `onObtained`
-    (`MessageRepository.setAttachmentPath`, filling the local path on every message referencing the
-    hash). Nothing is pushed to anyone: a blob walks hop-by-hop over direct-neighbor file transfers,
+    (`InboundPipeline.onObtained`: screen the held bytes, and adopt the avatar or group photo they are; a
+    message names its blob by hash, so there is no path to fill in). Nothing is pushed to anyone: a blob walks hop-by-hop over direct-neighbor file transfers,
     one hop per re-ask.
   - `reask()` steps every round still missing and not arriving — on a new link (a neighbour that links in a
     widened round is asked at once; catches late joiners) and on the 60 s re-offer tick, which opens the next
@@ -532,9 +532,9 @@ opaque SHA-256-addressed bytes with a MIME string beside them, which is why voic
     never flooded — each hop mints a fresh request id), and never bouncing a blob back to its giver.
 
 On startup, `MeshManager.resumePendingFetches()` re-requests any attachment referenced by a stored
-message whose bytes aren't present yet (`MessageDao.hashesNeedingFetch()`) — and any
+message whose bytes aren't present yet (`MessageDao.attachmentsNeedingFetch()`) — and any
 attachment referenced by a **carried store-and-forward frame** whose bytes are missing
-(`ForwardStore.attachmentHashesNeedingFetch()`, gated by the carrier budget below), so a carrier keeps
+(`ForwardStore.attachmentsNeedingFetch()`, gated by the carrier budget below), so a carrier keeps
 retrying the image it is custodying for a late joiner.
 
 **Over the Internet.** The same image crosses the spool plane as a second object class beside frames:
@@ -601,7 +601,7 @@ that budget is a purely local knob that can differ per node without breaking cue
     (`observeNewestForConversation`, ADR 2026-09.hd5n) and the list screens read per-thread summaries
     (`observeNewestPerConversation`, `observeDistinctConversations`, `observeGroupSenders`,
     `countUnreadIn`), all served by the two `conversationId`-led indices; plus `markReceived`,
-    `deleteByConversation`, and `hashesNeedingFetch`.
+    `deleteByConversation`, and `attachmentsNeedingFetch`.
   - `peers`: `nodeId` (PK), `name`, `status`, `avatarHash?`, `pubKey?` (pinned E2E public-key bundle),
     `verified` (out-of-band key confirmation, see §14), `deviceTag?` (key-independent block-list
     continuity), `protoVersion?` / `capabilities?` (advertised, diagnostic), `updatedAt`, `openToChat` (their
@@ -623,10 +623,10 @@ that budget is a purely local knob that can differ per node without breaking cue
 - **Repositories** (`MessageRepository`, `PeerRepository`, `ReactionRepository`, `GroupRepository`,
   `BlobRepository`, `ForwardRepository`) are the single source of truth; DAOs expose `Flow<List<…>>` for
   the UI and suspend writes for the manager.
-- **`SettingsStore`** (Preferences DataStore, `knit_settings`): node id, display name, status,
+- **`SettingsStore`** (Preferences DataStore, `knit_settings`): display name, status,
   advertising/discovery toggles, `avatarUpdatedAt`, and a last-read watermark driving unread badges.
-  **Generates and persists the node id** on first read (`getOrCreateNodeId`, transaction-guarded
-  against races; §10).
+  The node id is not stored here: `Identity.nodeId()` derives it from the identity key bundle
+  (`NodeId.fromPublicKeyBundle`; §10).
 - **`AttachmentStore`** (§7) — ingests images, voice notes and arbitrary files into the content-addressed,
   encrypted `blobs` table (keyed by SHA-256). For E2E DM/group attachments the bytes are encrypted first and keyed by their
   ciphertext hash (§14); broadcast-room attachments are stored plaintext-in-the-encrypted-DB.
@@ -682,7 +682,7 @@ that budget is a purely local knob that can differ per node without breaking cue
 
 ## 11. Notifications (`notifications/`)
 
-- **`Notifier`** interface — `createChannel`, `notify`, `notifyMention`, `setChatVisible`, `clear`,
+- **`Notifier`** interface — `createChannel`, `notify`, `notifyMention`, `setVisibleConversation`, `clearConversation`,
   `onDismissed`. `NotificationChannels` registers the channels per context: `knit_msg_nearby`
   (`IMPORTANCE_DEFAULT` — the busy broadcast room), plus `knit_msg_dms`, `knit_msg_groups_v2`, and a
   dedicated `knit_msg_mentions` (all `IMPORTANCE_HIGH`); separate app channels are the foreground-service
@@ -705,7 +705,7 @@ that budget is a purely local knob that can differ per node without breaking cue
 - **Mentions** branch to a separate, standalone `BigTextStyle` notification on the Mentions channel
   (a message that `@`-mentions you takes `notifyMention`, everything else `notifyIncoming` — they're
   mutually exclusive), so a direct ping isn't buried among other senders.
-- `setChatVisible`/`clear` suppress and dismiss notifications while you're reading; a
+- `setVisibleConversation`/`clearConversation` suppress and dismiss notifications while you're reading; a
   `NotificationActionReceiver` wired as the `deleteIntent` calls `onDismissed` so a swipe-away clears
   accumulated state without those messages reappearing.
 
@@ -786,7 +786,7 @@ A typed foreground service hosts `MeshManager` so the mesh survives backgroundin
 - All cleaned up in `onDestroy` (including `MeshManager.stop()`, which cancels pending relays). The
   message notification channels are registered up front in `KnitApplication` so they appear in system
   settings before the first notification. Battery optimization is surfaced in onboarding and the
-  settings screen (`ui/Battery.kt`).
+  settings screen (`ui/BackgroundBattery.kt`).
 
 ## 14. Encryption posture
 
@@ -924,6 +924,7 @@ newer Kotlin stdlib.
   each other but never connected. The lesson still holds (don't await a job handle from inside that same
   job; a serialized dispatcher + a `connecting` guard fixed it); the current radios have their own
   lifecycle traps — the single-NDI wedges in `AGENTS.md` / `docs/DIGEST_PULL_REATTACH.md`.
+  <!-- doc-lint: allow connectTo — the retired Nearby transport's own function, named as history -->
 - **One-character text fields.** Binding a Compose `TextField`'s `value` directly to a
   DataStore-backed `StateFlow` lags a keystroke behind (the write→emit round-trip is async), so
   Compose resets the field and only one character registers. Fixed by holding editable text in a

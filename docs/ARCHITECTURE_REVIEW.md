@@ -1,5 +1,7 @@
 # Knit — Architecture Review
 
+<!-- doc-lint: record — a dated review; it names the code as it stood when written -->
+
 **Date:** 2026-07-04
 **Status updates (last revised 2026-07-05):** the following have been fixed since the review was written
 and are marked ✅ below — **#1** (`3df428a`, completed by work item #8), **#2** (`7b2c6ba`), **#3**

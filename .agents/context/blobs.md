@@ -46,7 +46,7 @@ Adjacent routing that stays where its owner is, because another subsystem owns i
   before is not asked again while its file is streaming in (`fileArrivingFrom`), and a file the link fed in full stays
   in flight while the link goes on feeding that peer. The lab pins it with `LabTransport.holdFiles` and the `files`
   recorder (one copy per (hash, link)).
-- **Before touching `BlobExchange.want`'s hints, its round (`nextAsk`, `FIRST_ASK_GRACE_MS`, `ROUND_MS`) or
+- **Before touching `BlobExchange.want`'s hints, its round (`decide`, `FIRST_ASK_GRACE_MS`, `ROUND_MS`) or
   `MeshTransport.bulkRouteTo`:** READ ADR 2026-10.f7gg — a round asks the likeliest holder alone (author, then Wi-Fi
   Aware linked, then reachable, then the source hop) and widens to everyone only after its grace, because every holder
   serves a fresh ask; there is no negative answer on the wire, so never make it one-at-a-time without one. A link-up
