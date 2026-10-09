@@ -1,6 +1,8 @@
 # How a picture is fetched over Bluetooth
 
-**Status:** describes `main` at `3890f16b` plus ADR 2026-10.nsr7's phase 1 (2026-10-07). The decisions behind it:
+**Status:** describes `main` at `3890f16b` plus ADR 2026-10.nsr7's phase 1 (2026-10-07). Since 2026-10-08 the holder
+query, the link boost and the feed window are on in release builds; [`BLUETOOTH_PLANE.md`](BLUETOOTH_PLANE.md) covers
+the feed window, which replaces the budgets below for a peer that reports its progress. The decisions behind it:
 
 - ADR 2026-09.4tx5: serve only a fresh ask.
 - ADR 2026-10.f7gg: ask the likeliest holder first.
@@ -254,7 +256,9 @@ share(link)  = budget(link) / number of links feeding a file now (1M/2M only)
 chunk        = 2 s of the share, capped at 16 KiB
 ```
 
-A Coded link keeps its own pace outside the split. A link's boost works like this:
+A Coded link keeps its own pace outside the split. A link to a peer that reports its progress is clocked by the feed
+window instead (ADR 2026-10.5buf), and falls back to this pace when the receiver goes silent for 3 s. A link's boost
+works like this:
 
 ```mermaid
 stateDiagram-v2
@@ -272,8 +276,8 @@ stateDiagram-v2
 ```
 
 Earning takes about 0.6 s on the lab Pixels, and the pace a feed reports moves at its next chunk, about 2 s after the
-first. An iPhone link never boosts (its doorbell owns the parameters), and the release build ships with
-`BLE_LINK_BOOST` off.
+first. An iPhone link never boosts (its doorbell owns the parameters). Release builds ship with `BLE_LINK_BOOST` on since
+2026-10-08.
 
 ## Bounds and costs
 

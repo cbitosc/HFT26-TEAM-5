@@ -223,6 +223,18 @@ no Wi-Fi Aware hardware.
   `SideScanPolicy` runs the second, filtered scan only while a peer advertising the flags byte is around.
   The transport declares `hasFastPlane`: `fastFanout` keeps the link copy and adds the page; `fastSend` never
   uses a page.
+- **iPhones** (ADR 2026-09.kwq2; `BuildConfig.BLE_GATT_PEERS`) — a foreground iPhone advertises only the `0xFE30`
+  UUID, so the presence scan also matches it and reads the peer's 24-byte payload over GATT (`GattPayloads`,
+  `BleGattPayloadReader`) before the usual dial rule applies.
+- **Coded PHY** (ADR 2026-10.yvn6; `BuildConfig.BLE_CODED_PHY`, always AUTO in release) — a second presence set on
+  Coded, an all-PHY scan, per-link 1M ↔ Coded S=8 steps driven by the larger id, and a fast advert plus a scan hunt
+  to recover a link lost at range.
+- **File feed** — a link feeding a file on a lit screen asks for a 15 ms interval and earns a larger budget (ADR
+  2026-10.2da4; `BuildConfig.BLE_LINK_BOOST`), and a file to a peer that reports its progress is clocked by those
+  reports instead of a fixed pace (ADR 2026-10.5buf; `BuildConfig.BLE_FEED_WINDOW`).
+
+All five Bluetooth flags and `BLOB_QUERY` default to on in release since 2026-10-08.
+[`BLUETOOTH_PLANE.md`](BLUETOOTH_PLANE.md) explains how they work together, with diagrams.
 
 ### 3.3 Routing, dedup & duplicate-suppressed flooding (`mesh/MeshRouter.kt`, `mesh/SeenSet.kt`)
 
