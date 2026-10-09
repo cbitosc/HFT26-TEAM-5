@@ -5,6 +5,8 @@ import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.getknit.knit.R
+import app.getknit.knit.call.CallManager
+import app.getknit.knit.call.CallRefusal
 import app.getknit.knit.contacts.ContactRemover
 import app.getknit.knit.data.GroupRepository
 import app.getknit.knit.data.MessageRepository
@@ -27,6 +29,7 @@ import app.getknit.knit.mesh.crypto.SafetyNumber
 import app.getknit.knit.mesh.crypto.VerifyPayload
 import app.getknit.knit.mesh.indirectPeers
 import app.getknit.knit.mesh.meshNodeLabel
+import app.getknit.knit.mesh.protocol.Protocol
 import app.getknit.knit.mesh.spool.SpoolStatus
 import app.getknit.knit.mesh.spool.spoolPresentPeers
 import app.getknit.knit.ui.Reach
@@ -162,6 +165,10 @@ data class ProfileDetailsUiState(
     val inCommon: InCommon = InCommon.EMPTY,
     // What "Remove contact" would do, and whether the overflow offers it at all.
     val removal: ContactRemoval = ContactRemoval.NotOffered,
+    // Whether a Call button sits beside Message (experimental, docs/VOICE_CALLS.md): a build that wires calls, a peer
+    // whose pinned profile carries CAP_CALL, and nobody we block. Unlike the chat's button, which shows in any DM and
+    // explains a refusal on the press, this one is offered only to a peer we know can answer.
+    val canCall: Boolean = false,
 )
 
 /**
@@ -192,6 +199,8 @@ class ProfileDetailsViewModel(
     // StaticFieldLeak: Koin hands every ViewModel the application context (`androidContext()`), never an Activity.
     @field:SuppressLint("StaticFieldLeak") private val context: Context,
     private val clock: () -> Long = System::currentTimeMillis,
+    // Voice calls (experimental, di/CallWiring): null in a build that wires none, which hides the Call button.
+    private val calls: CallManager? = null,
 ) : ViewModel() {
     private val me = MutableStateFlow<MyIdentity?>(null)
 
@@ -203,6 +212,11 @@ class ProfileDetailsViewModel(
 
     /** Emits once a [removeContact] has finished writing, so the screen can close. */
     val removed: SharedFlow<Unit> = _removed.asSharedFlow()
+
+    private val _events = MutableSharedFlow<Int>(extraBufferCapacity = 1)
+
+    /** One-shot string resources the screen shows as a snackbar — a call that could not start. */
+    val events: SharedFlow<Int> = _events.asSharedFlow()
 
     // One directory flow for both combines below: the labels it carries name a group's members, and a
     // second `observeDirectory()` would rebuild the whole label index on every peer write.
@@ -344,6 +358,11 @@ class ProfileDetailsViewModel(
                 loraNodeLabel = peer?.loraNode?.let(::meshNodeLabel),
                 inCommon = shared,
                 removal = removal,
+                canCall =
+                    calls != null &&
+                        nodeId !in blocked &&
+                        nodeId != myId?.nodeId &&
+                        (peer?.capabilities ?: 0L) and Protocol.CAP_CALL != 0L,
             )
         }.stateIn(
             viewModelScope,
@@ -365,6 +384,22 @@ class ProfileDetailsViewModel(
      */
     fun accept() {
         viewModelScope.launch { settings.accept(nodeId) }
+    }
+
+    /**
+     * Calls this peer (experimental), accepting any pending request first as [accept] does for Message: calling is
+     * choosing to converse. The call screen opens from the call layer; a refusal lands on [events].
+     */
+    fun startCall() {
+        val calls = calls ?: return
+        viewModelScope.launch {
+            settings.accept(nodeId)
+            when (calls.start(nodeId)) {
+                null -> Unit
+                CallRefusal.BUSY -> _events.tryEmit(R.string.chat_call_busy)
+                CallRefusal.SELF -> _events.tryEmit(R.string.chat_call_needs_dm)
+            }
+        }
     }
 
     /** Blocks this peer locally: their messages/reactions stop being stored, shown, and notified. */

@@ -3,6 +3,9 @@
 package app.getknit.knit.ui.profile
 
 import android.content.Context
+import app.getknit.knit.R
+import app.getknit.knit.call.CallManager
+import app.getknit.knit.call.CallRefusal
 import app.getknit.knit.contacts.ContactRemover
 import app.getknit.knit.data.GroupRepository
 import app.getknit.knit.data.MessageRepository
@@ -18,6 +21,7 @@ import app.getknit.knit.mesh.PRESENCE_LINGER_MS
 import app.getknit.knit.mesh.Peer
 import app.getknit.knit.mesh.RelayedHeard
 import app.getknit.knit.mesh.crypto.VerifyPayload
+import app.getknit.knit.mesh.protocol.Protocol
 import app.getknit.knit.mesh.spool.ScopeStatus
 import app.getknit.knit.mesh.spool.SpoolStatus
 import app.getknit.knit.ui.Reach
@@ -108,7 +112,7 @@ class ProfileDetailsViewModelTest {
         Dispatchers.resetMain()
     }
 
-    private fun vm() =
+    private fun vm(calls: CallManager? = null) =
         ProfileDetailsViewModel(
             nodeId,
             peers,
@@ -122,6 +126,7 @@ class ProfileDetailsViewModelTest {
             spoolsFlow,
             context,
             clock = { NOW },
+            calls = calls,
         )
 
     @Test
@@ -246,6 +251,60 @@ class ProfileDetailsViewModelTest {
             peersFlow.value = listOf(peer(nodeId, name = "Ada"))
             advanceUntilIdle()
             assertNull(vm.state.value.loraNodeLabel)
+        }
+
+    /**
+     * Call is offered only where it can be answered: a build that wires calls, a peer whose profile carries
+     * CAP_CALL, and nobody we block — the chat's button shows in any DM, but this one has no refusal to explain.
+     */
+    @Test
+    fun callIsOfferedOnlyToACallCapablePeerInABuildThatWiresCalls() =
+        runTest {
+            val calls = mockk<CallManager>(relaxed = true)
+            val vm = vm(calls)
+            backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.state.collect {} }
+            peersFlow.value = listOf(peer(nodeId, name = "Ada"))
+            advanceUntilIdle()
+            assertFalse("no capability bits yet", vm.state.value.canCall)
+
+            peersFlow.value = listOf(peer(nodeId, name = "Ada", capabilities = Protocol.CAP_FILES))
+            advanceUntilIdle()
+            assertFalse("a build without calls", vm.state.value.canCall)
+
+            peersFlow.value = listOf(peer(nodeId, name = "Ada", capabilities = Protocol.CAP_FILES or Protocol.CAP_CALL))
+            advanceUntilIdle()
+            assertTrue(vm.state.value.canCall)
+
+            blockedFlow.value = setOf(nodeId)
+            advanceUntilIdle()
+            assertFalse("blocked", vm.state.value.canCall)
+        }
+
+    @Test
+    fun aBuildThatWiresNoCallsNeverOffersOne() =
+        runTest {
+            val vm = vm(calls = null)
+            backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.state.collect {} }
+            peersFlow.value = listOf(peer(nodeId, name = "Ada", capabilities = Protocol.CAP_CALL))
+            advanceUntilIdle()
+            assertFalse(vm.state.value.canCall)
+        }
+
+    @Test
+    fun startCallAcceptsThePeerThenCallsAndReportsARefusal() =
+        runTest {
+            val calls = mockk<CallManager>(relaxed = true)
+            coEvery { calls.start(nodeId) } returns CallRefusal.BUSY
+            val vm = vm(calls)
+            val events = mutableListOf<Int>()
+            backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.events.collect { events += it } }
+
+            vm.startCall()
+            advanceUntilIdle()
+
+            coVerify { settings.accept(nodeId) }
+            coVerify(exactly = 1) { calls.start(nodeId) }
+            assertEquals(listOf(R.string.chat_call_busy), events)
         }
 
     @Test

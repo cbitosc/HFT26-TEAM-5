@@ -24,6 +24,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.Message
 import androidx.compose.material.icons.filled.Block
+import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PersonRemove
 import androidx.compose.material.icons.filled.VerifiedUser
@@ -33,6 +34,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -58,6 +60,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
@@ -87,6 +90,7 @@ import app.getknit.knit.ui.scan.QrScanner
 import app.getknit.knit.ui.theme.knitColors
 import app.getknit.knit.ui.verify.EncryptionSection
 import app.getknit.knit.ui.verify.PeerVerification
+import app.getknit.knit.ui.voice.rememberMicGate
 import kotlinx.coroutines.launch
 import org.koin.androidx.compose.koinViewModel
 import org.koin.core.parameter.parametersOf
@@ -104,7 +108,8 @@ private const val NAMED_GROUPS_MAX = 3
  * Read-only "contact details" view of another peer (keyed by [nodeId]): avatar, display name, live
  * presence (online / reachable long-range / offline), free-text status, node id, and end-to-end key
  * verification (safety number + QR scan). Offers a Message action (accepts any pending request from this
- * peer, then opens/starts a DM via [onMessage]), and Remove contact and Block/Unblock in the overflow menu.
+ * peer, then opens/starts a DM via [onMessage]), a Call beside it for a peer that can take one (experimental),
+ * and Remove contact and Block/Unblock in the overflow menu.
  * Reached by tapping a peer's avatar in a chat, or a sender's avatar in the Message Requests inbox.
  * [onRemoved] runs once a confirmed removal has finished writing — the DM it deleted may be the screen below.
  */
@@ -124,6 +129,9 @@ fun ProfileDetailsScreen(
 
     // Outside the scanner branch below, so a removal that lands while the scanner is up still closes.
     LaunchedEffect(Unit) { viewModel.removed.collect { onRemoved() } }
+
+    val resources = LocalResources.current
+    LaunchedEffect(Unit) { viewModel.events.collect { snackbarHostState.showSnackbar(resources.getString(it)) } }
 
     val matchMessage = stringResource(R.string.verify_match)
     val mismatchMessage = stringResource(R.string.verify_mismatch)
@@ -157,6 +165,7 @@ fun ProfileDetailsScreen(
                 viewModel.accept()
                 onMessage(id)
             },
+            onCall = viewModel::startCall,
             onOpenGroup = onOpenGroup,
             onScan = { scanning = true },
             onBlock = viewModel::block,
@@ -182,6 +191,8 @@ internal fun ProfileDetailsScreenContent(
     onRemoveContact: () -> Unit,
     onMarkVerified: () -> Unit,
     onClearVerification: () -> Unit,
+    // A voice call to this peer (experimental), offered only when [ProfileDetailsUiState.canCall].
+    onCall: () -> Unit = {},
     // Whether the LoRa plane is introduced at all in this build — a peer on a debug build can name a board
     // in a profile a release build has no radio for, and a line about a feature that isn't there is noise.
     // A parameter rather than a bare BuildConfig read so the hidden case is previewable and testable.
@@ -277,18 +288,21 @@ internal fun ProfileDetailsScreenContent(
             )
 
             // The reason you opened this screen. It used to sit tenth, under four lines of metadata, as a
-            // 48dp icon button that read as weaker than the text above it.
-            Button(
-                onClick = { onMessage(state.nodeId) },
-                modifier =
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 8.dp)
-                        .testTag("profile_details_message"),
+            // 48dp icon button that read as weaker than the text above it. Call, when offered, shares the row
+            // as the tonal second action, so Message stays the primary one.
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Icon(Icons.AutoMirrored.Filled.Message, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Text(stringResource(R.string.profile_details_message))
+                Button(
+                    onClick = { onMessage(state.nodeId) },
+                    modifier = Modifier.weight(1f).testTag("profile_details_message"),
+                ) {
+                    Icon(Icons.AutoMirrored.Filled.Message, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(stringResource(R.string.profile_details_message))
+                }
+                if (state.canCall) CallButton(onCall = onCall, snackbarHostState = snackbarHostState, modifier = Modifier.weight(1f))
             }
 
             InCommonSection(state.inCommon.groups, onOpenGroup = onOpenGroup)
@@ -334,6 +348,31 @@ internal fun ProfileDetailsScreenContent(
             },
             onDismiss = { showRemove = false },
         )
+    }
+}
+
+/**
+ * The profile's voice-call button (experimental), the chat top bar's in the profile's register. The microphone is
+ * asked for on the press that finds it missing and, as there, the call does not start on the grant: the user taps
+ * again. A phone with no microphone draws nothing.
+ */
+@Composable
+private fun CallButton(
+    onCall: () -> Unit,
+    snackbarHostState: SnackbarHostState,
+    modifier: Modifier = Modifier,
+) {
+    val scope = rememberCoroutineScope()
+    val denied = stringResource(R.string.chat_call_mic_denied)
+    val gate = rememberMicGate(onDenied = { scope.launch { snackbarHostState.showSnackbar(denied) } })
+    if (!gate.hasMicrophone) return
+    FilledTonalButton(
+        onClick = { gate.runOrRequest(onCall) },
+        modifier = modifier.testTag("profile_details_call"),
+    ) {
+        Icon(Icons.Filled.Call, contentDescription = null, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.width(8.dp))
+        Text(stringResource(R.string.profile_details_call))
     }
 }
 

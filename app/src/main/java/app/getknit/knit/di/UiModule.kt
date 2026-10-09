@@ -143,6 +143,7 @@ val uiModule =
                 get(),
                 get<RelayStatusRepository>().statuses,
                 androidContext(),
+                calls = getOrNull<CallManager>(),
             )
         }
         // MessageDetailsViewModel takes the long-pressed message's id as a runtime param.
