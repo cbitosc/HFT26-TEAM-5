@@ -1,12 +1,14 @@
 package app.getknit.knit.debug.call
 
 import android.Manifest
+import android.app.KeyguardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.media.AudioManager
 import android.os.Bundle
+import android.text.format.DateUtils
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -77,6 +79,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -97,8 +100,14 @@ import app.getknit.knit.call.CallPhase
 import app.getknit.knit.call.CallState
 import app.getknit.knit.call.TalkLink
 import app.getknit.knit.call.WalkieStats
+import app.getknit.knit.data.GroupRepository
+import app.getknit.knit.data.MessageRepository
 import app.getknit.knit.data.PeerRepository
+import app.getknit.knit.data.message.MessageEntity
+import app.getknit.knit.data.settings.SettingsStore
+import app.getknit.knit.identity.Identity
 import app.getknit.knit.mesh.protocol.CallPayload
+import app.getknit.knit.ui.chat.messagePreview
 import app.getknit.knit.ui.components.Avatar
 import app.getknit.knit.ui.preview.KnitPreview
 import app.getknit.knit.ui.preview.PREVIEW_NOW
@@ -123,6 +132,10 @@ class CallActivity :
     KoinComponent {
     private val calls: CallManager by inject()
     private val peers: PeerRepository by inject()
+    private val messages: MessageRepository by inject()
+    private val groups: GroupRepository by inject()
+    private val settings: SettingsStore by inject()
+    private val identity: Identity by inject()
     private val media: WebRtcCallMedia by inject()
 
     // Null in a build with the walkie off (`di/CallWiring.WALKIE_WIRED`): no call is ever a walkie there.
@@ -177,11 +190,23 @@ class CallActivity :
         val peerId = state?.peerId
         var name by remember { mutableStateOf("") }
         var avatarHash by remember { mutableStateOf<String?>(null) }
+        var caller by remember { mutableStateOf<CallerContext?>(null) }
         LaunchedEffect(peerId) {
             if (peerId == null) return@LaunchedEffect
             name = callerName(peers, peerId)
             avatarHash = peers.find(peerId)?.avatarHash
+            caller = runCatching { callerContext(peerId, peers, messages, groups, settings, identity) }.getOrNull()
         }
+        // Over the lock screen the last message stays hidden; unlocking with the call up shows it without a restart.
+        val keyguard = remember { getSystemService(KeyguardManager::class.java) }
+        var locked by remember { mutableStateOf(keyguard?.isKeyguardLocked == true) }
+        LaunchedEffect(Unit) {
+            while (true) {
+                locked = keyguard?.isKeyguardLocked == true
+                delay(POLL_MS)
+            }
+        }
+        val hideFlagged by settings.contentFilteringEnabled.collectAsState(initial = true)
         // The selected candidate pair and the media's stats, read while the media is up: the pair can move (a relay
         // pair first, a direct one later), and the stats are the diagnostics card's.
         val mediaUp = state?.walkie != true && (state?.phase == CallPhase.Connecting || state?.phase == CallPhase.Connected)
@@ -216,6 +241,9 @@ class CallActivity :
             route = route.takeIf { state?.walkie != true },
             stats = stats.takeIf { state?.walkie != true },
             quality = quality.takeIf { state?.walkie != true },
+            caller = caller,
+            locked = locked,
+            hideFlagged = hideFlagged,
             onAnswer = { state?.id?.let(::answer) },
             onDecline = { state?.id?.let { id -> lifecycleScope.launch { calls.decline(id) } } },
             onHangUp = { lifecycleScope.launch { calls.hangUp() } },
@@ -294,6 +322,9 @@ private const val MOVED_NOTE_MS = 4_000L
 private val RINGING = setOf(CallPhase.Calling, CallPhase.Ringing, CallPhase.Alerting, CallPhase.Connecting)
 private val MEDIA_UP = setOf(CallPhase.Connecting, CallPhase.Connected)
 
+// Before anyone has answered: when the caller's context is worth the room.
+private val SETTING_UP = setOf(CallPhase.Calling, CallPhase.Ringing, CallPhase.Alerting)
+
 /**
  * The call screen proper: the peer's face and name, where the call stands, the controls its phase offers and, while
  * the media is up, the diagnostics card for [stats] (shown until the header's toggle hides it).
@@ -319,6 +350,9 @@ internal fun CallScreen(
     onTalkCancel: () -> Unit = {},
     walkieStats: WalkieStats? = null,
     quality: Quality? = null,
+    caller: CallerContext? = null,
+    locked: Boolean = false,
+    hideFlagged: Boolean = true,
 ) {
     val phase = state?.phase
     var showStats by rememberSaveable { mutableStateOf(true) }
@@ -340,15 +374,20 @@ internal fun CallScreen(
                 Header(stats = if (phase in MEDIA_UP) showStats else null, onStats = { showStats = it })
                 if (inline) {
                     Spacer(Modifier.height(8.dp))
-                    InlineFace(state, name, avatarHash, view, note, clock)
+                    InlineFace(state, name, avatarHash, caller?.status, view, note, clock)
                 } else {
                     if (diagnostics != null) Spacer(Modifier.height(8.dp)) else Spacer(Modifier.weight(0.6f))
-                    StackedFace(state, name, avatarHash, view, note, compact = diagnostics != null, clock)
+                    StackedFace(state, name, avatarHash, caller?.status, view, note, compact = diagnostics != null, clock)
                 }
                 if (diagnostics != null) {
                     // The room between the face and the controls; a short screen scrolls the card rather than clip it.
                     Box(Modifier.weight(1f).fillMaxWidth().padding(vertical = 16.dp), contentAlignment = Alignment.Center) {
                         diagnostics(Modifier.verticalScroll(rememberScrollState()))
+                    }
+                } else if (phase in SETTING_UP && caller != null) {
+                    // While it rings: who this is to you, and what was said last — the why of most calls.
+                    Box(Modifier.weight(1f).fillMaxWidth().padding(vertical = 16.dp), contentAlignment = Alignment.Center) {
+                        CallerCard(caller, name, locked, hideFlagged, clock)
                     }
                 } else {
                     Spacer(Modifier.weight(1f))
@@ -369,6 +408,7 @@ private fun StackedFace(
     state: CallState?,
     name: String,
     avatarHash: String?,
+    status: String?,
     route: RouteView?,
     note: CallNote?,
     compact: Boolean,
@@ -400,6 +440,18 @@ private fun StackedFace(
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.fillMaxWidth(),
         )
+        if (!status.isNullOrBlank()) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                status,
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
         Spacer(Modifier.height(8.dp))
         Text(
             statusOf(state, clock),
@@ -437,6 +489,7 @@ private fun InlineFace(
     state: CallState?,
     name: String,
     avatarHash: String?,
+    status: String?,
     route: RouteView?,
     note: CallNote?,
     clock: () -> Long,
@@ -452,6 +505,15 @@ private fun InlineFace(
         Spacer(Modifier.width(16.dp))
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(name, style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (!status.isNullOrBlank()) {
+                Text(
+                    status,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
             Text(
                 statusOf(state, clock),
                 style = MaterialTheme.typography.titleSmall,
@@ -769,6 +831,60 @@ private fun ButtonLabel(label: String) {
     )
 }
 
+/**
+ * Who is calling, while it rings: where they stand with you, then the newest message in your thread — held back over
+ * the lock screen, where anyone holding the phone would read it (the relationship names no group, so it shows).
+ */
+@Composable
+private fun CallerCard(
+    caller: CallerContext,
+    name: String,
+    locked: Boolean,
+    hideFlagged: Boolean,
+    clock: () -> Long,
+) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        caller.relationship?.let {
+            Text(
+                it,
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+            )
+        }
+        val last = caller.lastMessage ?: return@Column
+        if (locked) {
+            Text(
+                "Unlock to see your last messages",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+            )
+            return@Column
+        }
+        val preview = messagePreview(LocalContext.current, last.message, hideFlagged)
+        if (preview.isBlank()) return@Column
+        val who = if (last.fromMe) "You" else name
+        val ago = DateUtils.getRelativeTimeSpanString(last.sentAt, clock(), DateUtils.MINUTE_IN_MILLIS).toString()
+        Surface(
+            shape = MaterialTheme.shapes.large,
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+            modifier = Modifier.fillMaxWidth().semantics(mergeDescendants = true) {},
+        ) {
+            Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    "$who · $ago",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(preview, style = MaterialTheme.typography.bodyLarge, maxLines = 3, overflow = TextOverflow.Ellipsis)
+            }
+        }
+    }
+}
+
 /** The route pill's content: which way the audio goes, and over which of this phone's networks. */
 internal data class RouteView(
     val label: String,
@@ -943,6 +1059,8 @@ private fun PreviewCall(
     link: TalkLink? = null,
     walkieStats: WalkieStats? = null,
     quality: Quality? = null,
+    caller: CallerContext? = null,
+    locked: Boolean = false,
 ) = KnitPreview {
     CallScreen(
         state =
@@ -973,6 +1091,8 @@ private fun PreviewCall(
         link = link,
         walkieStats = walkieStats,
         quality = quality,
+        caller = caller,
+        locked = locked,
     )
 }
 
@@ -983,6 +1103,40 @@ fun CallScreenIncomingPreview() = PreviewCall(CallPhase.Alerting, outgoing = fal
 @Preview(name = "Incoming, long name", widthDp = 411, heightDp = 891)
 @Composable
 fun CallScreenLongNamePreview() = PreviewCall(CallPhase.Alerting, outgoing = false, name = "IMABETHENEXTTRILLIONARE🔥🔥🔥🔥")
+
+private val PREVIEW_CALLER =
+    CallerContext(
+        status = "At the crag till 6",
+        relationship = "Verified contact · 2 groups together",
+        lastMessage =
+            LastMessage(
+                fromMe = false,
+                sentAt = PREVIEW_NOW - 2 * 60 * 60_000,
+                message =
+                    MessageEntity(
+                        id = "m1",
+                        conversationId = PREVIEW_PEER,
+                        senderId = PREVIEW_PEER,
+                        body = "Are you near the lab? The P7 needs a hand",
+                        sentAt = PREVIEW_NOW - 2 * 60 * 60_000,
+                    ),
+            ),
+    )
+
+@Preview(name = "Incoming, caller context", widthDp = 411, heightDp = 891)
+@Preview(name = "Incoming, caller context, dark", widthDp = 411, heightDp = 891, uiMode = Configuration.UI_MODE_NIGHT_YES)
+@Preview(name = "Incoming, caller context, small", widthDp = 360, heightDp = 640)
+@Composable
+fun CallScreenCallerContextPreview() = PreviewCall(CallPhase.Alerting, outgoing = false, caller = PREVIEW_CALLER)
+
+@Preview(name = "Incoming, caller context, locked", widthDp = 411, heightDp = 891)
+@Composable
+fun CallScreenCallerLockedPreview() = PreviewCall(CallPhase.Alerting, outgoing = false, caller = PREVIEW_CALLER, locked = true)
+
+@Preview(name = "Incoming, stranger", widthDp = 411, heightDp = 891)
+@Composable
+fun CallScreenStrangerPreview() =
+    PreviewCall(CallPhase.Alerting, outgoing = false, caller = CallerContext(relationship = "Not a contact · no messages yet"))
 
 @Preview(name = "Ringing", widthDp = 411, heightDp = 891)
 @Composable
