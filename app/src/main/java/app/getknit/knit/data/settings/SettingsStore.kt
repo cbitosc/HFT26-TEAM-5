@@ -466,14 +466,18 @@ class SettingsStore(
         dataStore.data.map { prefs -> BuildConfig.DEBUG && prefs[KEY_DEBUG_NAN_OFF] == true }
 
     /**
-     * The BLE Coded PHY experiment's mode (ADR 2026-10.yvn6), or null where the build keeps it dark
-     * (`BuildConfig.BLE_CODED_PHY` — not `DEBUG`, so a `-PbleCodedPhy=true` release-shaped build can be field tested).
-     * Unset reads [CodedPhyMode.AUTO]: a build that carries the experiment runs it. Set from Diagnostics or
-     * `…debug.PHY`; the `debug_` prefix keeps it out of a backup.
+     * The BLE Coded PHY's mode (ADR 2026-10.yvn6), or null where the build keeps it dark (`BuildConfig.BLE_CODED_PHY`).
+     * Unset reads [CodedPhyMode.AUTO]: a build that carries the feature runs it. Only a debug build reads the stored
+     * mode, set from Diagnostics or `…debug.PHY` for a walk test; a release build is always AUTO, whatever a debug
+     * install left behind. The `debug_` prefix keeps it out of a backup.
      */
     val debugBlePhyMode: Flow<CodedPhyMode?> =
         dataStore.data.map { prefs ->
-            if (BuildConfig.BLE_CODED_PHY) CodedPhyMode.parse(prefs[KEY_DEBUG_BLE_PHY_MODE]) ?: CodedPhyMode.AUTO else null
+            when {
+                !BuildConfig.BLE_CODED_PHY -> null
+                !BuildConfig.DEBUG -> CodedPhyMode.AUTO
+                else -> CodedPhyMode.parse(prefs[KEY_DEBUG_BLE_PHY_MODE]) ?: CodedPhyMode.AUTO
+            }
         }
 
     /**

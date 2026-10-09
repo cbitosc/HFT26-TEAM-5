@@ -682,7 +682,7 @@ as an unsigned frame, and would spend a key request on one from an unpinned send
 neighbour whose link (HELLO or Wi-Fi Aware SSI) carries the new capability bit: the `CAP_FILES` argument, a receiver
 that consumes a frame silently strands the sender's wait. The bit sits above the BLE advert's 8 and is read only from
 the link's copy. Every build sets it and answers, and only the asking is gated (`BuildConfig.BLOB_QUERY`), so a mixed
-fleet answers whoever asks and the release flip moves one side. `BlobHasItem.state` is an always-encoded int. A
+fleet answers whoever asks; the asking ships on in release since 2026-10-08. `BlobHasItem.state` is an always-encoded int. A
 state a reader does not know is never taken for HAVE, which makes the reserved `PARTIAL` (4, with `held`) additive
 later. Its serve still needs a request-side gate (`BlobReqContent.end`), never the bit alone. The fast codecs were
 not touched: `FastFrameCodec`'s dictionary and `FrameTranscoder`'s type codes are frozen, and these types ride

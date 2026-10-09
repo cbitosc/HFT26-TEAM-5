@@ -206,7 +206,7 @@ class MeshManager(
     // ADR 2026-10.f7gg). Injectable for `mesh/lab`, whose scenarios must not hang an assertion on a wall-clock race.
     private val firstAskGraceMs: Long = BlobExchange.FIRST_ASK_GRACE_MS,
     // Whether this build queries neighbours for a blob's holders before it asks (ADR 2026-10.6e5t;
-    // `BuildConfig.BLOB_QUERY`, dark in release until its device trial), and how long it waits for their answers.
+    // `BuildConfig.BLOB_QUERY`, on in every build by default), and how long it waits for their answers.
     // Off, every neighbour gets ADR 2026-10.f7gg's blind round; answering a query is never gated.
     private val blobHolderQuery: BlobExchange.HolderQuery = BlobExchange.HolderQuery(),
     // What the session's collectors and everything they launch run on. Production takes the default; the

@@ -71,7 +71,7 @@ the relaxed screen-off gap (120 s) is longer than the presence linger (90 s), so
 
 **Alternatives dropped.** #103 listed three. Option 2, letting the newcomer's side-channel page wake the clique,
 cannot work: the clique's side scan is Off while every capable peer is linked and nothing streams (ADR
-2026-09.u8qj, `SideScanPolicy.kt:51`), so nobody hears the page, and pages are dark in release
+2026-09.u8qj, `SideScanPolicy.kt:51`), so nobody hears the page, and pages were dark in release until 2026-10-08
 (`app/build.gradle.kts:350`). Option 3, shortening the settled floor, aims at the wrong number: the 600 s is the
 `120 s × (1 + links)` multiplier (`PowerState.kt:59,99`), not `SETTLED_INTERVAL_MS`, and lowering it costs every
 settled clique battery all day to shorten a rare join.

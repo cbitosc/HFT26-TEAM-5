@@ -81,7 +81,7 @@ main):
 **What it does not cover.**
 
 - `WearStatusServer`'s pause-only advert and the side channel's page sets still have no re-assert. The first is up
-  only during a mesh pause; the second is non-connectable, dark in release, and already retries its slots. Either can
+  only during a mesh pause; the second is non-connectable, on in release since 2026-10-08, and retries its slots on a start failure only. Either can
   take `reassert()` the same way.
 - On a legacy-HCI controller a refusal is invisible, so recovery waits on the net.
 

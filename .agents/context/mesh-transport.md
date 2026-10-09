@@ -472,7 +472,7 @@ device-verified only.
 
 A foreground iPhone advertises only the `0xFE30` UUID and serves its 24-byte advert payload (cue zeroed) from
 characteristic `848eedcd-a2e3-4fb2-86f9-e2c80821a497` (`DoorbellPolicy.PAYLOAD_UUID`) in the doorbell's service
-(knit-ios ADR 2026-09.xzpt). While `BuildConfig.BLE_GATT_PEERS` is on (debug; dark in release until the trial):
+(knit-ios ADR 2026-09.xzpt). While `BuildConfig.BLE_GATT_PEERS` is on (debug and release since 2026-10-08; the trial still owed):
 
 - **The presence scan matches the UUID too** (`BleScanner(matchesServiceUuid)`, a second OR'd filter).
 - **`onScanResult` splits.** Service data → `sight`, as always. A UUID-only advert → the cached payload for its
@@ -539,7 +539,7 @@ plus the room typing cue — ride **non-connectable extended-advertising pages**
 ACL, so they bypass a blob head-of-line-blocking the L2CAP stream and reach a sighted-but-unlinked peer.
 It lives *inside* `BluetoothMeshTransport` (which now declares `hasFastPlane`; `fastFanout` keeps the link
 copy the composite used to send and adds the page, `fastSend` is the link only — nothing DM-form rides a
-broadcast carrier), gated by `BuildConfig.BLE_SIDE_PLANE` (debug on, release off) through one seam: the
+broadcast carrier), gated by `BuildConfig.BLE_SIDE_PLANE` (debug and release on since 2026-10-08) through one seam: the
 `BleSideChannel?` DI hands the transport. A page is **one** `FastFrameCodec` unit (`0x03`/`0x05`, or one
 `0x04` fragment) ≤ `PAGE_BYTES` = 236 B — one AUX PDU, because an AD structure caps at 252 B, an in-place
 update on a live set must be one HCI operation, and a chained page is lost whole. `SideCarousel` (pure)
@@ -560,9 +560,9 @@ counters `bleSide*` on `…debug.STATE`. In the JVM, `mesh/lab/LabPages` is the 
 `BleFastRoutePolicy` and codec against the full oracle (`context/testing.md`). Device trial owed before the
 release flag flips — the ADR lists it.
 
-## Links step down to the Coded PHY at range — an experiment (ADR 2026-10.yvn6)
+## Links step down to the Coded PHY at range (ADR 2026-10.yvn6)
 
-Dark in release behind `BuildConfig.BLE_CODED_PHY`; in debug the mode (`SettingsStore.debugBlePhyMode`: off, auto,
+Behind `BuildConfig.BLE_CODED_PHY`, on in release since 2026-10-08 (release always AUTO); on a debug build the mode (`SettingsStore.debugBlePhyMode`: off, auto,
 coded, 1m) is set from Diagnostics or `…debug.PHY` and applied without a restart. With it on, and on a controller
 that reports `isLeCodedPhySupported`:
 
@@ -621,7 +621,7 @@ that reports `isLeCodedPhySupported`:
   `rx … in <ms>ms` line shows the drain: on 2026-10-03 three 1M Pixel pairs drained 4.8–10 KB/s, and at the old
   28 KiB/s a text sent mid-photo waited one to four minutes. No wire change.
 - **A link that feeds a file asks for a short interval** (#120, ADR 2026-10.2da4; `BuildConfig.BLE_LINK_BOOST`, debug
-  on / release off). The drain is the host's share of the controller's LE buffers (the Pixel 9: 3 of 13, split over its
+  and release on since 2026-10-08). The drain is the host's share of the controller's LE buffers (the Pixel 9: 3 of 13, split over its
   4 LE links, idle ones included) times about 2 packets per connection event, so it follows the interval: ~9 KB/s at
   45 ms, 22.5–29 at 15 ms. `FramedLink` pokes `onBusy` on its (feeding, receiving) edges; the transport makes a
   `BleLinkBoost` at a link's first file either way, which runs `LinkBoostPolicy`. While a file moves either way, a side
@@ -634,7 +634,7 @@ that reports `isLeCodedPhySupported`:
   (`PhyTuning.boostPaceBytesPerSec`), or 12 KiB/s (`crowdedBoostPaceBytesPerSec`) past four LE connections (the host's
   buffer split; `leLinkCount`), split as above; otherwise 4 KiB/s. An iPhone link is never boosted (dqvb).
 - **A file to a reporting Android peer is clocked by its reports** (ADR 2026-10.5buf, nsr7's phase 2;
-  `BuildConfig.BLE_FEED_WINDOW`, debug on / release off, `…debug.LINKTUNE --es feed window|pace`). On a link to a
+  `BuildConfig.BLE_FEED_WINDOW`, debug and release on since 2026-10-08, `…debug.LINKTUNE --es feed window|pace`). On a link to a
   peer carrying `CAP_BLOB_HAVE` and no doorbell, on any PHY (Coded too since 5buf's amendment of 2026-10-08 (2)),
   `paceFor` returns its pace with `windowed = true`, and `FramedLink.feedChunks` writes only while `FeedWindow` lets it.
   - **The window:** bytes written and not yet reported held, kept under the drain over the round trip plus

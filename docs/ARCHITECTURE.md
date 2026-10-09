@@ -215,8 +215,8 @@ no Wi-Fi Aware hardware.
   `CompositeMeshTransport.onForeignReachable`, BLE boosts its scan to chase a peer another plane already
   sees onto the cheaper persistent link. `BluetoothAudioMonitor` flags A2DP-audio contention
   (diagnostic-only today; the connect-time gate is deferred — §18).
-- **Side channel** (`BleSideChannel`, ADR 2026-09.sjaa; `BuildConfig.BLE_SIDE_PLANE`, debug-only until its
-  device trial) — the BLE analogue of NAN's fast fan-out: small floodable frames on non-connectable
+- **Side channel** (`BleSideChannel`, ADR 2026-09.sjaa; `BuildConfig.BLE_SIDE_PLANE`, on in release since
+  2026-10-08) — the BLE analogue of NAN's fast fan-out: small floodable frames on non-connectable
   extended-advertising pages (one `FastFrameCodec` unit per page, ≤ 236 B, under a second service UUID),
   connectionless so they bypass a blob head-of-line-blocking the L2CAP stream and reach a sighted-but-unlinked
   peer. `SideCarousel` schedules two advertising sets (12 s dwell, fewer-part frames first, typing coalesced);
@@ -484,7 +484,7 @@ opaque SHA-256-addressed bytes with a MIME string beside them, which is why voic
     (a live Wi-Fi Aware link; a reachable one for a blob worth raising it; a full-speed Bluetooth link with nothing
     streaming to us; a Coded or busy one) and load is asked alone with a `blobreq` (`relay = false`); one that
     brings nothing in its grace is queried once more, then the next is asked. Neighbours that cannot answer (the
-    iOS port, older builds, everyone while `BuildConfig.BLOB_QUERY` is off) get the **round of asks** of ADR
+    iOS port, older builds, a build with `BuildConfig.BLOB_QUERY` off) get the **round of asks** of ADR
     2026-10.f7gg: the likeliest alone — the frame's author, then a neighbour on the Wi-Fi Aware plane
     (`MeshTransport.bulkRouteTo`: linked, then reachable), then the hop the frame came from, then the rest — and,
     once that ask's grace (5 s, 15 s for a reachable Wi-Fi Aware peer) passes with nothing arriving, every other at

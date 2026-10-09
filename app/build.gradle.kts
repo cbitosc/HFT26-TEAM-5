@@ -93,48 +93,48 @@ val loraPlane = (project.findProperty("loraPlane") as? String)?.toBoolean()
 val commons = (project.findProperty("commons") as? String)?.toBoolean()
 
 // The BLE side channel (small floodable frames on non-connectable extended-advertising pages, knit/knit-next#13)
-// — the same kind of visibility switch at the start of its life: ON in debug, OFF in a shipped artifact,
+// — the same kind of visibility switch: ON in debug and in a shipped artifact,
 // overridable with `-PbleSidePlane=true|false`. It gates the one seam, the `BleSideChannel` the DI hands
 // `BluetoothMeshTransport` (null while dark: no page is ever aired or listened for, and the presence advert
 // carries no flag). Not a code strip (R8 prunes the `if (BLE_SIDE_PLANE)` branch), and the defaults live in
-// source so F-Droid's -P-free rebuild stays identical. Flip the release default after the device trial.
+// source so F-Droid's -P-free rebuild stays identical.
 val bleSidePlane = (project.findProperty("bleSidePlane") as? String)?.toBoolean()
 
 // Finding an iPhone through its GATT payload (companion change A3, knit-next#101): a foreground iPhone advertises
 // only the 0xFE30 UUID, so the presence scan also matches that UUID, reads the peer's payload characteristic, and
-// the advert sets FLAG_DIALS_GATT_PEERS so a lower-id iPhone waits to be dialed. ON in debug, OFF in a shipped
+// the advert sets FLAG_DIALS_GATT_PEERS so a lower-id iPhone waits to be dialed. ON in debug and in a shipped
 // artifact, overridable with `-PbleGattPeers=true|false`. It gates the reader, the second scan filter and the flag
 // together — a flag without a reader strands the pair. Not a code strip, and the defaults live in source so
-// F-Droid's -P-free rebuild stays identical. Flip the release default after the device trial.
+// F-Droid's -P-free rebuild stays identical.
 val bleGattPeers = (project.findProperty("bleGattPeers") as? String)?.toBoolean()
 
 // Asking neighbours which of them holds a blob before asking one for it (`blobhave`/`blobhas`, ADR 2026-10.6e5t):
-// ON in debug, OFF in a shipped artifact, overridable with `-PblobQuery=true|false`. It gates the asking only — every
-// build advertises CAP_BLOB_HAVE and answers a query, so a mixed fleet works and the release flip changes one side.
+// ON in debug and in a shipped artifact, overridable with `-PblobQuery=true|false`. It gates the asking only — every
+// build advertises CAP_BLOB_HAVE and answers a query, so a mixed fleet works.
 // Off, every neighbour gets ADR 2026-10.f7gg's blind round. Not a code strip, and the defaults live in source so
-// F-Droid's -P-free rebuild stays identical. Flip the release default after the device trial.
+// F-Droid's -P-free rebuild stays identical.
 val blobQuery = (project.findProperty("blobQuery") as? String)?.toBoolean()
 
 // The BLE Coded PHY experiment (long range, getknit/knit#29, ADR 2026-10.yvn6): a second presence set on the Coded
-// PHY, an all-PHY presence scan, and per-link steps between 1M and Coded S=8 — ON in debug, OFF in a shipped
+// PHY, an all-PHY presence scan, and per-link steps between 1M and Coded S=8 — ON in debug and in a shipped
 // artifact, overridable with `-PbleCodedPhy=true|false`. It gates the one seam, the mode flow the DI hands
 // `BluetoothMeshTransport` (OFF while dark: no Coded set, the legacy scan, no PHY handle), and the Diagnostics row
 // and `…debug.PHY` that set the mode. Not a code strip, and the defaults live in source so F-Droid's -P-free rebuild
-// stays identical. Flip the release default after the field trial.
+// stays identical.
 val bleCodedPhy = (project.findProperty("bleCodedPhy") as? String)?.toBoolean()
 
 // The Bluetooth link boost (knit-next#120): a link feeding a file asks for CONNECTION_PRIORITY_HIGH through a GATT
 // client on its own ACL, and the 1M/2M file budget rises while every feeding link reports the short interval — ON in
-// debug, OFF in a shipped artifact, overridable with `-PbleLinkBoost=true|false`. Off, no link opens a client for it
+// debug and in a shipped artifact, overridable with `-PbleLinkBoost=true|false`. Off, no link opens a client for it
 // and every feed keeps the base budget. Not a code strip, and the defaults live in source so F-Droid's -P-free rebuild
-// stays identical. Flip the release default after the device trial.
+// stays identical.
 val bleLinkBoost = (project.findProperty("bleLinkBoost") as? String)?.toBoolean()
 
 // The Bluetooth feed window (ADR 2026-10.nsr7's phase 2): a file to an Android peer that reports its progress is
 // clocked by those reports, keeping about half a second queued ahead of the receiver, instead of the fixed pace
-// budgets — ON in debug, OFF in a shipped artifact, overridable with `-PbleFeedWindow=true|false`, and switchable at
+// budgets — ON in debug and in a shipped artifact, overridable with `-PbleFeedWindow=true|false`, and switchable at
 // run time on a debug build (`…debug.LINKTUNE --es feed window|pace`). Not a code strip, and the defaults live in
-// source so F-Droid's -P-free rebuild stays identical. Flip the release default after the device A/B.
+// source so F-Droid's -P-free rebuild stays identical.
 val bleFeedWindow = (project.findProperty("bleFeedWindow") as? String)?.toBoolean()
 
 // The Wear OS status service (a read-only GATT characteristic a bonded watch reads the mesh state from; the
@@ -387,18 +387,18 @@ android {
             // The commons is not introduced yet: a shipped artifact hides it (`-Pcommons=true` lights it
             // for a maintainer build). Staging and nonMinifiedRelease inherit this through initWith.
             buildConfigField("boolean", "COMMONS", (commons ?: false).toString())
-            // The BLE side channel is not introduced yet: dark in a shipped artifact until its device trial.
-            buildConfigField("boolean", "BLE_SIDE_PLANE", (bleSidePlane ?: false).toString())
-            // Finding iPhones through their GATT payload is not introduced yet: dark until its device trial.
-            buildConfigField("boolean", "BLE_GATT_PEERS", (bleGattPeers ?: false).toString())
-            // Querying for a blob's holders is not introduced yet: a shipped artifact answers, and asks blind.
-            buildConfigField("boolean", "BLOB_QUERY", (blobQuery ?: false).toString())
-            // The Coded PHY experiment is not introduced yet: dark in a shipped artifact until its field trial.
-            buildConfigField("boolean", "BLE_CODED_PHY", (bleCodedPhy ?: false).toString())
-            // The Bluetooth link boost is not introduced yet: a shipped artifact feeds at the base budget until its trial.
-            buildConfigField("boolean", "BLE_LINK_BOOST", (bleLinkBoost ?: false).toString())
-            // The Bluetooth feed window is not introduced yet: a shipped artifact paces every feed until its A/B.
-            buildConfigField("boolean", "BLE_FEED_WINDOW", (bleFeedWindow ?: false).toString())
+            // The BLE side channel is introduced: on in a shipped artifact.
+            buildConfigField("boolean", "BLE_SIDE_PLANE", (bleSidePlane ?: true).toString())
+            // Finding iPhones through their GATT payload is introduced: on in a shipped artifact.
+            buildConfigField("boolean", "BLE_GATT_PEERS", (bleGattPeers ?: true).toString())
+            // Querying for a blob's holders is introduced: a shipped artifact answers and asks.
+            buildConfigField("boolean", "BLOB_QUERY", (blobQuery ?: true).toString())
+            // The Coded PHY is introduced: on in a shipped artifact.
+            buildConfigField("boolean", "BLE_CODED_PHY", (bleCodedPhy ?: true).toString())
+            // The Bluetooth link boost is introduced: a shipped artifact asks for HIGH while it feeds.
+            buildConfigField("boolean", "BLE_LINK_BOOST", (bleLinkBoost ?: true).toString())
+            // The Bluetooth feed window is introduced: a shipped artifact feeds by its receiver's reports.
+            buildConfigField("boolean", "BLE_FEED_WINDOW", (bleFeedWindow ?: true).toString())
             // The Wear OS status service is a prototype: dark in a shipped artifact.
             buildConfigField("boolean", "WEAR_STATUS", (wearStatus ?: false).toString())
             // Never ship a fault injector, whatever `-PmodelFaultOnLoad` said.

@@ -329,7 +329,7 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   2026-10-06, #140: only a no, a gone link or the floor moves on; waits stretch to the neighbour's measured round
   trip); the rest keep f7gg's round. A query is not an ask (it serves, pulls and stamps nothing), HAVE is the serve predicate read without materialising,
   SENDING peeks the memo, an unknown state is never HAVE (PARTIAL is reserved for a range ask), every build answers
-  and only the asking is dark in release. Wire change: the iOS port owes the responder as a companion change.
+  and the asking is on in every build since 2026-10-08 (`BuildConfig.BLOB_QUERY`). Wire change: the iOS port owes the responder as a companion change.
   Lab: `BlobHaveLabTest`; unit: `BlobHolderQueryTest`. **Before touching `CarrierPullPolicy`,
   `ForwardStore.carriedAttachments`, what `onCarriedFrame` / `rewantMissingBlobs` hold back, `BlobExchange`'s parked
   asks (`parkBehindFeed`, `waitsBehindFeed`, `serveParked`), or `answersIn`'s author rule:** READ ADR 2026-10.g24x. A

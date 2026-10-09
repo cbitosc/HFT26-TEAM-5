@@ -8,9 +8,9 @@ topics: [mesh, bluetooth]
 
 # ADR 2026-09.sjaa — BLE side channel: small floodable frames ride non-connectable extended-advertising pages
 
-Status: Accepted (2026-09-16) — built and JVM-tested; device-trialled 2026-09-17 (results at the end); dark in a
-shipped artifact (`BuildConfig.BLE_SIDE_PLANE`, debug on / release off) until the two items the trial left open
-are done. Work item knit/knit-next#13.
+Status: Accepted (2026-09-16) — built and JVM-tested; device-trialled 2026-09-17 (results at the end); behind
+`BuildConfig.BLE_SIDE_PLANE`, on in a shipped artifact since 2026-10-08, ahead of the two items the trial left
+open. Work item knit/knit-next#13.
 
 **What was observed.** On the BLE plane every frame and every file share one ordered L2CAP CoC stream per
 link. A blob in flight head-of-line-blocks the small frames behind it and, by saturating the ACL, starves the

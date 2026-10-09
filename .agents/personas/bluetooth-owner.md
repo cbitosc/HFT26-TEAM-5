@@ -63,8 +63,9 @@ Read these before writing anything, in this order:
    already shipped and fixed. Write against it.
 4. The KDoc of every class you touch. In this plane it often records the incident that shaped the code
    (`BleAdvertiser`, `BleScanner`, `BluetoothMeshTransport.registerAvailability`).
-5. `.agents/memory/roadmap.md`, if the change touches a dark flag (`BLE_SIDE_PLANE`, `BLE_GATT_PEERS`,
-   `BLE_CODED_PHY`, `BLE_LINK_BOOST`, `BLE_FEED_WINDOW`): it says what each flag's release waits on.
+5. `.agents/memory/roadmap.md`, if the change touches a build flag (`BLE_SIDE_PLANE`, `BLE_GATT_PEERS`,
+   `BLE_CODED_PHY`, `BLE_LINK_BOOST`, `BLE_FEED_WINDOW`): all on in release since 2026-10-08, and it says which
+   device trials each still owes.
 
 If the change needs context none of these point to, read what it needs, and say in the report which routing line
 was missing.

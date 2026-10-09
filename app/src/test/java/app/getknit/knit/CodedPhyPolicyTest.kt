@@ -296,7 +296,7 @@ class CodedPhyPolicyTest {
         assertTrue("open on a lit screen hunts with nobody lost", CodedPhyPolicy.hunts(codedOn = true, lostWanted = false, inUse = true))
         assertFalse(CodedPhyPolicy.hunts(codedOn = true, lostWanted = false, inUse = false))
         assertFalse(
-            "dark in release: the experiment off never hunts",
+            "with the mode off, the plane never hunts",
             CodedPhyPolicy.hunts(codedOn = false, lostWanted = true, inUse = true),
         )
     }

@@ -8,7 +8,7 @@ topics: [ble, mesh, blobs]
 
 # ADR 2026-10.5buf — A Bluetooth file feed is clocked by its receiver's reports
 
-Status: Accepted (2026-10-07), dark in release behind `BuildConfig.BLE_FEED_WINDOW` until its device A/B, and on in
+Status: Accepted (2026-10-07), behind `BuildConfig.BLE_FEED_WINDOW`, on in release since 2026-10-08 ahead of its device A/B, and on in
 the first release that carries nsr7's `blobprog`. Builds ADR
 2026-10.nsr7's phase 2. For the links it covers, it replaces ADR 2026-10.8jwn's budget and its split, and ADR
 2026-10.2da4's earned budgets; the boost's interval ask stays. No wire change.

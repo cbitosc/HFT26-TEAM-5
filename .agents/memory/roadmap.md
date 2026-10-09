@@ -590,44 +590,44 @@ doc). **Don't start a deferred item without explicit direction.**
   message. The gate needs to distinguish a real A2DP route from any active stream.
 - **Finding iPhones over GATT (A3): the release flag** — BUILT 2026-09-29 (ADR 2026-09.kwq2, companion change A3,
   #101): the presence scan matches the `0xFE30` UUID, reads a foreground iPhone's GATT payload, dials it when our id
-  is larger, and advertises `FLAG_DIALS_GATT_PEERS`. Dark in a shipped artifact (`BuildConfig.BLE_GATT_PEERS`, debug
-  on / release off) until the device trial: the gate against knit-peer's `ios` profile on a Pixel 7 and the Moto G
+  is larger, and advertises `FLAG_DIALS_GATT_PEERS`. ON in a shipped artifact since 2026-10-08 (`BuildConfig.BLE_GATT_PEERS`), flipped ahead of the device trial, which
+  is still owed: the gate against knit-peer's `ios` profile on a Pixel 7 and the Moto G
   in both id orders, then the iPhone 12 checks in both orders, recording first-link times in the iPhone-below order
-  (revisit a scan-tier-following flag only if they miss MVP item 2). Flip the release default then.
+  (revisit a scan-tier-following flag only if they miss MVP item 2).
 - **BLE side channel: the release flag** — the carrier is BUILT (2026-09-16, ADR 2026-09.sjaa;
   knit/knit-next#13) and device-trialled on three lab phones (2026-09-17: every controller 1650-B extended
   advertising, 20/20 and 12/12 pages caught screen-on, 11/12 screen-off, the #13 case delivering the
   bystander's posts off a page while the sender's link copies lagged, no link slowdown from airing pages —
-  numbers in the ADR). Still dark in a shipped artifact (`BuildConfig.BLE_SIDE_PLANE`, debug on / release off)
-  until: one night's battery on a settled clique against the dark build, and a sighted-but-unlinked peer
+  numbers in the ADR). ON in a shipped artifact since 2026-10-08 (`BuildConfig.BLE_SIDE_PLANE`), flipped ahead of
+  what is still owed: one night's battery on a settled clique against the dark build, and a sighted-but-unlinked peer
   (this lab links everyone — needs a link budget saturated or a phone in connect backoff). Trial knobs
   deferred with it: a third slot (two saturate at one part per 6 s), a shorter dwell for screen-on rooms,
   2M secondary PHY, hold-until-echoed dwell, DM-form frames on a page (issue scope: DMs stay on L2CAP).
 - **BLE Coded PHY: the release flag** — BUILT 2026-10-01 on `feat/ble-coded-phy` (ADR 2026-10.yvn6, getknit/knit#29):
-  a second presence set on Coded, an all-PHY presence scan, per-link 1M ↔ Coded S=8 steps on link RSSI. Dark in a
-  shipped artifact (`BuildConfig.BLE_CODED_PHY`, debug on / release off) until: a walk-apart field trial (link-drop
+  a second presence set on Coded, an all-PHY presence scan, per-link 1M ↔ Coded S=8 steps on link RSSI. ON in a
+  shipped artifact since 2026-10-08 (`BuildConfig.BLE_CODED_PHY`, mode AUTO), flipped ahead of what is still owed: a walk-apart field trial (link-drop
   distance under off, auto and coded), the OFF-vs-AUTO 1M-sighting rate, chat latency behind a blob on a CODED link,
   and a battery night against OFF. iOS has no Coded PHY; 2M up-shift and PHY-aware blob scheduling are deferred.
 - **Bluetooth link boost: the release flag, screen-off feeds, iPhone links** — BUILT 2026-10-06 on
   `fix/ble-link-boost-120` (ADR 2026-10.2da4, #120): while a file moves either way, a side whose screen is on asks for
   `CONNECTION_PRIORITY_HIGH` (and the MTU once), and the 1M/2M budget rises to 18 KiB/s (12 past four LE connections)
   while every feeding link reported ≤ 15 ms.
-  Dark in a shipped artifact (`BuildConfig.BLE_LINK_BOOST`, debug on / release off) until the device trial in the ADR:
+  ON in a shipped artifact since 2026-10-08 (`BuildConfig.BLE_LINK_BOOST`), flipped ahead of the ADR's device trial:
   single links, P3 both ways, fan-out, concurrent receive, a phone holding more LE links (it sets the shipped budget),
   Wi-Fi Aware on, the Moto, screen-off, a mixed build. Deferred: a file between two dark phones (the linger's wait
   cannot wake the CPU, and an alarm costs more than it saves), iPhone links (the doorbell's BALANCED owns them; the port would need
   its own ask), and a 2M step (≈10% with HIGH).
 - **Bluetooth feed window: the release flag** — BUILT 2026-10-07 on `feat/ble-feed-window` (ADR 2026-10.5buf, nsr7's
   phase 2): a 1M/2M file to a reporting Android peer is clocked by its `blobprog` reports, about 500 ms queued ahead of
-  the measured drain, instead of the 8jwn/2da4 budgets. Dark in a shipped artifact (`BuildConfig.BLE_FEED_WINDOW`,
-  debug on / release off) until its device A/B (v2.8.0, today's caps with the boost off, the window with the boost off
+  the measured drain, instead of the 8jwn/2da4 budgets. ON in a shipped artifact since 2026-10-08 (`BuildConfig.BLE_FEED_WINDOW`),
+  flipped ahead of its device A/B (v2.8.0, today's caps with the boost off, the window with the boost off
   and on; texts behind a photo; the burst, mixed-switch and dark-receiver cells). **It ships on in the same release as
   nsr7's `blobprog`, never after it**: a release reporting every 2 s would leave its installs feeding in fits to every
-  later windowed sender. Deferred: the window on Coded (walk trial first) and on iPhone links (the port must report).
+  later windowed sender. The window covers Coded too (5buf's amendment of 2026-10-08 (2)). Deferred: the window on iPhone links (the port must report).
 - **Blob holder query: the release flag, the iOS responder, partial fetch** — BUILT 2026-10-05 on `feat/blob-have`
   (ADR 2026-10.6e5t): a `blobhave` query to every neighbour whose link carries `CAP_BLOB_HAVE`, the best holder by
   plane and load asked alone, confirm then fall back, f7gg's round for the rest. Every build answers; asking is
-  dark in a shipped artifact (`BuildConfig.BLOB_QUERY`, debug on / release off) until a device trial: the #136
+  ON in a shipped artifact since 2026-10-08 (`BuildConfig.BLOB_QUERY`), flipped ahead of a device trial: the #136
   trial's S1–S4 again (S3 should take the holding hop at once), two holders on different links, the iPhone and Moto
   asked blind, and a holder walking away mid-fetch. The 2026-10-05 trial (P3/P8/P9) passed those it could stage
   and set `QUERY_WAIT_MS` to 5 s; its pull-through recheck and dead-cycle backoff are in, and still owed are the

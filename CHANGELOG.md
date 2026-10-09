@@ -32,6 +32,9 @@ document:
   again without the file picker. The button shows only while Knit can still open the file.
 - You can turn on a field log in Diagnostics: three days of how your phone's radios behaved, with no names,
   messages or ids in it. Share it as a file to help tune Knit; it never leaves your phone unless you do.
+- Phones now find each other over Bluetooth from farther apart, and a connection drifting out of range
+  switches to Bluetooth's long-range mode to stay up. Both phones need that mode, so iPhones and phones
+  without it connect as before.
 
 ### Changed
 

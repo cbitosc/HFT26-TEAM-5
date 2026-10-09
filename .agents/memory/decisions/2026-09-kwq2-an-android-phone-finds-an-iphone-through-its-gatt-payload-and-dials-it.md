@@ -9,8 +9,9 @@ topics: [ble, transport, interop]
 # ADR 2026-09.kwq2 — An Android phone finds an iPhone through its GATT payload and dials it
 
 Status: Accepted (2026-09-29). Companion change A3 for the iOS port (`knit-ios`, ADR 2026-09.xzpt there), knit-next issue
-101, with #102 for the link-parameter motive. Dark in release behind `BuildConfig.BLE_GATT_PEERS` until its device
-trial. The flag bit landed in a commit of its own, after the device gate passed (2026-09-29).
+101, with #102 for the link-parameter motive. Behind `BuildConfig.BLE_GATT_PEERS`, on in release since
+2026-10-08, ahead of its device trial. The flag bit landed in a commit of its own, after the device gate passed
+(2026-09-29).
 
 **What was observed.** A foreground iPhone advertises the `0xFE30` UUID and nothing else: iOS cannot advertise service
 data, and `BleScanner` filtered on it, so an Android phone never sighted an iPhone and never dialed one. The iPhone

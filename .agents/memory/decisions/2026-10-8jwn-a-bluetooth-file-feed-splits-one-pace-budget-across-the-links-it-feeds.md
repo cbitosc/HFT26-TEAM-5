@@ -89,7 +89,7 @@ every pair, so the fastest pairs pay for the slowest; the sender cannot tell the
 - Incoming streams are not counted, though they use the same air. The trial did not measure how much an incoming
   file slows an outgoing one.
 - Coded sits outside the split, yet S=8 spends about eight times the air per byte: one Coded feed at 1 KiB/s uses
-  about a whole 1M budget's worth. The experiment is dark in release; count Coded against the budget before it ships.
+  about a whole 1M budget's worth. Coded is now paced outside the split at 1 KiB/s (yvn6's #114 amendment), and windowed for a reporting peer (5buf), so this held when it shipped on 2026-10-08.
 - Tune against the receiver's `rx … in` line, never the sender's `file … in`.
 
 **Follow-up.** Ask for a shorter connection interval (`CONNECTION_PRIORITY_HIGH` through a GATT client on the link's
@@ -109,7 +109,7 @@ every link feeding a file on 1M/2M has reported 15 ms or less, the budget is `Ph
 (18 KiB/s), or 12 KiB/s on a phone holding more than four LE connections, split exactly as above. Otherwise it stays
 4 KiB/s. `CodedPhyPolicy.pace` takes the `earned` flag and the LE count, `paceFor` computes them, and the
 `bt file pace` line ends `earned=… le=…`. On the trial's best cell a 700 KB photo crossed in 41–42 s with every text behind
-it in 3.4 s or less. Dark in release behind `BLE_LINK_BOOST` until its device trial (2da4).
+it in 3.4 s or less. Behind `BLE_LINK_BOOST` (2da4), on in release since 2026-10-08.
 
 **Amended 2026-10-06 (ADR 2026-10.g24x).** The split stands, but each link's budget is its own (the boosted one only
 while that link has earned it), and a holder feeds one 1M/2M copy of a blob at a time, so a room or group photo no

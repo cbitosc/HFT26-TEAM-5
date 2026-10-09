@@ -344,7 +344,7 @@ val meshModule =
                 publicChannel = { body -> get<PublicChannelSink>().postToPublicChannel(body) },
                 onTransferSignal = { sender, payload, sentAt -> get<TransferManager>().onSignal(sender, payload, sentAt) },
                 identities = get(),
-                // Ask the best holder of a blob rather than the likeliest (ADR 2026-10.6e5t); dark in release.
+                // Ask the best holder of a blob rather than the likeliest (ADR 2026-10.6e5t).
                 blobHolderQuery = BlobExchange.HolderQuery(enabled = BuildConfig.BLOB_QUERY),
                 fieldLog = get(),
             )

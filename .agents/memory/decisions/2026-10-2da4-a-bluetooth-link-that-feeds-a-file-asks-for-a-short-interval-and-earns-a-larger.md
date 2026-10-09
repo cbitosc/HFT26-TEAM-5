@@ -8,7 +8,7 @@ topics: [ble, mesh]
 
 # ADR 2026-10.2da4 — A Bluetooth link that feeds a file asks for a short interval and earns a larger budget
 
-Status: Accepted (2026-10-06), dark in release behind `BuildConfig.BLE_LINK_BOOST` until its device trial. Work item
+Status: Accepted (2026-10-06), behind `BuildConfig.BLE_LINK_BOOST`, on in release since 2026-10-08, ahead of its device trial. Work item
 knit/knit-next#120. Amends ADR 2026-10.8jwn (the budget) and ADR 2026-09.dqvb (Android links and GATT). No wire change,
 Android only.
 

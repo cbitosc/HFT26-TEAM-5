@@ -8,9 +8,9 @@ topics: [ble, mesh, power]
 
 # ADR 2026-10.yvn6 — BLE links step down to the Coded PHY at range
 
-Status: Accepted (2026-10-01) as an experiment — built and JVM-tested on `feat/ble-coded-phy`, dark in a shipped
-artifact behind `BuildConfig.BLE_CODED_PHY` until a walk-apart field trial measures the range it buys and a
-battery night measures what it costs. getknit/knit#29.
+Status: Accepted (2026-10-01) as an experiment — built and JVM-tested on `feat/ble-coded-phy`, behind
+`BuildConfig.BLE_CODED_PHY`. A release feature since 2026-10-08 (always AUTO; the mode knob is debug-only), ahead of the walk-apart
+field trial that measures the range it buys and the battery night that measures what it costs. getknit/knit#29.
 
 **What was observed.** #29 asks for the LE Coded PHY (S=8, "long range") so the Bluetooth mesh reaches further
 without a LoRa board. Every Bluetooth path ran on 1M: a legacy presence advert, a legacy scan, links on whatever
@@ -69,8 +69,8 @@ is out: it must stay legacy for legacy-only scanners and the 31-byte budget.
 - **Reachable at Coded range.** A peer sighted on Coded counts as nearby (`reachable ⊇ neighbors` holds, since a
   Coded sighting can dial). If links at that range turn out not to hold, the Coded sighting must stop feeding
   `reachable` rather than the floor being loosened further.
-- **Never toggled behind the user's back.** Release reads OFF whatever is stored; flipping `BLE_CODED_PHY` in
-  release is a product decision with a CHANGELOG line, after the trial.
+- **Never toggled behind the user's back.** A build without `BLE_CODED_PHY` reads OFF and a release build AUTO, whatever is stored; flipping it
+  in release is a product decision with a CHANGELOG line (flipped 2026-10-08, ahead of the trial).
 
 Tests: `CodedPhyPolicyTest` (scoring, dial choice, every step rule), `BlePresenceTrackerTest`,
 `PromotionPolicyTest`. `BlePhyControl` and the Coded set are device-verified only, like `BleDoorbell`.
@@ -209,7 +209,7 @@ measures how far short.
   3 minutes per drop at range, on the dialed side only.
 - A Coded dial can now pause the scan for up to 25 s. That only happens for a peer heard on Coded alone, which is a far
   peer.
-- All of it is dark in release, like the rest of the experiment.
+- All of it rides `BLE_CODED_PHY`, like the rest of the feature (on in release since 2026-10-08).
 
 Tests: `CodedAdvertPaceTest` (the window, a relink, two peers, giving up, a fresh try), `CodedPhyPolicyTest` (the drop
 rule, interval units, the watchdog), and `BleAdvertiserTest`. The last covers: the in-place change and its order;
@@ -418,7 +418,7 @@ about 100 m out. All three ran main @47485429 in AUTO. Logs: `~/knit-trials/2026
   - `hunt=` on the `bt state` line.
   - `…debug.PHY` reports `hunting` and `hunted` and sets `--ei huntInUseHoldMs`.
 
-**What it costs.** It is all dark in release, like the rest of the experiment.
+**What it costs.** It all rides `BLE_CODED_PHY`, like the rest of the feature (on in release since 2026-10-08).
 
 - A pocket phone pays for at most 3 minutes per drop at range, at the same cadence a lonely phone runs in its first
   three minutes.

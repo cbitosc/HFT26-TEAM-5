@@ -37,7 +37,7 @@ data class CodedPhyStatus(
 /**
  * The debug bridge's and Diagnostics' handle on the experiment, bound by [BluetoothMeshTransport] while it runs — the
  * same shape as the Wi-Fi Aware fault injector, so neither needs an `android.bluetooth` import or a transport
- * reference, and nothing is added to the `MeshTransport` seam for an experiment dark in release. [tuning] is read by
+ * reference, and nothing is added to the `MeshTransport` seam for one build flag. [tuning] is read by
  * every link's [PhyStepper] on each decision and by the presence tracker's Coded credit; `…debug.PHY` overrides it on
  * a debug build.
  */

@@ -202,11 +202,13 @@ class DiagnosticsViewModel(
     }
 
     /**
-     * The BLE Coded PHY experiment's mode (ADR 2026-10.yvn6), or null where the build keeps it dark — which is also
-     * whether the row shows. Its own flow for the same reason as [bleLinkCap]; the transport collects the same key.
+     * The BLE Coded PHY's mode (ADR 2026-10.yvn6), or null where the row is hidden: a release build (the knob is a
+     * walk-test tool, debug only) or one that keeps the PHY dark. Its own flow for the same reason as [bleLinkCap];
+     * the transport collects the same key.
      */
     val blePhyMode: StateFlow<CodedPhyMode?> =
-        settings.debugBlePhyMode.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+        (if (BuildConfig.DEBUG) settings.debugBlePhyMode else flowOf(null))
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     /**
      * The PHY each Bluetooth link with a PHY handle is on, by node id — a chip on its row. Empty where the build keeps
@@ -216,9 +218,9 @@ class DiagnosticsViewModel(
         (if (BuildConfig.BLE_CODED_PHY) CodedPhyDiag.linkPhys else flowOf(emptyMap()))
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
-    /** Sets the Coded PHY mode. A no-op where the build keeps the experiment dark. */
+    /** Sets the Coded PHY mode. A no-op on a release build, or where the build keeps the PHY dark. */
     fun setBlePhyMode(mode: CodedPhyMode) {
-        if (!BuildConfig.BLE_CODED_PHY) return
+        if (!BuildConfig.DEBUG || !BuildConfig.BLE_CODED_PHY) return
         viewModelScope.launch { settings.setDebugBlePhyMode(mode) }
     }
 

@@ -18,15 +18,15 @@ Bluetooth-adjacent routing that stays in `AGENTS.md`, because another subsystem 
   READ ADR 2026-09.sjaa and the "page carousel" section of `.agents/context/mesh-transport.md`. The BLE side
   channel carries `shouldFastFanout` frames on non-connectable extended-advertising pages — one
   `FastFrameCodec` unit per 236-B page, never a chain, never presence, never a DM-form frame — gated per
-  peer on the advert's flags byte and dark in release behind `BuildConfig.BLE_SIDE_PLANE` until its device
-  trial (CHECK `.agents/memory/roadmap.md`). The receive scan is Off for an all-linked clique with nothing
+  peer on the advert's flags byte and behind `BuildConfig.BLE_SIDE_PLANE`, on in release since 2026-10-08 with
+  trials still owed (CHECK `.agents/memory/roadmap.md`). The receive scan is Off for an all-linked clique with nothing
   streaming (ADR 2026-09.u8qj) — the link copy already reaches every linked peer; don't widen that gate. `hasFastPlane` is now true for Bluetooth: the link copy the
   composite used to send lives inside the transport's `fastFanout`/`fastSend`; don't add it back upstream.
 - **When touching `CodedPhyPolicy`, `PhyStepper`, `BlePhyControl`, `CodedPhyDiag`, `CodedAdvertPace`, `RangeHunt`,
   `AppVisibility`,
   `BleAdvertiser.codedParams` / `setInterval`, `BleScanner.phys`, `BlePresenceTracker`'s per-PHY RSSI,
   `BuildConfig.BLE_CODED_PHY` or `…debug.PHY`:** READ ADR
-  2026-10.yvn6 and the Coded PHY section of `.agents/context/mesh-transport.md`. An experiment, dark in release: a
+  2026-10.yvn6 and the Coded PHY section of `.agents/context/mesh-transport.md`. On in release since 2026-10-08: a
   second presence set on Coded (the legacy advert stays), an all-PHY scan, a Coded sighting scored on the 1M scale
   (+12 dB) so every −90 floor is untouched, and per-link 1M ↔ Coded S=8 steps driven by the larger id through a GATT
   handle on the link's ACL. Capability is inferred from hearing the Coded advert — no flags-byte bit. A dialer heard on
@@ -36,14 +36,14 @@ Bluetooth-adjacent routing that stays in `AGENTS.md`, because another subsystem 
   dialing side hunts it — lonely gap, Coded windows, no settled floor, whatever other links it holds — for those
   3 min, or up to 30 while Knit is open on a lit screen, which hunts on its own too (`RangeHunt`, the 2026-10-04
   amendment). CHECK
-  `.agents/memory/roadmap.md` for what the release flag waits on.
+  `.agents/memory/roadmap.md` for the trials it still owes.
 - **When touching `CodedPhyPolicy.pace`, `PhyTuning.filePaceBytesPerSec` / `BLE_PACE_BYTES_PER_SEC`, `PaceConfig` /
   `PaceWindow` / `TransferPacePolicy`, `BluetoothMeshTransport.paceFor`, or `FramedLink`'s `pace`:** READ ADR
   2026-10.8jwn. **Before touching `FeedWindow`, `PaceConfig.windowed`, `BluetoothMeshTransport.windowed`,
   `FramedLink.feedChunks` / `awaitReport`, `RxReports`, or `BuildConfig.BLE_FEED_WINDOW`:** READ ADR
   2026-10.5buf — a file to an Android peer that reports is clocked by those reports on any PHY (written and not yet held kept under
   the measured drain over the round trip plus a quarter second, BBR-style, no split, no earned budget; on Coded in 1 KiB
-  chunks, its amendment of 2026-10-08 (2)), the old pace only for a silent receiver, an iPhone or an older build; dark in release until its A/B, switched on a debug build by `…debug.LINKTUNE --es feed window|pace`. A Bluetooth file is fed below what the air drains, from one budget split evenly among the 1M/2M links
+  chunks, its amendment of 2026-10-08 (2)), the old pace only for a silent receiver, an iPhone or an older build; on in release since 2026-10-08 (its A/B still owed), switched on a debug build by `…debug.LINKTUNE --es feed window|pace`. A Bluetooth file is fed below what the air drains, from one budget split evenly among the 1M/2M links
   feeding a file at once (`txInProgress`), in chunks of two seconds of the share; a paced Coded link keeps its own pace outside the
   split (yvn6's #114 amendment). The stack's queue hides the drain from the sender, so tune against the receiver's
   `rx … in <ms>ms` line — never the sender's `file … in`, which reads size ÷ pace. No wire change.
@@ -54,8 +54,7 @@ Bluetooth-adjacent routing that stays in `AGENTS.md`, because another subsystem 
   `CONNECTION_PRIORITY_HIGH` (and the MTU once) through one GATT client per link, and lets go 15 s after neither
   direction streams, or at once on screen-off; a dark side only listens. A link's budget rises to 18 KiB/s (12 past four
   LE connections) only while that link *reported* ≤ 15 ms (`earned`; per link since ADR 2026-10.g24x), else 8jwn's
-  4 KiB/s. Dark in release until
-  its trial. The trial is `scripts/ble-drain-trial.py --boost on|off`, and the oracle is both phones' HCI snoops read
+  4 KiB/s. On in release since 2026-10-08, its trial still owed. The trial is `scripts/ble-drain-trial.py --boost on|off`, and the oracle is both phones' HCI snoops read
   by `scripts/btsnoop-drain.py` — the sender's, since only it shows the queue.
 - **When touching `BluetoothMeshTransport.superviseAccepted`, `BleAdmissionPolicy`, `teardownLink`, `LinkEvents`,
   `neverSighted`, `LonelyDialPolicy` / `noLinkSince`, or what a held link scores for eviction:** READ ADR
@@ -104,8 +103,8 @@ Bluetooth-adjacent routing that stays in `AGENTS.md`, because another subsystem 
   unchanged rule (larger id dials); `GattPayloads` is the iOS pacing line for line (one read at a time, 12 s,
   30 s / 10 min waits) plus a 64-address LRU, and a payload lives until one of the contract's three rules forgets it: a
   dial failing before its channel opens (never on HANDSHAKE), a HELLO on a link to the address naming another node,
-  or 60 s of scanning unheard with no link up. The flag is set only while the reader runs — one build switch gates filter, reader and flag, dark in
-  release until the trial. A1 (shzv) stays whole: it is the fallback that makes a clear flag safe.
+  or 60 s of scanning unheard with no link up. The flag is set only while the reader runs — one build switch gates filter, reader and flag, on in
+  release since 2026-10-08, the trial still owed. A1 (shzv) stays whole: it is the fallback that makes a clear flag safe.
 
 ## Adding an entry
 

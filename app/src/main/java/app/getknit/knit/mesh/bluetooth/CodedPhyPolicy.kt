@@ -6,8 +6,9 @@ import app.getknit.knit.mesh.link.PaceConfig
 import kotlin.math.roundToInt
 
 /**
- * How the Bluetooth plane uses the LE Coded PHY (getknit/knit#29, ADR 2026-10.yvn6) — an experiment, dark in release
- * behind `BuildConfig.BLE_CODED_PHY`, switched at run time from Diagnostics or `…debug.PHY` (`SettingsStore.debugBlePhyMode`).
+ * How the Bluetooth plane uses the LE Coded PHY (getknit/knit#29, ADR 2026-10.yvn6) — behind
+ * `BuildConfig.BLE_CODED_PHY` (on in every build by default), switched at run time from Diagnostics or
+ * `…debug.PHY` (`SettingsStore.debugBlePhyMode`).
  */
 enum class CodedPhyMode {
     /** Today's plane: the legacy presence advert, a legacy scan, links on whatever PHY the stack picks. The baseline. */

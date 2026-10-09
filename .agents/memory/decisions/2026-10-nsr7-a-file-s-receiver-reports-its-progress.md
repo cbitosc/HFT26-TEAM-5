@@ -167,7 +167,7 @@ iPhone build older than that drops it, or asks an unpinned sender for its key, a
 - **A new capability bit.** It would burn a bit for a feature not yet shipped. The lab mismatch (an iPhone with the bit
   and no `blobprog`) costs only its feeds being judged the old way: by pace and write staleness.
 
-**Phase 2 (built since as ADR 2026-10.5buf, dark in release behind `BLE_FEED_WINDOW`): replace the pace caps with an in-flight window.** Bytes written minus bytes the
+**Phase 2 (built since as ADR 2026-10.5buf, behind `BLE_FEED_WINDOW`, on in release since 2026-10-08): replace the pace caps with an in-flight window.** Bytes written minus bytes the
 receiver reports is the stack's queue plus the air. Writing only while that is under about 0.5 s of the measured drain
 would bound a text's wait behind a file at about 0.5 s, on any link speed. It would replace the 4/12/18 KiB/s budgets
 and the cross-link split with each link's own self-clocked drain. The boost ask and a hard ceiling would stay, and

@@ -10,8 +10,8 @@ topics: [mesh, wire, blobs]
 
 Status: Accepted (2026-10-05). Amends ADR 2026-10.f7gg, whose round is now the tier for neighbours that cannot be
 queried, and ADR 2026-09.4tx5 and ADR 2026-10.nxfb, whose reads are unchanged. Additive wire change: two new
-unsigned point-to-point types and the capability bit `CAP_BLOB_HAVE` (0x2000). No DB change. Asking is dark in
-release behind `BuildConfig.BLOB_QUERY` until its device trial; answering is on in every build. The iOS port follows
+unsigned point-to-point types and the capability bit `CAP_BLOB_HAVE` (0x2000). No DB change. Asking is behind
+`BuildConfig.BLOB_QUERY`, on in release since 2026-10-08 ahead of its device trial; answering is on in every build. The iOS port follows
 as a companion change; it needs nothing to keep working, since it is asked blind as before.
 
 **What was observed.** The #136 device trial (2026-10-05, main 512b72bc, four Pixels) passed: one copy per asker in

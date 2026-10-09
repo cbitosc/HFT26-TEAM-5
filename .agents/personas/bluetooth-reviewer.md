@@ -141,7 +141,8 @@ Then two checks that are not shapes:
   flags bits, `CAP_DOORBELL`, the doorbell schedule, `GattPayloads` pacing, `REPLACE_MIN_HOLD_MS`, the Wear
   golden vectors, `KnitChannel`'s PSK) changing at all is a finding unless the change is a paired change
   (`.agents/rules/paired-change.md`).
-- **Dark flags.** `BLE_SIDE_PLANE`, `BLE_GATT_PEERS`, `BLE_CODED_PHY`, `WEAR_STATUS` are off in release; each has
+- **Build flags.** `BLE_SIDE_PLANE`, `BLE_GATT_PEERS`, `BLE_CODED_PHY`, `BLE_LINK_BOOST`, `BLE_FEED_WINDOW` are on in
+  release since 2026-10-08 (`-P<flag>=false` still builds them dark); `WEAR_STATUS` is off in release. Each has
   one seam. A second gate downstream, a code path that runs with the flag off, or a flags-byte bit set while its
   behaviour is not live, is a finding.
 
@@ -254,10 +255,10 @@ One line per invariant, by subsystem, with the ADR to read. Not exhaustive and n
 - **Pace.** One 4 KiB/s budget split among the 1M/2M links feeding at once, chunks of two seconds of the share,
   read before every chunk; Coded outside the split (8jwn, yvn6 #114).
 - **Side channel.** One `FastFrameCodec` unit per 236-B page, never a chain, never presence, never DM-form; overflow
-  sheds the oldest unstarted frame (sjaa). Dark in release.
-- **Coded PHY.** Release reads OFF; `codedOnly` on 1M listening time; a Coded-alone dialer is unsighted only while
+  sheds the oldest unstarted frame (sjaa). On in release since 2026-10-08.
+- **Coded PHY.** Release reads AUTO whatever is stored (the mode knob is debug-only); `codedOnly` on 1M listening time; a Coded-alone dialer is unsighted only while
   the experiment runs; the larger id drives steps; OFF leaves a link on its PHY; a Coded dial gets a 25 s watchdog
-  (yvn6 and amendments). Dark in release.
+  (yvn6 and amendments). On in release since 2026-10-08.
 - **GATT clients.** The doorbell rings only for a HELLO with `CAP_DOORBELL` (Android never claims it), at the
   enqueue, as a write without response, never for `typing`/`blobreq`/`keyreq`; BALANCED re-asked at most twice a
   lookup (dqvb). The payload reader holds the arbiter, never reads a linked address or during a dial, never

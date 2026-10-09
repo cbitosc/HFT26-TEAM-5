@@ -1085,7 +1085,7 @@ private val BLE_PHY_MODES =
 /**
  * The BLE Coded PHY experiment's mode (`SettingsStore.debugBlePhyMode`, ADR 2026-10.yvn6), so a walk test can switch
  * between today's Bluetooth, the automatic steps and the two pinned PHYs without adb. The transport applies a change
- * without a restart.
+ * without a restart. Debug builds only: a release build always runs AUTO and never shows the row.
  */
 @Composable
 private fun BlePhyModeRow(
