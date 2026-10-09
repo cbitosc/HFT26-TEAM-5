@@ -75,6 +75,7 @@ internal class WebRtcCallMedia(
 
     // The sessions open now, newest last: a glare's dropped one can close after its replacement opened.
     private val open = CopyOnWriteArrayList<WebRtcSession>()
+    private val path = DefaultPath(context.applicationContext)
 
     override fun open(
         servers: List<TurnServer>,
@@ -82,7 +83,7 @@ internal class WebRtcCallMedia(
         direct: Boolean,
         events: (MediaEvent) -> Unit,
     ): CallSession =
-        WebRtcSession(factory, servers, relayOnly, direct, link, events, audio, scope, log, onClosed = open::remove).also(open::add)
+        WebRtcSession(factory, servers, relayOnly, direct, link, events, audio, scope, log, path, onClosed = open::remove).also(open::add)
 
     /** The newest open session's stats, for the call screen's diagnostics card; null with no session or no report. */
     suspend fun stats(): CallStats? = open.lastOrNull()?.stats()
@@ -109,6 +110,7 @@ private class WebRtcSession(
     private val audio: CallAudio,
     private val scope: CoroutineScope,
     private val log: (String) -> Unit,
+    private val path: DefaultPath,
     private val onClosed: (WebRtcSession) -> Unit,
 ) : CallSession {
     private val lock = Any()
@@ -192,6 +194,14 @@ private class WebRtcSession(
         }
 
     private val pc: PeerConnection
+    private val config: PeerConnection.RTCConfiguration
+
+    // Follows Android's default network for the session's life (DefaultPath); null on a direct call, which prefers
+    // its group's Ethernet-typed network instead, or with the bridge's switch off.
+    private val pathWatch: AutoCloseable?
+
+    @Volatile
+    private var preferred: PeerConnection.AdapterType? = null
 
     init {
         val tlsUnchecked = WebRtcCallMedia.turnTlsUnchecked
@@ -205,7 +215,7 @@ private class WebRtcSession(
                 }
                 builder.createIceServer()
             }
-        val config =
+        config =
             PeerConnection.RTCConfiguration(ice).apply {
                 sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
                 bundlePolicy = PeerConnection.BundlePolicy.MAXBUNDLE
@@ -223,10 +233,24 @@ private class WebRtcSession(
                     iceBackupCandidatePairPingInterval = BACKUP_PING_MS
                 }
             }
+        val followPath = !direct && DefaultPath.enabled
+        if (followPath) {
+            // Known now unless this is the process's first call: its network monitor starts with the connection.
+            path.preference()?.let {
+                config.networkPreference = it
+                preferred = it
+            }
+        }
         pc = checkNotNull(factory.createPeerConnection(config, observer)) { "no peer connection" }
         pc.addTrack(track, listOf("knit"))
         audio.begin()
-        log("webrtc: opened (${servers.size} TURN, relay=$relayOnly, direct=$direct${if (tlsUnchecked) ", turns unchecked" else ""})")
+        log(
+            "webrtc: opened (${servers.size} TURN, relay=$relayOnly, direct=$direct" +
+                (if (tlsUnchecked) ", turns unchecked" else "") +
+                (if (followPath) ", prefer ${preferred?.name?.lowercase() ?: "pending"}" else "") + ")",
+        )
+        // Also fires at once with the current default: the first call of a process gets its preference here.
+        pathWatch = if (followPath) path.watch(::onDefaultNetwork) else null
     }
 
     override suspend fun offer(): String? {
@@ -282,11 +306,25 @@ private class WebRtcSession(
             }
         }
 
+    /** Android moved its default network: the call prefers the new one from now on (DefaultPath). */
+    private fun onDefaultNetwork(network: android.net.Network) {
+        val type = path.preferenceFor(network) ?: return
+        val applied =
+            synchronized(lock) {
+                if (closed || type == preferred) return
+                preferred = type
+                config.networkPreference = type
+                pc.setConfiguration(config)
+            }
+        log("webrtc: prefer ${type.name.lowercase()} (android default)${if (applied) "" else ", refused mid-call"}")
+    }
+
     override fun close() {
         synchronized(lock) {
             if (closed) return
             closed = true
         }
+        pathWatch?.close()
         onClosed(this)
         gathered.complete(Unit)
         // dispose() closes the connection and its senders; the source is ours to free.

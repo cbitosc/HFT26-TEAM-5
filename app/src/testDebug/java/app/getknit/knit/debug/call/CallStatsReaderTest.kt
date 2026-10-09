@@ -141,17 +141,33 @@ class CallStatsReaderTest {
                     ),
                 ),
                 StatEntry("CP3", "candidate-pair", 0.0, mapOf("localCandidateId" to "L1", "responsesReceived" to 0L)),
-                StatEntry("L1", "local-candidate", 0.0, mapOf("candidateType" to "srflx", "protocol" to "udp", "address" to "203.0.113.7")),
+                StatEntry(
+                    "L1",
+                    "local-candidate",
+                    0.0,
+                    mapOf(
+                        "candidateType" to "srflx",
+                        "protocol" to "udp",
+                        "networkType" to "cellular",
+                        "address" to "203.0.113.7",
+                    ),
+                ),
                 StatEntry(
                     "L2",
                     "local-candidate",
                     0.0,
-                    mapOf("candidateType" to "relay", "protocol" to "udp", "relayProtocol" to "tcp", "address" to "198.51.100.9"),
+                    mapOf(
+                        "candidateType" to "relay",
+                        "protocol" to "udp",
+                        "relayProtocol" to "tcp",
+                        "networkType" to "wifi",
+                        "address" to "198.51.100.9",
+                    ),
                 ),
                 StatEntry("R1", "remote-candidate", 0.0, mapOf("candidateType" to "srflx", "address" to "192.0.2.1")),
                 StatEntry("R2", "remote-candidate", 0.0, mapOf("candidateType" to "prflx", "address" to "192.0.2.2")),
             )
-        assertEquals("*relay/prflx udp/turn-tcp 98ms, srflx/srflx udp 142ms (1 pending)", pairSummary(report))
+        assertEquals("*relay/prflx udp/turn-tcp wifi 98ms, srflx/srflx udp cellular 142ms (1 pending)", pairSummary(report))
         assertEquals("none answered yet (0 pending)", pairSummary(emptyList()))
     }
 

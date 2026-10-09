@@ -37,6 +37,13 @@ internal class DirectNetworkDetector(
     private var reported: NetworkChangeDetector.NetworkInformation? = null
     private val watch = scope.launch { link.collect { onLink(it) } }
 
+    init {
+        current = this
+    }
+
+    /** libwebrtc's own list of the phone's networks, for [DefaultPath] to name the default one as libwebrtc does. */
+    fun networks(): List<NetworkChangeDetector.NetworkInformation> = base.activeNetworkList.orEmpty()
+
     override fun getCurrentConnectionType(): NetworkChangeDetector.ConnectionType = base.currentConnectionType
 
     override fun supportNetworkCallback(): Boolean = base.supportNetworkCallback()
@@ -47,6 +54,7 @@ internal class DirectNetworkDetector(
     }
 
     override fun destroy() {
+        if (current === this) current = null
         watch.cancel()
         base.destroy()
     }
@@ -88,6 +96,11 @@ internal class DirectNetworkDetector(
     companion object {
         /** Upstream's Wi-Fi Direct handle: no `android.net.Network` stands behind the group. */
         private const val GROUP_HANDLE = 0L
+
+        /** The detector of the monitor running now (one per monitor start), or null while none runs. */
+        @Volatile
+        var current: DirectNetworkDetector? = null
+            private set
 
         /**
          * What the group is reported as: Ethernet, so its pair wins on cost. A debug-bridge knob (`call op=nettype`)

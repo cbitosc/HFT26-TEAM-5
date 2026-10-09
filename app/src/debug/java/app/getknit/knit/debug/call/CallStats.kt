@@ -47,7 +47,8 @@ internal class StatEntry(
 
 /**
  * Every candidate pair that has had an answer, for the log line beside a route change: `*` marks the selected one,
- * then its candidate types, the local transport (and the leg to the TURN server for a relay), and its round trip —
+ * then its candidate types, the local transport (and the leg to the TURN server for a relay), this phone's network
+ * for it (`wifi`, `cellular`, …, as the stats name it), and its round trip —
  * the current one, else the average over every answer so far, else `?`. Fastest first, with the pairs still unanswered
  * counted. Candidate types and transports only: never an address, the rule the media's log follows.
  */
@@ -67,6 +68,7 @@ internal fun pairSummary(report: List<StatEntry>): String {
                     (if (pair.id == selectedId) "*" else "") +
                         "${local?.members?.get("candidateType") ?: "?"}/${remote?.members?.get("candidateType") ?: "?"} " +
                         "${local?.members?.get("protocol") ?: "?"}$relay " +
+                        (local?.members?.get("networkType") as? String)?.let { "$it " }.orEmpty() +
                         (rtt?.let { "${it.roundToLong()}ms" } ?: "?")
                 (rtt ?: Double.MAX_VALUE) to line
             }.sortedBy { it.first }

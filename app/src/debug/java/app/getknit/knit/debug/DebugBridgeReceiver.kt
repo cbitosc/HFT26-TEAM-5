@@ -51,6 +51,7 @@ import app.getknit.knit.data.settings.KnitBoardSetup
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.data.webp.WebpTranscode
 import app.getknit.knit.debug.call.CallActivity
+import app.getknit.knit.debug.call.DefaultPath
 import app.getknit.knit.debug.call.DirectNetworkDetector
 import app.getknit.knit.debug.call.WalkieTalk
 import app.getknit.knit.debug.call.WebRtcCallMedia
@@ -2050,7 +2051,8 @@ class DebugBridgeReceiver :
      * raises its Wi-Fi Direct group; `off` is Diagnostics' persisted "Wi-Fi Direct calls" switch, so every call goes
      * over STUN/TURN until a timing is set again), `nettype --es as ethernet|wifi` (what the group is reported to libwebrtc as —
      * the steering trial's A/B), and `dropgroup` (closes the live leg's lane as if the peer walked away: the radio
-     * goes back and ICE must fail over). A `route` ending `/wifi-direct` is a pair on the group. `turntls --es check
+     * goes back and ICE must fail over). A `route` ending `/wifi-direct` is a pair on the group. `pathpref --es mode
+     * android|off` sets whether a call prefers the network Android routes over (DefaultPath; on by default), and `turntls --es check
      * off|on` opens the next calls' `turns:` legs without checking the certificate, a diagnosis switch held in memory
      * (libwebrtc's own roots hold no Let's Encrypt root); `webrtc: relays …` then says whether a `tls` relay came.
      *
@@ -2154,6 +2156,17 @@ class DebugBridgeReceiver :
                 return reply("ok", "the group is reported as ${DirectNetworkDetector.reportAs} from the next call on")
             }
 
+            "pathpref" -> {
+                DefaultPath.enabled =
+                    when (intent.getStringExtra("mode")) {
+                        "android" -> true
+                        "off" -> false
+                        else -> return reply("error", "mode must be android|off")
+                    }
+                val what = if (DefaultPath.enabled) "follow Android's default network" else "prefer no network"
+                return reply("ok", "calls $what from the next call on")
+            }
+
             "turntls" -> {
                 WebRtcCallMedia.turnTlsUnchecked =
                     when (intent.getStringExtra("check")) {
@@ -2186,6 +2199,7 @@ class DebugBridgeReceiver :
             .put("status", "ok")
             .put("foreground", foreground)
             .put("relayOnly", calls.relayOnly)
+            .put("pathPref", if (DefaultPath.enabled) "android" else "off")
             .put("turnTls", if (WebRtcCallMedia.turnTlsUnchecked) "unchecked" else "checked")
             .put("directMode", if (getKoin().get<SettingsStore>().debugDirectCallsOff.first()) "off" else calls.directMode.name.lowercase())
             .put("direct", getKoin().getOrNull<DirectCallPath>()?.describe() ?: JSONObject.NULL)
