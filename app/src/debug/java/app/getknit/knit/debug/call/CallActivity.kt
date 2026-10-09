@@ -121,8 +121,8 @@ import org.koin.core.component.inject
 
 /**
  * The one call screen (experimental, debug only): the peer's face and name, incoming Answer/Decline, then status, the
- * route (direct or relayed), mute, speaker and hang up, with a live diagnostics card ([CallDiagnostics]) the header's
- * toggle hides; a walkie session (§3.11) trades mute and speaker for a hold-to-talk button over [WalkieTalk].
+ * route (direct or relayed), mute, speaker and hang up, with who is calling ([CallerContext]) in the middle — or, once
+ * the header's toggle asks for it, a live diagnostics card ([CallDiagnostics]) in its place; a walkie session (§3.11) trades mute and speaker for a hold-to-talk button over [WalkieTalk].
  * [CallScreen] is the stateless half the previews draw.
  * Shows over the lock screen for the full-screen ring. While it is in the foreground it starts [CallService], the
  * microphone's foreground service, once the call is live and RECORD_AUDIO is granted.
@@ -322,12 +322,10 @@ private const val MOVED_NOTE_MS = 4_000L
 private val RINGING = setOf(CallPhase.Calling, CallPhase.Ringing, CallPhase.Alerting, CallPhase.Connecting)
 private val MEDIA_UP = setOf(CallPhase.Connecting, CallPhase.Connected)
 
-// Before anyone has answered: when the caller's context is worth the room.
-private val SETTING_UP = setOf(CallPhase.Calling, CallPhase.Ringing, CallPhase.Alerting)
-
 /**
- * The call screen proper: the peer's face and name, where the call stands, the controls its phase offers and, while
- * the media is up, the diagnostics card for [stats] (shown until the header's toggle hides it).
+ * The call screen proper: the peer's face and name, where the call stands, the controls its phase offers and, between
+ * them, who is calling ([caller]) — or, while the media is up and the header's toggle is on, the diagnostics card for
+ * [stats] instead. The toggle starts off unless [statsShown] (the previews' way to draw the card).
  */
 @Composable
 internal fun CallScreen(
@@ -353,9 +351,10 @@ internal fun CallScreen(
     caller: CallerContext? = null,
     locked: Boolean = false,
     hideFlagged: Boolean = true,
+    statsShown: Boolean = false,
 ) {
     val phase = state?.phase
-    var showStats by rememberSaveable { mutableStateOf(true) }
+    var showStats by rememberSaveable { mutableStateOf(statsShown) }
     val walkieUp = state?.walkie == true && phase == CallPhase.Connected
     // A walkie session's card in place of the media's: it has no media to read.
     val diagnostics: (@Composable (Modifier) -> Unit)? =
@@ -384,8 +383,8 @@ internal fun CallScreen(
                     Box(Modifier.weight(1f).fillMaxWidth().padding(vertical = 16.dp), contentAlignment = Alignment.Center) {
                         diagnostics(Modifier.verticalScroll(rememberScrollState()))
                     }
-                } else if (phase in SETTING_UP && caller != null) {
-                    // While it rings: who this is to you, and what was said last — the why of most calls.
+                } else if (phase != null && phase != CallPhase.Ended && !walkieUp && caller != null) {
+                    // Who this is to you, and what was said last — the why of most calls — until the call ends.
                     Box(Modifier.weight(1f).fillMaxWidth().padding(vertical = 16.dp), contentAlignment = Alignment.Center) {
                         CallerCard(caller, name, locked, hideFlagged, clock)
                     }
@@ -832,7 +831,7 @@ private fun ButtonLabel(label: String) {
 }
 
 /**
- * Who is calling, while it rings: where they stand with you, then the newest message in your thread — held back over
+ * Who is calling: where they stand with you, then the newest message in your thread — held back over
  * the lock screen, where anyone holding the phone would read it (the relationship names no group, so it shows).
  */
 @Composable
@@ -1061,6 +1060,7 @@ private fun PreviewCall(
     quality: Quality? = null,
     caller: CallerContext? = null,
     locked: Boolean = false,
+    statsShown: Boolean = stats != null || walkieStats != null,
 ) = KnitPreview {
     CallScreen(
         state =
@@ -1093,6 +1093,7 @@ private fun PreviewCall(
         quality = quality,
         caller = caller,
         locked = locked,
+        statsShown = statsShown,
     )
 }
 
@@ -1145,7 +1146,7 @@ fun CallScreenRingingPreview() = PreviewCall(CallPhase.Ringing)
 @Preview(name = "Connected", widthDp = 411, heightDp = 891)
 @Preview(name = "Connected, dark", widthDp = 411, heightDp = 891, uiMode = Configuration.UI_MODE_NIGHT_YES)
 @Composable
-fun CallScreenConnectedPreview() = PreviewCall(CallPhase.Connected, route = "relay/srflx", muted = true)
+fun CallScreenConnectedPreview() = PreviewCall(CallPhase.Connected, route = "relay/srflx", muted = true, caller = PREVIEW_CALLER)
 
 @Preview(name = "Connected, breaking up", widthDp = 411, heightDp = 891)
 @Preview(name = "Connected, breaking up, dark", widthDp = 411, heightDp = 891, uiMode = Configuration.UI_MODE_NIGHT_YES)
@@ -1156,6 +1157,8 @@ fun CallScreenPoorPreview() =
         route = "srflx/srflx",
         stats = CallStats(localType = "srflx", remoteType = "srflx", networkType = "cellular"),
         quality = Quality(QualityLevel.POOR, QualityIssue.HEARING_BREAKS),
+        caller = PREVIEW_CALLER,
+        statsShown = false,
     )
 
 @Preview(name = "Connected, relayed, diagnostics", widthDp = 411, heightDp = 891)
