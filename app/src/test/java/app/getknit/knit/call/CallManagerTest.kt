@@ -868,26 +868,6 @@ class CallManagerTest {
         }
 
     @Test
-    fun directModeOffMakesNoInviteAndJoinsNone() =
-        runTest {
-            val (_, alice, bob) = neighbours()
-            alice.manager.directMode = DirectMode.OFF
-            alice.manager.start(BOB)
-            runCurrent()
-            assertNull(alice.offer().dw)
-            alice.manager.hangUp()
-            runCurrent()
-            alice.manager.directMode = DirectMode.PREWARM
-            bob.manager.directMode = DirectMode.OFF
-            alice.sent.clear()
-            alice.manager.start(BOB)
-            runCurrent()
-            bob.manager.answer(bob.state!!.id)
-            runCurrent()
-            assertTrue(bob.direct.joins.isEmpty() && alice.direct.hosts.isEmpty())
-        }
-
-    @Test
     fun everyEndEndsTheDirectLegOnceWithTheFrameThatTellsThePeer() =
         runTest {
             val (_, alice, bob) = neighbours()

@@ -13,16 +13,17 @@ import kotlinx.coroutines.flow.emptyFlow
 import java.net.InetAddress
 import java.util.Base64
 
-/** When a call between neighbours raises its Wi-Fi Direct group (docs/VOICE_CALLS.md §3.10); a debug-bridge toggle. */
+/**
+ * When a call between neighbours raises its Wi-Fi Direct group (docs/VOICE_CALLS.md §3.10); a debug-bridge toggle.
+ * "Never" is not a mode: it is Diagnostics' persisted switch (`SettingsStore.debugDirectCallsOff`), which
+ * [DirectCallPath] reads, and which the bridge's `mode off` writes.
+ */
 enum class DirectMode {
     /** The callee joins while it rings, so an answer connects over the group at once. */
     PREWARM,
 
     /** The callee joins only once it answers: nothing on the radio changes for a call that is never picked up. */
     ANSWER,
-
-    /** Never: every call rides its Internet path alone. */
-    OFF,
 }
 
 /** The group's name and passphrase, when [DirectInvite.s]/[DirectInvite.p] are ones the platform would accept. */

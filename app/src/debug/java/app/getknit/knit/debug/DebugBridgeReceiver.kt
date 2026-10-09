@@ -2043,7 +2043,8 @@ class DebugBridgeReceiver :
      * username or password).
      *
      * The direct leg (§3.10, ADR 2026-10.kxnw): `direct --es mode prewarm|answer|off` (when a call between neighbours
-     * raises its Wi-Fi Direct group), `nettype --es as ethernet|wifi` (what the group is reported to libwebrtc as —
+     * raises its Wi-Fi Direct group; `off` is Diagnostics' persisted "Wi-Fi Direct calls" switch, so every call goes
+     * over STUN/TURN until a timing is set again), `nettype --es as ethernet|wifi` (what the group is reported to libwebrtc as —
      * the steering trial's A/B), and `dropgroup` (closes the live leg's lane as if the peer walked away: the radio
      * goes back and ICE must fail over). A `route` ending `/wifi-direct` is a pair on the group.
      *
@@ -2097,15 +2098,18 @@ class DebugBridgeReceiver :
             }
 
             "direct" -> {
+                // `off` is Diagnostics' persisted switch (`SettingsStore.debugDirectCallsOff`): the two read the same
+                // key, so it survives a restart and the screen shows it. A timing turns the leg back on.
                 val mode =
                     when (intent.getStringExtra("mode")) {
                         "prewarm" -> DirectMode.PREWARM
                         "answer" -> DirectMode.ANSWER
-                        "off" -> DirectMode.OFF
+                        "off" -> null
                         else -> return reply("error", "mode must be prewarm|answer|off")
                     }
-                calls.directMode = mode
-                return reply("ok", "direct ${mode.name.lowercase()}")
+                mode?.let { calls.directMode = it }
+                getKoin().get<SettingsStore>().setDebugDirectCallsOff(mode == null)
+                return reply("ok", "direct ${mode?.name?.lowercase() ?: "off (persisted)"}")
             }
 
             "nettype" -> {
@@ -2139,7 +2143,7 @@ class DebugBridgeReceiver :
             .put("status", "ok")
             .put("foreground", foreground)
             .put("relayOnly", calls.relayOnly)
-            .put("directMode", calls.directMode.name.lowercase())
+            .put("directMode", if (getKoin().get<SettingsStore>().debugDirectCallsOff.first()) "off" else calls.directMode.name.lowercase())
             .put("direct", getKoin().getOrNull<DirectCallPath>()?.describe() ?: JSONObject.NULL)
             .put(
                 "call",

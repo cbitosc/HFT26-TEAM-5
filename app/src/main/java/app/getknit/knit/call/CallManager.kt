@@ -313,7 +313,7 @@ class CallManager(
     }
 
     /** [p]'s Wi-Fi Direct invite, when this side may take it up at all and every part of it is usable. */
-    private fun directInviteOf(p: CallPayload): DirectInvite? = p.dw?.takeIf { directMode != DirectMode.OFF && !relayOnly && it.isUsable() }
+    private fun directInviteOf(p: CallPayload): DirectInvite? = p.dw?.takeIf { !relayOnly && it.isUsable() }
 
     /** The callee's side: joins [l]'s group now, when it was offered one and this phone can. True when it did. */
     private fun commitJoin(
@@ -567,7 +567,7 @@ class CallManager(
     @Suppress("ReturnCount") // a ladder of exits: the call ended under each slow step
     private suspend fun dial(l: Live) {
         // §3.10: a group we would host for a neighbour. Minting raises nothing; the callee's "joining" does.
-        val invite = if (directMode != DirectMode.OFF && !relayOnly) direct.invite(l.id, l.peerId) else null
+        val invite = if (!relayOnly) direct.invite(l.id, l.peerId) else null
         mutex.withLock {
             if (!current(l)) return
             l.invite = invite
@@ -600,7 +600,7 @@ class CallManager(
             if (!current(l)) return
             // §3.10: a callee that did not join while it rang (answer mode, or a phone that may not join off screen)
             // joins now. A relay-only answer never does.
-            if (directMode != DirectMode.OFF && !relayOnly) commitJoin(l, prewarm = false)
+            if (!relayOnly) commitJoin(l, prewarm = false)
         }
         val servers = l.servers?.await() ?: servers(l.peerId)
         val session = openFor(l, servers) ?: return
