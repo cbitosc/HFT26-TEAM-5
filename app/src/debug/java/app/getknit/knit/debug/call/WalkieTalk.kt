@@ -10,7 +10,9 @@ import app.getknit.knit.call.TalkIn
 import app.getknit.knit.call.TalkLink
 import app.getknit.knit.call.TalkQueue
 import app.getknit.knit.call.TalkWire
+import app.getknit.knit.call.WalkieMeter
 import app.getknit.knit.call.WalkiePolicy
+import app.getknit.knit.call.WalkieStats
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
@@ -62,6 +64,18 @@ internal interface TalkLinks {
 
     /** Holds the Wi-Fi Aware link to [peerId] open, or raises one, for a while; false when none will come now. */
     fun raise(peerId: String): Boolean
+
+    /** The radio a chunk to [peerId] would ride now, or null when no radio links the two. */
+    fun planeTo(peerId: String): TalkPlane?
+}
+
+/** A radio linking a walkie call's two phones, as the diagnostics card names it. */
+internal enum class TalkPlane(
+    val label: String,
+) {
+    WIFI_AWARE("Wi-Fi Aware"),
+    BLUETOOTH_CODED("Bluetooth Coded"),
+    BLUETOOTH("Bluetooth"),
 }
 
 /**
@@ -80,8 +94,9 @@ internal class WalkieTalk(
     private val calls: CallManager,
     private val recorder: TalkRecorder,
     private val player: TalkPlayer,
-    // `MeshManager.sendCallTalk`: one chunk's plaintext sealed into a `talk` frame; false when nothing could be sealed.
-    private val send: suspend (peerId: String, chunk: ByteArray) -> Boolean,
+    // `MeshManager.sendCallTalk`: one chunk's plaintext sealed into a `talk` frame of the bytes returned; null when
+    // nothing could be sealed.
+    private val send: suspend (peerId: String, chunk: ByteArray) -> Int?,
     private val scope: CoroutineScope,
     private val clock: () -> Long = { System.currentTimeMillis() },
     private val log: (String) -> Unit = {},
@@ -96,6 +111,13 @@ internal class WalkieTalk(
     val chunksOut = AtomicInteger()
     val chunksIn = AtomicInteger()
     val lost = AtomicInteger()
+
+    // The session's numbers for the diagnostics card ([stats]).
+    private val meter = WalkieMeter()
+
+    // Whether the Wi-Fi Aware link to the walkie call's peer is held now (`TalkLinks.raise`).
+    @Volatile
+    private var holding = false
 
     /** The burst being spoken: its bytes on their way to [streamer], and whether its end sends ([kept]) or drops it. */
     private class Outgoing(
@@ -151,9 +173,35 @@ internal class WalkieTalk(
                 val now = mesh.raise(call.peerId)
                 if (now != armed) log("walkie: Wi-Fi Aware link to ${call.peerId} ${if (now) "asked for" else "not available now"}")
                 armed = now
+                holding = now
                 delay(WalkiePolicy.LINK_ASK_MS)
             }
         }
+    }
+
+    /** The session's numbers now, for the call screen's diagnostics card; read once a second while it shows. */
+    fun stats(): WalkieStats {
+        val peerId =
+            calls.state.value
+                ?.takeIf { it.walkie }
+                ?.peerId
+        return meter.snapshot().copy(burstsOut = sent.get(), burstsIn = heard.get(), path = peerId?.let(::pathTo))
+    }
+
+    // Where a chunk to the peer goes now: "Wi-Fi Aware · direct · held", "Through a neighbour · flooded", "No link".
+    private fun pathTo(peerId: String): String? =
+        when (_link.value) {
+            TalkLink.DIRECT -> directPath(peerId)
+            TalkLink.MESH -> "Through a neighbour · flooded"
+            TalkLink.NONE -> "No link"
+            null -> null
+        }
+
+    // The radio a chunk to a neighbour takes, and whether the call holds its Wi-Fi Aware link.
+    private fun directPath(peerId: String): String {
+        val plane = links?.planeTo(peerId) ?: return "Direct"
+        val held = holding && plane == TalkPlane.WIFI_AWARE
+        return listOfNotNull(plane.label, "direct", "held".takeIf { held }).joinToString(" · ")
     }
 
     /** Starts a burst; false when no walkie session is connected, or the microphone would not open. */
@@ -252,6 +300,7 @@ internal class WalkieTalk(
         // For the burst's log line: when each chunk was cut and when its send returned, from the press.
         val began = clock()
         val timings = mutableListOf<String>()
+        meter.burstOut()
 
         suspend fun out(
             audio: ByteArray,
@@ -262,21 +311,19 @@ internal class WalkieTalk(
             bytesOut += chunk.size
             // No link at this instant (a held link coming round again, say) is worth a moment's wait; the chunks
             // behind it queue meanwhile and go in order.
-            val sent =
-                (0 until SEND_TRIES).any { attempt ->
-                    send(call.peerId, chunk).also {
-                        if (!it &&
-                            attempt < SEND_TRIES - 1
-                        ) {
-                            delay(SEND_RETRY_MS)
-                        }
-                    }
-                }
-            if (sent) {
+            var frame: Int? = null
+            for (attempt in 0 until SEND_TRIES) {
+                frame = send(call.peerId, chunk)
+                if (frame != null || attempt == SEND_TRIES - 1) break
+                delay(SEND_RETRY_MS)
+            }
+            if (frame != null) {
                 delivered++
                 chunksOut.incrementAndGet()
             }
-            timings += "$cut>${clock() - began}"
+            val handed = clock() - began
+            meter.chunkOut(audio, frame, handed - cut)
+            timings += "$cut>$handed"
         }
         for (packet in packets) chunker.add(packet)?.let { out(it, end = false) }
         val keep = kept.await()
@@ -297,6 +344,7 @@ internal class WalkieTalk(
     private suspend fun session(call: CallState) {
         burst = 0
         lastActivity = clock()
+        meter.reset()
         log("walkie: session ${call.id} with ${call.peerId}${if (call.degraded) " (degraded from a live call)" else ""}")
         coroutineScope {
             launch { hangUpWhenIdle() }
@@ -318,6 +366,7 @@ internal class WalkieTalk(
                 if (queue.offer(t.chunk, t.at)) {
                     chunksIn.incrementAndGet()
                     arrivals.getOrPut(t.chunk.b) { mutableListOf() } += t.at
+                    meter.chunkIn(t.chunk, t.at, t.sentAt, t.frameBytes)
                 }
                 lastActivity = clock()
             }
@@ -327,6 +376,7 @@ internal class WalkieTalk(
                         is TalkQueue.Step.Play -> {
                             if (step.first) {
                                 playedAt = clock()
+                                arrivals[step.burst]?.minOrNull()?.let { meter.started(it, playedAt) }
                                 if (_talk.value is Talk.Idle) _talk.value = Talk.Hearing
                             }
                             withContext(Dispatchers.IO) { player.play(OpusPackets.split(step.audio), step.first, step.last) }
@@ -336,6 +386,7 @@ internal class WalkieTalk(
                                 if (_talk.value == Talk.Hearing) _talk.value = Talk.Idle()
                             }
                             lost.addAndGet(queue.skipped - skipped)
+                            meter.skipped(queue.skipped - skipped)
                             skipped = queue.skipped
                             lastActivity = clock()
                         }

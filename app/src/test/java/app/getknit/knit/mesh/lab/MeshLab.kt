@@ -1262,7 +1262,7 @@ class LabNode internal constructor(
                 ingressBudget = IngressBudget(burst = limits.ingressBurst, perMinute = limits.ingressPerMinute, clock = now),
                 spoolDialer = spool,
                 commons = commons,
-                onCallTalk = { _, chunk -> talks += chunk },
+                onCallTalk = { _, chunk, _, _ -> talks += chunk },
             )
         manager.start()
         // The session's collectors subscribe asynchronously; a frame sent before that is emitted into nobody.
@@ -1423,7 +1423,7 @@ class LabNode internal constructor(
     suspend fun sendTalk(
         to: LabNode,
         chunk: ByteArray,
-    ): Boolean = spaced { manager.sendCallTalk(to.nodeId, chunk) }
+    ): Boolean = spaced { manager.sendCallTalk(to.nodeId, chunk) != null }
 
     /** Sends a DM; the frame the app's composer would send. */
     suspend fun sendDm(

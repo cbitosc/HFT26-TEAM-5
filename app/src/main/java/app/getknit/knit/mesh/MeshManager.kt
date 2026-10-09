@@ -245,7 +245,7 @@ class MeshManager(
     onCallSignal: suspend (senderId: String, payload: CallPayload, sentAt: Long) -> Unit = { _, _, _ -> },
     // A walkie chunk's plaintext from an accepted contact (a `talk` frame, docs/VOICE_CALLS.md §3.11), late-bound and
     // bound to return at once the same way. The default drops it.
-    onCallTalk: suspend (senderId: String, chunk: ByteArray) -> Unit = { _, _ -> },
+    onCallTalk: suspend (senderId: String, chunk: ByteArray, sentAt: Long, frameBytes: Int) -> Unit = { _, _, _, _ -> },
     // Capability bits this build advertises beyond [Protocol.LOCAL_CAPABILITIES] — [Protocol.CAP_CALL] when the call
     // media is wired (di/CallWiring). OR-ed into our own profile; a change republishes it at the next start.
     private val extraCapabilities: Long = 0L,
@@ -3158,29 +3158,30 @@ class MeshManager(
      *  - its id is [TALK_ID_CHARS] of a fresh one: it is a dedup key for minutes and nothing else.
      * No node custodies it, and it never rides the Internet plane or LoRa. A live neighbour takes it alone, over its
      * quickest link ([MeshTransport.sendLive]), and relays it nowhere (ttl 0); anyone further gets a flood of at most
-     * [TALK_TTL] relays. False when nothing could be sealed, or there is no link to hand it to (nothing is sealed then).
+     * [TALK_TTL] relays. The frame's size (its envelope's bytes), or null when nothing could be sealed, or there is no
+     * link to hand it to (nothing is sealed then).
      */
     suspend fun sendCallTalk(
         peerId: String,
         chunk: ByteArray,
-    ): Boolean {
+    ): Int? {
         val links = transport.neighbors.value
-        if (links.isEmpty()) return false
+        if (links.isEmpty()) return null
         val peer = peers.find(peerId)
-        val bundle = peer?.pubKey?.let { PublicKeyBundle.decode(it) } ?: return false
+        val bundle = peer?.pubKey?.let { PublicKeyBundle.decode(it) } ?: return null
         val me = identity.nodeId()
         val id = FrameId.new().take(TALK_ID_CHARS)
         val now = clock()
         val aad = MessageCrypto.header(id, me, now, peerId)
         val scheme = if (peer.readsCryptoV3()) EncEnvelope.VERSION_DM_V3 else EncEnvelope.VERSION_RATCHET
-        val sealed = ratchet.sealDm(peerId, bundle.dhPublicKey(), ratchetPrekeyOf(peer), chunk, aad, now, scheme) ?: return false
+        val sealed = ratchet.sealDm(peerId, bundle.dhPublicKey(), ratchetPrekeyOf(peer), chunk, aad, now, scheme) ?: return null
         val compact = sealed.r?.takeIf { sealed.v == EncEnvelope.VERSION_DM_V3 }?.let { TalkSeal.encode(it, sealed.ct) }
         val payload = compact ?: WireCodec.encodePayload(ChatContent(enc = sealed))
         val env = RelayEnvelope(type = FrameType.TALK, id = id, senderId = me, sentAt = now, recipientId = peerId, payload = payload)
         val neighbour = links.firstOrNull { it.nodeId == peerId }
         val wire = WireEnvelope(ttl = if (neighbour != null) 0 else TALK_TTL, sig = ByteArray(0), signed = WireCodec.encodeEnvelope(env))
         router.sendOwn(wire, id, neighbour, live = true)
-        return true
+        return wire.signed.size
     }
 
     /**

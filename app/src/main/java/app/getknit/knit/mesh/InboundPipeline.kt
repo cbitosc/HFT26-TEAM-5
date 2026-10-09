@@ -226,7 +226,7 @@ class InboundPipeline(
     private val onCallCtl: suspend (senderId: String, payload: CallPayload, sentAt: Long) -> Unit = { _, _, _ -> },
     // A walkie chunk's plaintext ([handleTalk], docs/VOICE_CALLS.md §3.11), from an accepted contact once its seal
     // opened. The call layer decides whether it belongs to a session; the hook returns without waiting, like the above.
-    private val onCallTalk: suspend (senderId: String, chunk: ByteArray) -> Unit = { _, _ -> },
+    private val onCallTalk: suspend (senderId: String, chunk: ByteArray, sentAt: Long, frameBytes: Int) -> Unit = { _, _, _, _ -> },
     // A commons' advertised name for its notification title (`CommonsStore.find`), null when the operator
     // set none — the notifier then uses the generic room title.
     commonsTitle: suspend (conversationId: String) -> String? = { null },
@@ -439,7 +439,7 @@ class InboundPipeline(
             FrameType.COMMONS -> {}
 
             FrameType.TALK -> {
-                handleTalk(env, signed = wire.sig.isNotEmpty())
+                handleTalk(env, signed = wire.sig.isNotEmpty(), frameBytes = wire.signed.size)
             }
 
             else -> {}
@@ -457,6 +457,7 @@ class InboundPipeline(
     private suspend fun handleTalk(
         env: RelayEnvelope,
         signed: Boolean,
+        frameBytes: Int,
     ) {
         val me = identity.nodeId()
         if (env.group != null || env.recipientId != me || env.senderId == me) return
@@ -475,7 +476,7 @@ class InboundPipeline(
             db.withWriteTransaction { ratchet.commitOpen(me, env.senderId, peerIkPub, sealed.header, sealed.nonce, sealed.ct, aad, now) {} }
         if (!committed) return
         onPeerFrameOpened(env.senderId, sealed.header.init?.eph, sealed.header.flags and RatchetHeader.FLAG_RESET != 0)
-        onCallTalk(env.senderId, peek.plaintext)
+        onCallTalk(env.senderId, peek.plaintext, env.sentAt, frameBytes)
     }
 
     /** A talk frame's seal: the ratchet header, the nonce (v2 only; v3 derives it) and the ciphertext. */

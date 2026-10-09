@@ -234,7 +234,18 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
     - `state`: adds `walkie` and `degraded` to the call, and a `walkie` block: the button's `talk` state, the bursts
       `sent` and `heard` (played to their end), the chunks `chunksOut`, `chunksIn` and `lost` (skipped as never
       come), and `link`: `DIRECT`, `MESH` or `NONE`, the link a chunk to the peer would take (null outside a walkie
-      call).
+      call). Its `stats` are the call screen's walkie diagnostics card, null until measured:
+      - `transitMs`: arrival less the sender's stamp, the median of the latest 16 chunks. It is read off both phones'
+        clocks, so their skew is in it.
+      - `jitterMs`: RFC 3550's, from the stamps' spacing, so it has no skew in it.
+      - `lossPercent`: chunks skipped of those expected.
+      - `sendKbps` and `receiveKbps`: frame bytes per second of speech over the latest burst each way.
+      - `bufferMs`: the latest burst heard, from its first chunk to its playing.
+      - `handMs`: a chunk's cut to the radio taking it, retries included.
+      - `frameOut` and `frameIn`: the average frame's envelope bytes.
+      - `failed`: chunks no radio took.
+      - `path`: for example `Wi-Fi Aware · direct · held`, `Bluetooth Coded · direct`, `Through a neighbour · flooded`
+        or `No link`.
     - To see a live call degrade, set `relay --ez on true` with no TURN spool: ICE fails and both phones drop to
       `degraded` without an END.
     - Logcat: `call <id>: no live path; a walkie session now`, then `walkie: session …`, and `walkie: Wi-Fi Aware

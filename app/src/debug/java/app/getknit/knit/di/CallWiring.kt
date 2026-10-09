@@ -19,11 +19,13 @@ import app.getknit.knit.debug.call.CallBarHost
 import app.getknit.knit.debug.call.CallController
 import app.getknit.knit.debug.call.CallFaces
 import app.getknit.knit.debug.call.TalkLinks
+import app.getknit.knit.debug.call.TalkPlane
 import app.getknit.knit.debug.call.TalkPlayer
 import app.getknit.knit.debug.call.TalkRecorder
 import app.getknit.knit.debug.call.WalkieTalk
 import app.getknit.knit.debug.call.WebRtcCallMedia
 import app.getknit.knit.identity.Identity
+import app.getknit.knit.mesh.BulkRoute
 import app.getknit.knit.mesh.MeshController
 import app.getknit.knit.mesh.MeshManager
 import app.getknit.knit.mesh.MeshTransport
@@ -167,6 +169,17 @@ private fun Scope.talkLinks(): TalkLinks =
         }
 
         override fun raise(peerId: String): Boolean = get<MeshTransport>().holdLink(peerId)
+
+        // The composite's own order: a Wi-Fi Aware link first (sendLive), else the Bluetooth link holding the peer.
+        override fun planeTo(peerId: String): TalkPlane? {
+            val transport = get<MeshTransport>()
+            return when {
+                transport.bulkRouteTo(peerId) == BulkRoute.Linked -> TalkPlane.WIFI_AWARE
+                transport.neighbors.value.none { it.nodeId == peerId } -> null
+                transport.slowLinkTo(peerId) -> TalkPlane.BLUETOOTH_CODED
+                else -> TalkPlane.BLUETOOTH
+            }
+        }
     }
 
 /** Starts the call surfaces' collectors at process start, on a background thread — never on main. */

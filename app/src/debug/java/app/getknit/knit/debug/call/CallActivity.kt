@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.media.AudioManager
 import android.os.Bundle
 import android.view.WindowManager
 import android.widget.Toast
@@ -91,6 +92,7 @@ import app.getknit.knit.call.CallManager
 import app.getknit.knit.call.CallPhase
 import app.getknit.knit.call.CallState
 import app.getknit.knit.call.TalkLink
+import app.getknit.knit.call.WalkieStats
 import app.getknit.knit.data.PeerRepository
 import app.getknit.knit.mesh.protocol.CallPayload
 import app.getknit.knit.ui.components.Avatar
@@ -144,6 +146,8 @@ class CallActivity :
         handle(intent)
         lifecycleScope.launch {
             calls.state.collect { state ->
+                // A walkie's bursts play on the media stream (TalkPlayer), so the volume keys turn that one.
+                volumeControlStream = if (state?.walkie == true) AudioManager.STREAM_MUSIC else AudioManager.USE_DEFAULT_STREAM_TYPE
                 when {
                     state == null -> {
                         finish()
@@ -186,6 +190,15 @@ class CallActivity :
                 delay(POLL_MS)
             }
         }
+        // The walkie's numbers, read as often as the media's while its session is up.
+        val walkieUp = state?.walkie == true && state?.phase == CallPhase.Connected
+        var walkieStats by remember { mutableStateOf<WalkieStats?>(null) }
+        LaunchedEffect(walkieUp) {
+            while (walkieUp) {
+                walkieStats = walkie?.stats()
+                delay(POLL_MS)
+            }
+        }
         val talk by (walkie?.talk ?: NO_TALK).collectAsState()
         val link by (walkie?.link ?: NO_LINK).collectAsState()
         CallScreen(
@@ -204,6 +217,7 @@ class CallActivity :
             onTalk = { lifecycleScope.launch { walkie?.press() } },
             onTalkSend = { lifecycleScope.launch { walkie?.release() } },
             onTalkCancel = { lifecycleScope.launch { walkie?.cancel() } },
+            walkieStats = walkieStats.takeIf { walkieUp },
         )
     }
 
@@ -293,10 +307,18 @@ internal fun CallScreen(
     onTalk: () -> Unit = {},
     onTalkSend: () -> Unit = {},
     onTalkCancel: () -> Unit = {},
+    walkieStats: WalkieStats? = null,
 ) {
     val phase = state?.phase
     var showStats by rememberSaveable { mutableStateOf(true) }
-    val diagnostics = stats?.takeIf { showStats && phase in MEDIA_UP }
+    val walkieUp = state?.walkie == true && phase == CallPhase.Connected
+    // A walkie session's card in place of the media's: it has no media to read.
+    val diagnostics: (@Composable (Modifier) -> Unit)? =
+        when {
+            !showStats || phase !in MEDIA_UP -> null
+            walkieUp -> walkieStats?.let { s -> { m -> WalkieDiagnostics(s, m) } }
+            else -> stats?.let { s -> { m -> CallDiagnostics(s, m) } }
+        }
     Surface(modifier = modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
         BoxWithConstraints(Modifier.fillMaxSize().safeDrawingPadding().padding(horizontal = 24.dp, vertical = 16.dp)) {
             // With the card up, a phone too short for the stacked face puts it beside the name instead.
@@ -313,12 +335,12 @@ internal fun CallScreen(
                 if (diagnostics != null) {
                     // The room between the face and the controls; a short screen scrolls the card rather than clip it.
                     Box(Modifier.weight(1f).fillMaxWidth().padding(vertical = 16.dp), contentAlignment = Alignment.Center) {
-                        CallDiagnostics(diagnostics, Modifier.verticalScroll(rememberScrollState()))
+                        diagnostics(Modifier.verticalScroll(rememberScrollState()))
                     }
                 } else {
                     Spacer(Modifier.weight(1f))
                 }
-                if (state?.walkie == true && phase == CallPhase.Connected) {
+                if (walkieUp) {
                     WalkieControls(state, name, talk, link, onHangUp, onTalk, onTalkSend, onTalkCancel)
                 } else {
                     Controls(state, onAnswer, onDecline, onHangUp, onMute, onSpeaker)
@@ -819,6 +841,7 @@ private fun PreviewCall(
     degraded: Boolean = false,
     talk: Talk = Talk.Idle(),
     link: TalkLink? = null,
+    walkieStats: WalkieStats? = null,
 ) = KnitPreview {
     CallScreen(
         state =
@@ -847,6 +870,7 @@ private fun PreviewCall(
         clock = { PREVIEW_NOW },
         talk = talk,
         link = link,
+        walkieStats = walkieStats,
     )
 }
 
@@ -917,3 +941,32 @@ fun CallScreenWalkieUnlinkedPreview() = PreviewCall(CallPhase.Connected, walkie 
 @Preview(name = "Walkie, through the mesh", widthDp = 411, heightDp = 891)
 @Composable
 fun CallScreenWalkieMeshPreview() = PreviewCall(CallPhase.Connected, walkie = true, link = TalkLink.MESH)
+
+@Preview(name = "Walkie, diagnostics", widthDp = 411, heightDp = 891)
+@Preview(name = "Walkie, diagnostics, small", widthDp = 360, heightDp = 640)
+@Preview(name = "Walkie, diagnostics, dark", widthDp = 411, heightDp = 891, uiMode = Configuration.UI_MODE_NIGHT_YES)
+@Composable
+fun CallScreenWalkieDiagnosticsPreview() =
+    PreviewCall(
+        CallPhase.Connected,
+        walkie = true,
+        link = TalkLink.DIRECT,
+        walkieStats =
+            WalkieStats(
+                transitMs = 148.0,
+                jitterMs = 22.4,
+                lossPercent = 1.2,
+                sendKbps = 11.9,
+                receiveKbps = 11.8,
+                bufferMs = 412.0,
+                handMs = 9.0,
+                frameOut = 712,
+                frameIn = 708,
+                chunksOut = 42,
+                chunksIn = 81,
+                chunksLost = 1,
+                burstsOut = 3,
+                burstsIn = 6,
+                path = "Bluetooth Coded · direct",
+            ),
+    )

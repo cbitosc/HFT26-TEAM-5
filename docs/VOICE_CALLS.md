@@ -481,8 +481,8 @@ an experiment behind `BuildConfig.WALKIE` (`-Pwalkie=`, on in debug and off in r
   - A burst ends on its `e` chunk, or after 4 s with nothing held and nothing new.
   - A chunk of a burst that ended, or one behind the play position, is dropped.
 
-  Talking holds playback: what arrives meanwhile plays after the release. The session hangs up after 10 min with no
-  burst either way.
+  Talking holds playback: what arrives meanwhile plays after the release. Bursts play from the loudspeaker, unless a
+  headset is connected. The session hangs up after 10 min with no burst either way.
 - **C-3.11-8** From the ring to the hang-up, a walkie call holds a Wi-Fi Aware link to its peer
   (`MeshTransport.holdLink`), renewing the hold every 10 s; a hold lapses 25 s after its last renewal.
   - **No link yet.** The hold raises one through the hint an attachment fetch gives

@@ -1,7 +1,9 @@
 package app.getknit.knit.debug.call
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
 import android.media.AudioFocusRequest
 import android.media.AudioFormat
 import android.media.AudioManager
@@ -17,7 +19,8 @@ import java.nio.ByteOrder
 /**
  * Plays the peer's walkie bursts as their chunks land (docs/VOICE_CALLS.md §3.11): the platform Opus decoder, configured
  * with the `OpusHead` an extractor would hand it and fed the bare packets, into a streaming [AudioTrack] on the media
- * usage, under transient focus while a burst plays.
+ * usage, under transient focus while a burst plays. It plays from the loudspeaker, as a walkie-talkie does, whatever
+ * mode the phone's audio is in; only a headset the user has on takes it instead ([output]).
  *
  * Driven by one coroutine (`WalkieTalk`'s player loop, on the IO dispatcher); only [hold] comes from another thread.
  * Writes never block: a full or held track is waited on with [delay], so the loop stays cancellable when the session
@@ -133,6 +136,9 @@ internal class TalkPlayer(
                 ).setBufferSizeInBytes(maxOf(min, rate * channels * PCM_BYTES * BUFFER_MS / MS_PER_S))
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
+        val out = output()
+        t.setPreferredDevice(out)
+        Log.i(TAG, "walkie out: ${if (out != null) "speaker" else "media route"}")
         synchronized(trackLock) {
             track?.release()
             track = t
@@ -244,6 +250,16 @@ internal class TalkPlayer(
         }
     }
 
+    /**
+     * The built-in loudspeaker, or null (the media route, which a headset takes) while a headset is connected. Pinned
+     * rather than left to the media route, which follows the earpiece on a phone left in communication mode.
+     */
+    private fun output(): AudioDeviceInfo? {
+        val outputs = runCatching { manager.getDevices(AudioManager.GET_DEVICES_OUTPUTS) }.getOrNull().orEmpty()
+        if (outputs.any { it.type in HEADSETS }) return null
+        return outputs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
+    }
+
     // The identification header an Ogg Opus stream opens with (RFC 7845 §5.1): version 1, mono, no pre-skip, 16 kHz in.
     private fun opusHead(): ByteArray =
         ByteBuffer
@@ -279,6 +295,18 @@ internal class TalkPlayer(
         const val END_TRIES = 20
         const val WAIT_MS = 10L
         const val TAIL_SLACK_MS = 500L
+
+        // TYPE_BLE_HEADSET is API 31, but an inlined int: an older phone never reports it.
+        @SuppressLint("InlinedApi")
+        val HEADSETS =
+            setOf(
+                AudioDeviceInfo.TYPE_WIRED_HEADSET,
+                AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
+                AudioDeviceInfo.TYPE_USB_HEADSET,
+                AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+                AudioDeviceInfo.TYPE_BLE_HEADSET,
+                AudioDeviceInfo.TYPE_HEARING_AID,
+            )
 
         val ATTRIBUTES: AudioAttributes =
             AudioAttributes

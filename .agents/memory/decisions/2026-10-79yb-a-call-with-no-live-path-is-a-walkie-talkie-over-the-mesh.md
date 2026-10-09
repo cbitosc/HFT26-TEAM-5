@@ -250,3 +250,40 @@ The guards:
 - `WalkieStreamTest`'s link rule.
 - `WalkieTalkLabTest`'s no-link case.
 
+
+## Amendment 2026-10-09 (4): the loudspeaker
+
+A walkie plays from the loudspeaker, as a walkie-talkie does. `TalkPlayer` pins its track to the built-in speaker
+instead of leaving it to the media route, which follows the earpiece on a phone left in communication mode. A
+connected headset is the one exception: wired, USB, Bluetooth or a hearing aid takes the burst instead, since it
+would be surprising to play someone's voice aloud to a user wearing earbuds. The call screen's volume keys turn the
+media stream while a walkie session is up, because that is the stream the bursts play on.
+
+Rejected: the communication route with the speaker forced on. It would bring back the call audio mode, which the walkie
+leaves alone because it has no live media.
+
+The trial: a burst heard from the speaker on both phones, the log's `walkie out: speaker`, and a headset taking it
+instead.
+
+## Amendment 2026-10-09 (5): the walkie's diagnostics card
+
+A walkie session gets the diagnostics card a live call has, laid out the same way. It reads the chunks rather than a
+media stack:
+
+- **Transit, jitter and loss.** Transit is arrival less the sender's stamp, the median of the latest chunks, and
+  carries the two clocks' skew. Jitter is RFC 3550's, from the spacing of those stamps, so it is free of skew. Loss is
+  the chunks skipped of those expected.
+- **Send, receive and buffer.** The send and receive rates are frame bytes per second of speech over the latest burst
+  each way. The buffer is the player's wait before the latest burst began.
+- **The details.** The path a chunk takes, the codec, the chunks, the average frame each way, the time the radio took
+  to accept a chunk, and the bursts.
+
+`WalkieMeter` holds the numbers, pure and JVM-tested. To feed it:
+
+- `sendCallTalk` returns the frame's envelope size, or null where it returned false;
+- the receive hook carries the frame's stamp and size.
+
+Neither changes a byte on the wire. The bridge's `CALL state` reports the same numbers.
+
+The guard is `WalkieMeterTest`.
+

@@ -22,6 +22,7 @@ import app.getknit.knit.call.CallPhase
 import app.getknit.knit.call.DirectCallPath
 import app.getknit.knit.call.DirectMode
 import app.getknit.knit.call.StunServers
+import app.getknit.knit.call.WalkieStats
 import app.getknit.knit.crash.ProcessExitReasons
 import app.getknit.knit.data.AttachmentIdentities
 import app.getknit.knit.data.AttachmentStore
@@ -2216,9 +2217,25 @@ class DebugBridgeReceiver :
                         .put("chunksOut", it.chunksOut.get())
                         .put("chunksIn", it.chunksIn.get())
                         .put("lost", it.lost.get())
+                        .put("stats", walkieStatsJson(it.stats()))
                 } ?: JSONObject.NULL,
             )
     }
+
+    /** The walkie's diagnostics card as numbers (§3.11): what `CallActivity` draws, null where not yet measured. */
+    private fun walkieStatsJson(s: WalkieStats): JSONObject =
+        JSONObject()
+            .put("transitMs", s.transitMs ?: JSONObject.NULL)
+            .put("jitterMs", s.jitterMs ?: JSONObject.NULL)
+            .put("lossPercent", s.lossPercent ?: JSONObject.NULL)
+            .put("sendKbps", s.sendKbps ?: JSONObject.NULL)
+            .put("receiveKbps", s.receiveKbps ?: JSONObject.NULL)
+            .put("bufferMs", s.bufferMs ?: JSONObject.NULL)
+            .put("handMs", s.handMs ?: JSONObject.NULL)
+            .put("frameOut", s.frameOut ?: JSONObject.NULL)
+            .put("frameIn", s.frameIn ?: JSONObject.NULL)
+            .put("failed", s.chunksFailed)
+            .put("path", s.path ?: JSONObject.NULL)
 
     /**
      * Drives a direct file transfer headless (transfer/TransferManager) so two lab phones can run one

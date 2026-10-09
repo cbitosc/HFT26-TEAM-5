@@ -42,11 +42,16 @@ data class CallState(
     val degraded: Boolean = false,
 )
 
-/** One chunk of the peer's walkie burst in the connected session [callId] (§3.11), stamped [at] on this phone's clock. */
+/**
+ * One chunk of the peer's walkie burst in the connected session [callId] (§3.11), stamped [at] on this phone's clock:
+ * its frame was [frameBytes] and stamped [sentAt] by its sender (0: unknown), for the walkie's diagnostics.
+ */
 class TalkIn(
     val callId: String,
     val chunk: TalkChunk,
     val at: Long,
+    val sentAt: Long = 0L,
+    val frameBytes: Int = 0,
 )
 
 /** Why [CallManager.start] dialled nothing. */
@@ -337,18 +342,21 @@ class CallManager(
     /**
      * One chunk of [senderId]'s walkie burst ([TalkWire], a `talk` frame's opened plaintext, §3.11): passed on only
      * while this phone's call is a connected walkie session with that peer and the chunk names it. Returns at once; a
-     * talk frame is never re-served, and the player orders and dedups by burst and chunk.
+     * talk frame is never re-served, and the player orders and dedups by burst and chunk. [sentAt] and [frameBytes]
+     * are the frame's, measured for the diagnostics only.
      */
     suspend fun onTalk(
         senderId: String,
         bytes: ByteArray,
+        sentAt: Long = 0L,
+        frameBytes: Int = 0,
     ) {
         val (tag, chunk) = TalkWire.decode(bytes) ?: return
         val id =
             mutex.withLock {
                 live?.takeIf { it.peerId == senderId && it.walkie && it.phase == CallPhase.Connected && TalkWire.tagOf(it.id) == tag }?.id
             } ?: return
-        talkIn.trySend(TalkIn(id, chunk, clock()))
+        talkIn.trySend(TalkIn(id, chunk, clock(), sentAt, frameBytes))
     }
 
     @Suppress("ReturnCount") // a ladder of refusals ahead of the one admit

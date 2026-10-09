@@ -2,6 +2,7 @@ package app.getknit.knit.call
 
 import java.io.ByteArrayOutputStream
 import java.util.TreeMap
+import kotlin.math.abs
 
 /** How [CallManager.start] places a call (§3.11): [AUTO] picks; [LIVE] and [WALKIE] force one (the debug bridge). */
 enum class CallKind { AUTO, LIVE, WALKIE }
@@ -381,5 +382,195 @@ class TalkQueue(
 
     private companion object {
         const val MAX_BURSTS = 8
+    }
+}
+
+/**
+ * A walkie session's numbers, as the call screen's diagnostics card draws them (§3.11): the walkie's answer to a live
+ * call's `CallStats`. Null until measured. [path] and the burst counts are filled in by the caller.
+ */
+data class WalkieStats(
+    // Arrival less the sender's stamp, the median of the latest chunks: by two phones' clocks, so their skew is in it.
+    val transitMs: Double? = null,
+    // RFC 3550's interarrival jitter over chunks, from the sender's stamps: no clock skew in it.
+    val jitterMs: Double? = null,
+    // Chunks skipped as never come, of the chunks this session expected.
+    val lossPercent: Double? = null,
+    // Frame bytes per second of speech, over the latest burst each way.
+    val sendKbps: Double? = null,
+    val receiveKbps: Double? = null,
+    // The latest burst heard: its first chunk's arrival to its playing.
+    val bufferMs: Double? = null,
+    // From a chunk's cut to the radio taking it (retries included), the median of the latest chunks.
+    val handMs: Double? = null,
+    // The average `talk` frame (its envelope's bytes) each way.
+    val frameOut: Int? = null,
+    val frameIn: Int? = null,
+    val chunksOut: Int = 0,
+    val chunksFailed: Int = 0,
+    val chunksIn: Int = 0,
+    val chunksLost: Int = 0,
+    val burstsOut: Int = 0,
+    val burstsIn: Int = 0,
+    val path: String? = null,
+)
+
+/**
+ * Measures a walkie session for [WalkieStats]: each chunk out as the radio takes it (or refuses it), each chunk in as
+ * the player's queue takes it, each burst as it starts playing, and the chunks skipped. Pure and clocked by its
+ * callers (`WalkieMeterTest`); synchronized, since the burst out and the player run on their own threads.
+ */
+class WalkieMeter {
+    private val transits = ArrayDeque<Long>()
+    private val hands = ArrayDeque<Long>()
+    private var jitter: Double? = null
+    private var lastIn: Pair<Long, Long>? = null
+    private var buffer: Long? = null
+    private var out = Tally()
+    private var inBurst = -1
+    private var inTally = Tally()
+    private var framesOut = Tally()
+    private var framesIn = Tally()
+    private var chunksOut = 0
+    private var failed = 0
+    private var chunksIn = 0
+    private var lost = 0
+
+    // Bytes over the audio they carried (ms), or over the frames counted.
+    private class Tally(
+        var bytes: Long = 0,
+        var count: Long = 0,
+    )
+
+    @Synchronized
+    fun reset() {
+        transits.clear()
+        hands.clear()
+        jitter = null
+        lastIn = null
+        buffer = null
+        out = Tally()
+        inBurst = -1
+        inTally = Tally()
+        framesOut = Tally()
+        framesIn = Tally()
+        chunksOut = 0
+        failed = 0
+        chunksIn = 0
+        lost = 0
+    }
+
+    /** A burst out begins: the send rate is this burst's from here. */
+    @Synchronized
+    fun burstOut() {
+        out = Tally()
+    }
+
+    /** A chunk carrying [audio] out, cut [handMs] before the radio took it in a frame of [frameBytes], or null: refused. */
+    @Synchronized
+    fun chunkOut(
+        audio: ByteArray,
+        frameBytes: Int?,
+        handMs: Long,
+    ) {
+        if (frameBytes == null) {
+            failed++
+            return
+        }
+        chunksOut++
+        out.bytes += frameBytes
+        out.count += audioMs(audio)
+        framesOut.bytes += frameBytes
+        framesOut.count++
+        hands.keep(handMs)
+    }
+
+    /** A chunk in, taken by the player's queue: it came [at], stamped [sentAt] by its sender (0: unknown). */
+    @Synchronized
+    fun chunkIn(
+        chunk: TalkChunk,
+        at: Long,
+        sentAt: Long,
+        frameBytes: Int,
+    ) {
+        chunksIn++
+        if (chunk.b != inBurst) {
+            inBurst = chunk.b
+            inTally = Tally()
+        }
+        inTally.bytes += frameBytes
+        inTally.count += audioMs(chunk.a)
+        framesIn.bytes += frameBytes
+        framesIn.count++
+        if (sentAt <= 0) return
+        transits.keep(at - sentAt)
+        // RFC 3550 §6.4.1, the arrivals' spacing against the stamps': J += (|D| - J) / 16.
+        lastIn?.let { (r, s) ->
+            val d = abs((at - r) - (sentAt - s)).toDouble()
+            val j = jitter ?: 0.0
+            jitter = j + (d - j) / JITTER_GAIN
+        }
+        lastIn = at to sentAt
+    }
+
+    /** A burst whose first chunk came [firstAt] began to play [at]. */
+    @Synchronized
+    fun started(
+        firstAt: Long,
+        at: Long,
+    ) {
+        buffer = at - firstAt
+    }
+
+    /** [n] chunks skipped over as never come. */
+    @Synchronized
+    fun skipped(n: Int) {
+        lost += n
+    }
+
+    @Synchronized
+    fun snapshot(): WalkieStats =
+        WalkieStats(
+            transitMs = transits.median(),
+            jitterMs = jitter,
+            lossPercent = (chunksIn + lost).takeIf { it > 0 }?.let { lost * PERCENT / it },
+            sendKbps = out.rate(),
+            receiveKbps = inTally.rate(),
+            bufferMs = buffer?.toDouble(),
+            handMs = hands.median(),
+            frameOut = framesOut.mean(),
+            frameIn = framesIn.mean(),
+            chunksOut = chunksOut,
+            chunksFailed = failed,
+            chunksIn = chunksIn,
+            chunksLost = lost,
+        )
+
+    // Bits per millisecond are kilobits per second.
+    private fun Tally.rate(): Double? = count.takeIf { it > 0 }?.let { bytes * BITS / it.toDouble() }
+
+    private fun Tally.mean(): Int? = count.takeIf { it > 0 }?.let { (bytes / it).toInt() }
+
+    private fun ArrayDeque<Long>.keep(value: Long) {
+        addLast(value)
+        if (size > WINDOW) removeFirst()
+    }
+
+    private fun ArrayDeque<Long>.median(): Double? {
+        if (isEmpty()) return null
+        val sorted = sorted()
+        val mid = sorted.size / 2
+        return if (sorted.size % 2 == 1) sorted[mid].toDouble() else (sorted[mid - 1] + sorted[mid]) / 2.0
+    }
+
+    private fun audioMs(audio: ByteArray): Long = OpusPackets.split(audio).sumOf(OpusPackets::durationUs) / US_PER_MS
+
+    private companion object {
+        // The latest chunks a median reads: about eight seconds of speech.
+        const val WINDOW = 16
+        const val JITTER_GAIN = 16.0
+        const val PERCENT = 100.0
+        const val BITS = 8.0
+        const val US_PER_MS = 1_000L
     }
 }

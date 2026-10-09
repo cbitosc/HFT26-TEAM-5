@@ -27,6 +27,8 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import app.getknit.knit.call.WalkiePolicy
+import app.getknit.knit.call.WalkieStats
 import java.util.Locale
 
 /**
@@ -45,18 +47,7 @@ internal fun CallDiagnostics(
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
     ) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Icon(
-                    Icons.Outlined.Insights,
-                    contentDescription = null,
-                    modifier = Modifier.size(18.dp),
-                    tint = MaterialTheme.colorScheme.primary,
-                )
-                Text("Call diagnostics", style = MaterialTheme.typography.labelLarge)
-                Spacer(Modifier.weight(1f))
-                Box(Modifier.size(8.dp).background(MaterialTheme.colorScheme.primary, CircleShape))
-                Text("LIVE", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
-            }
+            Title("Call diagnostics", "LIVE")
             Row(Modifier.fillMaxWidth()) {
                 Metric("Round trip", ms(stats.rttMs), Modifier.weight(1f))
                 Metric("Jitter", ms(stats.jitterMs), Modifier.weight(1f))
@@ -76,6 +67,65 @@ internal fun CallDiagnostics(
                 Detail("ICE", "${stats.localCandidates} local · ${stats.remoteCandidates} remote candidates")
             }
         }
+    }
+}
+
+/**
+ * The diagnostics card of a walkie session (§3.11), laid out as [CallDiagnostics] is: the chunks' transit, jitter and
+ * loss, the frames' rate each way over the latest burst and the player's start-up buffer, over the path a chunk takes,
+ * the codec, the chunks and the frames. Transit is read off two phones' clocks; the rest is not.
+ */
+@Composable
+internal fun WalkieDiagnostics(
+    stats: WalkieStats,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Title("Walkie diagnostics", "MESH")
+            Row(Modifier.fillMaxWidth()) {
+                Metric("Transit", ms(stats.transitMs), Modifier.weight(1f))
+                Metric("Jitter", ms(stats.jitterMs), Modifier.weight(1f))
+                Metric("Loss", percent(stats.lossPercent), Modifier.weight(1f))
+            }
+            Row(Modifier.fillMaxWidth()) {
+                Metric("↑ Send", kbps(stats.sendKbps), Modifier.weight(1f))
+                Metric("↓ Receive", kbps(stats.receiveKbps), Modifier.weight(1f))
+                Metric("Buffer", ms(stats.bufferMs), Modifier.weight(1f))
+            }
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Detail("Path", stats.path ?: NONE)
+                Detail("Codec", WALKIE_CODEC)
+                Detail("Chunks", chunksOf(stats))
+                Detail("Frame", framesOf(stats))
+                Detail("Bursts", "${stats.burstsOut} sent · ${stats.burstsIn} heard")
+            }
+        }
+    }
+}
+
+/** The card's title, with its live marker at the end. */
+@Composable
+private fun Title(
+    title: String,
+    marker: String,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Icon(
+            Icons.Outlined.Insights,
+            contentDescription = null,
+            modifier = Modifier.size(18.dp),
+            tint = MaterialTheme.colorScheme.primary,
+        )
+        Text(title, style = MaterialTheme.typography.labelLarge)
+        Spacer(Modifier.weight(1f))
+        Box(Modifier.size(8.dp).background(MaterialTheme.colorScheme.primary, CircleShape))
+        Text(marker, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
     }
 }
 
@@ -116,6 +166,27 @@ private val DetailLabelWidth = 56.dp
 private const val NONE = "—"
 private const val FINE_BELOW = 10.0
 private const val HZ_PER_KHZ = 1_000
+private const val BPS_PER_KBPS = 1_000
+private const val WALKIE_PACKET_MS = 20
+
+/** "Opus · 8 kbps · 16 kHz · mono · 20 ms": what a walkie burst is recorded as (C-3.11-5). */
+private val WALKIE_CODEC =
+    "Opus · ${WalkiePolicy.BIT_RATE / BPS_PER_KBPS} kbps · ${WalkiePolicy.SAMPLE_RATE / HZ_PER_KHZ} kHz · mono · $WALKIE_PACKET_MS ms"
+
+/** "480 ms · 42 out, 1 failed · 40 in, 2 lost": the chunks' length and how many went and came. */
+internal fun chunksOf(stats: WalkieStats): String {
+    val out = "${stats.chunksOut} out" + if (stats.chunksFailed > 0) ", ${stats.chunksFailed} failed" else ""
+    val inbound = "${stats.chunksIn} in" + if (stats.chunksLost > 0) ", ${stats.chunksLost} lost" else ""
+    return "${WalkiePolicy.CHUNK_MS} ms · $out · $inbound"
+}
+
+/** "712 B out · 708 B in · handed over in 12 ms": the average frame each way, and how long the radio took one. */
+internal fun framesOf(stats: WalkieStats): String =
+    listOfNotNull(
+        stats.frameOut?.let { "$it B out" },
+        stats.frameIn?.let { "$it B in" },
+        stats.handMs?.let { "handed over in ${ms(it)}" },
+    ).joinToString(" · ").ifEmpty { NONE }
 
 internal fun ms(value: Double?): String = value?.let { "${decimal(it)} ms" } ?: NONE
 
