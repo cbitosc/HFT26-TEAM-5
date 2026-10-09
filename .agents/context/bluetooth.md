@@ -101,8 +101,9 @@ Bluetooth-adjacent routing that stays in `AGENTS.md`, because another subsystem 
   `initiateTo`, `BleLinkTuner`'s `label` / `released` / `closeAgainLater`, `BleDoorbell`'s `onAttached`,
   `LinkTuneDiag.aclArm` (`…debug.LINKTUNE --ez arm`), `FieldEvent.BtOrphan`, or `leLinkCount`:** READ ADR 2026-10.b8yf
   (#142). An LE ACL can outlive Knit's CoC: Android 12's ATT channel never idles out unless a local GATT client held it
-  and left, and #142's Android 16/17 centrals kept theirs for a reason not yet identified, though by source a CoC link
-  should idle out there. So every ACL a channel opened on is
+  and left, and on Android 16/17 the side that dialed never gets the no-app idle timeout (`gatt_set_idle_timeout …
+  status=false (not performed)` at connect, 13 of 13 central links; a peripheral's is set and idles out in 4 s). So every
+  ACL a channel opened on is
   armed: a `BleLinkTuner` that asks nothing attaches and leaves, `autoConnect = false`, outside `tuners`, never cancelled
   at teardown — at link-up for every link not served by the doorbell (whose lookup's attach is the arm), and 2 s after
   a channel that never became a link (a refusal, a failed HELLO or dial), only while the ACL's edges say it is up and no

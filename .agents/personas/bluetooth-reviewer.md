@@ -213,11 +213,14 @@ Sourced; cite these by their ADR, and treat anything not here or in an ADR as a 
   mesh's L2CAP links among them, and an app can neither see nor reserve one (dqvb, wetm).
 - An LE ACL can outlive Knit's CoC (#142, b8yf).
   - On Android 12 the ATT channel never idles out unless a local GATT client held the link and left.
-  - On Android 16, by source, a link that carried a CoC idles out by itself (`l2cu_allocate_ccb` marks it active),
-    and an Android 17 peripheral did. Yet #142's Android 16/17 *centrals* kept theirs, for a reason not yet
-    identified.
-  - A client that attaches and leaves sets the 1 s idle timeout, and the ACL drops 1–4 s after the channel closes.
-    That is certain on the Android 12 side, and either end's disconnect ends the ACL on both phones.
+  - On Android 16/17 the side that dialed (the central) never gets the no-app idle timeout: the stack logs
+    `gatt_set_idle_timeout: idle_timeout=4 … status=false (1-OK 0-not performed)` at connect, so its ACL outlives the
+    CoC unless the peer's own timer runs: an Android 14+ peripheral's does (`status=true`, it drops the ACL 4 s after
+    the CoC closes; P9/P8, 2026-10-09), and an Android 12 peer's never does.
+  - A client that attaches and leaves sets the idle timeout when it leaves (4 s on Android 16/17, logged `status=true`;
+    1 s by source on Android 12), and the ACL drops once the channel closes. Either end's disconnect ends the ACL on
+    both phones. An armed 16/17 central clears its pair by itself (P9/P8); an armed Android 12 side alone is certain by
+    source, and its device cell is still owed.
   - When the timer fires, `l2c_link_timeout` disconnects only while the link has no channel, so a CoC opened
     meanwhile keeps the link.
   - Android 12 re-dials a dropped LE peer from its controller's accept list within 2–3 s, Knit or not, and that

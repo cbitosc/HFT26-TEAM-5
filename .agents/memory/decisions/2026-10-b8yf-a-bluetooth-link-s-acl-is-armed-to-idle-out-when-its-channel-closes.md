@@ -8,8 +8,8 @@ topics: [ble, transport]
 
 # ADR 2026-10.b8yf — A Bluetooth link's ACL is armed to idle out when its channel closes
 
-Status: Proposed (2026-10-09). Work item #142. JVM-tested (`OrphanAclPolicyTest`, `FieldEventSchemaTest`); the device
-trial below is owed before it stands. No wire change, Android only. Amends ADR 2026-09.dqvb ("no Android↔Android link
+Status: Proposed (2026-10-09). Work item #142. JVM-tested (`OrphanAclPolicyTest`, `FieldEventSchemaTest`). The device
+trial's Android 16/17 cells passed on the P9 and P8 (2026-10-09, below); its Android 12 cells are owed before it stands. No wire change, Android only. Amends ADR 2026-09.dqvb ("no Android↔Android link
 opens a GATT client") and builds on ADR 2026-09.hj4a (the lonely dial whose replaced link left the first orphans) and
 ADR 2026-10.2da4 (the buffer share an orphan takes).
 
@@ -24,23 +24,27 @@ L2CAP channel, Knit's CoC, closes:
 - **Android 12** (`system/bt`, android12-release). `gatt_init` registers the ATT fixed channel with
   `default_idle_tout = 0xffff`, never. `gatt_send_conn_cback` sets an idle timeout only when an app holds the link, and
   `l2cu_no_dynamic_ccbs` returns early while a fixed channel has no idle timeout.
-- **Android 16** (android16-release). A link with no holder gets `GATT_LINK_IDLE_TIMEOUT_WHEN_NO_APP`, and
-  `l2cu_no_dynamic_ccbs` returns early `if (!with_active_local_clients)`. That flag is sticky. It is set by
-  `L2CA_MarkLeLinkAsActive`, through `GATT_SetIdleTimeout(…, is_active = true)`, when a local client becomes a holder.
-  `l2cu_allocate_ccb` also sets it for any non-EATT dynamic channel ("once a dynamic channel is opened, timeouts become
-  active"), so by source a link that carried Knit's CoC should idle out by itself.
-  - On the phones, an Android 17 peripheral did so (Step 0, below).
-  - #142's two Android 16/17 *centrals* did not (the snoop, below). Each ran five ATT exchanges against the P3 when the
-    connection came up, so something on the central side, perhaps the central's own stack client or another app's,
-    is the likeliest keeper. It is not identified.
+- **Android 16 and 17** (android16-release; found on the P9 and P8, 2026-10-09, below). A link with no holder is meant
+  to get `GATT_LINK_IDLE_TIMEOUT_WHEN_NO_APP` (4 s): `gatt_send_conn_cback` calls `GATT_SetIdleTimeout`, which stores
+  it on the ATT fixed channel through `L2CA_SetLeGattTimeout`. On the side that **dialed** (the central) that call
+  fails when the connection comes up. The stack logs `gatt_set_idle_timeout: idle_timeout=4, is_active=false,
+  status=false (1-OK 0-not performed)` on 13 of 13 central links, against `status=true` on 6 of 6 peripheral links.
+  `L2CA_SetLeGattTimeout` fails only when it finds no LE link or no ATT channel for the address, so on a central one of
+  the two is not in place yet when GATT is told of the connection (which one is not traced). The central's link keeps
+  no idle timeout and
+  outlives its CoC, while the peripheral idles out 4 s after it. That is #142's pair: an Android 16/17 lonely dialer
+  (central, never idles) against the Android 12 P3 (never idles either). The source reading this replaces
+  (`l2cu_allocate_ccb` marks a CoC link active, so it should idle out) is about the gate that lets the timer run, not
+  the timeout it runs with.
 
-A client that attaches to the ACL and leaves (`disconnect()` + `close()`) therefore sets the 1 s idle timeout, which
-runs once no dynamic channel remains, and the stack drops the ACL about 1–4 s after the CoC closes. This is certain on
-Android 12 by source. Either end's disconnect ends the ACL on both phones, so arming the Android 12 side clears #142's
-pair. Whether an arm on an Android 16+ central clears it when that phone is the only one armed is trial cell 3's
-open question. EATT is not involved: the Pixel 9 refuses it on Knit's unencrypted links. The
-hunt's Pixel 9 dump shows the healthy case: a debug build with Coded on lists `app.getknit.knit` (`BlePhyControl`'s
-client) as each mesh link's holder, and those links dropped cleanly.
+A client that attaches to the ACL and leaves (`disconnect()` + `close()`) sets the no-app idle timeout when it leaves.
+On Android 16/17 that is the 4 s timeout (`gatt_set_idle_timeout: idle_timeout=4 … status=true` right after each
+`bt acl arm … attached`, central or peripheral). The timer runs once no dynamic channel remains, and the stack drops
+the ACL about 4 s after the CoC closes (1–4 s on Android 12, by source). Either end's disconnect ends the ACL on both
+phones, so one armed side clears the pair, and an armed Android 16+ central needs nothing from its peer (trial cell 3's
+question, answered on the P9 and P8). EATT is not involved: the arm opened no EATT channel, and both sides refuse it on
+Knit's unencrypted links. The hunt's Pixel 9 dump shows the healthy case: a debug build with Coded on lists
+`app.getknit.knit` (`BlePhyControl`'s client) as each mesh link's holder, and those links dropped cleanly.
 
 Knit's GATT clients rarely touched an Android↔Android link: `BlePhyControl` needs Coded and a peer heard on Coded,
 `BleLinkTuner` a file under the boost or a debug `LINKTUNE`, and the doorbell and the payload reader serve iPhones
@@ -116,8 +120,9 @@ state, not the app's.
    orphan once as `bt_orphan` (`peer`, `linked`, `armed`, `tries`, `cleared`, `age`): `linked=false` is a channel that
    never became a link, and `armed` tells "the arm failed" (`false`) from "the stack ignored it".
 7. **The A/B switch.** `…debug.LINKTUNE --ez arm false|true` (`LinkTuneDiag.aclArm`, echoed as `arm`). Off, nothing is
-   armed or released, and each orphan is still reported, with `tries=0`. No build flag: this is a fix, and the trial
-   gates the merge.
+   armed or released, and each orphan is still reported, with `tries=0`. The extra is applied only while the
+   Bluetooth transport runs: a paused mesh answers "Bluetooth transport is not running" and drops it, so set it after
+   `RESUME`. No build flag: this is a fix, and the trial gates the merge.
 
 **Amends dqvb.** Its "no Android↔Android link opens a GATT client" (already narrowed by 2da4's boost) no longer holds:
 every link opens one for a few milliseconds at link-up, without discovery, and lets it go. The Moto G's stack, which
@@ -156,20 +161,57 @@ dqvb kept away from discovery, is a trial cell.
   never a false flag.
 - The ACL edges are the oracle. With the receiver unregistered (a ROM without the protected-broadcast declaration),
   nothing is watched; the arm still runs.
+- **`arms=` counts skipped arms.** An unlinked arm whose ACL never came up (a dial that timed out) returns at its
+  `isLive` check without a log line, yet `arms=<attached>/<begun>` counts it begun: the P9 read 9/17 with every arm
+  that ran attached. Read the `bt acl arm … attached` lines, not the ratio.
+- **`unarmed at stop` over-reports on Android 14+.** At `stop()` an ACL whose arm never attached is recorded as a
+  `bt_orphan` (`tries=0`) before the stack has had its 4 s; the peripheral's own timer then drops it. In the field it
+  needs an arm that failed, so it stays rare; with the A/B switch off it fires for every link.
 - `leLinkCount`'s KDoc said a mesh link appears in `getConnectedDevices(GATT)` only while a tuner holds it. It appears
   whenever any app has a GATT server registered (Step 0), and an orphan is counted, rightly: it takes a buffer share.
 
-**Device trial owed**, on a release-shaped build (`-PwearStatus=false -PbleCodedPhy=false -PbleLinkBoost=false`),
-Wi-Fi Aware and the spool off, the P3 with the P8 or P9:
+**Device trial, the P9 (Android 16) and P8 (Android 17), 2026-10-09 05:30–06:01.** Both ran f97421d3 release-shaped
+(`-PwearStatus=false -PbleCodedPhy=false -PbleLinkBoost=false`), with Wi-Fi Aware on. The P3, P7 and Moto meshed in range
+on older builds, so they were unarmed peers. The P9 dials the P8, the P7 and the Moto, and the P3 dials both. The
+oracles were `dumpsys bluetooth_manager` (`shim::btm` ACL history, `shim::acl` with `is_locally_initiated`) and the
+stack's `gatt_set_idle_timeout` and `l2c_link_timeout` lines.
+
+- **Cell 2, in-range closes: passed.** PAUSE on each phone, the process kill of an install, and a natural eof: every
+  Knit ACL was down 1.2–4.2 s after its channel closed.
+  - An armed central disconnected itself 4.0–4.1 s after the close (`l2c_link_timeout … All channels closed`).
+  - The Moto ends its side in about 1.2 s.
+  - The one straggler was a disconnect collision: both ends sent `LL_TERMINATE`, and the P8 saw its side end by
+    supervision timeout (0x08) 5 s later.
+  - The LoRa board's link (`Knit_16b8`) on the P9 also drops 4 s after a pause. Its GATT client stops with the mesh;
+    that predates this change.
+- **Cell 3, the controls: passed for Android 16/17.**
+  - With `arm false` on both phones, the stop logged `bt acl orphan … unarmed at stop` and a `bt_orphan` (`tries=0`) for
+    each link, as designed.
+  - The ACLs still dropped, but only by the peripheral's timer: the unarmed central never started one. The connect-time
+    `status=false` above is why.
+  - Armed, the central's timer runs whatever the peer does. So arming the Android 16+ side alone clears #142's pair,
+    by mechanism; the P3 side of the cell is still owed.
+- **Cell 4, side effects: passed for what this pair can show.**
+  - No EATT from the arm. EATT opened only on bonded links (the LoRa board, an Oura ring), and the P3's attempts on Knit
+    links were refused as unencrypted with the arm on or off.
+  - The dial failures were not the arm's: `OTHER` was `CONNECTION_FAILED_ESTABLISHMENT` (0x3e) at −84 dBm before any arm
+    ran, and `TIMEOUT` a peer not yet advertising after its resume.
+  - Relinks after a pause took 40 s to five minutes, because the settled scan floor (the larger id does not hunt)
+    predates this; a `HEAL` brought them in.
+- **Steady state, 10 min, arm on.**
+  - Every link was armed and attached, on both phones.
+  - Both phones read `orphans=0 released=0`, with no new `bt_orphan`.
+  - `leLinks` minus the links equals the phone's known non-Knit LE devices: three on the P9, one on the P8.
+
+**Still owed**, on the same build shape with the P3:
 
 1. #142's recipe: the P8 alone past 180 s, lonely-dials the P3, the relink replaces it. Pass: within 5 s of
    `bt link down`, both phones log `bt acl edge ACL_DISCONNECTED <addr>`; `leLinks` equals the link count on both; the
    P3's snoop holds no idle LE handle and no TCB holds a dead link.
-2. In-range closes (`…debug.PAUSE`, an eviction, a force-stop): the ACL drops within seconds each time.
-3. Controls: `arm false` on both brings the orphan back, then a `bt_orphan` and a release by the next tick or two; arm
-   one side only, once on the P3 (Android 12) and once on the P8 (Android 16). Its extra cases (a)–(f) follow the list.
-4. Side effects: releases and re-dials per address over 30 min stop after two tries; relink time and `bt_fail` after a
-   quick same-direction relink; no EATT channel (PSM 0x27) in the snoop; an iPhone link unchanged.
+2. An eviction close.
+3. Arm the P3 alone (Android 12), then the P8 alone against the P3. Of the extra cases below, (a), (b), (d), (e) and (f)
+   remain; (c) passed on the P9 and P8.
+4. Releases and re-dials per address over 30 min stop after two tries; an iPhone link unchanged.
 5. The drain A/B: the group-picture cell, the P3 lit sending to the dark P8 and P9, 8 reps, `arm false` with orphans
    then armed, in one session. The P3→P9 drain should match the no-orphan control.
 
@@ -181,7 +223,9 @@ Cell 3's extra cases:
   record, and the P3's `dumpsys bluetooth_manager` connection_manager section right after the close, to see who holds
   the accept-list entry.
 - (c) A Pause with `--ez arm false` on both phones: `bt acl orphan … unarmed at stop` and a `bt_orphan` with
-  `tries=0` on each, and the ACL still up for the pause; then the same with the arm on.
+  `tries=0` on each, and the ACL still up for the pause; then the same with the arm on. Run on the P9 and P8: the
+  records came as written, but the ACL did not stay up, since an Android 14+ peripheral idles out by itself; the cell's
+  "still up" holds only against the P3.
 - (d) The Moto G as a peer: after `bt acl arm … attached`, no service discovery and no parameter put-back in its
   snoop.
 - (e) A cross-dial: force a dial to an address within 1 s of its `bt acl release` or unlinked `bt acl arm`. Pass:

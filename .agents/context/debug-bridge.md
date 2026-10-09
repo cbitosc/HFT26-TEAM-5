@@ -356,7 +356,10 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   armed to idle out when its channel closes (at link-up, at a refused or failed channel's end, at stop), and no orphan
   is released, but each orphan is still logged (`bt acl orphan <id> <addr> kept tries=0 …`, or `… unarmed at stop`)
   and recorded as `bt_orphan` — the A/B switch for the orphan trial; `--ez arm true` puts it back (relink between
-  cells: a link armed before the switch stays armed). The client a
+  cells: a link armed before the switch stays armed). Like every switch here, it is applied only while the Bluetooth
+  transport runs: a paused mesh answers `Bluetooth transport is not running` and drops it, so send it after `RESUME`.
+  Read whether the stack took the arm in logcat: `gatt_set_idle_timeout: idle_timeout=4 … status=true` right after
+  `bt acl arm … attached` (Android 16/17). The client a
   boost made and the one this action makes are the same `BleLinkTuner`; `close` lets it go and the boost makes another
   at its next ask. No node reads the budget and the links' last-heard state without making a client. An iPhone link is refused
   (`refused`: its doorbell owns the parameters, ADR 2026-09.dqvb), and no PHY is asked while the Coded experiment runs

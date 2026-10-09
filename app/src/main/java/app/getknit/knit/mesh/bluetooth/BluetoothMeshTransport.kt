@@ -1349,10 +1349,11 @@ class BluetoothMeshTransport(
     /**
      * Arms [device]'s ACL to idle out once its last channel closes (#142, ADR 2026-10.b8yf): a GATT client attaches to
      * the ACL and leaves at once, asking nothing. An LE ACL can outlive Knit's CoC. Android 12's ATT channel never
-     * idles out unless a local client held it and left, and #142's Android 16/17 centrals kept theirs for a reason not
-     * yet identified. A client that held it and left sets the stack's 1 s idle timeout, which runs once no dynamic
-     * channel remains, so the stack drops the ACL a second or so after the link's channel closes. That is certain where
-     * Android 12 armed it, and either end's disconnect ends it on both phones. Never in [tuners], so the boost and
+     * idles out unless a local client held it and left, and on Android 16/17 the side that dialed never gets the no-app
+     * idle timeout (`gatt_set_idle_timeout … status=false` at connect). A client that held it and left sets that timeout
+     * (4 s on Android 16/17, 1 s by source on Android 12), which runs once no dynamic channel remains, so the stack drops
+     * the ACL about 4 s after the link's channel closes (1–4 s on Android 12). Either end's disconnect ends it on both
+     * phones. Never in [tuners], so the boost and
      * `…debug.LINKTUNE close` cannot take it over; it ends by itself.
      *
      * [isLive] is checked just before `connectGatt`, which on a gone ACL would dial instead. A `false` from

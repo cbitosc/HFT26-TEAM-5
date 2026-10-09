@@ -5,14 +5,15 @@ package app.getknit.knit.mesh.bluetooth
  * ADR 2026-10.b8yf).
  *
  * An LE ACL can outlive its last L2CAP channel (Knit's CoC). On Android 12 the ATT fixed channel never idles out
- * unless a local GATT client held the link and left. #142's Android 16/17 centrals kept theirs too, for a reason not
- * yet identified, although by source a link that carried a CoC idles out there. Such an orphan sits idle for half an
- * hour and takes a share of the controller's buffers from every other link, which halved a phone's file drain. The
+ * unless a local GATT client held the link and left. On Android 16/17 the side that dialed never gets the no-app idle
+ * timeout (the stack's `gatt_set_idle_timeout … status=false` at connect), so its ACL stays too. Such an orphan sits
+ * idle for half an hour and takes a share of the controller's buffers from every other link, which halved a phone's
+ * file drain. The
  * transport arms every ACL a channel opened on (a
  * GATT client attaches and leaves, [BluetoothMeshTransport]'s `armAcl`): at link-up, and when a channel closes without
  * becoming a link (a refused dialer, a failed HELLO, a dial that connected and then failed). The stack then drops the ACL
- * a second or so after the channel closes. This is the net under those arms, and the field log's record of where an arm
- * missed.
+ * about 4 s after the channel closes on Android 16/17 (1–4 s on Android 12, by source). This is the net under those arms,
+ * and the field log's record of where an arm missed.
  *
  * **The oracle is the ACL broadcasts** ([onAcl]), never `getConnectedDevices(GATT)`, which shows another device's LE
  * connection only while some app's GATT server is registered. An ended channel's address is watched only while its
@@ -21,7 +22,7 @@ package app.getknit.knit.mesh.bluetooth
  *
  * **The rules**, read on the transport's minute tick ([check]):
  * - An ACL still up [graceMs] after its channel ended, or after its last [Release], is an orphan. The arm drops it in
- *   1–4 s, so the grace is the arm's margin.
+ *   about 4 s (1–4 s on Android 12), so the grace is the arm's margin.
  * - An orphan is released (attached and left again) at most [maxTries] times, then reported once as kept. One that goes
  *   down is reported once as cleared, with the tries it took. Exactly one [Report] per orphan, never one for an ACL that
  *   went down inside the grace.
@@ -306,7 +307,7 @@ internal class OrphanAclPolicy<D>(
     }
 
     companion object {
-        /** How long an ACL may outlive its channel before it counts as an orphan: the arm drops one in 1–4 s. */
+        /** How long an ACL may outlive its channel before it counts as an orphan: the arm drops one in about 4 s. */
         const val GRACE_MS = 15_000L
 
         /** Releases per orphan before it is reported as kept: bounds Android 12's accept-list re-dial churn. */
