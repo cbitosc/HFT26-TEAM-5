@@ -1221,8 +1221,7 @@ class BluetoothMeshTransport(
 
     /**
      * Whether a file to [link] is clocked by its receiver's reports (ADR 2026-10.nsr7's phase 2): the switch on and a
-     * peer that reports — an Android build carrying [Protocol.CAP_BLOB_HAVE] — on any PHY. Never an iPhone
-     * ([DoorbellPolicy.serves]): nothing sends it a report to answer, and its own reports are not measured yet.
+     * peer that reports — a build carrying [Protocol.CAP_BLOB_HAVE], an iPhone included — on any PHY.
      */
     private fun windowed(link: FramedLink): Boolean = BleFeedPolicy.windowed(LinkTuneDiag.feedWindow, link.peer.capabilities)
 

@@ -12,17 +12,14 @@ import app.getknit.knit.mesh.protocol.Protocol
 internal object BleFeedPolicy {
     /**
      * Whether a file is clocked by its receiver's reports (ADR 2026-10.nsr7's phase 2): the switch [feedWindowOn] and a
-     * peer that reports — an Android build carrying [Protocol.CAP_BLOB_HAVE] in [capabilities] — on any PHY, Coded too
-     * (ADR 2026-10.5buf's Coded amendment). Never an iPhone ([DoorbellPolicy.serves]): nothing sends it a report to
-     * answer, and its own reports are not measured yet.
+     * peer that reports — a build carrying [Protocol.CAP_BLOB_HAVE] in [capabilities], an iPhone included — on any
+     * PHY, Coded too (ADR 2026-10.5buf's Coded amendment).
      */
     fun windowed(
         feedWindowOn: Boolean,
         capabilities: Long,
     ): Boolean =
-        feedWindowOn &&
-            capabilities and Protocol.CAP_BLOB_HAVE != 0L &&
-            !DoorbellPolicy.serves(capabilities)
+        feedWindowOn && capabilities and Protocol.CAP_BLOB_HAVE != 0L
 
     /**
      * A link's [base] pace, marked [windowed] when its receiver's reports clock it, with the window's queue and its

@@ -212,3 +212,12 @@ latency during a feed and the snoop's queue depth.
   for the second photo before its feed ends.
 - **Back to back:** reps 65–67 run three times in a row with each carrier's screen state recorded, and once with the P8
   and the P9 dark. Pass as above in every rep.
+
+**Amendment (2026-10-09): `blobprog` to an iPhone.** `onFileProgress` no longer excludes an iPhone (`CAP_DOORBELL`):
+the iOS port is building the half item 1 waited for, a receiver that reports on every chunk and a sender that meters
+its feeds by the reports, and this is the Android half of that paired change. Until the iOS half ships, each report to
+an iPhone is about 500 B/s of reverse air it only counts (ds45). An iPhone build from before ds45 (knit-ios 38f4fe1)
+treats the frame as signed and may ask an unpinned sender for its key, so a lab iPhone must be on ds45 or later before
+this build meets it. A new capability bit is still not taken, for the reason above. Device trial owed: the iPhone
+feeding a photo to a P9. Pass: the iPhone counts about 4 `blobprog`/s and acts on them (its meter or ETA in its log),
+with no key requests and no rings on the P9's state line.

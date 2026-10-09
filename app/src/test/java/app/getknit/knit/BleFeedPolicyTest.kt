@@ -19,15 +19,16 @@ class BleFeedPolicyTest {
     private val iphone = Protocol.CAP_BLOB_HAVE or Protocol.CAP_DOORBELL
 
     @Test
-    fun anAndroidPeerThatReportsIsWindowed() {
+    fun aPeerThatReportsIsWindowedAnIPhoneToo() {
         assertTrue(BleFeedPolicy.windowed(true, android))
+        assertTrue(BleFeedPolicy.windowed(true, iphone))
     }
 
     @Test
     fun theWindowNeedsTheSwitchAndAReportingPeer() {
         assertFalse("switch off", BleFeedPolicy.windowed(false, android))
         assertFalse("an older build never reports", BleFeedPolicy.windowed(true, 0L))
-        assertFalse("an iPhone's reports are not measured", BleFeedPolicy.windowed(true, iphone))
+        assertFalse("switch off for an iPhone too", BleFeedPolicy.windowed(false, iphone))
     }
 
     @Test

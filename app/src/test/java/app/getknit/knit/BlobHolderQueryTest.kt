@@ -858,7 +858,7 @@ class BlobHolderQueryTest {
             val sent = s.heard.single { it.first == FrameType.BLOB_PROGRESS }.third
             assertEquals(BlobProgressContent(hash, 40_960, 2_000), WireCodec.decodePayload<BlobProgressContent>(sent.payload))
             assertTrue("a neighbour without the bit is never sent one", old.heard.none { it.first == FrameType.BLOB_PROGRESS })
-            assertTrue("nor is an iPhone, until its port takes the type", phone.heard.none { it.first == FrameType.BLOB_PROGRESS })
+            assertEquals("an iPhone is: its port takes the type", 1, phone.heard.count { it.first == FrameType.BLOB_PROGRESS })
 
             s.exchange.onProgressReport(BlobProgressContent(hash, 40_960, 2_000), "r")
             assertEquals(listOf(FileProgress("r", hash, 40_960, 2_000)), s.transport.progressTaken.toList())

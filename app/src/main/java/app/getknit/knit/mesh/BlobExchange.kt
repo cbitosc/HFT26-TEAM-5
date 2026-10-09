@@ -1450,14 +1450,12 @@ class BlobExchange(
     /**
      * A file streaming in from a neighbour reached [p] ([MeshTransport.fileProgress]): tell its sender how much of it we
      * hold, so it measures the drain its stack's queue hides and times the asks it parked behind the feed by it (ADR
-     * 2026-10.nsr7). Only to a neighbour whose link carries [Protocol.CAP_BLOB_HAVE], and not yet to an iPhone
-     * ([Protocol.CAP_DOORBELL]); an older Android build refuses the unsigned frame and loses nothing.
+     * 2026-10.nsr7). Only to a neighbour whose link carries [Protocol.CAP_BLOB_HAVE], an iPhone included now its port
+     * takes the type; an older build refuses the unsigned frame and loses nothing.
      */
     suspend fun onFileProgress(p: FileProgress) {
         val peer = transport.neighbors.value.firstOrNull { it.nodeId == p.from } ?: return
-        // Never to an iPhone yet: its port refuses the unsigned type as a signed one, and from an unpinned sender spends
-        // key requests on it (the bluetooth-reviewer's finding). Its companion change lifts this.
-        val capable = peer.capabilities and Protocol.CAP_BLOB_HAVE != 0L && peer.capabilities and Protocol.CAP_DOORBELL == 0L
+        val capable = peer.capabilities and Protocol.CAP_BLOB_HAVE != 0L
         if (!capable || p.key.isEmpty() || p.key.length > MAX_HASH_CHARS) return
         try {
             val content = BlobProgressContent(p.key, p.held, p.ms)
@@ -1603,9 +1601,8 @@ class BlobExchange(
 
     /**
      * Withdraws our ask for [hash] from [to] (a `blobcancel`, ADR 2026-10.nsr7): the holder drops it if it is parked, and
-     * a copy queued and not yet streaming. Only to a neighbour whose link carries [Protocol.CAP_BLOB_HAVE]; unlike
-     * [onFileProgress], an iPhone ([Protocol.CAP_DOORBELL]) gets one too, since its port takes the type (knit-ios ADR
-     * 2026-10.ds45).
+     * a copy queued and not yet streaming. Only to a neighbour whose link carries [Protocol.CAP_BLOB_HAVE]; an iPhone
+     * ([Protocol.CAP_DOORBELL]) gets one too, since its port takes the type (knit-ios ADR 2026-10.ds45).
      */
     private suspend fun withdrawAsk(
         hash: String,

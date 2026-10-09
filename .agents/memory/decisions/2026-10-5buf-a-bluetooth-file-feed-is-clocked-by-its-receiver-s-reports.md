@@ -392,3 +392,22 @@ files, `scripts/ble-drain-trial.py`):
   without a later `back`, and texts behind the photo under about 5 s.
 - **The experiment on at 1M** with a stack-driven 2M step mid-file: `bt file window rate=` does not drop to the
   fallback.
+
+## Amendment 2026-10-09: an iPhone that reports is windowed
+
+**What changed.** `BleFeedPolicy.windowed` no longer excludes an iPhone (`DoorbellPolicy.serves`): a file to any peer
+carrying `CAP_BLOB_HAVE` is windowed, as item 2 kept for Android. This is the Android half of a paired change. The iOS
+half reports on every chunk, as Android does, and meters its own feeds; the two ship in the same release (item 4's rule
+that no phone reports every 2 s to a sender that windows it). The link boost keeps its iPhone exclusion.
+
+**Against an iPhone build without that half.** Today's port reports every 2 s, so the window falls back as it does for
+an older Android build: about 3 s waiting on the first 8 KiB, then `paced: two-second reporter` for the rest of the
+stream, in 2 KiB chunks (four times the writes of the plain pace, not less throughput). `expectedFileRate` also scores
+that feed as windowed, at its last drain, rather than as its share of the paced budget, so nsr7's park and ETA can
+over-promise behind it. Both go away with the iOS half; neither is worth a gate of its own on a port with no installed
+base.
+
+**Device trial owed.** A P9 feeding a 410 KB photo to the iPhone on the companion build, lit and dark, once with a
+second Android link feeding. Pass: the window holds (`back`, no `paced` past the start), the receiver's drain is at
+least the paced base, texts behind it within 5 s. Then lock the iPhone mid-file. Pass: `paced: receiver silent`, the
+link survives, and the file completes after the next ring.
