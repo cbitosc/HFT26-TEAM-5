@@ -21,14 +21,14 @@ import app.getknit.knit.data.AttachmentIdentities
 import app.getknit.knit.data.AttachmentStore
 import app.getknit.knit.data.BlobRepository
 import app.getknit.knit.data.GroupRepository
+import app.getknit.knit.data.KnitDatabase
 import app.getknit.knit.data.MessageReceiptRepository
 import app.getknit.knit.data.MessageRepository
 import app.getknit.knit.data.PeerRepository
 import app.getknit.knit.data.ReactionRepository
+import app.getknit.knit.data.blob.BlobEntity
 import app.getknit.knit.data.decodeBoundedFromBytes
 import app.getknit.knit.data.downscale
-import app.getknit.knit.data.KnitDatabase
-import app.getknit.knit.data.blob.BlobEntity
 import app.getknit.knit.data.forward.ForwardDao
 import app.getknit.knit.data.group.GroupEntity
 import app.getknit.knit.data.group.GroupMembersStore
