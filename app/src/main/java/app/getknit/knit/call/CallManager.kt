@@ -105,6 +105,8 @@ data class CallTimings(
  * **A call with no live path is a walkie-talkie** ([walkie], §3.11, ADR 2026-10.79yb): one dialled where no live path
  * looks possible offers a walkie session, which carries no media at all, and a live call whose path is lost (or never
  * came) drops to one instead of ending — when both sides said they can, by the walkie bit on the OFFER and the ANSWER.
+ * That drop is parked behind [dropToWalkie] (off): a peer off every radio got a session that could carry nothing, so
+ * a lost live call ends no_route, and neither OFFER nor ANSWER carries the bit.
  */
 @Suppress("LargeClass") // one call's whole state machine, its direct leg's four decisions included; pure and two-sided tested
 class CallManager(
@@ -119,6 +121,7 @@ class CallManager(
     private val log: (String) -> Unit = {},
     private val direct: CallDirect = CallDirect.None,
     private val walkie: CallWalkie = CallWalkie.None,
+    private val dropToWalkie: Boolean = false,
 ) {
     private class Live(
         val id: String,
@@ -405,7 +408,7 @@ class CallManager(
         p: CallPayload,
     ) {
         l.walkie = isWalkieOnly(p)
-        l.walkieOk = !l.walkie && walkie.enabled && p.m and CallPayload.MEDIA_WALKIE != 0
+        l.walkieOk = dropToWalkie && !l.walkie && walkie.enabled && p.m and CallPayload.MEDIA_WALKIE != 0
     }
 
     /** What a live OFFER or ANSWER says it carries: audio, and the walkie bit when this side can drop to one (§3.11). */
@@ -683,7 +686,7 @@ class CallManager(
         // §3.10: a group we would host for a neighbour. Minting raises nothing; the callee's "joining" does.
         val invite = if (!relayOnly) direct.invite(l.id, l.peerId) else null
         // §3.11: offer the drop to a walkie to a peer that runs one; it takes effect only if its ANSWER echoes it.
-        val offersWalkie = walkie.enabled && walkie.capable(l.peerId)
+        val offersWalkie = dropToWalkie && walkie.enabled && walkie.capable(l.peerId)
         mutex.withLock {
             if (!current(l)) return
             l.invite = invite

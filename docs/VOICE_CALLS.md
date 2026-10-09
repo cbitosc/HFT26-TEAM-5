@@ -449,6 +449,11 @@ an experiment behind `BuildConfig.WALKIE` (`-Pwalkie=`, on in debug and off in r
 
   The drop closes the media and ends any direct leg, and sends nothing. The other side's ICE sees the media go and
   drops on its own timer. Without both bits, the call ends as before.
+
+  **Parked (2026-10-09).** The Android build no longer sets the bit on either message, and it ignores the bit when
+  a peer sends it (`CallManager.dropToWalkie`, off), so a lost live call ends `no_route`. In a P9↔P7 call over the
+  Internet the drop left the two phones in a walkie session neither could send on, because the peer was off every
+  radio. A walkie session placed on purpose is unchanged.
 - **C-3.11-5** A burst is Opus at 8 kbps, captured at 16 kHz mono, in 20 ms packets, up to 60 s. It is cut into
   chunks: one each time 480 ms of audio is in hand, then the rest marked as the last. A chunk's plaintext is binary:
 

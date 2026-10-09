@@ -228,6 +228,7 @@ class CallManagerTest {
     private fun TestScope.side(
         name: String,
         net: Net,
+        dropToWalkie: Boolean = false,
     ): Side {
         val sent = Collections.synchronizedList(mutableListOf<CallPayload>())
         val missed = Collections.synchronizedList(mutableListOf<MissedCall>())
@@ -261,6 +262,7 @@ class CallManagerTest {
                 timings = TIMINGS,
                 direct = direct,
                 walkie = walkie,
+                dropToWalkie = dropToWalkie,
             )
         side = Side(name, manager, media, sent, missed, turnAsks, direct, walkie)
         net.nodes[name] = manager
@@ -268,10 +270,10 @@ class CallManagerTest {
         return side
     }
 
-    private fun TestScope.pair(): Triple<Net, Side, Side> {
+    private fun TestScope.pair(dropToWalkie: Boolean = false): Triple<Net, Side, Side> {
         val net = Net(backgroundScope) { testScheduler.currentTime }
-        val alice = side(ALICE, net)
-        val bob = side(BOB, net)
+        val alice = side(ALICE, net, dropToWalkie)
+        val bob = side(BOB, net, dropToWalkie)
         alice.direct.peer = bob.direct
         bob.direct.peer = alice.direct
         return Triple(net, alice, bob)
@@ -1034,9 +1036,15 @@ class CallManagerTest {
 
     // ---- §3.11: the walkie-talkie ----
 
-    /** Alice and Bob both run the walkie; [live] is whether a live call looks possible from Alice's side. */
-    private fun TestScope.walkies(live: Boolean): Triple<Net, Side, Side> =
-        pair().also { (_, alice, bob) ->
+    /**
+     * Alice and Bob both run the walkie; [live] is whether a live call looks possible from Alice's side. The drop from a
+     * live call is on here (its machinery stays tested while the shipped default parks it).
+     */
+    private fun TestScope.walkies(
+        live: Boolean,
+        dropToWalkie: Boolean = true,
+    ): Triple<Net, Side, Side> =
+        pair(dropToWalkie).also { (_, alice, bob) ->
             alice.walkie.enabled = true
             bob.walkie.enabled = true
             alice.walkie.live = live
@@ -1166,6 +1174,47 @@ class CallManagerTest {
             assertTrue(bob.state!!.walkie && bob.state!!.degraded)
             assertEquals(CallPhase.Connected, bob.state!!.phase)
             assertFalse(CallPayload.PHASE_END in alice.phases() + bob.phases())
+        }
+
+    @Test
+    fun withTheDropParkedALiveCallCarriesNoWalkieBitAndEndsNoRoute() =
+        runTest {
+            val (_, alice, bob) = walkies(live = true, dropToWalkie = false)
+            alice.manager.start(BOB)
+            runCurrent()
+            assertEquals(CallPayload.MEDIA_AUDIO, alice.offer().m)
+            bob.manager.answer(bob.state!!.id)
+            runCurrent()
+            assertEquals(CallPayload.MEDIA_AUDIO, bob.lastOf(CallPayload.PHASE_ANSWER).m)
+            advanceTimeBy(TIMINGS.connectMs + 1)
+            runCurrent()
+            assertEquals(CallPayload.REASON_NO_ROUTE, alice.state!!.reason)
+            assertEquals(CallPayload.REASON_NO_ROUTE, bob.state!!.reason)
+            assertFalse(alice.state!!.walkie || bob.state!!.walkie)
+        }
+
+    @Test
+    fun aCalleeWithTheDropParkedIgnoresTheBitAnOlderBuildOffers() =
+        runTest {
+            // Alice is an older build that still offers the drop; Bob's build parks it.
+            val net = Net(backgroundScope) { testScheduler.currentTime }
+            val alice = side(ALICE, net, dropToWalkie = true)
+            val bob = side(BOB, net, dropToWalkie = false)
+            alice.direct.peer = bob.direct
+            bob.direct.peer = alice.direct
+            for (side in listOf(alice, bob)) side.walkie.enabled = true
+            alice.walkie.live = true
+            alice.manager.start(BOB)
+            runCurrent()
+            assertEquals(CallPayload.MEDIA_AUDIO or CallPayload.MEDIA_WALKIE, alice.offer().m)
+            bob.manager.answer(bob.state!!.id)
+            runCurrent()
+            assertEquals(CallPayload.MEDIA_AUDIO, bob.lastOf(CallPayload.PHASE_ANSWER).m)
+            advanceTimeBy(TIMINGS.connectMs + 1)
+            runCurrent()
+            assertEquals(CallPayload.REASON_NO_ROUTE, alice.state!!.reason)
+            assertEquals(CallPayload.REASON_NO_ROUTE, bob.state!!.reason)
+            assertFalse(alice.state!!.walkie || bob.state!!.walkie)
         }
 
     @Test
