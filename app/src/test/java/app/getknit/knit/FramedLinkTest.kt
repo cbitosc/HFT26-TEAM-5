@@ -210,6 +210,28 @@ class FramedLinkTest {
     }
 
     @Test
+    fun frameWithANegativeTtlIsDroppedAsUndecodable() {
+        // AND-11: 0xFFFFFFFF, which kotlinx reads as -1, is refused as iOS's int32 refuses it.
+        val metrics = MeshMetrics()
+        val h = harness(nodeId = "sender01", metrics = metrics)
+        val env = RelayEnvelope(type = FrameType.CHAT, id = "m1", senderId = "sender01", payload = ByteArray(0))
+        writeRecord(
+            h.toLink,
+            LinkFraming.Type.FRAME,
+            WireCodec.encodeWire(WireEnvelope(ttl = -1, sig = byteArrayOf(1), signed = WireCodec.encodeEnvelope(env))),
+        )
+        writeRecord(h.toLink, LinkFraming.Type.FRAME, frameBytes(id = "m2", senderId = "sender01"))
+        assertEquals(
+            "m2",
+            h.callbacks.inbound
+                .poll(2, TimeUnit.SECONDS)
+                ?.envelope
+                ?.id,
+        )
+        assertEquals(1L, metrics.frames().dropsByReason[DropReason.DECODE_FAILED])
+    }
+
+    @Test
     fun digestRecordSurfacesReceivedDigest() {
         val h = harness(nodeId = "sender01")
         writeRecord(h.toLink, LinkFraming.Type.DIGEST, LinkFraming.encodeDigest(DigestWire(listOf("a", "b"))))

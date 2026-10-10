@@ -13,10 +13,11 @@ import org.junit.Test
  * Each hex string is what knit-ios `9ac4cdf`'s `KnitWire` encoders wrote (`CBORRepresentable.encoded`, run on
  * Linux from an archive of `Sources/KnitWire`), for frame id `ICcuNTxDSlFYX2ZtdHuCiQ` and hash `ab` × 32. Each
  * must decode on Android into the values iOS meant and re-encode to its own bytes, since every one of these
- * decodes in `InboundPipeline` returns silently on failure.
+ * decodes in `InboundPipeline` once returned silently on failure (each now counts `PAYLOAD_DECODE_FAILED`).
  *
- * The last two cases pin two kotlinx-cbor behaviours the iOS decoder does not share (latent, not triggered by
- * any build today): an empty map read as null for a nullable field, and a 32-bit unsigned `ttl` wrapped negative.
+ * The last two cases pin two kotlinx-cbor behaviours the iOS decoder does not share: an empty map read as null for a
+ * nullable field (latent; docs/WIRE_COMPAT.md rule 6 keeps it so), and a 32-bit unsigned `ttl` read as negative, which
+ * `WireCodec.decodeWire` now refuses as iOS does.
  */
 class IosPayloadShapesTest {
     private val id = "ICcuNTxDSlFYX2ZtdHuCiQ"
@@ -123,10 +124,11 @@ class IosPayloadShapesTest {
         assertNull("kotlinx reads {} as null; iOS reads it as AllDefaults()", outer.inner)
     }
 
-    /** Latent: a ttl of 0xFFFFFFFF wraps to -1 on Android, where iOS's int32 field refuses the envelope. */
+    /** AND-11: a ttl of 0xFFFFFFFF, which kotlinx reads as -1, is refused, as iOS's int32 field refuses it. So is a negative hops. */
     @Test
-    fun `a 32-bit unsigned ttl wraps negative`() {
-        val wire = WireCodec.decodeWire("a36374746c1affffffff6373696740667369676e656440".fromHex())
-        assertEquals(-1, wire?.ttl)
+    fun `a 32-bit unsigned ttl or a negative hops is refused`() {
+        assertNull(WireCodec.decodeWire("a36374746c1affffffff6373696740667369676e656440".fromHex()))
+        assertNull(WireCodec.decodeWire(WireCodec.encodeWire(WireEnvelope(hops = -1, sig = ByteArray(0), signed = ByteArray(0)))))
+        assertEquals(0, WireCodec.decodeWire(WireCodec.encodeWire(WireEnvelope(ttl = 0, sig = ByteArray(0), signed = ByteArray(0))))?.ttl)
     }
 }

@@ -834,8 +834,12 @@ object WireCodec {
 
     fun encodeWire(wire: WireEnvelope): ByteArray = cbor.encodeToByteArray(wire)
 
-    /** Decodes the outer wrapper, or null if the bytes are malformed/unrecognized. */
-    fun decodeWire(bytes: ByteArray): WireEnvelope? = runCatching { cbor.decodeFromByteArray<WireEnvelope>(bytes) }.getOrNull()
+    /**
+     * Decodes the outer wrapper, or null if the bytes are malformed/unrecognized. A negative `ttl` or `hops` is refused:
+     * no encoder writes one, kotlinx reads a 32-bit unsigned `0xFFFFFFFF` as -1, and iOS's `int32` refuses it.
+     */
+    fun decodeWire(bytes: ByteArray): WireEnvelope? =
+        runCatching { cbor.decodeFromByteArray<WireEnvelope>(bytes) }.getOrNull()?.takeIf { it.ttl >= 0 && it.hops >= 0 }
 
     fun encodeEnvelope(env: RelayEnvelope): ByteArray = cbor.encodeToByteArray(env)
 

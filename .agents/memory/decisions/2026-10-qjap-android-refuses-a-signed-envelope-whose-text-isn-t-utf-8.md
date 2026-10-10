@@ -8,7 +8,7 @@ topics: [wire, crypto, interop]
 
 # ADR 2026-10.qjap — Android refuses a signed envelope whose text isn't UTF-8, as iOS does
 
-Status: Accepted (2026-10-10; `mesh/protocol/CborText`, `WireCodec.decodeEnvelope` / `decodeChecked`,
+Status: Accepted (2026-10-10; `mesh/protocol/CborText`, `WireCodec.decodeEnvelope` / `decodeChecked` / `decodeWire`,
 `InboundPipeline.decodeCounted`; no byte moves, no vector moves)
 
 **What was observed.** The 2026-10 interop audit (IOS-5) signed a frame whose `id` held a byte that isn't UTF-8.
@@ -26,7 +26,8 @@ spool, custody reads), so such a frame is never delivered, carried, relayed or l
 `DECODE_FAILED` wherever that plane already counts an envelope it can't decode (the framed link does; the others drop
 it silently, as they drop any malformed envelope). Text inside the opaque `payload` is checked per type where the
 pipeline reads it (`decodeCounted` → `WireCodec.decodeChecked`), counted as `PAYLOAD_DECODE_FAILED`; a carrier can't
-check a sealed body and doesn't.
+check a sealed body and doesn't. `decodeWire` refuses a negative `ttl` or `hops` beside it (AND-11): kotlinx reads a
+32-bit unsigned `0xFFFFFFFF` as -1, and iOS's `int32` refuses it.
 
 The alternatives a reader reaches for first don't work. Checking the decoded strings for U+FFFD can't tell a repaired
 byte from a peer's honest U+FFFD. A strict `CharsetDecoder` (`REPORT`) ties the verdict to the runtime's charset, the
