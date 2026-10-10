@@ -95,6 +95,8 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import app.getknit.knit.MainActivity
+import app.getknit.knit.R
 import app.getknit.knit.call.CallManager
 import app.getknit.knit.call.CallPhase
 import app.getknit.knit.call.CallState
@@ -107,6 +109,7 @@ import app.getknit.knit.data.message.MessageEntity
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.identity.Identity
 import app.getknit.knit.mesh.protocol.CallPayload
+import app.getknit.knit.notifications.MessageNotifier
 import app.getknit.knit.ui.chat.messagePreview
 import app.getknit.knit.ui.components.Avatar
 import app.getknit.knit.ui.preview.KnitPreview
@@ -195,7 +198,8 @@ class CallActivity :
             if (peerId == null) return@LaunchedEffect
             name = callerName(peers, peerId)
             avatarHash = peers.find(peerId)?.avatarHash
-            caller = runCatching { callerContext(peerId, peers, messages, groups, settings, identity) }.getOrNull()
+            val unnamed = getString(R.string.group_unnamed)
+            caller = runCatching { callerContext(peerId, peers, messages, groups, settings, identity, unnamed) }.getOrNull()
         }
         // Over the lock screen the last message stays hidden; unlocking with the call up shows it without a restart.
         val keyguard = remember { getSystemService(KeyguardManager::class.java) }
@@ -244,6 +248,7 @@ class CallActivity :
             caller = caller,
             locked = locked,
             hideFlagged = hideFlagged,
+            onOpenChat = { peerId?.let(::openChat) },
             onAnswer = { state?.id?.let(::answer) },
             onDecline = { state?.id?.let { id -> lifecycleScope.launch { calls.decline(id) } } },
             onHangUp = { lifecycleScope.launch { calls.hangUp() } },
@@ -265,6 +270,16 @@ class CallActivity :
 
     private fun handle(intent: Intent?) {
         if (intent?.action == ACTION_ANSWER) intent.getStringExtra(EXTRA_ID)?.let(::answer)
+    }
+
+    /** The caller's DM thread in the app, as a message notification's tap opens it; the call keeps running. */
+    private fun openChat(peerId: String) {
+        startActivity(
+            Intent(this, MainActivity::class.java)
+                .setAction(MessageNotifier.ACTION_OPEN_CHAT)
+                .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                .putExtra(MainActivity.EXTRA_ROUTE, "chat/$peerId"),
+        )
     }
 
     private fun micGranted(): Boolean =
@@ -352,6 +367,7 @@ internal fun CallScreen(
     locked: Boolean = false,
     hideFlagged: Boolean = true,
     statsShown: Boolean = false,
+    onOpenChat: () -> Unit = {},
 ) {
     val phase = state?.phase
     var showStats by rememberSaveable { mutableStateOf(statsShown) }
@@ -386,7 +402,7 @@ internal fun CallScreen(
                 } else if (phase != null && phase != CallPhase.Ended && !walkieUp && caller != null) {
                     // Who this is to you, and what was said last — the why of most calls — until the call ends.
                     Box(Modifier.weight(1f).fillMaxWidth().padding(vertical = 16.dp), contentAlignment = Alignment.Center) {
-                        CallerCard(caller, name, locked, hideFlagged, clock)
+                        CallerCard(caller, name, locked, hideFlagged, clock, onOpenChat)
                     }
                 } else {
                     Spacer(Modifier.weight(1f))
@@ -832,7 +848,8 @@ private fun ButtonLabel(label: String) {
 
 /**
  * Who is calling: where they stand with you, then the newest message in your thread — held back over
- * the lock screen, where anyone holding the phone would read it (the relationship names no group, so it shows).
+ * the lock screen, where anyone holding the phone would read it, as are the shared groups' names (the line counts them
+ * there instead). Tapping the message opens the thread.
  */
 @Composable
 private fun CallerCard(
@@ -841,9 +858,10 @@ private fun CallerCard(
     locked: Boolean,
     hideFlagged: Boolean,
     clock: () -> Long,
+    onOpenChat: () -> Unit,
 ) {
     Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        caller.relationship?.let {
+        caller.relationshipShown(locked)?.let {
             Text(
                 it,
                 style = MaterialTheme.typography.labelLarge,
@@ -866,6 +884,7 @@ private fun CallerCard(
         val who = if (last.fromMe) "You" else name
         val ago = DateUtils.getRelativeTimeSpanString(last.sentAt, clock(), DateUtils.MINUTE_IN_MILLIS).toString()
         Surface(
+            onClick = onOpenChat,
             shape = MaterialTheme.shapes.large,
             color = MaterialTheme.colorScheme.surfaceContainerHigh,
             modifier = Modifier.fillMaxWidth().semantics(mergeDescendants = true) {},
@@ -1109,6 +1128,7 @@ private val PREVIEW_CALLER =
     CallerContext(
         status = "At the crag till 6",
         relationship = "Verified contact · 2 groups together",
+        namedRelationship = "Verified contact · in Climbing, Lab",
         lastMessage =
             LastMessage(
                 fromMe = false,
