@@ -1010,6 +1010,21 @@ class MeshManagerTest {
             assertFalse("nothing to seal to", rig.manager.sendTransferSignal("nobody", payload))
         }
 
+    @Test
+    fun aTransferSignalToAPeerWithoutTheRatchetSendsNothing() =
+        runTest(UnconfinedTestDispatcher()) {
+            // IOS-7: an iPhone's profile, E2E | GROUPS | REACTIONS | STORE_FORWARD, here even with a prekey pinned — the
+            // case where sealDm would otherwise have started an X3DH the peer can never open.
+            val rig = Rig(backgroundScope)
+            rig.pinWithCaps(rig.bob, RatchetCrypto.generateKeyPair().pub, 0xFL)
+            val payload = TransferPayload(id = "t1", phase = TransferPayload.PHASE_OFFER, name = "clip.mp4", size = 5L, mime = "video/mp4")
+
+            assertFalse(rig.manager.sendTransferSignal(rig.bob.nodeId, payload))
+            advanceUntilIdle()
+
+            assertTrue(rig.sentChatFrames().isEmpty())
+        }
+
     // --- the long-range re-offer set (FarPeerFrameSource, ADR 039) ---
 
     /** A carried frame from [sender] to [recipient] as custody would hold it (the fake store never verifies). */
