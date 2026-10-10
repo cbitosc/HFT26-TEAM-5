@@ -307,29 +307,39 @@ class InboundPipeline(
     ) {
         when {
             env.type == FrameType.BLOB_REQ -> {
-                WireCodec.decodePayload<BlobReqContent>(env.payload)?.let { blobExchange.onRequest(it.hash, fromNodeId, it.offset) }
+                decodeCounted<BlobReqContent>(env.payload)?.let { blobExchange.onRequest(it.hash, fromNodeId, it.offset) }
                 metrics.onBlobAskHandled()
             }
 
             env.senderId != fromNodeId -> {}
 
             env.type == FrameType.BLOB_HAVE -> {
-                WireCodec.decodePayload<BlobHaveContent>(env.payload)?.let { blobExchange.onHaveQuery(it.hashes, fromNodeId, env.id) }
+                decodeCounted<BlobHaveContent>(env.payload)?.let { blobExchange.onHaveQuery(it.hashes, fromNodeId, env.id) }
             }
 
             env.type == FrameType.BLOB_PROGRESS -> {
-                WireCodec.decodePayload<BlobProgressContent>(env.payload)?.let { blobExchange.onProgressReport(it, fromNodeId) }
+                decodeCounted<BlobProgressContent>(env.payload)?.let { blobExchange.onProgressReport(it, fromNodeId) }
             }
 
             env.type == FrameType.BLOB_CANCEL -> {
-                WireCodec.decodePayload<BlobCancelContent>(env.payload)?.let { blobExchange.onCancel(it.hash, fromNodeId) }
+                decodeCounted<BlobCancelContent>(env.payload)?.let { blobExchange.onCancel(it.hash, fromNodeId) }
             }
 
             else -> {
-                WireCodec.decodePayload<BlobHasContent>(env.payload)?.let { blobExchange.onHaveAnswer(it, fromNodeId) }
+                decodeCounted<BlobHasContent>(env.payload)?.let { blobExchange.onHaveAnswer(it, fromNodeId) }
             }
         }
     }
+
+    /**
+     * [WireCodec.decodePayload], counting a payload that won't decode as
+     * [DropReason.PAYLOAD_DECODE_FAILED] — once per frame, where its handler reads it after [verifyInbound] (and a
+     * profile's in-band key, which the verify itself needs). A re-read of a payload already counted, and the carry gate,
+     * which runs before any signature check, use the uncounted [WireCodec.decodePayload], so carried traffic and
+     * unsigned junk don't swamp the count a port's regressed encoder should show in Diagnostics (AND-12).
+     */
+    private inline fun <reified T> decodeCounted(payload: ByteArray): T? =
+        WireCodec.decodePayload<T>(payload).also { if (it == null) metrics.onDropped(DropReason.PAYLOAD_DECODE_FAILED) }
 
     /**
      * Routes a verified inbound frame to its type handler. A plain `when` over the type string: an unknown
@@ -377,7 +387,7 @@ class InboundPipeline(
             }
 
             FrameType.KEY_REQ -> {
-                WireCodec.decodePayload<KeyReqContent>(env.payload)?.let { keyExchange.onRequest(it.nodeIds, fromNodeId) }
+                decodeCounted<KeyReqContent>(env.payload)?.let { keyExchange.onRequest(it.nodeIds, fromNodeId) }
             }
 
             FrameType.TYPING -> {
@@ -453,7 +463,9 @@ class InboundPipeline(
     private suspend fun handleTyping(env: RelayEnvelope) {
         val me = identity.nodeId()
         if (env.senderId == me) return
-        val groupId = WireCodec.decodePayload<TypingContent>(env.payload)?.groupId
+        // Every port encodes a DM or room cue as `{}`, so a payload that won't decode is malformed, never a DM or
+        // room cue: counted and dropped rather than read as one (a group cue whose groupId broke would light the room).
+        val groupId = (decodeCounted<TypingContent>(env.payload) ?: return).groupId
         val conversationId =
             when {
                 groupId != null -> if (groups.find(groupId) == null) return else groupId
@@ -477,7 +489,7 @@ class InboundPipeline(
         env: RelayEnvelope,
         plane: DeliveryPlane,
     ) {
-        val ackId = WireCodec.decodePayload<ReceiptContent>(env.payload)?.ackId ?: return
+        val ackId = decodeCounted<ReceiptContent>(env.payload)?.ackId ?: return
         val recipientOfAcked = messages.recipientOf(ackId)
         if (recipientOfAcked == null || recipientOfAcked == env.senderId) {
             receipts.record(ackId, ackerFor(env, ackId, recipientOfAcked), plane, clock())
@@ -530,9 +542,13 @@ class InboundPipeline(
      * carries its bundle in-band (first contact arrives before any pin), every other type uses the sender's
      * pinned key. Shared by [verifyInbound] (the delivery gate) and [canCarry] (the custody gate) so both
      * authenticate a profile the same way — via its own key — instead of a pin it may not have yet. Null when
-     * there is no key to verify with (an unpinned non-profile sender, or a malformed in-band key).
+     * there is no key to verify with (an unpinned non-profile sender, or a malformed in-band key). [countDecode] is
+     * true only from [verifyInbound], so a profile whose payload won't decode counts once, not again at the carry gate.
      */
-    private suspend fun verifierBundle(env: RelayEnvelope): PublicKeyBundle? =
+    private suspend fun verifierBundle(
+        env: RelayEnvelope,
+        countDecode: Boolean,
+    ): PublicKeyBundle? =
         when {
             // Our own frame looping back (a neighbor carried it and re-served it): verify against our identity's
             // own bundle, which we always have. We never pin our own key in `peers`, so without this branch a
@@ -544,7 +560,13 @@ class InboundPipeline(
             }
 
             env.type == FrameType.PROFILE -> {
-                WireCodec.decodePayload<ProfileContent>(env.payload)?.pubKey?.let { PublicKeyBundle.decode(it) }
+                val profile =
+                    if (countDecode) {
+                        decodeCounted<ProfileContent>(env.payload)
+                    } else {
+                        WireCodec.decodePayload<ProfileContent>(env.payload)
+                    }
+                profile?.pubKey?.let { PublicKeyBundle.decode(it) }
             }
 
             else -> {
@@ -599,7 +621,7 @@ class InboundPipeline(
             // our sends and re-serve them, yet the drop stopped [onDeliver]'s carry from re-custodying them, so
             // the content digest never reconverged. Letting it through re-carries it; delivery is idempotent
             // ([deliverChat]'s isNew gate, own-message notifications already skipped), so a duplicate is harmless.
-            val bundle = verifierBundle(env)
+            val bundle = verifierBundle(env, countDecode = true)
             if (bundle == null) {
                 metrics.onDropped(DropReason.NO_SENDER_KEY)
                 // Try to recover the sender's key so future frames from it verify (the inbound key-request
@@ -674,7 +696,7 @@ class InboundPipeline(
     private suspend fun handleReaction(env: RelayEnvelope) {
         // Blocked sender: drop the reaction (the router still relays it onward to other peers).
         if (env.senderId in settings.blockedNodeIds.first()) return
-        val content = WireCodec.decodePayload<ReactionContent>(env.payload) ?: return
+        val content = decodeCounted<ReactionContent>(env.payload) ?: return
         if (content.emoji != null && !isValidReactionEmoji(content.emoji)) {
             metrics.onDropped(DropReason.REACTION_REFUSED)
             return
@@ -716,7 +738,7 @@ class InboundPipeline(
             ackBlockedRoomChat(env)
             return
         }
-        val content = WireCodec.decodePayload<ChatContent>(env.payload) ?: return
+        val content = decodeCounted<ChatContent>(env.payload) ?: return
         // Group messages take the membership-gated path; they carry recipientId null, so they must be
         // handled before the DM check below (which would otherwise treat them as broadcast).
         val group = env.group
@@ -1983,11 +2005,12 @@ class InboundPipeline(
         env: RelayEnvelope,
     ): Boolean {
         if (env.type == FrameType.CHAT) {
+            // Uncounted: the carry gate runs before the signature is checked, and the delivery path counts the frame.
             val content = WireCodec.decodePayload<ChatContent>(env.payload) ?: return false
             val isBroadcast = env.recipientId == null && env.group == null
             if (!isBroadcast && content.enc == null) return false // DM/group must be carried encrypted
         }
-        val bundle = verifierBundle(env)
+        val bundle = verifierBundle(env, countDecode = false)
         if (bundle == null || NodeId.fromPublicKeyBundle(bundle.encoded) != env.senderId) {
             metrics.onDropped(DropReason.CARRY_REFUSED)
             return false
@@ -2054,7 +2077,7 @@ class InboundPipeline(
      */
     private suspend fun handleGroupLeave(env: RelayEnvelope) {
         if (env.senderId in settings.blockedNodeIds.first()) return
-        val groupId = WireCodec.decodePayload<GroupLeaveContent>(env.payload)?.groupId ?: return
+        val groupId = decodeCounted<GroupLeaveContent>(env.payload)?.groupId ?: return
         // The leave clock is what the member's own rejoin must beat ([rejoinBy]); bounded, or a far-future
         // leave locks them out of their own group for good.
         groups.recordDeparture(groupId, env.senderId, clampFuture(env.sentAt))
@@ -3074,7 +3097,7 @@ class InboundPipeline(
             onSelfProfile(env.sentAt)
             return
         }
-        val content = WireCodec.decodePayload<ProfileContent>(env.payload) ?: return
+        val content = decodeCounted<ProfileContent>(env.payload) ?: return
         // Self-certifying identity: a peer's nodeId IS the hash of its public-key bundle, so a profile
         // is only trustworthy if the advertised key actually derives back to the claimed senderId.
         // This makes the key pin race-proof — a peer cannot pin a key for a nodeId it doesn't hold the

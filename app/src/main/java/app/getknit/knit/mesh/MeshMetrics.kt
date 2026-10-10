@@ -104,6 +104,13 @@ enum class DropReason {
      * flood signal Diagnostics should show: one link handing over room posts faster than any room is written.
      */
     INGRESS_REFUSED,
+
+    /**
+     * A verified frame whose `payload` wouldn't decode into its type's content: a field of the wrong CBOR type or a
+     * missing required one. Counted where the pipeline reads the payload, so a regressed
+     * encoder on another port shows here instead of vanishing (the interop audit's AND-12).
+     */
+    PAYLOAD_DECODE_FAILED,
 }
 
 /**

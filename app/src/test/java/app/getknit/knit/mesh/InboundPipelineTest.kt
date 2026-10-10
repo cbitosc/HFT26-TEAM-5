@@ -1683,6 +1683,115 @@ class InboundPipelineTest {
         }
 
     @Test
+    fun typingCueWhosePayloadWontDecodeIsCountedNotReadAsADmOrRoomCue() =
+        runTest {
+            // Every port encodes a DM or room cue as {}, so a payload that won't decode is malformed (AND-12): it
+            // lights no thread, where it once fell through to the room or the DM.
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.pin(alice)
+            val room =
+                RelayEnvelope(type = FrameType.TYPING, id = "typing-room", senderId = alice.nodeId, sentAt = 7L, payload = UNDECODABLE)
+            val dm =
+                RelayEnvelope(
+                    type = FrameType.TYPING,
+                    id = "typing-dm",
+                    senderId = alice.nodeId,
+                    sentAt = 7L,
+                    recipientId = rig.self.nodeId,
+                    payload = UNDECODABLE,
+                )
+
+            rig.deliver(alice, room)
+            rig.deliver(alice, dm)
+
+            assertTrue(
+                rig.typingTracker.typing.value
+                    .isEmpty(),
+            )
+            assertEquals(2L, rig.drops(DropReason.PAYLOAD_DECODE_FAILED))
+        }
+
+    @Test
+    fun aBlobAskWhosePayloadWontDecodeIsCounted() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val neighbour = party()
+            val bad =
+                RelayEnvelope(
+                    type = FrameType.BLOB_REQ,
+                    id = "blobreq-bad",
+                    senderId = neighbour.nodeId,
+                    sentAt = 7L,
+                    payload = UNDECODABLE,
+                )
+            rig.pipeline.onDeliver(
+                WireEnvelope(relay = false, sig = ByteArray(0), signed = WireCodec.encodeEnvelope(bad)),
+                bad,
+                neighbour.nodeId,
+            )
+            assertEquals(1L, rig.drops(DropReason.PAYLOAD_DECODE_FAILED))
+        }
+
+    @Test
+    fun aReceiptAReactionAndALeaveWhosePayloadsWontDecodeAreEachCounted() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.pin(alice)
+            for (type in listOf(FrameType.RECEIPT, FrameType.REACTION, FrameType.GROUP_LEAVE)) {
+                rig.deliver(alice, RelayEnvelope(type = type, id = "$type-1", senderId = alice.nodeId, sentAt = 7L, payload = UNDECODABLE))
+            }
+            assertEquals(3L, rig.drops(DropReason.PAYLOAD_DECODE_FAILED))
+            coVerify(exactly = 0) { rig.receipts.record(any(), any(), any(), any()) }
+            coVerify(exactly = 0) { rig.groups.recordDeparture(any(), any(), any()) }
+        }
+
+    @Test
+    fun aRoomChatWhosePayloadWontDecodeIsCountedAndNotSaved() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.pin(alice)
+            rig.deliver(
+                alice,
+                RelayEnvelope(type = FrameType.CHAT, id = "c-1", senderId = alice.nodeId, sentAt = 7L, payload = UNDECODABLE),
+            )
+            assertEquals("counted once, not again at the carry gate", 1L, rig.drops(DropReason.PAYLOAD_DECODE_FAILED))
+            assertNull(rig.msgMap["c-1"])
+        }
+
+    @Test
+    fun theCarryGateRefusesAnUndecodablePayloadWithoutCountingIt() =
+        runTest {
+            // The gate runs before any signature check, for every frame a carrier sees; only delivery counts (AND-12).
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.pin(alice)
+            val env = RelayEnvelope(type = FrameType.CHAT, id = "c-3", senderId = alice.nodeId, sentAt = 7L, payload = UNDECODABLE)
+            assertFalse(rig.pipeline.canCarry(alice.sign(env), env))
+            assertEquals(0L, rig.drops(DropReason.PAYLOAD_DECODE_FAILED))
+        }
+
+    @Test
+    fun aProfileWhosePayloadWontDecodeIsCountedAndPinsNothing() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            val env =
+                RelayEnvelope(
+                    type = FrameType.PROFILE,
+                    id = "profile-${alice.nodeId}-7",
+                    senderId = alice.nodeId,
+                    sentAt = 7L,
+                    payload = UNDECODABLE,
+                )
+            rig.deliver(alice, env)
+            assertEquals("counted once, not again at the carry gate", 1L, rig.drops(DropReason.PAYLOAD_DECODE_FAILED))
+            assertNull(rig.peerMap[alice.nodeId])
+        }
+
+    @Test
     fun typingCueForAnUnknownGroupIsIgnored() =
         runTest {
             val rig = Rig(backgroundScope)
@@ -7166,6 +7275,9 @@ class InboundPipelineTest {
 
     private companion object {
         const val HYBRID_TEMPLATE = "DHKEM_X25519_HKDF_SHA256_HKDF_SHA256_AES_256_GCM_RAW"
+
+        /** CBOR for the integer 1: a valid item that no content type is, so every payload read fails on it (AND-12). */
+        val UNDECODABLE = byteArrayOf(0x01)
 
         /** Era/skew offsets in the reset-heuristic cases are all whole hours. */
         const val HOUR_MS = 60 * 60_000L
