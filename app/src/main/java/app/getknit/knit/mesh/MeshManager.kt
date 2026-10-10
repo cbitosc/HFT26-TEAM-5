@@ -2891,6 +2891,10 @@ class MeshManager(
      * avatar itself — but if this stayed the one sealed frame still carrying a cleartext mime, then
      * mime-presence would itself become a fresh distinguisher, sorting sealed frames into "profile update"
      * and "user message" for any carrier. Nulling it here is what stops the fix creating a new signal.
+     *
+     * A ctl DM is a v2 seal, so it goes only to a peer whose pinned profile carries [Protocol.CAP_RATCHET], the bit
+     * [canSealTickTo] asks for: a v1-only reader (an iPhone today) could open none, and `ratchet.sealDm` would otherwise
+     * start an X3DH off whatever prekey it found (the interop audit's IOS-7).
      */
     private suspend fun sendCtlDm(
         peerId: String,
@@ -2898,8 +2902,9 @@ class MeshManager(
         avatarHash: String?,
         me: String,
     ): Boolean {
-        val peer = peers.find(peerId)
-        val bundle = peer?.pubKey?.let { PublicKeyBundle.decode(it) } ?: return false
+        val peer = peers.find(peerId) ?: return false
+        if ((peer.capabilities ?: 0L) and Protocol.CAP_RATCHET == 0L) return false
+        val bundle = peer.pubKey?.let { PublicKeyBundle.decode(it) } ?: return false
         val id = FrameId.new()
         val now = clock()
         val aad = MessageCrypto.header(id, me, now, peerId)
