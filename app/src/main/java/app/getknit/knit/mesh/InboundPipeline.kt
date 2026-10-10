@@ -332,14 +332,14 @@ class InboundPipeline(
     }
 
     /**
-     * [WireCodec.decodePayload], counting a payload that won't decode as
+     * [WireCodec.decodeChecked], counting a payload that won't decode, or holds text that isn't UTF-8, as
      * [DropReason.PAYLOAD_DECODE_FAILED] — once per frame, where its handler reads it after [verifyInbound] (and a
      * profile's in-band key, which the verify itself needs). A re-read of a payload already counted, and the carry gate,
-     * which runs before any signature check, use the uncounted [WireCodec.decodePayload], so carried traffic and
+     * which runs before any signature check, use the uncounted [WireCodec.decodeChecked], so carried traffic and
      * unsigned junk don't swamp the count a port's regressed encoder should show in Diagnostics (AND-12).
      */
     private inline fun <reified T> decodeCounted(payload: ByteArray): T? =
-        WireCodec.decodePayload<T>(payload).also { if (it == null) metrics.onDropped(DropReason.PAYLOAD_DECODE_FAILED) }
+        WireCodec.decodeChecked<T>(payload).also { if (it == null) metrics.onDropped(DropReason.PAYLOAD_DECODE_FAILED) }
 
     /**
      * Routes a verified inbound frame to its type handler. A plain `when` over the type string: an unknown
@@ -564,7 +564,7 @@ class InboundPipeline(
                     if (countDecode) {
                         decodeCounted<ProfileContent>(env.payload)
                     } else {
-                        WireCodec.decodePayload<ProfileContent>(env.payload)
+                        WireCodec.decodeChecked<ProfileContent>(env.payload)
                     }
                 profile?.pubKey?.let { PublicKeyBundle.decode(it) }
             }
@@ -1785,7 +1785,7 @@ class InboundPipeline(
         // base key", and which one — our local epoch `pe`, or the signed prekey when `pe` is 0 — is what
         // separates two peers sitting in different eras from a swept retention window. Cheap, and drops are
         // already rate-limited by being drops.
-        val r = WireCodec.decodePayload<ChatContent>(env.payload)?.enc?.r
+        val r = WireCodec.decodeChecked<ChatContent>(env.payload)?.enc?.r
         Log.w(TAG, "drop v2 chat ${env.id}: $outcome se=${r?.se} pe=${r?.pe} n=${r?.n} init=${r?.init != null}")
         // AEAD_FAIL joins the two missing-state cases as a reset trigger. It is the *split-brain* failure —
         // both sides hold a session and the roots disagree — and it is the only one that cannot resolve
@@ -2006,7 +2006,7 @@ class InboundPipeline(
     ): Boolean {
         if (env.type == FrameType.CHAT) {
             // Uncounted: the carry gate runs before the signature is checked, and the delivery path counts the frame.
-            val content = WireCodec.decodePayload<ChatContent>(env.payload) ?: return false
+            val content = WireCodec.decodeChecked<ChatContent>(env.payload) ?: return false
             val isBroadcast = env.recipientId == null && env.group == null
             if (!isBroadcast && content.enc == null) return false // DM/group must be carried encrypted
         }
@@ -2044,7 +2044,7 @@ class InboundPipeline(
         via: String? = null,
     ) {
         if (env.type != FrameType.CHAT) return
-        val hash = WireCodec.decodePayload<ChatContent>(env.payload)?.attachmentHash ?: return
+        val hash = WireCodec.decodeChecked<ChatContent>(env.payload)?.attachmentHash ?: return
         if (blobStore.has(hash)) return
         if (copyFromOwnStore(hash, env.senderId)) return
         if (blobs.carrierOnlyBlobBytes() >= CARRIER_BLOB_BUDGET_BYTES) return

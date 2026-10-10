@@ -1,6 +1,7 @@
 package app.getknit.knit
 
 import app.getknit.knit.mesh.ArrivingFile
+import app.getknit.knit.mesh.DropReason
 import app.getknit.knit.mesh.FileKind
 import app.getknit.knit.mesh.FileMeta
 import app.getknit.knit.mesh.InboundFrame
@@ -184,6 +185,28 @@ class FramedLinkTest {
         assertNotNull("a FRAME record should surface as onInbound", got)
         assertEquals("m1", got!!.envelope.id)
         assertEquals("sender01", got.fromNodeId)
+    }
+
+    @Test
+    fun frameWhoseSignedTextIsNotUtf8IsDroppedAsUndecodable() {
+        // IOS-5 (ADR 2026-10.qjap): the id's last byte becomes 0xFF, which kotlinx would repair into U+FFFD.
+        val metrics = MeshMetrics()
+        val h = harness(nodeId = "sender01", metrics = metrics)
+        val env = RelayEnvelope(type = FrameType.CHAT, id = "m1-QQ", senderId = "sender01", payload = ByteArray(0))
+        val signed = WireCodec.encodeEnvelope(env)
+        signed[signed.indexOfFirst { it == 'Q'.code.toByte() } + 1] = 0xFF.toByte()
+        writeRecord(h.toLink, LinkFraming.Type.FRAME, WireCodec.encodeWire(WireEnvelope(sig = byteArrayOf(1), signed = signed)))
+        // A good frame behind it proves the read loop got past the bad one.
+        writeRecord(h.toLink, LinkFraming.Type.FRAME, frameBytes(id = "m2", senderId = "sender01"))
+        assertEquals(
+            "m2",
+            h.callbacks.inbound
+                .poll(2, TimeUnit.SECONDS)
+                ?.envelope
+                ?.id,
+        )
+        assertNull(h.callbacks.inbound.poll())
+        assertEquals(1L, metrics.frames().dropsByReason[DropReason.DECODE_FAILED])
     }
 
     @Test

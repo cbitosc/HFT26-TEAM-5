@@ -1774,6 +1774,20 @@ class InboundPipelineTest {
         }
 
     @Test
+    fun aRoomChatWhoseBodyIsNotUtf8IsCountedAndNotSaved() =
+        runTest {
+            // kotlinx would repair the body into U+FFFD; iOS refuses the payload, and so does Android now (ADR 2026-10.qjap).
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.pin(alice)
+            val payload = WireCodec.encodePayload(ChatContent(body = "hi-Q"))
+            payload[payload.size - 1] = 0xFF.toByte()
+            rig.deliver(alice, RelayEnvelope(type = FrameType.CHAT, id = "c-2", senderId = alice.nodeId, sentAt = 7L, payload = payload))
+            assertEquals("counted once, not again at the carry gate", 1L, rig.drops(DropReason.PAYLOAD_DECODE_FAILED))
+            assertNull(rig.msgMap["c-2"])
+        }
+
+    @Test
     fun aProfileWhosePayloadWontDecodeIsCountedAndPinsNothing() =
         runTest {
             val rig = Rig(backgroundScope)

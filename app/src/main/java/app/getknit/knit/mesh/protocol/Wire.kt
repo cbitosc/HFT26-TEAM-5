@@ -839,11 +839,22 @@ object WireCodec {
 
     fun encodeEnvelope(env: RelayEnvelope): ByteArray = cbor.encodeToByteArray(env)
 
-    /** Decodes the signed routing envelope from [signed], or null if malformed. */
-    fun decodeEnvelope(signed: ByteArray): RelayEnvelope? = runCatching { cbor.decodeFromByteArray<RelayEnvelope>(signed) }.getOrNull()
+    /**
+     * Decodes the signed routing envelope from [signed], or null if malformed — and null if any text string in it isn't
+     * valid UTF-8, which kotlinx would repair silently and iOS refuses ([CborText], ADR 2026-10.qjap). Every plane
+     * decodes `signed` here, so such a frame is never delivered, carried, relayed or listed in a digest.
+     */
+    fun decodeEnvelope(signed: ByteArray): RelayEnvelope? =
+        if (!CborText.validUtf8(signed)) null else runCatching { cbor.decodeFromByteArray<RelayEnvelope>(signed) }.getOrNull()
 
     inline fun <reified T> encodePayload(content: T): ByteArray = cbor.encodeToByteArray(content)
 
-    /** Decodes the opaque per-type [payload] into [T], or null if absent/malformed. */
+    /**
+     * Decodes the opaque per-type [payload] into [T], or null if absent/malformed. Text isn't checked here: a caller that
+     * acts on a peer's payload uses [decodeChecked].
+     */
     inline fun <reified T> decodePayload(payload: ByteArray): T? = runCatching { cbor.decodeFromByteArray<T>(payload) }.getOrNull()
+
+    /** [decodePayload], and null if any text string in [payload] isn't valid UTF-8, as iOS refuses it (ADR 2026-10.qjap). */
+    inline fun <reified T> decodeChecked(payload: ByteArray): T? = if (CborText.validUtf8(payload)) decodePayload<T>(payload) else null
 }

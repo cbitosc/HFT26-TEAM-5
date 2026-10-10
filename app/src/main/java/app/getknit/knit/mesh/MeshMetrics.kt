@@ -106,8 +106,8 @@ enum class DropReason {
     INGRESS_REFUSED,
 
     /**
-     * A verified frame whose `payload` wouldn't decode into its type's content: a field of the wrong CBOR type or a
-     * missing required one. Counted where the pipeline reads the payload, so a regressed
+     * A verified frame whose `payload` wouldn't decode into its type's content: a field of the wrong CBOR type, a
+     * missing required one, text that isn't UTF-8. Counted where the pipeline reads the payload, so a regressed
      * encoder on another port shows here instead of vanishing (the interop audit's AND-12).
      */
     PAYLOAD_DECODE_FAILED,
