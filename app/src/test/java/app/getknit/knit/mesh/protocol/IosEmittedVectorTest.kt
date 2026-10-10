@@ -83,7 +83,12 @@ class IosEmittedVectorTest {
         assertEquals(relay.senderId, NodeId.fromPublicKeyBundle(checkNotNull(profile.pubKey)))
         assertEquals(DeviceTag.derive("vector-device-carol"), profile.deviceTag)
         assertEquals(Protocol.VERSION, profile.protoVersion)
-        assertEquals(0x9L, profile.capabilities)
+        val caps = checkNotNull(profile.capabilities)
+        assertEquals(
+            Protocol.CAP_E2E or Protocol.CAP_GROUPS or Protocol.CAP_REACTIONS or Protocol.CAP_STORE_FORWARD,
+            caps,
+        )
+        assertEquals("no ratchet: Android must keep sealing v1 to her", 0L, caps and Protocol.CAP_RATCHET)
     }
 
     @Test
