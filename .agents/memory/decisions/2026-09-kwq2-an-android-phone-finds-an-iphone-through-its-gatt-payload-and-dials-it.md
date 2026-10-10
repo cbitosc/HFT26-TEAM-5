@@ -131,3 +131,11 @@ flags byte as `0x03` on both phones.
 One peer-above run on the Pixel 3 made no read for 180 s. Its presence scan ran with the UUID filter the whole
 time, and every window returned only the three Android phones in reach, so knit-peer's advert never arrived: rig
 side.
+
+**Amended 2026-10-10 (AND-3): a GATT-sighted iPhone's life once it backgrounds.** A foreground iPhone read here is
+sighted, so it was judged and scored as an Android peer is. Once it went to the background this phone stopped
+hearing it, and for the 90 s presence linger its re-dial from below was refused as a sighted dialer's, after which
+its live link scored −127 and was the first shed at the 6-link budget. Both now key on the `CAP_DOORBELL` bit in
+the link's HELLO (ADR 2026-09.shzv's AND-3 amendment): such a link scores the −90 floor out of presence, and such a
+dialer is sighted for admission only if heard within 12 s. The "backgrounded iPhone" limit above still holds for a
+first link: this phone cannot sight one and so never dials it, and one below a flagged phone still waits.

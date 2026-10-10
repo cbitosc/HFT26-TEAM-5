@@ -314,6 +314,11 @@ class BluetoothMeshTransport(
     // Freshest BluetoothDevice per nodeId (updated every sighting, so a rotated random address re-associates).
     private val deviceFor = ConcurrentHashMap<String, BluetoothDevice>()
 
+    // The node ids whose latest sighting came through a GATT payload (an iPhone, kwq2) rather than service data: this
+    // phone's own evidence that a dialer claiming CAP_DOORBELL in its unauthenticated HELLO is one (AND-3). Kept with
+    // [deviceFor], not the payload, which the quiet rule can forget inside presence's 90 s linger.
+    private val gattSighted = ConcurrentHashMap.newKeySet<String>()
+
     // Presence model (smoothed RSSI + dwell + linger) fed by scan sightings; drives promotion + `reachable`.
     private val presence = BlePresenceTracker(codedCreditDb = { CodedPhyDiag.tuning.codedCreditDb })
 
@@ -585,6 +590,7 @@ class BluetoothMeshTransport(
         landing.clear() // after the links: a reader still running could land a file the next session never takes
         presence.clear()
         deviceFor.clear()
+        gattSighted.clear()
         codedDeviceFor.clear()
         codedCapable.clear()
         codedTallies.clear()
@@ -1864,7 +1870,7 @@ class BluetoothMeshTransport(
         }
         if (!gattPeers || record.serviceUuids?.contains(BleConstants.SERVICE_UUID) != true) return
         val read = gattPayloads.heard(result.device.address)
-        if (read != null) sight(read, result.device, result.rssi) else maybeReadGatt(result.device, result.rssi)
+        if (read != null) sight(read, result.device, result.rssi, viaGatt = true) else maybeReadGatt(result.device, result.rssi)
     }
 
     /** The peer [parsed] names is here, on [device] at [rssi]: presence, the side channel's audience, and the loops. */
@@ -1873,8 +1879,10 @@ class BluetoothMeshTransport(
         device: BluetoothDevice,
         rssi: Int,
         coded: Boolean = false,
+        viaGatt: Boolean = false,
     ) {
         if (parsed.nodeId == localNodeIdOrEmpty()) return
+        if (viaGatt) gattSighted.add(parsed.nodeId) else gattSighted.remove(parsed.nodeId)
         if (coded) {
             // Its Coded set's address is not its presence advert's: kept apart, so a dial picks the PHY it opens on.
             codedDeviceFor[parsed.nodeId] = device
@@ -1942,7 +1950,7 @@ class BluetoothMeshTransport(
                 when (val outcome = result.outcome) {
                     is GattPayloads.Outcome.Read -> {
                         Log.i(TAG, "bt gatt read $address → ${outcome.payload.nodeId} (psm ${outcome.payload.psm})")
-                        sight(outcome.payload, device, rssi)
+                        sight(outcome.payload, device, rssi, viaGatt = true)
                     }
 
                     GattPayloads.Outcome.Failed -> {
@@ -2054,6 +2062,16 @@ class BluetoothMeshTransport(
             LonelyDialPolicy.msUntilDue(localNodeId, links.size, aloneForMs(), lonelyCandidates(snaps), lonelyDialInFlight())
         }
 
+    /**
+     * What [fl] scores for eviction ([BleAdmissionPolicy.linkRssi]). The doorbell bit is the HELLO's, which
+     * [registerLink] keeps in `peer` on a dialed link and an accepted one alike: a doorbell link gone from presence is
+     * a backgrounded iPhone still linked, scored the floor (interop audit AND-3).
+     */
+    private fun linkScore(
+        fl: FramedLink,
+        rssiByNode: Map<String, Double>,
+    ): Double = BleAdmissionPolicy.linkRssi(rssiByNode[fl.nodeId], fl in neverSighted, DoorbellPolicy.serves(fl.peer.capabilities))
+
     private fun driveConnections() {
         val now = elapsed()
         val snaps = presence.snapshots(now)
@@ -2067,7 +2085,7 @@ class BluetoothMeshTransport(
             scored.values.map { fl ->
                 PromotionPolicy.LinkSnapshot(
                     nodeId = fl.nodeId,
-                    smoothedRssi = BleAdmissionPolicy.linkRssi(rssiByNode[fl.nodeId], neverSighted = fl in neverSighted),
+                    smoothedRssi = linkScore(fl, rssiByNode),
                     ageMs = now - fl.linkStartedAt,
                     idleMs = now - fl.lastActivityAt,
                 )
@@ -2090,7 +2108,12 @@ class BluetoothMeshTransport(
         if (decision.promote.isNotEmpty() || decision.evict.isNotEmpty()) {
             Log.i(TAG, "promote=${decision.promote} evict=${decision.evict} backoff=$backoff a2dp=${audioMonitor.state.value}")
         }
-        decision.evict.forEach { id -> scored[id]?.let { teardownLink(id, "evicted", only = it) } }
+        decision.evict.forEach { id ->
+            val fl = scored[id] ?: return@forEach
+            val score = linkSnaps.firstOrNull { it.nodeId == id }?.smoothedRssi?.toInt()
+            Log.i(TAG, "bt evicting $id (score=$score doorbell=${DoorbellPolicy.serves(fl.peer.capabilities)})")
+            teardownLink(id, "evicted", only = fl)
+        }
         // A GATT read is a connection too; a dial waits for it (the read's end wakes this loop), as a read waits for a dial.
         if (gattPayloads.current == null) dial(decision.promote, lonely)
     }
@@ -2232,12 +2255,21 @@ class BluetoothMeshTransport(
         val admitSighted = CodedPhyPolicy.sightedForAdmission(snap, codedOn())
         val heldAgeMs = links[clientNodeId]?.let { elapsed() - it.linkStartedAt }
         val atCap = debugCap?.let { links.size + inFlightSnapshot().size >= it } ?: false
-        val verdict = BleAdmissionPolicy.decide(localNodeId, clientNodeId, admitSighted, heldAgeMs, atCap)
+        // A doorbell dialer (an iPhone) counts as sighted only if heard within 12 s: backgrounded, it is unheard while
+        // the linger still holds it (interop audit AND-3). The HELLO's bit is taken only with our own evidence behind it,
+        // so a claimed id can't pull a sighted Android peer into the unsighted rows. Logged for a claim alone.
+        val claimed = DoorbellPolicy.serves(advert.capabilities)
+        val heldDoorbell = links[clientNodeId]?.let { DoorbellPolicy.serves(it.peer.capabilities) }
+        val doorbell = BleAdmissionPolicy.doorbellTrusted(claimed, heldDoorbell, sighted, clientNodeId in gattSighted)
+        val heardAgoMs = snap?.lastSeenAgoMs
+        val trust = if (doorbell) "" else " doorbellTrusted=false"
+        val why = if (claimed) " doorbell=true heardAgoMs=$heardAgoMs inPresence=$sighted$trust" else ""
+        val verdict = BleAdmissionPolicy.decide(localNodeId, clientNodeId, admitSighted, heldAgeMs, atCap, doorbell, heardAgoMs)
         if (verdict == BleAdmissionPolicy.Verdict.Refuse) {
             Log.i(
                 TAG,
                 "bt refused client $clientNodeId (sighted=$sighted codedOnly=${sighted && !admitSighted} " +
-                    "heldAgeMs=$heldAgeMs atCap=$atCap)",
+                    "heldAgeMs=$heldAgeMs atCap=$atCap$why)",
             )
             link.close()
             armUnlinked(socket.remoteDevice, clientNodeId) // most often a sighted lonely dialer (hj4a)
@@ -2250,7 +2282,7 @@ class BluetoothMeshTransport(
             armUnlinked(socket.remoteDevice, clientNodeId)
             return
         }
-        Log.i(TAG, "bt accepted client $clientNodeId ($verdict, sighted=$sighted codedOnly=${sighted && !admitSighted})")
+        Log.i(TAG, "bt accepted client $clientNodeId ($verdict, sighted=$sighted codedOnly=${sighted && !admitSighted}$why)")
         registerLink(clientNodeId, advert, link, sighted, socket.remoteDevice)
     }
 
@@ -2515,6 +2547,7 @@ class BluetoothMeshTransport(
                             cancelGattRead()
                             presence.clear()
                             deviceFor.clear()
+                            gattSighted.clear()
                             codedDeviceFor.clear()
                             sideCapable.clear()
                             synchronized(lock) {
@@ -2734,6 +2767,7 @@ class BluetoothMeshTransport(
     /** Periodic one-line state dump (mirrors WifiAwareTransport's), so a device session is greppable end-to-end. */
     private fun logState() {
         val now = elapsed()
+        val rssiByNode = presence.snapshots(now).associate { it.nodeId to it.smoothedRssi }
         val backoffStr =
             synchronized(lock) {
                 backoffs.entries.joinToString(",") { (id, b) ->
@@ -2760,7 +2794,8 @@ class BluetoothMeshTransport(
                 ) +
                 (if (gattPeers) " gattPayloads=${gattPayloads.payloadCount} gattReads=${gattReads.get()}" else "") +
                 (if (codedOn()) " phy=${codedMode.wire} coded=$codedAdvert phyLinks=${phyControls.size} hunt=$hunting" else "") +
-                (sideChannel?.let { " ${it.diag()} $sideDecision" } ?: ""),
+                (sideChannel?.let { " ${it.diag()} $sideDecision" } ?: "") +
+                " linkScores=${links.values.joinToString(",") { "${it.nodeId}:${linkScore(it, rssiByNode).toInt()}" }}",
         )
     }
 

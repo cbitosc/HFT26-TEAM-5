@@ -63,8 +63,10 @@ Bluetooth-adjacent routing that stays in `AGENTS.md`, because another subsystem 
   2026-09.shzv and ADR 2026-09.hj4a. A dialer presence holds is judged by the old tie-break, unchanged — the
   Android mesh must not move. Only an unsighted dialer (an iPhone
   advertises no service data, so it is never sighted and never dialed) is admitted whatever the id order, and its
-  second link replaces the first only once the held one is 30 s old. A teardown passes the link it means
-  (`only =`) — never re-key it by node id alone — and only a never-sighted link scores the −90 floor. The one
+  second link replaces the first only once the held one is 30 s old. A `CAP_DOORBELL` dialer (an iPhone) counts as
+  sighted only if heard within 12 s (`DOORBELL_HEARD_MS`, shzv's AND-3 amendment), so a backgrounded iPhone's re-dial
+  gets in. A teardown passes the link it means (`only =`) — never re-key it by node id alone — and only a
+  never-sighted link or a `CAP_DOORBELL` one scores the −90 floor out of presence; any other gone from presence −127. The one
   exception to "larger dials" is hj4a's lonely dial: after 180 s with **no** link (`noLinkSince`, the clock the
   scan's lonely cadence shares) a node dials the strongest larger id it sights, one at a time, and it rests on the unsighted admit:
   a responder that sighted the newcomer refuses it and dials it itself. Its oracle, `bt lonely dial <id> (…)`, is

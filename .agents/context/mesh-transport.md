@@ -378,8 +378,20 @@ first once the held one is 30 s old (`REPLACE_MIN_HOLD_MS`). Each link has its o
 `teardownLink(…, only = link)` releases the slot only while that link holds it — the link's own end and an
 eviction both pass the link they mean; the replaced link's `onLinkDown` used to remove its replacement. A link
 the scan has not once sighted (`neverSighted`) scores the promotion floor (−90 dBm); a sighted peer that left
-presence still scores −127. Oracle: `bt accepted client <id> (<verdict>, sighted=<bool>)` and `bt refused client
-<id> (…)` at debug. Tests: `BleAdmissionPolicyTest`; the lab has no radio layer.
+presence still scores −127, unless its HELLO carried `CAP_DOORBELL`.
+
+A backgrounded iPhone (AND-3, the shzv amendment of 2026-10-10): its UUID moves to Apple's overflow area, so this
+phone stops hearing it and it leaves presence 90 s later. A link whose HELLO carried `CAP_DOORBELL`
+(`FramedLink.peer.capabilities`; Android never sets it) scores −90 out of presence, never −127, so it is not the
+first shed at the budget, though a candidate 8 dB stronger still replaces it. A doorbell dialer counts as sighted
+for admission (`BleAdmissionPolicy.doorbellTrusted`: the HELLO's bit counts only if any held link's HELLO
+carried it too and a peer in presence was last sighted through its GATT payload, `gattSighted`) only if presence heard it within `DOORBELL_HEARD_MS` (12 s, `Snapshot.lastSeenAgoMs`), else it takes
+the unsighted rows. That is wall-clock age, and the scan is duty-cycled, so a foreground iPhone's dial from below is
+often admitted too; the error only leans toward linking. Oracle: `bt accepted client <id> (<verdict>,
+sighted=<b> codedOnly=<b>[ doorbell=true heardAgoMs=<ms|null> inPresence=<b>[ doorbellTrusted=false]])` and `bt refused client <id>
+(sighted=<b> codedOnly=<b> heldAgeMs=<ms|null> atCap=<b>[ …same suffix])` at info; an eviction logs `bt evicting
+<id> (score=<dBm> doorbell=<b>)`, and a debug `bt state` ends `linkScores=<id>:<dBm>,…`. Tests:
+`BleAdmissionPolicyTest`, `PromotionPolicyTest`; the lab has no radio layer.
 
 ## A lonely node dials a larger peer it sights (ADR 2026-09.hj4a)
 
@@ -497,7 +509,7 @@ characteristic `848eedcd-a2e3-4fb2-86f9-e2c80821a497` (`DoorbellPolicy.PAYLOAD_U
 Limits: in the iPhone-below order the first link waits on this phone's (possibly floored) scan cadence; a read
 during iOS's PSM-change service swap is a 10-minute stranger, kept line for line with iOS; a backgrounded iPhone
 cannot be sighted, and one below a flagged phone waits for a dial that can't come (free until iOS gains background
-discovery); an identity change at an address that never goes quiet, new node below a flagged phone and old above,
+discovery) — once linked, though, it keeps its link and its re-dial gets in (AND-3, above); an identity change at an address that never goes quiet, new node below a flagged phone and old above,
 keeps the old sighting until the address rotates or goes quiet. Oracle: `bt gatt read <addr> → <id>` /
 `failed (<phase>)` / `stranger (<phase>)` and `bt gatt forget <addr> (dial|hello <id>|quiet)` at info, `bt gatt reading <addr>` at debug, `gattPayloads=`/`gattReads=` on `bt state`. Tests:
 `GattPayloadsTest`, `BleAdvertPayloadTest`, `DoorbellPolicyTest`; the reader is device-verified only.

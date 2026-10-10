@@ -110,3 +110,66 @@ One behaviour changes. A *sighted* iPhone's redial over a held link is now refus
 the held link fails. #102's 5 s supervision timeout makes that wait longer than the 720 ms one did, and the
 iPhone's 10 s dial backoff covers it. The comments that said nothing on this side ever dials an iPhone are updated
 (`BleAdmissionPolicy`, `BluetoothMeshTransport.neverSighted`, `BleScanner`).
+
+**Amended 2026-10-10 (AND-3, a paired change with knit-ios): a backgrounded iPhone keeps its link and gets back
+in.** A foreground iPhone is sighted through its GATT payload (kwq2), so its link scores its smoothed RSSI and the
+`neverSighted` floor never applies to it. Once Knit leaves the front, its UUID moves to Apple's overflow area, this
+phone stops hearing it, and 90 s later it leaves presence. Its link then scored −127 and was the first shed at the
+6-link budget, and for those 90 s its re-dial was refused whenever our id sorted larger: it was still "sighted".
+
+`CAP_DOORBELL` (`0x1000`) in the link's HELLO is the marker for a peer this phone loses sight of in the background.
+Android never claims it; every iPhone that serves the doorbell does, and so does knit-peer's `ios` profile. It is
+read from `FramedLink.peer.capabilities`, which `registerLink` builds from the HELLO on both sides (the dialer's on
+an accepted link, the reply on a dialed one). Two rules:
+
+- **The score.** `BleAdmissionPolicy.linkRssi(…, doorbell = true)` scores `UNSIGHTED_LINK_RSSI` (−90) while the
+  peer is out of presence, never −127; in presence it scores the smoothed RSSI as before. Such a link is shed by a
+  candidate 8 dB above −90, as any floor-scored link is, and kept against a weaker one. Every other link keeps the
+  old rule.
+- **Admission.** A doorbell dialer counts as sighted, for the below-us refusal and the linked refusal, only if
+  presence heard it within `DOORBELL_HEARD_MS` (12 000 ms, equal to `PromotionConfig.dwellThresholdMs`; read from
+  `Snapshot.lastSeenAgoMs`). Otherwise it takes the unsighted rows: admitted in either order, and replacing a held
+  link once that link is 30 s old. An iPhone heard that recently is in front, and this phone can dial it; one it
+  can no longer hear may be in the background, where its own dial is its only way back. `CodedPhyPolicy.sightedForAdmission`
+  still feeds the `sighted` input.
+
+The parallel iOS change (`iphone-dials-flagged-android`) has a foreground iPhone dial a flagged larger Android after a
+15 s head start. That dial is refused only when this phone heard the iPhone within 12 s, which between
+duty-cycled scan windows it often has not, so the dial is often admitted (below).
+
+The HELLO's bit alone is not trusted: the HELLO is unauthenticated, and a device claiming a sighted Android
+peer's id with `0x1000` set would otherwise take the unsighted rows whenever that peer was 12 s unheard (most
+of a screen-off phone's scan cycle) and replace its link every 30 s. So the bit counts for admission only when
+this phone's own evidence agrees on both counts (`BleAdmissionPolicy.doorbellTrusted`): a link held to that id
+must have carried it in its own HELLO, and a peer presence holds must have been last sighted through a GATT
+payload (the iPhone path, kwq2; `gattSighted`, cleared by any service-data sighting). A peer presence holds
+through service data never takes the doorbell rows, even under a link that once got in claiming the bit. A
+genuine iPhone, or knit-peer's `ios` profile, meets both every time. The score needs no such check: it reads
+the held link's own HELLO, and only a link already admitted has one.
+
+The score is not monotonic: a doorbell link in presence scores its smoothed RSSI, which can sit below the −90 it
+would score once out of presence, so at the budget a far foreground iPhone is shed before a backgrounded one. That is
+rare and was left as the contract states it.
+
+The 12 s is wall-clock age of the last sighting, not listening time. The presence scan is duty-cycled (12 s windows
+every 30 s while interactive, longer gaps idle or settled), so a foreground iPhone is often more than 12 s since last
+heard between windows, and its dial is then admitted: it ends up the central, and #102's BALANCED ask still runs.
+The error only ever leans toward linking. The HELLO is unauthenticated, so a device claiming the id of an iPhone this phone
+holds a doorbell link to, or sighted through its GATT payload, can take the unsighted rows between scan windows, which is the exposure the original
+decision accepted for an unsighted peer: a slot under that id, a replace at most once per 30 s, frames still signed.
+
+Considered and not taken: measuring the 12 s on 1M listening time (`BlePresenceTracker`'s `oneMClock`, as
+`codedLagMs` is), so the rule reads the iPhone's state rather than our duty cycle; and counting a dialer we hold a
+dial in flight to as sighted, to curb crossed dials. Both would cut the cross-dial churn between scan windows, but
+the error they fix only leans toward linking, and #102 still brings an iPhone-dialed link to a 5 s timeout.
+
+Oracle: `bt accepted client <id> (<verdict>, sighted=<b> codedOnly=<b> doorbell=true heardAgoMs=<ms|null>
+inPresence=<b>)` and `bt refused client <id> (sighted=<b> codedOnly=<b> heldAgeMs=<ms|null> atCap=<b> doorbell=true
+heardAgoMs=<ms|null> inPresence=<b>)`; the `doorbell=` suffix appears only when the HELLO claims the bit, so Android
+lines are unchanged, and it ends ` doorbellTrusted=false` when this phone's evidence rejected the claim. An eviction logs `bt evicting <id> (score=<dBm> doorbell=<b>)` between the `promote=… evict=…` line and
+`bt link down: <id> (evicted)`, and a debug build's `bt state` line ends `linkScores=<id>:<dBm>,…`. Tests:
+`BleAdmissionPolicyTest`'s doorbell rows and `PromotionPolicyTest.aDoorbellLinkOutOfPresenceIsScoredTheFloorNotShedFirst`.
+
+A correction to the 2026-09-29 amendment: `FLAG_DIALS_GATT_PEERS` is no longer clear in a release build. It has been
+set in release since `713b29d6` (2026-10-08). The unsighted admit's other cases (an adapter that cannot read, an
+iPhone build that ignores the flag, a sighting from before it) still stand, and so does the backgrounded iPhone above.

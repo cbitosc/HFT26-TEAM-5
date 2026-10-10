@@ -264,7 +264,8 @@ One line per invariant, by subsystem, with the ADR to read. Not exhaustive and n
 - **Dial and admission.** The larger id dials; the one exception is the lonely dial after 180 s with no link,
   larger ids only, one in flight (shzv, hj4a). A sighted smaller dialer is refused; an unsighted one is admitted
   in either order, replacing a held link only once it is 30 s old (shzv). A teardown passes the link it means;
-  only a never-sighted link scores −90, a sighted one gone from presence −127 (shzv). Floors: −90, 12 s dwell,
+  only a never-sighted link or a `CAP_DOORBELL` one scores −90 out of presence, any other sighted one gone from
+  presence −127 (shzv); a doorbell dialer is sighted for admission only if heard within 12 s (shzv's AND-3 amendment). Floors: −90, 12 s dwell,
   8 s gap reset — don't widen it (pj9w). A GATT payload is forgotten only by the contract's three rules (kwq2).
 - **Link.** A frame crosses a link once (`LinkCrossings`); one queued digest per link (tjfb); a file fed in full
   stays in flight while the link feeds that peer, and the tick asks nothing of a peer whose file is arriving

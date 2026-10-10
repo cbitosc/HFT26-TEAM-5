@@ -111,6 +111,9 @@ document:
 - Adding an iPhone contact from their code left "Waiting to reach…" on their profile for good, and some
   messages said an update would bring an iPhone contact files, direct transfers or forward secrecy. Neither
   happens now, since Knit for iPhone doesn't offer those.
+- An iPhone with Knit in the background now stays connected to your phone over Bluetooth. Before, your phone
+  dropped it first once it had as many connections as it could hold, and sometimes turned the iPhone away when
+  it tried to reconnect.
 
 ## [2.8.0](https://github.com/getknit/knit/releases/tag/v2.8.0) — 2026-10-03T03:55:42Z
 

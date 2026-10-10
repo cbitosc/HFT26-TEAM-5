@@ -1,5 +1,6 @@
 package app.getknit.knit
 
+import app.getknit.knit.mesh.bluetooth.BleAdmissionPolicy
 import app.getknit.knit.mesh.bluetooth.BlePresenceTracker
 import app.getknit.knit.mesh.bluetooth.PromotionConfig
 import app.getknit.knit.mesh.bluetooth.PromotionPolicy
@@ -113,6 +114,28 @@ class PromotionPolicyTest {
             )
         assertEquals(listOf("new"), d.promote)
         assertEquals(listOf("weak"), d.evict)
+    }
+
+    @Test
+    fun aDoorbellLinkOutOfPresenceIsScoredTheFloorNotShedFirst() {
+        // A backgrounded iPhone's link (interop audit AND-3): out of presence it scores −90, not −127, so a weak
+        // candidate no longer evicts it at the budget. A floor low enough to let the −100 dBm candidate through
+        // isolates the hysteresis; at the shipped −90 floor it never promotes at all.
+        val lowFloor = PromotionConfig(rssiFloorDbm = -110)
+        val strong = (1..5).map { link("s$it", -60.0) }
+        val doorbell = link("iphone", BleAdmissionPolicy.linkRssi(null, neverSighted = false, doorbell = true))
+        val absent = link("iphone", BleAdmissionPolicy.linkRssi(null, neverSighted = false))
+
+        val weak = PromotionPolicy.decide(listOf(cand("far", -100.0)), strong + doorbell, emptySet(), lowFloor)
+        assertTrue("−100 is within 8 dB of −90", weak.promote.isEmpty() && weak.evict.isEmpty())
+        // The same link scored the old way would have gone.
+        val before = PromotionPolicy.decide(listOf(cand("far", -100.0)), strong + absent, emptySet(), lowFloor)
+        assertEquals(listOf("iphone"), before.evict)
+
+        // As for any −90 link, a candidate 8 dB clear of it still replaces it.
+        val clear = PromotionPolicy.decide(listOf(cand("near", -82.0)), strong + doorbell, emptySet(), PromotionConfig())
+        assertEquals(listOf("near"), clear.promote)
+        assertEquals(listOf("iphone"), clear.evict)
     }
 
     @Test
