@@ -339,6 +339,14 @@ class MeshManager(
             canSeal = { peerId -> canSealTickTo(peerId) && ratchetPrekeyOf(peers.find(peerId)) != null },
             sendIntro = ::sendIntroTo,
             sessionConfirmed = { peerId -> ratchet.sessionFor(peerId)?.confirmed == true },
+            // A profile has pinned (it carries the version and the bits; a card alone carries neither) without
+            // CAP_RATCHET: a v1-only peer no intro can reach.
+            ratchetless = { peerId ->
+                peers.find(peerId)?.let { peer ->
+                    (peer.protoVersion != null || peer.capabilities != null) &&
+                        (peer.capabilities ?: 0L) and Protocol.CAP_RATCHET == 0L
+                } == true
+            },
             // A pair peer named, evicted, lapsed or pinned is a scope-table input landing (ADR 2026-09.dcah).
             // `scopeSync` is declared below; the lambda reads it at call time, like `reopenFrame`.
             onPairsChanged = { scopeSync?.onScopeTableChanged() },

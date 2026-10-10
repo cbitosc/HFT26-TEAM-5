@@ -88,6 +88,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -850,6 +851,41 @@ class MeshManagerTest {
             rig.manager.cancelIntro(rig.bob.nodeId)
 
             coVerify(exactly = 1) { rig.settings.setIntroState(emptySet(), setOf("$carolId|${Long.MAX_VALUE}")) }
+        }
+
+    @Test
+    fun importingAnIPhonesCodeRegistersNoIntro() =
+        runTest(UnconfinedTestDispatcher()) {
+            val rig = Rig(backgroundScope)
+            coEvery { rig.settings.pendingIntros } returns MutableStateFlow(emptySet())
+            coEvery { rig.settings.introGrace } returns MutableStateFlow(emptySet())
+            // Met over the radios first: its profile pinned E2E | GROUPS | REACTIONS | STORE_FORWARD, no ratchet.
+            coEvery { rig.peers.find(rig.bob.nodeId) } returns
+                PeerEntity(
+                    nodeId = rig.bob.nodeId,
+                    pubKey = rig.bob.bundle.encoded,
+                    protoVersion = Protocol.VERSION,
+                    capabilities = 0xFL,
+                    updatedAt = 1L,
+                )
+
+            rig.manager.importContact(rig.bob.nodeId)
+
+            coVerify(exactly = 0) { rig.settings.setIntroState(any(), any()) }
+            assertNull(rig.manager.introState(rig.bob.nodeId).first())
+        }
+
+    @Test
+    fun importingACardWhoseProfileIsUnknownRegistersTheIntro() =
+        runTest(UnconfinedTestDispatcher()) {
+            val rig = Rig(backgroundScope)
+            coEvery { rig.settings.pendingIntros } returns MutableStateFlow(emptySet())
+            coEvery { rig.settings.introGrace } returns MutableStateFlow(emptySet())
+            rig.pin(rig.bob) // the card's bundle alone: no version, no bits
+
+            rig.manager.importContact(rig.bob.nodeId)
+
+            coVerify(exactly = 1) { rig.settings.setIntroState(match { set -> set.single().startsWith(rig.bob.nodeId) }, emptySet()) }
         }
 
     @Test
