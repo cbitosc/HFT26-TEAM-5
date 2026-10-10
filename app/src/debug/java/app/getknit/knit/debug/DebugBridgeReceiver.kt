@@ -2219,6 +2219,7 @@ class DebugBridgeReceiver :
                         .put("route", calls.route() ?: JSONObject.NULL)
                         .put("walkie", it.walkie)
                         .put("degraded", it.degraded)
+                        .put("peerCastTicketed", it.peerCastTicketed)
                 } ?: JSONObject.NULL,
             ).put(
                 "walkie",
@@ -2226,6 +2227,7 @@ class DebugBridgeReceiver :
                     JSONObject()
                         .put("talk", it.talk.value.toString())
                         .put("link", it.link.value?.name ?: JSONObject.NULL)
+                        .put("castTicketed", getKoin().get<MeshManager>().castTicketed())
                         .put("sent", it.sent.get())
                         .put("heard", it.heard.get())
                         .put("chunksOut", it.chunksOut.get())

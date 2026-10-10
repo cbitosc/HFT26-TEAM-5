@@ -36,6 +36,7 @@ import java.util.concurrent.ConcurrentHashMap
  * JVM tests. It is deliberately *not* a conformance oracle: `knit-spool`'s own suite is that, and the
  * byte-level record vectors are pinned by [SpoolRecordsTest] against `docs/SPOOL_PROTOCOL.md`.
  */
+
 class FakeSpool(
     private val maxPull: Int = 64,
     private val maxFrames: Int = 400,
@@ -74,6 +75,10 @@ class FakeSpool(
     private val ent: Boolean = false,
     // The credential-free STUN list HELLO advertises; null omits the field.
     private val stun: List<String>? = null,
+    // Fans out casts (experimental, docs/VOICE_CALLS.md §2.7): HELLO carries these bounds, and a CAST from a subscriber
+    // goes to every other subscriber of its scope and is never stored. With [ent], only on a scope some subscriber's
+    // accepted ticket carries the cast flag for. Null = a spool without casts, which skips a CAST unanswered.
+    private val cast: SpoolCastInfo? = null,
 ) : SpoolDialer {
     private class Attachment(
         val total: Int,
@@ -197,6 +202,7 @@ class FakeSpool(
                     turn = true.takeIf { turn },
                     ent = true.takeIf { ent },
                     stun = stun,
+                    cast = cast,
                 ),
             ),
         )
@@ -330,6 +336,14 @@ class FakeSpool(
     /** The `msg` of every `err ticket` a TURNREQ got. */
     val turnRefusals: MutableList<String> = Collections.synchronizedList(mutableListOf())
 
+    /** Every CAST this spool was sent, as scope hex — carried or dropped, the daemon's `knit_spool_casts_total`. */
+    val casts: MutableList<String> = Collections.synchronizedList(mutableListOf())
+
+    /** Copies of casts handed to subscribers, the daemon's `knit_spool_casts_fanned_total`. */
+    @Volatile
+    var castsFanned = 0
+        private set
+
     /** Every ENT this spool was sent, in order. */
     val ents: MutableList<SpoolEnt> = Collections.synchronizedList(mutableListOf())
 
@@ -443,7 +457,7 @@ class FakeSpool(
         /** A muted spool takes every correlated request and answers none — true when this one was eaten. */
         private fun swallow(bytes: ByteArray): Boolean {
             val type = SpoolCodec.peekType(bytes)
-            if (!muted || type == SpoolRecordType.HELLO || type == SpoolRecordType.SUB) return false
+            if (!muted || type in UNSWALLOWED) return false
             synchronized(swallowed) { swallowed.add(type.orEmpty()) }
             return true
         }
@@ -505,6 +519,10 @@ class FakeSpool(
 
                 SpoolRecordType.ENT -> {
                     if (ent) SpoolCodec.decode<SpoolEnt>(bytes)?.let(::onEnt) else skip(SpoolRecordType.ENT)
+                }
+
+                SpoolRecordType.CAST -> {
+                    if (cast != null) SpoolCodec.decode<SpoolCast>(bytes)?.let(::onCast) else skip(SpoolRecordType.CAST)
                 }
 
                 else -> {}
@@ -664,6 +682,25 @@ class FakeSpool(
                     ),
                 ),
             )
+        }
+
+        /**
+         * The daemon's `handleCast`: never answered, never stored. Dropped unless this connection subscribed the scope,
+         * the data fits, and — on a ticketed spool — some subscriber of the scope holds a cast-flagged ticket; then
+         * relayed unchanged to every other subscriber.
+         */
+        private fun onCast(record: SpoolCast) {
+            val scopeHex = hex(record.scope)
+            casts.add(scopeHex)
+            val bounds = cast ?: return
+            if (scopeHex !in subscribed || record.data.size > bounds.maxBytes) return
+            val others = synchronized(sockets) { sockets.toList() }.filter { scopeHex in it.subscribed }
+            if (ent && others.none { (it.ticket?.fl ?: 0L) and SpoolTicket.FL_CAST != 0L }) return
+            val relayed = SpoolCodec.encode(SpoolCast(t = SpoolRecordType.CAST, scope = record.scope, data = record.data))
+            others.filterNot { it === this }.forEach {
+                it.emit(relayed)
+                castsFanned++
+            }
         }
 
         /** A v1 spool skips an unknown record without answering — the stall a client must never provoke. */
@@ -1007,3 +1044,9 @@ private fun carried(
 
 /** How long a black-holed socket stays silent before the fake dialer gives up on it. */
 private const val BLACKHOLE_MS = 500L
+
+/**
+ * What a muted spool still handles: the handshake and the SUB (so it reads as connected), and casts, which are never
+ * answered, so a silent spool has nothing to swallow there.
+ */
+private val UNSWALLOWED = setOf(SpoolRecordType.HELLO, SpoolRecordType.SUB, SpoolRecordType.CAST)

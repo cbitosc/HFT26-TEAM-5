@@ -59,17 +59,24 @@ internal sealed interface Talk {
 
 /** The mesh as a walkie call sees its peer (§3.11): the link a chunk would take, and the call's hold on a Wi-Fi Aware one. */
 internal interface TalkLinks {
-    /** [TalkLink] to [peerId], as it changes. */
-    fun linkTo(peerId: String): Flow<TalkLink>
+    /** [TalkLink] to [peerId], as it changes; [peerTicketed] is whether its walkie signal said it holds a cast ticket. */
+    fun linkTo(
+        peerId: String,
+        peerTicketed: () -> Boolean,
+    ): Flow<TalkLink>
 
     /** Holds the Wi-Fi Aware link to [peerId] open, or raises one, for a while; false when none will come now. */
     fun raise(peerId: String): Boolean
 
     /**
      * The way a chunk to [peerId] goes now, by the links `MeshManager.sendCallTalk` sends on: [TalkLink] reads the
-     * peers this phone hears, and a peer heard but not linked gets its chunks flooded through the links there are.
+     * peers this phone hears, a peer heard but not linked gets its chunks flooded through the links there are, and one
+     * with no mesh path at all gets them cast through a relay when one carries them ([peerTicketed] as for [linkTo]).
      */
-    fun pathTo(peerId: String): TalkPath
+    fun pathTo(
+        peerId: String,
+        peerTicketed: Boolean,
+    ): TalkPath
 }
 
 /** The way a walkie chunk goes to the peer, as the diagnostics card names it. */
@@ -80,6 +87,7 @@ internal enum class TalkPath(
     BLUETOOTH_CODED("Bluetooth Coded · direct"),
     BLUETOOTH("Bluetooth · direct"),
     FLOODED("Through a neighbour · flooded"),
+    SPOOL("Through the relay · cast"),
     NONE("No link"),
 }
 
@@ -100,8 +108,8 @@ internal class WalkieTalk(
     private val recorder: TalkRecorder,
     private val player: TalkPlayer,
     // `MeshManager.sendCallTalk`: one chunk's plaintext sealed into a `talk` frame of the bytes returned; null when
-    // nothing could be sealed.
-    private val send: suspend (peerId: String, chunk: ByteArray) -> Int?,
+    // nothing could be sealed. The flag is the peer's cast ticket, from its walkie signal (§2.7).
+    private val send: suspend (peerId: String, chunk: ByteArray, peerTicketed: Boolean) -> Int?,
     private val scope: CoroutineScope,
     private val clock: () -> Long = { System.currentTimeMillis() },
     private val log: (String) -> Unit = {},
@@ -172,7 +180,7 @@ internal class WalkieTalk(
     private suspend fun linking(call: CallState) {
         val mesh = links ?: return
         coroutineScope {
-            launch { mesh.linkTo(call.peerId).collect { _link.value = it } }
+            launch { mesh.linkTo(call.peerId) { peerTicketed() }.collect { _link.value = it } }
             var armed: Boolean? = null
             while (true) {
                 val now = mesh.raise(call.peerId)
@@ -193,9 +201,15 @@ internal class WalkieTalk(
         return meter.snapshot().copy(burstsOut = sent.get(), burstsIn = heard.get(), path = peerId?.let(::pathTo))
     }
 
+    // Whether the walkie call's peer said it holds a cast ticket (§2.7): then a relay that sells casts carries ours.
+    private fun peerTicketed(): Boolean =
+        calls.state.value
+            ?.takeIf { it.walkie }
+            ?.peerCastTicketed == true
+
     // Where a chunk to the peer goes now ("Wi-Fi Aware · direct · held"), and whether the call holds that link.
     private fun pathTo(peerId: String): String? {
-        val path = links?.pathTo(peerId) ?: return null
+        val path = links?.pathTo(peerId, peerTicketed()) ?: return null
         return path.label + if (holding && path == TalkPath.WIFI_AWARE) " · held" else ""
     }
 
@@ -308,7 +322,7 @@ internal class WalkieTalk(
             // behind it queue meanwhile and go in order.
             var frame: Int? = null
             for (attempt in 0 until SEND_TRIES) {
-                frame = send(call.peerId, chunk)
+                frame = send(call.peerId, chunk, peerTicketed())
                 if (frame != null || attempt == SEND_TRIES - 1) break
                 delay(SEND_RETRY_MS)
             }

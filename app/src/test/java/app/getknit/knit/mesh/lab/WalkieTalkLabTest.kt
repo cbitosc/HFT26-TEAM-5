@@ -3,6 +3,8 @@ package app.getknit.knit.mesh.lab
 import app.getknit.knit.call.TalkChunk
 import app.getknit.knit.call.TalkWire
 import app.getknit.knit.mesh.protocol.FrameType
+import app.getknit.knit.mesh.spool.FakeSpool
+import app.getknit.knit.mesh.spool.SpoolCastInfo
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -17,7 +19,8 @@ import org.robolectric.RobolectricTestRunner
 /**
  * A walkie burst's chunks between real stacks (docs/VOICE_CALLS.md §3.11, ADR 2026-10.79yb): unsigned, compactly sealed
  * `talk` frames that cross a relay to a peer two hops away and open in its call layer and nowhere else — no row in a
- * thread, no row in any custody — and that a live neighbour takes alone, with no hop left to relay them on. The call
+ * thread, no row in any custody — and that a live neighbour takes alone, with no hop left to relay them on. With no
+ * radio path at all they are cast through a relay instead (§2.7), signed, and stored by nobody there either. The call
  * itself is not run here (the lab has no call layer); the chunks are what two nodes exchange.
  */
 @RunWith(RobolectricTestRunner::class)
@@ -144,8 +147,77 @@ class WalkieTalkLabTest {
             assertTrue(alice.talkSends().isEmpty())
         }
 
+    /**
+     * Two phones that met over a radio, traded a DM each (so their DM scope is on the relay), then parted. A burst
+     * either way now has no mesh path at all, so it is cast through the relay, signed, and opens in the call layer
+     * alone: no thread row, no custody row, nothing pushed into the scope, and nothing on any radio.
+     */
+    @Test
+    fun aBurstWithNoRadioPathIsCastThroughTheRelayIntoTheCallLayerAlone() =
+        runBlocking {
+            val spool = FakeSpool(cast = CAST_BOUNDS)
+            val alice = lab.node("alice", spool = spool).apply { setDisplayName("Alice") }
+            val bob = lab.node("bob", spool = spool).apply { setDisplayName("Bob") }
+            lab.link(alice, bob)
+            lab.awaitAcquainted(alice, bob)
+            trade(alice, bob, carriers = emptyList())
+            lab.unlink(alice, bob)
+            // The cast door needs a converged DM scope, not presence (stamped only on a pulled frame, which the
+            // link phase may leave none of); converged also means every pair frame is on the relay already.
+            lab.awaitDmScope(alice, bob)
+            lab.awaitDmScope(bob, alice)
+            val pushedBefore = spool.pushed.size
+            val heldBefore = listOf(alice, bob).associateWith { it.custodyIds() }
+
+            burst(alice, bob)
+            lab.await(CHUNKS) { bob.chunksHeard().size }
+            assertEquals((0 until CHUNKS).toSet(), bob.chunksHeard())
+            burst(bob, alice)
+            lab.await(CHUNKS) { alice.chunksHeard().size }
+
+            assertTrue("no radio carried a chunk", alice.talkSends().isEmpty() && bob.talkSends().isEmpty())
+            assertTrue("every chunk was cast: ${spool.casts.size}", spool.casts.size >= 2 * CHUNKS)
+            // A cast is never pushed. The count is not pinned to zero, because a stray frame of the pair's (a late
+            // receipt, a republished profile) may still push meanwhile; twelve chunks pushed would show here as twelve.
+            val pushedDuring = spool.pushed.size - pushedBefore
+            assertTrue("a cast was pushed: $pushedDuring pushes during ${2 * CHUNKS} chunks", pushedDuring < CHUNKS)
+            // Nothing reached a thread, and no store holds a talk frame.
+            assertEquals(2, alice.decrypted(alice.dmWith(bob)).size)
+            assertEquals(2, bob.decrypted(bob.dmWith(alice)).size)
+            for (node in listOf(alice, bob)) {
+                val gained = node.custodyIds() - heldBefore.getValue(node)
+                assertTrue("${node.name} custodies a talk frame: $gained", gained.none { it.length == TALK_ID_CHARS })
+            }
+        }
+
+    /** A neighbour has a mesh path, so nothing is cast to it even with a relay that would carry it. */
+    @Test
+    fun aNeighbourIsNeverCast() =
+        runBlocking {
+            val spool = FakeSpool(cast = CAST_BOUNDS)
+            val alice = lab.node("alice", spool = spool).apply { setDisplayName("Alice") }
+            val bob = lab.node("bob", spool = spool).apply { setDisplayName("Bob") }
+            lab.link(alice, bob)
+            lab.awaitAcquainted(alice, bob)
+            trade(alice, bob, carriers = emptyList())
+            // The cast door is open (a converged scope), so only the mesh path keeps it shut.
+            lab.awaitDmScope(alice, bob)
+            assertTrue("a cast was possible here", alice.manager.canCastTalk(bob.nodeId, peerTicketed = false))
+
+            burst(alice, bob)
+            lab.await(CHUNKS) { bob.chunksHeard().size }
+            assertEquals(CHUNKS, alice.talkSends().size)
+            assertTrue("a neighbour's chunks were cast: ${spool.casts}", spool.casts.isEmpty())
+        }
+
     private companion object {
         const val TAG = 0x5A17
+
+        // A relay that carries casts, at the rate an honest walkie needs (VOICE_CALLS.md §2.7).
+        val CAST_BOUNDS = SpoolCastInfo(maxBytes = 2_048, rate = 4)
+
+        // A talk frame's id is this long (`MeshManager.TALK_ID_CHARS`, private there); every other frame's is longer.
+        const val TALK_ID_CHARS = 11
         const val CHUNKS = 6
 
         // The send log names a peer by this much of its node id (`LabTransport.NODE_ID_CHARS`).

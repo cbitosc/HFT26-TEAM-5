@@ -23,6 +23,12 @@ interface CallWalkie {
      */
     suspend fun liveLikely(peerId: String): Boolean
 
+    /**
+     * Whether this phone holds a cast ticket on a spool it is connected to (§2.7) — what a walkie OFFER or ANSWER tells
+     * the peer in `CallPayload.ct`. False by default: a phone that cannot tell only leaves a free peer casting less.
+     */
+    fun castTicketed(): Boolean = false
+
     object None : CallWalkie {
         override val enabled = false
 
@@ -35,24 +41,32 @@ interface CallWalkie {
 /**
  * Where a walkie chunk to a peer would go now (§3.11), for the call screen's notice: over a live link of this phone's
  * own ([DIRECT]); through other phones, with recent evidence a path exists ([MESH]: the peer's own frames reached us
- * through one); or nowhere this phone can see ([NONE]).
+ * through one); with no mesh path, through a spool that casts it (§2.7, [SPOOL]); or nowhere this phone can see
+ * ([NONE]).
  */
 enum class TalkLink {
     DIRECT,
     MESH,
+    SPOOL,
     NONE,
     ;
 
     companion object {
-        /** [peerId]'s link, given this phone's live [neighbours] and the peers [heardIndirectly] through one of them. */
+        /**
+         * [peerId]'s link, given this phone's live [neighbours], the peers [heardIndirectly] through one of them, and
+         * whether a connected spool would [cast] to it. The order is `MeshManager.sendCallTalk`'s: the spool only where
+         * the mesh has no path.
+         */
         fun of(
             peerId: String,
             neighbours: Set<String>,
             heardIndirectly: Set<String>,
+            cast: Boolean = false,
         ): TalkLink =
             when {
                 peerId in neighbours -> DIRECT
                 neighbours.isNotEmpty() && peerId in heardIndirectly -> MESH
+                cast -> SPOOL
                 else -> NONE
             }
     }

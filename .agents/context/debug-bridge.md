@@ -233,10 +233,15 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
     - `--es op talk --ei ms 500-8000`: holds the talk button that long in a connected walkie session, streaming the
       burst in chunks as it records. The call screen must have started the microphone service, so answer from the
       screen, not the shade.
-    - `state`: adds `walkie` and `degraded` to the call, and a `walkie` block: the button's `talk` state, the bursts
-      `sent` and `heard` (played to their end), the chunks `chunksOut`, `chunksIn` and `lost` (skipped as never
-      come), and `link`: `DIRECT`, `MESH` or `NONE`, the link a chunk to the peer would take (null outside a walkie
-      call). Its `stats` are the call screen's walkie diagnostics card, null until measured:
+    - `state`: adds `walkie`, `degraded` and `peerCastTicketed` (the peer's walkie signal said it holds a cast
+      ticket, §2.7) to the call, and a `walkie` block: the button's `talk` state, the bursts `sent` and `heard`
+      (played to their end), the chunks `chunksOut`, `chunksIn` and `lost` (skipped as never come), `castTicketed`
+      (this phone holds a cast ticket on a connected relay that carries casts), and `link`: `DIRECT`, `MESH`,
+      `SPOOL` or `NONE`, the link a chunk to the peer would take (null outside a walkie call). `SPOOL` is a peer the
+      mesh has no path to, whose chunks are cast through a relay (`docs/VOICE_CALLS.md` §2.7): the relay's `hello` must
+      carry `cast`, the DM scope be subscribed there, and on a relay that takes tickets a cast ticket be held by one
+      of the two (`…debug.SPOOL --es ticket`, minted with knit-spool's `ticket-mint --cast`). Its `stats` are the
+      call screen's walkie diagnostics card, null until measured:
       - `transitMs`: arrival less the sender's stamp, the median of the latest 16 chunks. It is read off both phones'
         clocks, so their skew is in it.
       - `jitterMs`: RFC 3550's, from the stamps' spacing, so it has no skew in it.
@@ -246,8 +251,8 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
       - `handMs`: a chunk's cut to the radio taking it, retries included.
       - `frameOut` and `frameIn`: the average frame's envelope bytes.
       - `failed`: chunks no radio took.
-      - `path`: for example `Wi-Fi Aware · direct · held`, `Bluetooth Coded · direct`, `Through a neighbour · flooded`
-        or `No link`.
+      - `path`: for example `Wi-Fi Aware · direct · held`, `Bluetooth Coded · direct`, `Through a neighbour · flooded`,
+        `Through the relay · cast` or `No link`.
     - To see a live call degrade, set `relay --ez on true` with no TURN spool: ICE fails and both phones drop to
       `degraded` without an END.
     - Logcat: `call <id>: no live path; a walkie session now`, then `walkie: session …`, and `walkie: Wi-Fi Aware

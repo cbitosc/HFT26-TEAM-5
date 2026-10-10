@@ -329,6 +329,55 @@ object ScopeFrames {
     }
 
     /**
+     * The cast set (docs/VOICE_CALLS.md §2.7), the §4.4 analogue for the lane a spool never stores. Only a walkie's
+     * `talk` frame, only on a pair's own DM scope — never a pair scope, a group or the commons — and only between the
+     * scope's two members in the direction [inbound] names: peer to us on the way in, us to the peer on the way out.
+     * `isCustodial` is checked as well, belt and braces, so a later amendment that widens the set can never admit a
+     * custodial type by accident and let it dodge custody and the digest.
+     *
+     * The signature is not checked here. As for a blob it is `InboundPipeline.canCarry`, which `ScopeSync` runs next.
+     */
+    fun castEligible(
+        env: RelayEnvelope,
+        selfId: String,
+        scope: Scope,
+        inbound: Boolean,
+    ): Boolean {
+        val peerId = scope.peerId ?: return false
+        if (scope.pair || env.group != null) return false
+        if (env.type != FrameType.TALK || FrameType.isCustodial(env.type)) return false
+        val from = if (inbound) peerId else selfId
+        val to = if (inbound) selfId else peerId
+        return env.senderId == from && env.recipientId == to
+    }
+
+    /** Seals one signed frame as a cast for [scope] (docs/VOICE_CALLS.md §2.7). */
+    fun sealCast(
+        scope: Scope,
+        sig: ByteArray,
+        signed: ByteArray,
+    ): ByteArray = ScopeCrypto.sealCast(scope.keys, scope.id, sig, signed)
+
+    /**
+     * Opens a cast and applies the cast set, or null on any failure. Nothing is quarantined: a cast is never listed,
+     * so a bad one cannot drive a re-pull loop, and nothing about it is remembered.
+     *
+     * The returned wire is a delivery to this phone and nowhere further: `ttl = 0`, `relay = false`, so the router
+     * delivers it and floods it to no neighbour. Its signature rides as the frame's own, so the ordinary signed door
+     * verifies it again.
+     */
+    fun openCast(
+        scope: Scope,
+        selfId: String,
+        data: ByteArray,
+    ): Opened? {
+        val unsealed = runCatching { ScopeCrypto.openCast(scope.keys, scope.id, data) }.getOrNull() ?: return null
+        val env = WireCodec.decodeEnvelope(unsealed.signed) ?: return null
+        if (!castEligible(env, selfId, scope, inbound = true)) return null
+        return Opened(WireEnvelope(ttl = 0, hops = 0, relay = false, sig = unsealed.sig, signed = unsealed.signed), env)
+    }
+
+    /**
      * §9.2's outward guard: never push a frame whose frame-global expiry has already lapsed. The mesh's
      * custody store applies the same rule inward (`ForwardRepository.store` refuses a dead-on-arrival
      * frame), so an expired frame can neither enter local custody nor bounce between our uploads and the

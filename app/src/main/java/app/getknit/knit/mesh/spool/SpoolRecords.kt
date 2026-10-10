@@ -47,6 +47,10 @@ object SpoolRecordType {
     // Entitlement tickets (experimental; docs/VOICE_CALLS.md §2.6). Sent only to a spool whose HELLO carried `ent`,
     // and only a ticket whose `aud` is that spool's host.
     const val ENT = "ent"
+
+    // Casts (experimental; docs/VOICE_CALLS.md §2.7, proposed spec §7.7): one name for both directions. Sent only to
+    // a spool whose HELLO carried `cast`, and never answered.
+    const val CAST = "cast"
 }
 
 /** Error codes a spool may return; the registry is append-only (unknown codes are terminal-generic). */
@@ -191,7 +195,8 @@ class ScopeSub(
  * TURN credentials (experimental, docs/VOICE_CALLS.md §2.1: presence is the signal, `false` is never sent).
  * [ent] says the spool takes entitlement tickets ([SpoolEnt]) and that a `turnreq` here needs one; [stun] lists up
  * to four `stun:`/`stuns:` URIs anyone may gather from with no credential (experimental, docs/VOICE_CALLS.md §2.6).
- * Both are absent when off: `false` and an empty list are never sent.
+ * Both are absent when off: `false` and an empty list are never sent. [cast] says the spool fans out [SpoolCast]s
+ * within its bounds (experimental, docs/VOICE_CALLS.md §2.7), and is absent when it does not.
  * Client→spool: [v] is the chosen version, everything else omitted — a client identifies itself no further
  * than that.
  */
@@ -206,6 +211,31 @@ class SpoolHello(
     val turn: Boolean? = null,
     val ent: Boolean? = null,
     val stun: List<String>? = null,
+    val cast: SpoolCastInfo? = null,
+)
+
+/**
+ * A spool's cast bounds (experimental, docs/VOICE_CALLS.md §2.7): [maxBytes] caps a cast's `data`, and [rate] is casts
+ * per second per connection with a burst of four times that. Stated up front because a cast is never answered: a
+ * spool drops one past either bound without a word, so a client has to keep to them unprompted.
+ */
+@Serializable
+class SpoolCastInfo(
+    val maxBytes: Int,
+    val rate: Int,
+)
+
+/**
+ * A cast (experimental, docs/VOICE_CALLS.md §2.7, proposed spec §7.7): one sealed frame for a scope's other live
+ * subscribers, which the spool fans out and never stores. Client→spool it is the one record with no `q`, and it is
+ * never answered; spool→client it arrives unchanged, from whichever member cast it. [data] is a cast seal
+ * (`ScopeCrypto.sealCast`), never a frame blob.
+ */
+@Serializable
+class SpoolCast(
+    val t: String,
+    val scope: ByteArray,
+    val data: ByteArray,
 )
 
 /** Client→spool: subscribe to scopes (responded to with one DIGEST or scoped ERR each). */
@@ -355,6 +385,13 @@ class SpoolTicket(
 
         /** [fl] bit: the holder may ask for TURN credentials. */
         const val FL_TURN = 1L
+
+        /**
+         * [fl] bit 3: the holder may cast, and its connection unlocks casts on every scope it subscribes, for the
+         * scope's other members too (docs/VOICE_CALLS.md §2.7). Bits 1 and 2 are reserved for knit-spool's proposed
+         * files and scope-creation claims.
+         */
+        const val FL_CAST = 8L
     }
 }
 

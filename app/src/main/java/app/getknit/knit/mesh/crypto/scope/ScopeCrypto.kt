@@ -48,6 +48,20 @@ object ScopeCrypto {
     const val ATTACH_SEAL_VERSION: Byte = 0x03
 
     /**
+     * Cast seal version, a cast's first byte (experimental, docs/VOICE_CALLS.md §2.7). Distinct from [SEAL_VERSION] and
+     * [ATTACH_SEAL_VERSION], with an aad of its own, so a cast never opens as a frame blob or a chunk and neither of
+     * those opens as a cast: nothing slips a custodial frame into the unstored lane, or a cast into the digest.
+     */
+    const val CAST_SEAL_VERSION: Byte = 0x04
+
+    /** A cast's plaintext is padded to a multiple of this, so a spool sees a size class rather than a frame's size. */
+    const val CAST_PAD_BYTES = 128
+
+    /** The u16 length a cast plaintext carries ahead of `signed`, and so the bound on `signed`. */
+    private const val CAST_LENGTH_BYTES = 2
+    private const val MAX_CAST_SIGNED = 0xFFFF
+
+    /**
      * Plaintext bytes per attachment chunk. **Structural, not tunable**: a fixed size is what makes a
      * chunk's position derivable from the attachment alone, so no manifest object is needed. Sized so a
      * sealed chunk (1 + 12 + [ATTACH_HEADER_BYTES] + this + 16) stays inside the 64 KiB `maxBlob`.
@@ -94,11 +108,14 @@ object ScopeCrypto {
     private val LABEL_COMMONS_KEY = "knit/spool/v1/commons-key".toByteArray()
     private val AAD_PREFIX = "knit/scope/v1".toByteArray()
     private val AAD_ATTACH_PREFIX = "knit/scope/v1/attach".toByteArray()
+    private val LABEL_CNONCE = "knit/scope/v1/cnonce".toByteArray()
+    private val AAD_CAST_PREFIX = "knit/scope/v1/cast".toByteArray()
 
     // FNV-1a 64-bit, mirrored from mesh/StoreDigest (same fold, raw-byte input instead of UTF-8).
     private const val FNV64_OFFSET = -0x340D631B7BDDDCDBL
     private const val FNV64_PRIME = 0x100000001B3L
     private const val BYTE_MASK = 0xFFL
+    private const val BYTE_MASK_INT = 0xFF
 
     /** The two halves of a scope's sealing secret. */
     class SealKeys(
@@ -263,6 +280,61 @@ object ScopeCrypto {
         val pt = cipher.doFinal(ct)
         require(pt.size > SIG_BYTES) { "sealed unit too short" }
         return Unsealed(sig = pt.copyOfRange(0, SIG_BYTES), signed = pt.copyOfRange(SIG_BYTES, pt.size))
+    }
+
+    /**
+     * Seals one frame as a cast (experimental, docs/VOICE_CALLS.md §2.7): `0x04 ‖ nonce ‖ AES-256-GCM(pt)` with
+     * `pt = sig(64) ‖ u16be(|signed|) ‖ signed ‖ 0x00…` padded to a multiple of [CAST_PAD_BYTES]. The construction is
+     * [seal]'s, under its own nonce label and aad (`knit/scope/v1/cast ‖ scopeId`, 50 bytes against a frame's 45 and a
+     * chunk's 52, so none can alias). It is deterministic for the same reason, though nothing dedups a cast: the same
+     * frame cast to two spools is the same bytes. [sig] must be the frame's raw Ed25519 signature — every cast is
+     * signed, whatever its radio copy carries.
+     */
+    fun sealCast(
+        keys: SealKeys,
+        scopeId: ByteArray,
+        sig: ByteArray,
+        signed: ByteArray,
+    ): ByteArray {
+        require(sig.size == SIG_BYTES) { "sig must be $SIG_BYTES raw Ed25519 bytes" }
+        require(signed.isNotEmpty() && signed.size <= MAX_CAST_SIGNED) { "signed must be 1..$MAX_CAST_SIGNED bytes" }
+        val body = sig + byteArrayOf((signed.size ushr Byte.SIZE_BITS).toByte(), signed.size.toByte()) + signed
+        val pt = body + ByteArray(Math.floorMod(-body.size, CAST_PAD_BYTES))
+        val nonce = Hkdf.computeHkdf(MAC, keys.nonceKey, ZERO_SALT, LABEL_CNONCE + sha256(pt), NONCE_BYTES)
+        val cipher =
+            Cipher.getInstance(TRANSFORMATION).apply {
+                init(Cipher.ENCRYPT_MODE, SecretKeySpec(keys.sealKey, "AES"), GCMParameterSpec(TAG_BITS, nonce))
+                updateAAD(AAD_CAST_PREFIX + scopeId)
+            }
+        return byteArrayOf(CAST_SEAL_VERSION) + nonce + cipher.doFinal(pt)
+    }
+
+    /**
+     * Opens a cast back into the frame it carries. Throws like [open]: [IllegalArgumentException] on an unknown version,
+     * a short or mis-padded plaintext, a length past the end, or padding that is not zero; the JDK AEAD exception on a
+     * wrong key, wrong scope or tamper. The caller still verifies the frame's signature and the cast set.
+     */
+    fun openCast(
+        keys: SealKeys,
+        scopeId: ByteArray,
+        data: ByteArray,
+    ): Unsealed {
+        require(data.isNotEmpty() && data[0] == CAST_SEAL_VERSION) { "unknown cast seal version" }
+        require(data.size > 1 + NONCE_BYTES + SIG_BYTES + CAST_LENGTH_BYTES) { "cast too short" }
+        val nonce = data.copyOfRange(1, 1 + NONCE_BYTES)
+        val cipher =
+            Cipher.getInstance(TRANSFORMATION).apply {
+                init(Cipher.DECRYPT_MODE, SecretKeySpec(keys.sealKey, "AES"), GCMParameterSpec(TAG_BITS, nonce))
+                updateAAD(AAD_CAST_PREFIX + scopeId)
+            }
+        val pt = cipher.doFinal(data, 1 + NONCE_BYTES, data.size - 1 - NONCE_BYTES)
+        require(pt.size % CAST_PAD_BYTES == 0) { "cast plaintext is not padded" }
+        val n = ((pt[SIG_BYTES].toInt() and BYTE_MASK_INT) shl Byte.SIZE_BITS) or (pt[SIG_BYTES + 1].toInt() and BYTE_MASK_INT)
+        val end = SIG_BYTES + CAST_LENGTH_BYTES + n
+        require(n > 0 && end <= pt.size) { "cast length outside its plaintext" }
+        require(end + CAST_PAD_BYTES > pt.size) { "cast padded past one block" }
+        require((end until pt.size).all { pt[it] == 0.toByte() }) { "cast padding is not zero" }
+        return Unsealed(sig = pt.copyOfRange(0, SIG_BYTES), signed = pt.copyOfRange(SIG_BYTES + CAST_LENGTH_BYTES, end))
     }
 
     /**

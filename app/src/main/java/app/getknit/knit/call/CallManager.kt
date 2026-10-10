@@ -40,6 +40,8 @@ data class CallState(
     val walkie: Boolean = false,
     // The walkie took over a live call whose path was lost or never came.
     val degraded: Boolean = false,
+    // §2.7: the peer's OFFER or ANSWER said it holds a cast ticket, so a spool that sells casts carries ours too.
+    val peerCastTicketed: Boolean = false,
 )
 
 /**
@@ -165,6 +167,9 @@ class CallManager(
         var degraded = false
         var offeredWalkie = false
         var walkieOk = false
+
+        // §2.7: the peer's last OFFER or ANSWER carried `ct`.
+        var peerCastTicketed = false
     }
 
     private class Send(
@@ -383,6 +388,7 @@ class CallManager(
         val l = Live(p.id, sender, outgoing = false, startedAt = now, phase = CallPhase.Alerting, remoteOffer = sdp)
         live = l
         takeKind(l, p)
+        l.peerCastTicketed = p.ct
         if (!l.walkie) {
             l.invite = directInviteOf(p)
             l.servers = scope.async { servers(sender) }
@@ -413,6 +419,15 @@ class CallManager(
 
     /** What a live OFFER or ANSWER says it carries: audio, and the walkie bit when this side can drop to one (§3.11). */
     private fun liveMedia(walkieOk: Boolean): Int = CallPayload.MEDIA_AUDIO or (if (walkieOk) CallPayload.MEDIA_WALKIE else 0)
+
+    /** `CallPayload.ct` for an OFFER or ANSWER carrying media [m]: only beside the walkie bit, and only when it is true. */
+    private fun castFlag(m: Int): Boolean = m and CallPayload.MEDIA_WALKIE != 0 && walkie.castTicketed()
+
+    /** A live OFFER or ANSWER [p] with the media it says it carries ([liveMedia]) and the cast flag beside it (§2.7). */
+    private fun withLiveMedia(
+        p: CallPayload,
+        walkieOk: Boolean,
+    ): CallPayload = liveMedia(walkieOk).let { m -> p.copy(m = m, ct = castFlag(m)) }
 
     /** [p]'s Wi-Fi Direct invite, when this side may take it up at all and every part of it is usable. */
     private fun directInviteOf(p: CallPayload): DirectInvite? = p.dw?.takeIf { !relayOnly && it.isUsable() }
@@ -535,6 +550,7 @@ class CallManager(
     ): List<Send> {
         val l = live?.takeIf { it.id == p.id && it.peerId == sender && it.outgoing } ?: return emptyList()
         if (p.gen != 0 || (l.phase != CallPhase.Calling && l.phase != CallPhase.Ringing)) return emptyList()
+        l.peerCastTicketed = p.ct
         if (l.walkie) {
             if (p.m and CallPayload.MEDIA_WALKIE == 0) return finish(l, CallPayload.REASON_MEDIA, CallPayload.PHASE_END)
             connectWalkie(l)
@@ -705,7 +721,7 @@ class CallManager(
                 }
                 // A relay-only call goes direct nowhere: a group pair would show the peer our real address.
                 if (l.relay) l.invite = null
-                CallPayload(id = l.id, ph = CallPayload.PHASE_OFFER, sdp = sdp, dw = l.invite, m = liveMedia(l.offeredWalkie))
+                withLiveMedia(CallPayload(id = l.id, ph = CallPayload.PHASE_OFFER, sdp = sdp, dw = l.invite), l.offeredWalkie)
             }
         log("call ${l.id}: offering (${servers.size} TURN, relay=${l.relay}, direct=${offer.dw != null})")
         if (!signals.sendCallSignal(l.peerId, offer)) {
@@ -733,7 +749,7 @@ class CallManager(
                 }
                 remoteApplied(l, session)
                 val answer =
-                    CallPayload(id = l.id, ph = CallPayload.PHASE_ANSWER, sdp = sdp, dx = directVerdict(l), m = liveMedia(l.walkieOk))
+                    withLiveMedia(CallPayload(id = l.id, ph = CallPayload.PHASE_ANSWER, sdp = sdp, dx = directVerdict(l)), l.walkieOk)
                 listOf(Send(l.peerId, answer))
             }
         if (!deliver(sends)) {
@@ -745,7 +761,8 @@ class CallManager(
 
     /** §3.11: a walkie session's OFFER — no media, no ICE servers, no group: only that it is a walkie. */
     private suspend fun dialWalkie(l: Live) {
-        val offer = CallPayload(id = l.id, ph = CallPayload.PHASE_OFFER, m = CallPayload.MEDIA_WALKIE)
+        val offer =
+            CallPayload(id = l.id, ph = CallPayload.PHASE_OFFER, m = CallPayload.MEDIA_WALKIE, ct = castFlag(CallPayload.MEDIA_WALKIE))
         if (!mutex.withLock { current(l) }) return
         log("call ${l.id}: offering a walkie session")
         if (!signals.sendCallSignal(l.peerId, offer)) {
@@ -757,7 +774,8 @@ class CallManager(
 
     /** §3.11: the callee's ANSWER to a walkie session, which [connectWalkie] already connected on this side. */
     private suspend fun answerWalkie(l: Live) {
-        val answer = CallPayload(id = l.id, ph = CallPayload.PHASE_ANSWER, m = CallPayload.MEDIA_WALKIE)
+        val answer =
+            CallPayload(id = l.id, ph = CallPayload.PHASE_ANSWER, m = CallPayload.MEDIA_WALKIE, ct = castFlag(CallPayload.MEDIA_WALKIE))
         if (!mutex.withLock { current(l) }) return
         if (!deliver(listOf(Send(l.peerId, answer)))) mutex.withLock { if (current(l)) finish(l, CallPayload.REASON_ERROR) }
     }
@@ -1009,6 +1027,7 @@ class CallManager(
                     reason = it.reason,
                     walkie = it.walkie,
                     degraded = it.degraded,
+                    peerCastTicketed = it.peerCastTicketed,
                 )
             }
     }

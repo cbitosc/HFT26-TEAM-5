@@ -3156,17 +3156,28 @@ class MeshManager(
      *  - it is unsigned, because the seal authenticates it to its addressee (the ADR 059 argument), and a relay never
      *    needs to read it;
      *  - its id is [TALK_ID_CHARS] of a fresh one: it is a dedup key for minutes and nothing else.
-     * No node custodies it, and it never rides the Internet plane or LoRa. A live neighbour takes it alone, over its
-     * quickest link ([MeshTransport.sendLive]), and relays it nowhere (ttl 0); anyone further gets a flood of at most
-     * [TALK_TTL] relays. The frame's size (its envelope's bytes), or null when nothing could be sealed, or there is no
-     * link to hand it to (nothing is sealed then).
+     * No node custodies it, and it never rides LoRa. A live neighbour takes it alone, over its quickest link
+     * ([MeshTransport.sendLive]), and relays it nowhere (ttl 0); anyone further gets a flood of at most [TALK_TTL] relays.
+     *
+     * A peer this phone has no mesh path to at all — not a neighbour, and not heard through one lately — gets the chunk
+     * **cast** through the spools instead (§2.7, [ScopeSync.cast]), when a connected one would carry it: on an `ent`
+     * spool that needs a cast ticket, ours or the peer's ([peerTicketed], from its walkie signal). The cast copy is
+     * signed, as every frame the Internet plane carries is; the radio copy stays unsigned for Coded PHY's sake. Both
+     * carry the same id, so the peer keeps whichever arrives first. With links but no path to the peer, the blind flood
+     * still goes beside the cast.
+     *
+     * The frame's size (its envelope's bytes), or null when nothing could be sealed, or there is neither a link nor a
+     * spool to hand it to (nothing is sealed then, so the ratchet does not move).
      */
     suspend fun sendCallTalk(
         peerId: String,
         chunk: ByteArray,
+        peerTicketed: Boolean = false,
     ): Int? {
         val links = transport.neighbors.value
-        if (links.isEmpty()) return null
+        val neighbour = links.firstOrNull { it.nodeId == peerId }
+        val cast = !meshPathTo(peerId, links) && canCastTalk(peerId, peerTicketed)
+        if (links.isEmpty() && !cast) return null
         val peer = peers.find(peerId)
         val bundle = peer?.pubKey?.let { PublicKeyBundle.decode(it) } ?: return null
         val me = identity.nodeId()
@@ -3178,11 +3189,37 @@ class MeshManager(
         val compact = sealed.r?.takeIf { sealed.v == EncEnvelope.VERSION_DM_V3 }?.let { TalkSeal.encode(it, sealed.ct) }
         val payload = compact ?: WireCodec.encodePayload(ChatContent(enc = sealed))
         val env = RelayEnvelope(type = FrameType.TALK, id = id, senderId = me, sentAt = now, recipientId = peerId, payload = payload)
-        val neighbour = links.firstOrNull { it.nodeId == peerId }
         val wire = WireEnvelope(ttl = if (neighbour != null) 0 else TALK_TTL, sig = ByteArray(0), signed = WireCodec.encodeEnvelope(env))
-        router.sendOwn(wire, id, neighbour, live = true)
-        return wire.signed.size
+        if (links.isNotEmpty()) router.sendOwn(wire, id, neighbour, live = true)
+        val castTook = if (cast) castTalk(peerId, peerTicketed, env, wire) else 0
+        return wire.signed.size.takeIf { links.isNotEmpty() || castTook > 0 }
     }
+
+    /** Whether a chunk to [peerId] has a mesh path from these [links]: the peer is one, or was heard through one lately. */
+    private fun meshPathTo(
+        peerId: String,
+        links: Set<Peer>,
+    ): Boolean = links.any { it.nodeId == peerId } || (links.isNotEmpty() && peerId in relayedPresence.heard.value)
+
+    /** §2.7: casts [wire]'s frame to [peerId] through the spools, signed, and returns how many took it. */
+    private suspend fun castTalk(
+        peerId: String,
+        peerTicketed: Boolean,
+        env: RelayEnvelope,
+        wire: WireEnvelope,
+    ): Int = scopeSync?.cast(peerId, peerTicketed, env, messageCrypto.signRaw(wire.signed), wire.signed) ?: 0
+
+    /**
+     * Whether a walkie chunk to [peerId] could be cast through a connected spool now (§2.7), with the peer's ticket
+     * flag [peerTicketed] — what the call screen's link reads beside the radios. False without the plane.
+     */
+    fun canCastTalk(
+        peerId: String,
+        peerTicketed: Boolean,
+    ): Boolean = scopeSync?.canCast(peerId, peerTicketed) == true
+
+    /** Whether this phone holds a cast ticket on a connected spool that carries casts — what its walkie signal says. */
+    fun castTicketed(): Boolean = scopeSync?.castTicketed() == true
 
     /**
      * [TurnSource]: TURN credentials from the connected spools carrying [peerId]'s DM scope, or holding a ticket of

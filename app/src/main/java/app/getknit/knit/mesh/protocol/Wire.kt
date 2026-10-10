@@ -835,6 +835,11 @@ data class TransferPayload(
  * caller's OFFER names the group it will host in [dw], and the callee answers [dx] = [DIRECT_JOINING] on its
  * RINGING (or on its ANSWER, when it could only commit at answer) once it is joining. A build that knows neither
  * ignores both, and the call rides its Internet path as before.
+ *
+ * [ct] rides an OFFER or ANSWER that carries the walkie bit (§3.11), set when the sender holds a cast ticket on a spool
+ * it is connected to (§2.7): a spool that sells casts carries them on a scope one ticketed member holds, both ways, so
+ * the flag tells a free peer its own chunks will be carried there too. A hint for the sender's uploads and its link
+ * notice, never a grant: the spool checks the ticket it holds, and a build that ignores the flag only casts less.
  */
 @Serializable
 data class CallPayload(
@@ -847,6 +852,7 @@ data class CallPayload(
     val m: Int = MEDIA_AUDIO,
     val dw: DirectInvite? = null,
     val dx: Int? = null,
+    val ct: Boolean = false,
 ) {
     companion object {
         const val PHASE_OFFER = 1

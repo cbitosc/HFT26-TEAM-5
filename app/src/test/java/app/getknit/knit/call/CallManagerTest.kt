@@ -179,10 +179,13 @@ class CallManagerTest {
         override var enabled = false
         var peerCapable = true
         var live = true
+        var ticketed = false
 
         override suspend fun capable(peerId: String) = peerCapable
 
         override suspend fun liveLikely(peerId: String) = live
+
+        override fun castTicketed() = ticketed
     }
 
     private class Net(
@@ -1048,6 +1051,40 @@ class CallManagerTest {
             alice.walkie.enabled = true
             bob.walkie.enabled = true
             alice.walkie.live = live
+        }
+
+    /**
+     * §2.7: a walkie OFFER or ANSWER says whether its sender holds a cast ticket, so a free peer knows a relay that sells
+     * casts will carry its chunks too, and each side keeps what the other said. A phone with no ticket says nothing:
+     * the flag is omitted, as every default is.
+     */
+    @Test
+    fun aWalkieSignalCarriesTheSendersCastTicketAndTheOtherSideKeepsIt() =
+        runTest {
+            val (_, alice, bob) = walkies(live = false)
+            alice.walkie.ticketed = true
+            assertNull(alice.manager.start(BOB))
+            runCurrent()
+            assertTrue(alice.offer().ct)
+            assertTrue(bob.state!!.peerCastTicketed)
+
+            assertTrue(bob.manager.answer(bob.state!!.id))
+            runCurrent()
+            assertFalse("bob holds no ticket and says so by saying nothing", bob.lastOf(CallPayload.PHASE_ANSWER).ct)
+            assertFalse(alice.state!!.peerCastTicketed)
+            assertTrue(bob.state!!.peerCastTicketed)
+        }
+
+    /** The flag rides only beside the walkie bit: a live call with no drop to a walkie never carries it. */
+    @Test
+    fun aLiveCallNeverCarriesTheCastFlag() =
+        runTest {
+            val (_, alice, _) = walkies(live = true, dropToWalkie = false)
+            alice.walkie.ticketed = true
+            assertNull(alice.manager.start(BOB, CallKind.LIVE))
+            runCurrent()
+            assertEquals(CallPayload.MEDIA_AUDIO, alice.offer().m)
+            assertFalse(alice.offer().ct)
         }
 
     @Test

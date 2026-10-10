@@ -4,7 +4,7 @@
 |--------------------|-------------------------------------------------------------------------------------------------------------------------------|
 | Status             | **Draft sketch, not normative.** Nothing here is on the wire                                                                  |
 | Decision           | ADR 2026-10.3tee (Proposed); §3.10, a call between neighbours over Wi-Fi Direct, is ADR 2026-10.kxnw; §3.11, the walkie-talkie, is ADR 2026-10.79yb |
-| Spool side         | §2 is written to drop into `docs/SPOOL_PROTOCOL.md` as §7.6 (records) and a §10.1 bullet (observations) once accepted        |
+| Spool side         | §2.1–§2.6 are written to drop into `docs/SPOOL_PROTOCOL.md` as §7.6, and §2.7 as §7.7, each with §10.1 bullets, once accepted |
 | Client side        | §3 is app protocol: a new `MessageContent.ctl` value, invisible to spools and relays                                          |
 
 ## 1. Overview
@@ -26,8 +26,9 @@ A 1:1 audio call has three paths:
 - **Media** is WebRTC: Opus over DTLS-SRTP, peer to peer where ICE finds a path and through TURN where
   it does not. The DTLS fingerprint rides inside the sealed SDP, so Knit identity authenticates the
   media keys (§3.7).
-- **TURN credentials** are the only new spool-side behaviour (§2). The spool hands out short-lived
-  credentials for a TURN server its operator runs. It never carries media.
+- **TURN credentials** (§2) and **casts** (§2.7) are the only new spool-side behaviours. The spool hands out
+  short-lived credentials for a TURN server its operator runs, and never carries a live call's media. It does carry a
+  walkie's chunks, unstored, between two phones with no radio path, on a spool that sells that to the pair (§2.7).
 - **Between neighbours** the media can skip the Internet altogether: the two phones raise a Wi-Fi Direct group and
   ICE prefers its pair to any other (§3.10). That needs no spool and no STUN, and with them it still wins.
 
@@ -163,6 +164,11 @@ Proposed §10.1 bullet:
   is UDP.
 - **The "relay all calls" setting** (§3.7) moves the IP-pair exposure from the peer to the TURN
   operator. It does not remove the exposure.
+- **Casts** (§2.7) show the spool, live and never on disk, that a DM scope is in a walkie session, which side talks
+  when and for how long (about two casts a second per talking side), and both subscribers' IPs. Padding (C-7.7-12) and
+  a constant-bitrate encoder keep a chunk's size from saying what was said; nothing hides that something was. On a
+  spool that sells casts, the ticket rule (S-7.7-6) ties the payer's daily pseudonym to that timing, which the spool
+  could already tie to the payer's subscriptions.
 
 ### 2.6 Entitlement tickets and STUN (experimental)
 
@@ -184,7 +190,7 @@ Ticket {                 // tk: the house CBOR, every field required, unknown ke
     nbf: uint            // Unix seconds
     exp: uint            // Unix seconds, exp - nbf <= 48 h
     ps:  bytes(16)       // the holder's pseudonym for the day, opaque to the spool
-    fl:  uint            // bit 0: may ask for TURN
+    fl:  uint            // bit 0: may ask for TURN; bit 3: may cast, and unlocks casts for the scope (§2.7)
 }
 sig = Ed25519(issuer key, "knit/spool/v1/ticket" ‖ tk)
 ```
@@ -225,6 +231,94 @@ sig = c0740d14d5f46f2771721c593fa34a6e926b39182955cc6f8fb15365dddcf229
       da2cb33bdf6f23881cf4b153eedc4238e143fa53ef1a834961040bb55818b809
 ```
 
+### 2.7 Casts: a walkie's chunks through a spool (experimental)
+
+A walkie session (§3.11) streams a chunk about every half second, and over the radios those are `talk` frames nobody
+custodies. Two phones with no radio path to each other have nothing to carry them. A stored blob is the wrong
+carrier: each one costs a digest entry, an eviction, a tombstone, a place in every listing and a pull per member per
+heal round, and two a second push a scope's real history out within minutes. A **cast** is the other carrier: one
+sealed frame that the spool hands to the scope's other live subscribers and keeps nothing of. It is written to drop
+into `docs/SPOOL_PROTOCOL.md` as §7.7 (knit-spool ADR 2026-10.3wdy; here, ADR 2026-10.79yb's sixth amendment).
+
+| Record  | Direction | Fields                                   | Semantics                                                                                   |
+|---------|-----------|------------------------------------------|---------------------------------------------------------------------------------------------|
+| `hello` | s→c       | `…, cast: { maxBytes: Int, rate: Int }`  | Present when the spool fans out casts: `maxBytes` caps a cast's `data`, `rate` is casts per second per connection, with a burst of four times that |
+| `cast`  | c→s       | `t, scope: bstr32, data: bstr`           | One sealed frame for the scope's other subscribers. No `q`, and never answered              |
+| `cast`  | s→c       | `t, scope: bstr32, data: bstr`           | The same record, relayed unchanged to every other subscriber of the scope, caster excluded  |
+
+| ID           | Requirement |
+|--------------|-------------|
+| **S-7.7-1**  | A spool that fans out casts advertises `cast` in HELLO; one that does not MUST omit it. Presence is the signal. |
+| **S-7.7-2**  | A spool MUST NOT answer a cast, with `ok` or with `err`, whatever becomes of it. B-7.1-8 gains its one exception: a client record that carries no `q`. |
+| **S-7.7-3**  | A cast is fanned out only when its connection holds a `sub` for the scope, its `data` is at most `maxBytes`, it is within the per-connection, per-IP and spool-wide budgets, the scope is not the commons, and the ticket rule (S-7.7-6) holds. Anything else is dropped, and MAY be counted. |
+| **S-7.7-4**  | A spool MUST NOT store a cast or let one touch a stored scope: no blob, digest fold, tombstone, listing, `maxScopes` hold, creation gate or disk write. A cast for a scope the store has shed still fans out while subscribers hold the scope. |
+| **S-7.7-5**  | Fan-out is best-effort, and a dropped copy MUST NOT count toward the slow-consumer close: a subscriber whose channel is full loses that cast and nothing else. |
+| **S-7.7-6**  | On a connection whose HELLO carried `ent`, a cast fans out only while some live subscriber of its scope on this spool holds an accepted ticket with bit 3 of `fl` (`FL_CAST = 8`): the caster first, then the others. Liveness and skew are S-7.6-14's. A spool without a ticket key admits any subscriber's cast. |
+| **S-7.7-7**  | A dropped cast MUST NOT be a strike. A flood still pays the per-record budget that every record pays, and that budget strikes. |
+| **S-7.7-8**  | A spool MUST NOT log or persist a cast, the scope it names, a ticket or a pseudonym. Metrics MAY count casts, copies fanned out and drops by reason. |
+| **C-7.7-9**  | A client MUST NOT cast to a spool whose HELLO omitted `cast`, and MUST keep within its `maxBytes` and `rate` unprompted, because a refusal is silent. On an `ent` spool it casts only while it holds a cast ticket there, or its peer said it does (`CallPayload.ct`, §3.2). |
+| **C-7.7-10** | A client casts only into a scope whose SUB that spool has answered. |
+| **C-7.7-11** | Every cast is signed: its `sig` is the Ed25519 frame signature over `signed`, whatever the same frame's radio copy carries. |
+| **C-7.7-12** | The seal is the one below: its own version byte, nonce label and aad, the plaintext padded to a multiple of 128 bytes. An opener refuses any plaintext but the canonical one: whole blocks, a nonzero length inside them, at most one block of padding, all of it zero. |
+| **C-7.7-13** | The cast set: on a pair's own DM scope (never a pair scope, §3.5, a group or the commons), `type = talk`, no group, sender and recipient the scope's two members in the direction of travel; then the signature verifies against the pinned sender key (C-4.4-1's step). Nothing else is sealed into a cast or accepted out of one. |
+| **C-7.7-14** | A received cast re-enters delivery as a frame for this phone alone (`ttl = 0`, `relay = false`): never through §9.4, and never custodied, accounted (§9.6), quarantined (§9.3) or taken as presence. A cast that fails is dropped and forgotten. |
+| **C-7.7-15** | One frame may arrive over the radios and from several spools at once. The receiver keeps the first copy by frame id. |
+
+```
+pt    = sig(64) ‖ u16be(|signed|) ‖ signed ‖ 0x00…            // padded to a multiple of 128 bytes
+nonce = HKDF(ikm = nonceKey, info = "knit/scope/v1/cnonce" ‖ SHA-256(pt), L = 12)
+aad   = "knit/scope/v1/cast" ‖ scopeId                          // 50 bytes: a frame's is 45, a chunk's 52
+data  = 0x04 ‖ nonce(12) ‖ AES-256-GCM(key = sealKey, nonce, pt, aad)
+```
+
+A 480 ms walkie chunk's frame is about 693 bytes, so its plaintext pads to 768 and its cast is 797 bytes: about
+1.7 KB/s at two a second.
+
+> **Why no answer.** The shipped client reads a scoped `err` with no `q` as a refused `sub`, and would drop the
+> conversation. A `q` would put an ack, a 30 s pending slot and the silent-request strike (C-9.1-4) on every chunk. A
+> chunk is live or lost, and HELLO already states every bound a refusal could have named.
+>
+> **Why a seal of its own.** With `0x04` and its own aad, a cast never opens as a frame blob (§4.3) or a chunk (§4.5),
+> and neither of those opens as a cast. So nothing can slip a custodial frame into the one lane that skips custody and
+> the digest, or a cast into a scope's digest. It is deterministic for §4.3's reason, though nothing dedups a cast: the
+> same frame cast to two spools is the same bytes.
+>
+> **Why signed when the radio copy is not.** §4.4's invariant holds on this plane too: every frame the Internet carries
+> is checked against the pinned key before any ratchet work. The 64 bytes land only on the spool's copy, which has no
+> Coded PHY budget to keep.
+>
+> **Why one payer unlocks the scope.** As one payer is enough for TURN (§2.6). A ticket on every caster would make a
+> free friend's walkie one-way. It ties the payer's pseudonym to nothing the spool had not already tied it to.
+>
+> **Why `push` with a marker was rejected.** An older spool ignores an unknown key (B-2-2) and stores the chunk. The
+> HELLO gate is what makes an unstored lane safe to add.
+
+Proposed §12.2 rows: casts off by default (`rate` 0, omitted); a suggested `rate` of 4 a second, burst 4×; `maxBytes`
+2048; a spool-wide budget of 200 casts a second, burst 4×.
+
+**Test vectors.** One record for both directions, with `scope = 00 01 … 1f` and `data = a0 a1 … af`; a HELLO with `ent`
+and `cast = {2048, 4}`; and §2.6's ticket fixture with `fl = 9` (TURN and cast):
+
+```
+cast      = a3617464636173746573636f70655820000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+            646461746150a0a1a2a3a4a5a6a7a8a9aaabacadaeaf
+helloCast = a461746568656c6c6f61760163656e74f56463617374a2686d61784279746573190800647261746504
+tk        = a7617601636b69644821fe31dfa154a261636175646b6c61622e6578616d706c65636e62661a6b49d200
+            636578701a6b4b238062707350000102030405060708090a0b0c0d0e0f62666c09
+sig       = 9f0d82c5e15ddc486fc693a848dd2e937df32e505f22631dde6a49f82435d147
+            b64da30b5ac432ef18ee9e2349c4c8915cc8e9d5a3e829f95c2784bc5a5f530f
+```
+
+The seal on §13's DM fixture (`dmSealKey`, `dmNonceKey`, `dmScopeId`), with `sig` and `signed` the `sealBlob` inputs
+(64 and 40 bytes):
+
+```
+castSeal  = 0486dfeaff6b30c3cebc549d35183a43023f9b0c354d6f49d5cc1bac81def2774409f7f4ef746f0f4491271f09f7d2635d25
+            34931edda7a37adf7b73bd7c0e4a7a08e381a0861afaa8d7bd57436bf0bf26a80fd14a99a9aeadc356cc58a785ee926ca293
+            e1632be7c7da48dbbb51a7949e6743e392774d9f469d69cdd86b02f9c71f91415ca1b114fe8db955ad94fa4679cffb59ade4
+            6563a3650fd4b3
+```
+
 ## 3. Signaling (client)
 
 ### 3.1 Carriage
@@ -258,6 +352,7 @@ CallPayload {
     m:    Int = 1    // media bitmask: 1 audio; 2 video reserved; 4 walkie-talkie (§3.11)
     dw:   DirectInvite?  // OFFER: the Wi-Fi Direct group the caller will host (§3.10)
     dx:   Int?       // RINGING, ANSWER: 1 = the callee is joining that group (§3.10)
+    ct:   Boolean = false  // OFFER, ANSWER beside the walkie bit: the sender holds a cast ticket (§2.7)
     tk:   TalkChunk? // TALK: one chunk of a walkie burst, {b, q, a, e} (§3.11)
 }
 ```
@@ -473,12 +568,14 @@ an experiment behind `BuildConfig.WALKIE` (`-Pwalkie=`, on in debug and off in r
     derived. A header that form cannot carry (an init, a reset flag), or a peer that reads only v2, gets a
     `ChatContent` instead, whose CBOR never begins with `0x01`.
   - **Id.** Its frame id is 11 characters.
-  - **Reach.** No node custodies it, parks it, re-serves it or fans it onto the coordination plane, LoRa or a spool.
-    A neighbour of the sender gets it alone, with `ttl = 0`. Anyone else gets a flood of at most `ttl = 3` relays. A
-    build that does not know the type relays it like any unknown type and delivers nothing.
+  - **Reach.** No node custodies it, parks it, re-serves it or fans it onto the coordination plane or LoRa, and no
+    spool stores it. A neighbour of the sender gets it alone, with `ttl = 0`. A peer heard through the mesh gets a
+    flood of at most `ttl = 3` relays. A peer the mesh has no path to gets it **cast** through every connected spool
+    that would carry it (§2.7), signed, and beside the blind flood when this phone has links at all. A build that does
+    not know the type relays it like any unknown type and delivers nothing.
   - **Receipt.** The addressee admits the frame unsigned only in this shape: addressed to it, by someone else, in no
-    group. It hands the opened plaintext to the call layer only from an accepted contact, and a failed open is never
-    a reset trigger. Only a connected walkie session with the sender, under the chunk's tag, takes the chunk.
+    group, and admits the signed copy a spool casts through the ordinary signed door. It hands the opened plaintext to
+    the call layer only from an accepted contact, and a failed open is never a reset trigger, signed or not. Only a connected walkie session with the sender, under the chunk's tag, takes the chunk.
   - **Size.** A 480 ms chunk's frame is about 714 bytes, about 1.5 KB/s, inside Coded PHY's 2.1 KB/s.
 - **C-3.11-7** The receiver plays bursts one after another, in the order of `b`, and each in the order of `q`:
   - It starts a burst once it holds two chunks, or the last one, or 400 ms after the first chunk arrived.
@@ -504,9 +601,10 @@ an experiment behind `BuildConfig.WALKIE` (`-Pwalkie=`, on in debug and off in r
   - **direct:** over a link of this phone's own; nothing is shown;
   - **through the mesh:** no link of its own, but the peer's frames reached it through another phone lately; a notice
     says the chunks go through other phones;
+  - **through the relay:** no mesh path, but a connected relay would cast the chunks (§2.7); a notice says so;
   - **none:** no link it can see; a warning says it is linking.
 
-  With no link at all, nothing is sealed, and the burst says it did not go.
+  With neither a link nor a relay that would cast, nothing is sealed, and the burst says it did not go.
 
 ## 4. Tests this would add
 
@@ -514,7 +612,14 @@ an experiment behind `BuildConfig.WALKIE` (`-Pwalkie=`, on in debug and off in r
   - `SpoolRecordsTest` vectors for `turnreq`/`turncred`, and the §2.2 HMAC vector.
   - Conformance cases: no `turn` in HELLO without config; `not_subscribed` with no sub; `rate` past the
     budget; two issues never share a suffix.
+- **knit-spool, casts (§2.7):** `CastRecordVectorTest` for the vectors; `CastTest` for fan-out, nothing stored,
+  silent drops, no strike, the reload kill switch and the ticket rule; conformance checks `cast-advertised`,
+  `cast-fanout`, `cast-silent-refusal`, `cast-ticket` and the advisory `cast-rate`.
 - **knit-next:**
+  - Casts (§2.7): `SpoolCastRecordsTest` against the same hex; `CastSealTest`; the cast set in `ScopeFramesTest`;
+    `SpoolConnectionCastTest`; `ScopeSyncTest`'s cast cases; a signed talk frame that fails to open raises no reset
+    (`InboundPipelineTest`); the `ct` flag in `CallManagerTest`; and `WalkieTalkLabTest`'s burst cast between two
+    phones with no radio path.
   - A `CallPayload` golden vector (with `dw`/`dx`).
   - Stale `OFFER` → missed call; `CANCEL` before `OFFER` → no alert.
   - Glare resolution; idempotent duplicates.
@@ -528,4 +633,6 @@ an experiment behind `BuildConfig.WALKIE` (`-Pwalkie=`, on in debug and off in r
 - **Whose TURN:** a client may want to prefer a TURN server run by someone other than the spool
   operator, to avoid §2.5's join. Nothing above stops that, but no configuration surface exists for it.
 - **Timing signature:** a call shows up as a short burst of about five blobs plus a `turnreq`. That is
-  more distinctive than chat traffic, and padding (§11) is the only answer.
+  more distinctive than chat traffic, and padding (§11) is the only answer. A walkie over a relay (§2.7) is the sharper
+  case, two casts a second per talking side: padding hides what was said, but not that something was or when, and only
+  cover traffic during the silences would.

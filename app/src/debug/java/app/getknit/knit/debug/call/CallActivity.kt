@@ -649,7 +649,7 @@ private fun WalkieControls(
     onTalkCancel: () -> Unit,
 ) {
     Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
-        if (link == TalkLink.NONE || link == TalkLink.MESH) {
+        if (link != null && link != TalkLink.DIRECT) {
             LinkNotice(link, name)
             Spacer(Modifier.height(12.dp))
         }
@@ -679,7 +679,8 @@ private fun WalkieControls(
 
 /**
  * Why a burst may not reach the peer (§3.11): no link this phone can see — the radios are asked for one meanwhile — or
- * only a path through other phones, which works but is slower and less sure.
+ * only a path through other phones, which works but is slower and less sure, or no radio path at all but a relay that
+ * carries the bursts (§2.7), which works while both phones stay online.
  */
 @Composable
 private fun LinkNotice(
@@ -697,9 +698,19 @@ private fun LinkNotice(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Icon(if (none) Icons.Outlined.LinkOff else Icons.Outlined.Hub, contentDescription = null, modifier = Modifier.size(20.dp))
+            val icon =
+                when (link) {
+                    TalkLink.NONE -> Icons.Outlined.LinkOff
+                    TalkLink.SPOOL -> Icons.Outlined.Cloud
+                    else -> Icons.Outlined.Hub
+                }
+            Icon(icon, contentDescription = null, modifier = Modifier.size(20.dp))
             Text(
-                if (none) "Not linked to $name yet. Linking…" else "No direct link to $name. Going through other phones",
+                when (link) {
+                    TalkLink.NONE -> "Not linked to $name yet. Linking…"
+                    TalkLink.SPOOL -> "No radio link to $name. Going through your relay"
+                    else -> "No direct link to $name. Going through other phones"
+                },
                 style = MaterialTheme.typography.bodyMedium,
             )
         }

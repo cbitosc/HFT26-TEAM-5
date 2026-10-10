@@ -157,6 +157,8 @@ class OkHttpSpoolDialer(
 
         override fun send(bytes: ByteArray): Boolean = socket?.send(bytes.toByteString()) ?: false
 
+        override fun queued(): Long = socket?.queueSize() ?: 0L
+
         override fun close(
             code: Int,
             reason: String,

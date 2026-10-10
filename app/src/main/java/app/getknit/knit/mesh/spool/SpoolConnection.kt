@@ -18,6 +18,9 @@ interface SpoolLink {
     /** Sends one binary WebSocket message; false when the socket is already gone. */
     fun send(bytes: ByteArray): Boolean
 
+    /** Bytes handed to [send] and not yet written to the socket — what a cast checks so it never waits behind a blob. */
+    fun queued(): Long = 0L
+
     fun close(
         code: Int,
         reason: String,
@@ -148,6 +151,8 @@ class SpoolConnection(
     private val onTicketAnswer: suspend (HeldTicket, SpoolReply) -> Unit = { _, _ -> },
     // What a ticket's `exp` and an accepted ticket's lapse are read against (epoch ms).
     private val clock: () -> Long = { System.currentTimeMillis() },
+    // A cast another member sent (docs/VOICE_CALLS.md §2.7). Never answered, never a request, no `q`.
+    private val onCast: suspend (SpoolCast) -> Unit = {},
 ) {
     /**
      * One outstanding `q`. For the two requests answered by un-`q`'d records (`pull` → `blob`*,
@@ -264,6 +269,18 @@ class SpoolConnection(
     @Volatile
     var stun: List<String> = emptyList()
         private set
+
+    /**
+     * This spool's cast bounds (HELLO `cast`; experimental, docs/VOICE_CALLS.md §2.7), clamped like [limits], or null
+     * when it fans out none — read after [awaitReady]. [castOut] sends nothing without it.
+     */
+    @Volatile
+    var cast: SpoolCastInfo? = null
+        private set
+
+    // The advertised cast budget, kept on our side because the spool's refusals are silent. Built at the hello.
+    @Volatile
+    private var castBudget: CastBudget? = null
 
     // The ticket the spool last accepted here, until its `exp` lapses on our clock or a later one replaces it.
     @Volatile
@@ -442,6 +459,43 @@ class SpoolConnection(
 
     private fun turnTicketLive(): Boolean = liveTicket()?.let { it.fl and SpoolTicket.FL_TURN != 0L } == true
 
+    private fun castTicketLive(): Boolean = liveTicket()?.let { it.fl and SpoolTicket.FL_CAST != 0L } == true
+
+    /**
+     * Whether this phone's own ticket unlocks casts here: an `ent` spool where the live ticket, or the one on its way,
+     * carries the cast flag. A pending one counts, because the spool handles this connection's records in order: an
+     * `ent` sent before a cast is judged before it.
+     */
+    val ticketedCast: Boolean
+        get() = ent && (castTicketLive() || presenting?.ticket?.grantsCast == true)
+
+    /**
+     * Whether a cast for [scopeHex] would leave here at all, short of the budget and the queue: casts advertised, the
+     * hello done, the scope subscribed, and on an `ent` spool a cast ticket held here or by the peer ([peerTicketed],
+     * from its walkie signal). The spool makes the real ticket decision; this only spares it casts it would drop.
+     */
+    fun canCast(
+        scopeHex: String,
+        peerTicketed: Boolean,
+    ): Boolean = cast != null && isReady && isSubscribed(scopeHex) && (!ent || ticketedCast || peerTicketed)
+
+    /**
+     * Sends one cast (experimental, docs/VOICE_CALLS.md §2.7): no `q`, no [pending] entry, no answer awaited, no strike.
+     * False, and nothing sent, when [canCast] does not hold, when [data] is over the advertised `maxBytes`, when the
+     * advertised rate is spent, or while more than [CAST_QUEUE_LIMIT] bytes are queued on the socket. A chunk that
+     * would wait behind a blob is better lost than late.
+     */
+    fun castOut(
+        scope: ByteArray,
+        data: ByteArray,
+        peerTicketed: Boolean,
+    ): Boolean {
+        val info = cast ?: return false
+        if (!canCast(hex(scope), peerTicketed) || data.size > info.maxBytes) return false
+        if (link.queued() > CAST_QUEUE_LIMIT || castBudget?.take() != true) return false
+        return send(SpoolCodec.encode(SpoolCast(t = SpoolRecordType.CAST, scope = scope, data = data)))
+    }
+
     /**
      * Asks for one TURN credential (experimental, docs/VOICE_CALLS.md §2.2): [SpoolReply.Turn], or [SpoolReply.Failed]
      * (`not_subscribed`, `rate` + `retryMs`, `internal`, `ticket`), or [SpoolReply.Closed] — including when this spool
@@ -534,6 +588,7 @@ class SpoolConnection(
             SpoolRecordType.AHAS -> SpoolCodec.decode<SpoolAhas>(bytes)?.let(::onAhas)
             SpoolRecordType.ACHUNK -> SpoolCodec.decode<SpoolAchunk>(bytes)?.let(::onAchunk)
             SpoolRecordType.TURNCRED -> SpoolCodec.decode<SpoolTurnCred>(bytes)?.let(::onTurnCred)
+            SpoolRecordType.CAST -> SpoolCodec.decode<SpoolCast>(bytes)?.let { onCast(it) }
             SpoolRecordType.ERR -> SpoolCodec.decode<SpoolErr>(bytes)?.let { onErr(it) }
             else -> Unit // unknown `t`: additive evolution — ignore, never close
         }
@@ -578,6 +633,8 @@ class SpoolConnection(
         ent = hello.ent == true
         // A hostile list is bounded here, before anything holds it: four URLs a call can actually use, or none.
         stun = StunServers.pick(hello.stun.orEmpty())
+        cast = hello.cast?.clamped(limits)
+        castBudget = cast?.let { CastBudget(it.rate, clock) }
         // A difficulty beyond what a phone will attempt is refused outright rather than mined for: the
         // work is spent per scope on every round that re-subscribes, so believing an absurd one is a
         // remote battery denial that costs the spool a single integer.
@@ -778,6 +835,15 @@ class SpoolConnection(
         /** How long a `q`-correlated request waits for its terminal `ok`/`err`/`list` before giving up. */
         const val REQUEST_TIMEOUT_MS = 30_000L
 
+        /** Socket bytes queued past which a cast is skipped rather than sent behind them: about one attachment chunk. */
+        const val CAST_QUEUE_LIMIT = 64L * 1024
+
+        /** The highest cast rate believed from a hello; knit-spool refuses to start above it. */
+        const val MAX_CAST_RATE = 100
+
+        /** A cast budget's burst, as a multiple of its rate (docs/VOICE_CALLS.md §2.7). */
+        const val CAST_BURST_FACTOR = 4
+
         private const val MS_PER_S = 1_000L
 
         /**
@@ -815,6 +881,13 @@ class SpoolConnection(
                 maxAget = maxAget?.coerceIn(1, ScopeAttachments.MAX_CHUNKS),
             )
 
+        /** A spool's cast bounds, held to what one record can carry and to a rate no honest spool exceeds. */
+        private fun SpoolCastInfo.clamped(limits: SpoolLimits?) =
+            SpoolCastInfo(
+                maxBytes = maxBytes.coerceIn(0, limits?.maxRecord ?: MAX_INBOUND_RECORD),
+                rate = rate.coerceIn(0, MAX_CAST_RATE),
+            )
+
         /** The room's pinned bounds (§7.4), held to the same ceilings as the spool-wide caps they sit under. */
         private fun SpoolCommonsInfo.clamped(limits: SpoolLimits?) =
             SpoolCommonsInfo(
@@ -826,5 +899,32 @@ class SpoolConnection(
                 maxBlob = maxBlob.coerceIn(1, limits?.maxBlob ?: MAX_INBOUND_RECORD),
                 attach = attach,
             )
+    }
+}
+
+/**
+ * A spool's advertised cast budget, kept here because the spool drops an over-budget cast without a word: [rate] a
+ * second with a burst of four times that, exactly the bucket the spool runs. A rate of 0 refuses every take.
+ */
+private class CastBudget(
+    private val rate: Int,
+    private val clock: () -> Long,
+) {
+    private val burst = (rate * SpoolConnection.CAST_BURST_FACTOR).toDouble()
+    private var tokens = burst
+    private var lastMs = clock()
+
+    @Synchronized
+    fun take(): Boolean {
+        val now = clock()
+        tokens = minOf(burst, tokens + (now - lastMs) * rate / MS_PER_SECOND)
+        lastMs = now
+        if (tokens < 1.0) return false
+        tokens -= 1.0
+        return true
+    }
+
+    private companion object {
+        const val MS_PER_SECOND = 1_000.0
     }
 }

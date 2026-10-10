@@ -384,6 +384,48 @@ class ScopeSync(
     }
 
     /**
+     * Whether a cast to [peerId] would leave through at least one connected spool (experimental,
+     * docs/VOICE_CALLS.md §2.7): one whose hello advertised `cast`, that has answered the SUB of the peer's current
+     * DM scope, and — on an `ent` spool — where this phone holds a cast ticket or the peer does ([peerTicketed], from
+     * its walkie signal). Lock-free and synchronous, so the walkie can ask before it seals and spends a ratchet step.
+     */
+    fun canCast(
+        peerId: String,
+        peerTicketed: Boolean,
+    ): Boolean {
+        val scope = castScope(peerId) ?: return false
+        return workers.values.any { it.canCast(scope, peerTicketed) }
+    }
+
+    /**
+     * Whether this phone holds a cast ticket on some connected spool that fans out casts — what its walkie signal
+     * tells the peer, so a free phone knows its casts will be carried there.
+     */
+    fun castTicketed(): Boolean = workers.values.any { it.castTicketed() }
+
+    /**
+     * Casts one signed frame to [peerId] through every connected spool that would carry it (docs/VOICE_CALLS.md §2.7)
+     * and returns how many took it. Sealed once: the same frame cast to two spools is the same bytes, and the peer's
+     * router drops the second copy by frame id. The frame must be in the cast set, outward. Never under a worker's
+     * round lock and never a request: a walkie chunk is live or lost, and a heal round must not hold one back.
+     */
+    suspend fun cast(
+        peerId: String,
+        peerTicketed: Boolean,
+        env: RelayEnvelope,
+        sig: ByteArray,
+        signed: ByteArray,
+    ): Int {
+        val scope = castScope(peerId) ?: return 0
+        if (!ScopeFrames.castEligible(env, selfId(), scope, inbound = false)) return 0
+        val data = ScopeFrames.sealCast(scope, sig, signed)
+        return workers.values.count { it.castOut(scope, data, peerTicketed) }
+    }
+
+    /** The peer's current DM scope, the one a cast rides: never a retiring one, never the pair scope. */
+    private fun castScope(peerId: String): Scope? = scopes.firstOrNull { it.peerId == peerId && !it.retiring && !it.pair }
+
+    /**
      * The credential-free STUN URIs every connected spool advertised in its HELLO (C-7.6-20), in worker order and
      * without repeats. Not capped here: the call picks from these and what its TURN servers reduce to
      * (`call/StunServers`). Lock-free and synchronous — the hellos are already in memory.
@@ -784,6 +826,32 @@ class ScopeSync(
         fun stunUrls(): List<String> = connection?.takeIf { it.isReady }?.stun.orEmpty()
 
         /**
+         * Whether this worker's live connection would take a cast for [scope]: the scope belongs here and its SUB was
+         * answered (a digest arrived, so the spool counts the subscription), and the connection's own rule holds —
+         * casts advertised, and on an `ent` spool a cast ticket here or the peer's. Lock-free like [turnAsk].
+         */
+        fun canCast(
+            scope: Scope,
+            peerTicketed: Boolean,
+        ): Boolean {
+            val conn = connection ?: return false
+            return scope.belongsAt(url) && spoolDigests.containsKey(scope.idHex) && conn.canCast(scope.idHex, peerTicketed)
+        }
+
+        /** Whether this phone's own ticket unlocks casts on this worker's live connection. */
+        fun castTicketed(): Boolean = connection?.takeIf { it.isReady && it.cast != null }?.ticketedCast == true
+
+        /** Sends one sealed cast for [scope] on the live connection; false when it would not leave here. */
+        fun castOut(
+            scope: Scope,
+            data: ByteArray,
+            peerTicketed: Boolean,
+        ): Boolean {
+            val conn = connection ?: return false
+            return canCast(scope, peerTicketed) && conn.castOut(scope.id, data, peerTicketed)
+        }
+
+        /**
          * Presents this host's ticket on [conn] if one is held and presentable and it is not the ticket already
          * presented on this connection — so an import shows up at once (and replaces the accepted one), while a
          * refusal or an answer's own verdict write never re-sends the same bytes on the same connection (C-7.6-19).
@@ -1045,6 +1113,7 @@ class ScopeSync(
                 onScopeError = { scopeHex, code, retryMs -> handleScopeError(scopeHex, code, retryMs) },
                 onTicketAnswer = { ticket, reply -> ticketAnswered(ticket, reply) },
                 clock = clock,
+                onCast = { handleCast(it) },
             )
 
         /**
@@ -1883,6 +1952,23 @@ class ScopeSync(
             val scope = mine(scopes, connection).firstOrNull { it.idHex == hex(event.scope) } ?: return
             if (event.data.size > boundsFor(scope).maxBlob) return
             if (accept(scope, event.blobId, event.data, Source.EVENT) == Accept.DELIVERED) markDirty(scope.idHex)
+        }
+
+        /**
+         * A cast another member sent (docs/VOICE_CALLS.md §2.7): opened, held to the cast set, authenticated by
+         * [canCarry] exactly as a pulled blob is (pinned key, signature), then handed to [deliver] as a frame for this
+         * phone alone — `ttl = 0`, so no neighbour is flooded with it. That is the whole path: a cast is never claimed,
+         * accounted, quarantined, folded or counted as presence, and a failure is dropped and forgotten. It is never
+         * listed, so nothing can drive a re-pull, and a spool that never advertised casts has its casts ignored.
+         */
+        private suspend fun handleCast(cast: SpoolCast) {
+            val conn = connection ?: return
+            val maxBytes = conn.cast?.maxBytes ?: return
+            if (cast.data.size > maxBytes) return
+            val scope = mine(scopes, conn).firstOrNull { it.idHex == hex(cast.scope) } ?: return
+            val opened = ScopeFrames.openCast(scope, selfId(), cast.data) ?: return
+            if (!canCarry(opened.wire, opened.env)) return
+            deliver(opened.wire, opened.env, SPOOL_SOURCE_PREFIX + url)
         }
 
         private fun handleScopeError(

@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaCodec
+import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.media.MediaRecorder
 import android.util.Log
@@ -195,6 +196,13 @@ internal class TalkRecorder(
                     setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, FRAME_BYTES * BUFFER_FRAMES)
                 }
             MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_OPUS).apply {
+                // Constant bitrate keeps every packet one size, so a chunk's size says nothing about what was said, to
+                // a radio carrier or a relay (docs/VOICE_CALLS.md §2.7). Asked for only where the encoder says it can:
+                // elsewhere its default stands, and a cast's padding still keeps a relay's view to a size class.
+                val caps = codecInfo.getCapabilitiesForType(MediaFormat.MIMETYPE_AUDIO_OPUS).encoderCapabilities
+                if (caps?.isBitrateModeSupported(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR) == true) {
+                    format.setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
+                }
                 configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
                 start()
             }

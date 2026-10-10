@@ -6,9 +6,11 @@ import app.getknit.knit.mesh.MeshMetrics
 import app.getknit.knit.mesh.PRESENCE_FRESH_MS
 import app.getknit.knit.mesh.SPOOL_COVER_MS
 import app.getknit.knit.mesh.crypto.scope.ScopeCrypto
+import app.getknit.knit.mesh.protocol.FrameType
 import app.getknit.knit.mesh.protocol.RatchetHeader
 import app.getknit.knit.mesh.protocol.RatchetInit
 import app.getknit.knit.mesh.protocol.RelayEnvelope
+import app.getknit.knit.mesh.protocol.WireCodec
 import app.getknit.knit.mesh.protocol.WireEnvelope
 import app.getknit.knit.mesh.sha256Hex
 import com.google.crypto.tink.subtle.X25519
@@ -52,6 +54,8 @@ class ScopeSyncTest {
         val delivered: MutableList<RelayEnvelope>,
         val blobs: FakeBlobs,
         val obtained: MutableList<String>,
+        // The wire each delivery came in, beside [delivered]: what a cast's delivery wrapper is checked on.
+        val wires: MutableList<WireEnvelope> = mutableListOf(),
     )
 
     /** The local content-addressed store, in memory. Content-addressed, so a save is write-once. */
@@ -110,6 +114,7 @@ class ScopeSyncTest {
     ): Member {
         val metrics = MeshMetrics()
         val delivered = mutableListOf<RelayEnvelope>()
+        val wires = mutableListOf<WireEnvelope>()
         val obtained = mutableListOf<String>()
         val sync =
             ScopeSync(
@@ -129,7 +134,9 @@ class ScopeSyncTest {
                 // InboundPipeline.onDeliver does, so the next heal round folds the frame into our digest.
                 deliver = { wire, env, _ ->
                     delivered.add(env)
-                    custody.store(CarriedFrame(env, wire.sig, wire.signed), ForwardStore.ORIGIN_RELAY, now)
+                    wires.add(wire)
+                    // A walkie chunk is never custodied (InboundPipeline.onDeliver carries custodial types alone).
+                    if (env.type != FrameType.TALK) custody.store(CarriedFrame(env, wire.sig, wire.signed), ForwardStore.ORIGIN_RELAY, now)
                 },
                 blobs = blobs,
                 onAttachmentObtained = { obtained.add(it) },
@@ -141,7 +148,7 @@ class ScopeSyncTest {
                 tickets = tickets,
                 log = log,
             )
-        return Member(custody, sync, metrics, delivered, blobs, obtained)
+        return Member(custody, sync, metrics, delivered, blobs, obtained, wires)
     }
 
     /** Bytes plus their content address — what a frame's cleartext `attachmentHash` names. */
@@ -2693,5 +2700,184 @@ class ScopeSyncTest {
             assertEquals("image/jpeg", receiver.blobs.mimes[photoHash])
             sender.sync.stop()
             receiver.sync.stop()
+        }
+
+    // ---- casts (experimental, docs/VOICE_CALLS.md §2.7) ----
+
+    private val castBounds = SpoolCastInfo(maxBytes = 2_048, rate = 4)
+    private val castSig = ByteArray(ScopeCrypto.SIG_BYTES) { 7 }
+
+    private fun talk(
+        id: String = "t1",
+        from: String = alice,
+        to: String = bob,
+    ) = RelayEnvelope(
+        type = FrameType.TALK,
+        id = id,
+        senderId = from,
+        sentAt = now,
+        recipientId = to,
+        payload = ByteArray(40) { it.toByte() },
+    )
+
+    private suspend fun Member.castTalk(
+        env: RelayEnvelope = talk(),
+        sig: ByteArray = castSig,
+        peerTicketed: Boolean = false,
+    ): Int =
+        sync.cast(peerId = env.recipientId!!, peerTicketed = peerTicketed, env = env, sig = sig, signed = WireCodec.encodeEnvelope(env))
+
+    @Test
+    fun `a cast reaches the peer as a frame for it alone, and the spool stores nothing`() =
+        runTest {
+            val spool = FakeSpool(cast = castBounds)
+            val sender = member(spool, alice, bob)
+            val receiver = member(spool, bob, alice)
+            sender.sync.start(backgroundScope)
+            receiver.sync.start(backgroundScope)
+            pump()
+
+            assertTrue(sender.sync.canCast(bob, peerTicketed = false))
+            assertEquals(1, sender.castTalk())
+            pump(1)
+
+            assertEquals(listOf("t1"), receiver.delivered.map { it.id })
+            val wire = receiver.wires.single()
+            assertEquals("delivered to this phone and flooded nowhere", 0, wire.ttl)
+            assertFalse(wire.relay)
+            assertTrue("the cast's signature rides as the frame's own", wire.sig.contentEquals(castSig))
+            assertTrue("nothing was pushed: a cast is never a blob", spool.pushed.isEmpty())
+            assertEquals(1, spool.castsFanned)
+            assertFalse(receiver.custody.has("t1"))
+            assertEquals(0, receiver.metrics.spool().spoolInvalid)
+            assertEquals(0, receiver.metrics.spool().spoolAccounted)
+            sender.sync.stop()
+            receiver.sync.stop()
+        }
+
+    @Test
+    fun `a spool that never advertised casts is sent none`() =
+        runTest {
+            val spool = FakeSpool()
+            val sender = member(spool, alice, bob)
+            sender.sync.start(backgroundScope)
+            pump()
+            assertFalse(sender.sync.canCast(bob, peerTicketed = true))
+            assertEquals(0, sender.castTalk())
+            assertFalse(SpoolRecordType.CAST in spool.skippedRecords)
+            assertTrue(spool.casts.isEmpty())
+            // And a peer this phone shares no DM scope with is cast nothing anywhere.
+            assertFalse(sender.sync.canCast("nobody", peerTicketed = true))
+            sender.sync.stop()
+        }
+
+    @Test
+    fun `a cast goes to every spool that carries it`() =
+        runTest {
+            val one = FakeSpool(cast = castBounds)
+            val two = FakeSpool(cast = castBounds)
+            val urls = listOf("ws://one.test/spool/v1", "ws://two.test/spool/v1")
+            val relays = Relays(mapOf(urls[0] to one, urls[1] to two))
+            val sender = member(one, alice, bob, dialer = relays, urls = urls)
+            val receiver = member(one, bob, alice, dialer = relays, urls = urls)
+            sender.sync.start(backgroundScope)
+            receiver.sync.start(backgroundScope)
+            pump()
+
+            assertEquals(2, sender.castTalk())
+            pump(1)
+            assertEquals(1, one.castsFanned)
+            assertEquals(1, two.castsFanned)
+            // Both copies are the same frame; the router behind `deliver` keeps one (`SeenSet`, by id).
+            assertEquals(listOf("t1", "t1"), receiver.delivered.map { it.id })
+            sender.sync.stop()
+            receiver.sync.stop()
+        }
+
+    /** A cast never waits on a heal round: the round lock is held, for up to a request timeout, while the spool is silent. */
+    @Test
+    fun `a heal round stuck on a silent spool does not hold a cast back`() =
+        runTest {
+            val spool = FakeSpool(cast = castBounds)
+            val sender = member(spool, alice, bob)
+            val receiver = member(spool, bob, alice)
+            sender.sync.start(backgroundScope)
+            receiver.sync.start(backgroundScope)
+            pump()
+
+            spool.mute()
+            sender.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
+            sender.sync.onCustodyChanged()
+            pump(2)
+            assertTrue("the round is waiting on a request the spool swallowed", spool.swallowed.isNotEmpty())
+
+            assertEquals(1, sender.castTalk())
+            runCurrent()
+            assertEquals(listOf("t1"), receiver.delivered.map { it.id })
+            sender.sync.stop()
+            receiver.sync.stop()
+        }
+
+    @Test
+    fun `a cast the carry gate refuses, or outside the cast set, is dropped and remembered nowhere`() =
+        runTest {
+            val spool = FakeSpool(cast = castBounds)
+            val sender = member(spool, alice, bob)
+            val receiver = member(spool, bob, alice, carryGate = { wire, _ -> wire.sig.contentEquals(castSig) })
+            sender.sync.start(backgroundScope)
+            receiver.sync.start(backgroundScope)
+            pump()
+
+            assertEquals(1, sender.castTalk(talk(id = "forged"), sig = ByteArray(ScopeCrypto.SIG_BYTES)))
+            // A chat frame is not cast, whatever the caller asks: the outward set refuses it before the seal.
+            assertEquals(0, sender.sync.cast(bob, false, dmFrame("c1", alice, bob).envelope, castSig, ByteArray(8)))
+            assertEquals(1, sender.castTalk(talk(id = "real")))
+            pump(1)
+            assertEquals(listOf("real"), receiver.delivered.map { it.id })
+            assertEquals(0, receiver.metrics.spool().spoolInvalid)
+            sender.sync.stop()
+            receiver.sync.stop()
+        }
+
+    /**
+     * On a spool that sells casts (`ent`), a cast leaves only beside a cast ticket — ours, or the peer's by its walkie
+     * signal — and the spool carries it only once one subscriber of the scope holds one.
+     */
+    @Test
+    fun `an ent spool carries casts once a subscriber holds a cast ticket`() =
+        runTest {
+            val lab = FakeSpool(cast = castBounds, ent = true)
+            val labUrl = "ws://lab.example:9480/spool/v1"
+            val tickets = SpoolTickets(SpoolTicketsTest.MemoryJournal()) { now }
+            val payer = member(lab, alice, bob, urls = listOf(labUrl), tickets = tickets)
+            val friend = member(lab, bob, alice, urls = listOf(labUrl))
+            payer.sync.start(backgroundScope)
+            friend.sync.start(backgroundScope)
+            pump()
+
+            assertFalse(payer.sync.canCast(bob, peerTicketed = false))
+            assertFalse(payer.sync.castTicketed())
+            // The friend believes the payer holds a ticket, but nobody does yet: the cast goes, and the spool drops it.
+            assertEquals(1, friend.castTalk(talk(id = "early", from = bob, to = alice), peerTicketed = true))
+            pump(1)
+            assertTrue(payer.delivered.isEmpty())
+
+            // A TURN-only ticket unlocks nothing; one that carries the cast flag does, both ways.
+            assertTrue(
+                tickets.import(
+                    labUrl,
+                    SpoolTicketsTest.ticket(fl = SpoolTicket.FL_TURN or SpoolTicket.FL_CAST).text,
+                ) is SpoolTickets.Import.Held,
+            )
+            pump(2)
+            assertTrue(payer.sync.castTicketed())
+            assertTrue(payer.sync.canCast(bob, peerTicketed = false))
+            assertEquals(1, payer.castTalk(talk(id = "paid")))
+            assertEquals(1, friend.castTalk(talk(id = "free", from = bob, to = alice), peerTicketed = true))
+            pump(1)
+            assertEquals(listOf("paid"), friend.delivered.map { it.id })
+            assertEquals(listOf("free"), payer.delivered.map { it.id })
+            payer.sync.stop()
+            friend.sync.stop()
         }
 }

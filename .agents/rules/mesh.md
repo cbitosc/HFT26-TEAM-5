@@ -91,6 +91,12 @@ free). Two invariants that are easy to break:
   peer off the radios can never bootstrap or repair a DM session, nor receive group sender-key seeds. A retiring
   scope is pulled and never pushed into, with one exception (C-3.1-5, ADR 2026-10.j67x): the scope our own
   unanswered reset replaced takes that reset (`ScopeFrames.mayRefill`), since its peer is still on it.
+- **A cast is the plane's one unstored lane, and it has its own set** (`ScopeSync.cast` / `handleCast`,
+  `docs/VOICE_CALLS.md` §2.7). It carries a walkie's `talk` frame and nothing else (`ScopeFrames.castEligible`), sealed
+  as a third object class (`ScopeCrypto.sealCast`, version `0x04`) so it never opens as a blob or a chunk. It enters
+  through the same two doors (`canCarry`, then `deliver` with `ttl = 0`), and is never claimed, accounted,
+  quarantined or folded. Never send one through `request()` or under the round lock: it has no `q`, and a chunk that
+  waits is lost anyway.
 - **A *pulled* blob that fails validation is quarantined per (spool, scope), never merely dropped** (spec
   C-9.3-1). Spools are untrusted storage: a garbage blob folds into *their* digest and never ours, so
   without the invalid set the two digests diverge forever and the client re-pulls it on every heal round.

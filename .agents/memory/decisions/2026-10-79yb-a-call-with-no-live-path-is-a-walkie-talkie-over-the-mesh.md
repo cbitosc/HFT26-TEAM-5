@@ -287,3 +287,76 @@ Neither changes a byte on the wire. The bridge's `CALL state` reports the same n
 
 The guard is `WalkieMeterTest`.
 
+
+## Amendment 2026-10-10 (6): chunks cross a spool when no radio link exists
+
+Two phones online with no shared radio got a walkie session that carried nothing, because `sendCallTalk` sealed nothing
+without a link. That is the session a live call falls back to when its TURN is sold (knit-spool ADR 2026-10.bxsg) and
+STUN fails behind a symmetric NAT. Call signals already cross a spool as stored DM blobs. Chunks cannot ride that way:
+each costs a digest entry, an eviction, a tombstone, a listing and a pull per member per heal round, and two a second
+would push a 400-frame scope's history out within minutes.
+
+- **A chunk with no mesh path is cast.** knit-spool's new `cast` record (`docs/VOICE_CALLS.md` §2.7, knit-spool ADR
+  2026-10.3wdy) fans one sealed frame out to a scope's other live subscribers. The spool never stores it, never
+  answers it and never strikes it.
+  - **When.** `MeshManager.sendCallTalk` casts only when the peer is neither a neighbour nor in `heardIndirectly`,
+    and `ScopeSync.canCast` holds: a connected spool advertised `cast` and answered the peer's DM scope.
+  - **Beside what.** The blind flood still goes when this phone has links at all. Both copies carry one id, so the
+    receiver's `SeenSet` keeps the first.
+  - **How.** `ScopeSync.cast` sends to every such spool, never under the round lock and never as a request.
+- **The cast copy is signed; the radio copy is not.** The cast carries `messageCrypto.signRaw` over the same `signed`
+  bytes, so the Internet plane keeps §4.4's rule that every frame it carries is checked against the pinned key. The
+  radio copy keeps amendment (2)'s unsigned compact form and its Coded budget.
+  - **Receiving.** `ScopeSync.handleCast` runs `ScopeFrames.openCast`, then the cast set (`castEligible`), then
+    `canCarry`. It then delivers the frame through the router with `ttl = 0` and `relay = false`. Nothing is
+    accounted, quarantined or counted as presence.
+  - **Ratchet failures.** `handleTalk` now never treats a failed open as reset evidence, signed or not.
+- **Its own seal.** `ScopeCrypto.sealCast` uses version `0x04`, its own nonce label and aad, and a plaintext padded
+  to 128 bytes. A cast never opens as a frame blob or a chunk, and neither of those opens as a cast. A chunk's cast is
+  797 bytes.
+- **Sold with tickets.** On an `ent` spool a cast fans out only while some subscriber of the scope holds a ticket with
+  bit 3 (`SpoolTicket.FL_CAST`), so one payer unlocks the walkie both ways.
+  - `CallPayload.ct` rides a walkie OFFER or ANSWER when the sender holds one (`ScopeSync.castTicketed`), and
+    `CallState.peerCastTicketed` keeps the peer's value.
+  - `WalkieTalk` passes that value to `sendCallTalk`, so a free phone casts only where a payer has unlocked the scope.
+- **The screen.** `TalkLink.SPOOL` is the link to a peer with no mesh path whose chunks a relay would cast. The walkie
+  controls show "Going through your relay", the diagnostics path reads `Through the relay · cast`, and the bridge's
+  `CALL state` reports `peerCastTicketed` and `castTicketed`.
+- **Constant bitrate.** `TalkRecorder` asks the Opus encoder for CBR where it reports support, so a chunk's size says
+  nothing about what was said, to a carrier or a relay. The cast's padding covers the relay where it does not.
+
+Rejected:
+
+- **`push`, or `pushDirect`.** Stored, folded and listed. `pushDirect` also takes the round lock, which a heal stuck on
+  a silent spool holds for up to 30 s.
+- **An ack per cast.** A shipped client reads a scoped `err` with no `q` as a refused `sub`, and a `q` would put a
+  pending slot and the silent-request strike on every chunk.
+- **Casting to a peer heard through the mesh as well.** The user chose the fallback alone: a mesh path keeps its
+  mesh-only behaviour, and the spool sees only sessions that need it.
+- **Unsigned casts, authenticated by the ratchet alone.** Signing keeps §4.4's invariant, and its 64 bytes land only
+  on the spool's copy.
+- **Casts open to any subscriber on a ticketed spool.** The relay is the paid feature (Knit Anywhere), and radio
+  flooding stays free. A spool without tickets still lets any subscriber cast.
+- **A ticket on every caster.** A free friend could only listen.
+
+What it costs:
+
+- **Data and a live signal.** About 1.7 KB/s while talking. The spool sees which side of a DM scope talks when and for
+  how long, never what was said (§2.5).
+- **`CAP_WALKIE` now also means "reads casts."** No new bit, for amendment (1)'s reason: the only builds with the walkie
+  are this branch's lab phones. An older lab build skips the record, and a cast to it is lost.
+- **`dropToWalkie` stays parked.** Its reason, a peer off every radio getting a session that carries nothing, is what
+  casts fix, so un-parking it is the follow-up.
+- **A correction.** The sentence in the first streaming amendment that drops a `talk` frame opening to anything but a
+  `CTL_CALL` describes that amendment's form. Since amendment (2) the plaintext is `TalkWire`, and `CallManager.onTalk`
+  drops what does not decode.
+- **The guards:**
+  - `CastSealTest`: the vector, the refusals, and a chunk's size.
+  - `SpoolCastRecordsTest`: knit-spool's hex.
+  - `ScopeFramesTest`: the cast set.
+  - `SpoolConnectionCastTest`: the hello, the gates, the local budget, the queue.
+  - `ScopeSyncTest`'s cast cases: the round lock, the carry gate, the ticket rule.
+  - `InboundPipelineTest.aSignedTalkFrameThatFailsToOpenIsNeverResetEvidence`.
+  - `CallManagerTest`'s two `ct` cases.
+  - `WalkieStreamTest.aRelayIsThePeersLinkOnlyWhereTheMeshHasNone`.
+  - `WalkieTalkLabTest`: a burst cast between two phones with no radio path, and a neighbour that is never cast.

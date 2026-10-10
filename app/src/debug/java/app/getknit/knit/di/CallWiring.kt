@@ -36,11 +36,13 @@ import app.getknit.knit.transfer.DirectWifiLease
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import org.koin.android.ext.koin.androidContext
@@ -116,7 +118,7 @@ fun callModule(): Module? =
                     calls = get(),
                     recorder = get(),
                     player = get(),
-                    send = { peerId, chunk -> get<MeshManager>().sendCallTalk(peerId, chunk) },
+                    send = { peerId, chunk, peerTicketed -> get<MeshManager>().sendCallTalk(peerId, chunk, peerTicketed) },
                     links = talkLinks(),
                     scope = get<CoroutineScope>(),
                     log = { Log.i(TAG, it) },
@@ -153,28 +155,50 @@ private fun Scope.walkieRoute(): CallWalkie =
             val direct = (get<PeerRepository>().find(peerId)?.capabilities ?: 0L) and Protocol.CAP_DIRECT_TRANSFER != 0L
             return neighbour && direct && !get<SettingsStore>().debugDirectCallsOff.first()
         }
+
+        override fun castTicketed() = get<MeshManager>().castTicketed()
     }
 
 /**
- * The walkie's view of the mesh (§3.11): a chunk's link to a peer, from the live links and the peers heard through
- * them, and the call's hold on a Wi-Fi Aware link to it (`MeshTransport.holdLink`).
+ * The walkie's view of the mesh (§3.11): a chunk's link to a peer, from the live links, the peers heard through them
+ * and whether a relay would cast to it (§2.7), and the call's hold on a Wi-Fi Aware link to it (`MeshTransport.holdLink`).
  */
 private fun Scope.talkLinks(): TalkLinks =
     object : TalkLinks {
-        override fun linkTo(peerId: String): Flow<TalkLink> {
+        override fun linkTo(
+            peerId: String,
+            peerTicketed: () -> Boolean,
+        ): Flow<TalkLink> {
             val mesh = get<MeshController>()
-            return combine(mesh.neighbors, mesh.heardIndirectly) { linked, heard ->
-                TalkLink.of(peerId, linked.mapTo(HashSet()) { it.nodeId }, heard.keys)
+            val manager = get<MeshManager>()
+            // A relay's hello, its SUB's answer and a ticket's verdict arrive on no flow the walkie can watch, so the
+            // spool half is looked at again every few seconds; the radios' half moves the moment they do.
+            val castable =
+                flow {
+                    while (true) {
+                        emit(manager.canCastTalk(peerId, peerTicketed()))
+                        delay(CAST_LOOK_MS)
+                    }
+                }
+            return combine(mesh.neighbors, mesh.heardIndirectly, castable) { linked, heard, cast ->
+                TalkLink.of(peerId, linked.mapTo(HashSet()) { it.nodeId }, heard.keys, cast)
             }.distinctUntilChanged()
         }
 
         override fun raise(peerId: String): Boolean = get<MeshTransport>().holdLink(peerId)
 
-        // sendCallTalk's order: the peer's own link, a Wi-Fi Aware one first (sendLive), else a flood over any link.
-        override fun pathTo(peerId: String): TalkPath {
+        // sendCallTalk's order: the peer's own link, a Wi-Fi Aware one first (sendLive), else a flood over any link,
+        // and a cast through a relay for a peer the mesh has no path to.
+        override fun pathTo(
+            peerId: String,
+            peerTicketed: Boolean,
+        ): TalkPath {
             val transport = get<MeshTransport>()
             val linked = transport.neighbors.value
+            val meshPath =
+                linked.any { it.nodeId == peerId } || (linked.isNotEmpty() && peerId in get<MeshController>().heardIndirectly.value)
             return when {
+                !meshPath && get<MeshManager>().canCastTalk(peerId, peerTicketed) -> TalkPath.SPOOL
                 linked.isEmpty() -> TalkPath.NONE
                 transport.bulkRouteTo(peerId) == BulkRoute.Linked -> TalkPath.WIFI_AWARE
                 linked.none { it.nodeId == peerId } -> TalkPath.FLOODED
@@ -197,3 +221,6 @@ fun startCallsIfWired(koin: Koin) {
 fun WithCallBar(content: @Composable () -> Unit) = CallBarHost(content)
 
 private const val TAG = "KnitCall"
+
+/** How often the walkie's link looks again at whether a relay would cast to its peer. */
+private const val CAST_LOOK_MS = 3_000L

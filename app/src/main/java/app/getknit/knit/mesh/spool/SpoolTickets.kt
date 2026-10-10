@@ -24,6 +24,9 @@ class HeldTicket private constructor(
     /** Whether bit 0 of `fl` lets this ticket ask for TURN. */
     val grantsTurn: Boolean get() = claims.fl and SpoolTicket.FL_TURN != 0L
 
+    /** Whether bit 3 of `fl` lets this ticket cast, and unlock casts on its connection's scopes. */
+    val grantsCast: Boolean get() = claims.fl and SpoolTicket.FL_CAST != 0L
+
     /** Whether [other] is these very bytes — what "a different ticket" means to the refusal policy. */
     fun sameAs(other: HeldTicket): Boolean = tk.contentEquals(other.tk) && sig.contentEquals(other.sig)
 

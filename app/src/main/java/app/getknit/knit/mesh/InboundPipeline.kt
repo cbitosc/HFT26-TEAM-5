@@ -439,7 +439,7 @@ class InboundPipeline(
             FrameType.COMMONS -> {}
 
             FrameType.TALK -> {
-                handleTalk(env, signed = wire.sig.isNotEmpty(), frameBytes = wire.signed.size)
+                handleTalk(env, frameBytes = wire.signed.size)
             }
 
             else -> {}
@@ -448,15 +448,16 @@ class InboundPipeline(
 
     /**
      * One walkie chunk (docs/VOICE_CALLS.md §3.11): a [FrameType.TALK] frame addressed to us, its payload a [TalkSeal]
-     * (or a [ChatContent], for a header that form cannot carry). Unsigned by design, so the ratchet's AEAD is what
-     * authenticates it: nothing acts on it before it opens, and a failure is never a reset trigger. Opened and committed
-     * like any DM, from an accepted contact only, and its plaintext handed to the call layer. Never custodied ([onDeliver]
-     * carries custodial types alone), never acked, and never a message.
+     * (or a [ChatContent], for a header that form cannot carry). Unsigned over the radios by design, so the ratchet's
+     * AEAD is what authenticates it: nothing acts on it before it opens. The copy a spool casts (§2.7) is signed, and the
+     * signed door has verified it by now, but a failed open is never a reset trigger either way: a chunk is live or lost,
+     * a raced or duplicated one fails to open as a matter of course, and that must not cost the pair its session. Opened
+     * and committed like any DM, from an accepted contact only, and its plaintext handed to the call layer. Never
+     * custodied ([onDeliver] carries custodial types alone), never acked, and never a message.
      */
     @Suppress("ReturnCount") // a ladder of refusals ahead of the one hand-off
     private suspend fun handleTalk(
         env: RelayEnvelope,
-        signed: Boolean,
         frameBytes: Int,
     ) {
         val me = identity.nodeId()
@@ -471,7 +472,7 @@ class InboundPipeline(
         val aad = MessageCrypto.header(env.id, env.senderId, env.sentAt, me)
         val now = System.currentTimeMillis()
         val peek = ratchet.peekOpen(me, env.senderId, peerIkPub, sealed.header, sealed.nonce, sealed.ct, aad, now)
-        if (peek !is RatchetEngine.OpenOutcome.Opened) return onRatchetFailure(env, peek, me, now, authenticated = signed)
+        if (peek !is RatchetEngine.OpenOutcome.Opened) return onRatchetFailure(env, peek, me, now, authenticated = false)
         val committed =
             db.withWriteTransaction { ratchet.commitOpen(me, env.senderId, peerIkPub, sealed.header, sealed.nonce, sealed.ct, aad, now) {} }
         if (!committed) return

@@ -488,4 +488,93 @@ class ScopeFramesTest {
         assertEquals("", hex(ByteArray(0)))
         assertEquals("00ff7f80", hex(byteArrayOf(0, -1, 127, -128)))
     }
+
+    // The cast set (docs/VOICE_CALLS.md §2.7): a walkie's `talk` frame, on a pair's own DM scope, never stored.
+    private fun talk(
+        from: String,
+        to: String,
+        id: String = "t1",
+    ) = RelayEnvelope(type = FrameType.TALK, id = id, senderId = from, recipientId = to, payload = ByteArray(24) { it.toByte() })
+
+    private fun pairScope() =
+        Scope(
+            id =
+                ByteArray(32) {
+                    7
+                },
+            keys = scope().keys,
+            bounds = ScopeRegistry.DEFAULT_BOUNDS,
+            peerId = bob,
+            pair = true,
+        )
+
+    @Test
+    fun `the cast set takes a talk frame between the pair, in the direction named`() {
+        assertTrue(ScopeFrames.castEligible(talk(from = bob, to = alice), alice, scope(), inbound = true))
+        assertTrue(ScopeFrames.castEligible(talk(from = alice, to = bob), alice, scope(), inbound = false))
+        // The wrong way round for the direction, our own frame coming back, a third party either way.
+        assertFalse(ScopeFrames.castEligible(talk(from = alice, to = bob), alice, scope(), inbound = true))
+        assertFalse(ScopeFrames.castEligible(talk(from = bob, to = alice), alice, scope(), inbound = false))
+        assertFalse(ScopeFrames.castEligible(talk(from = mallory, to = alice), alice, scope(), inbound = true))
+        assertFalse(ScopeFrames.castEligible(talk(from = bob, to = carol), alice, scope(), inbound = true))
+    }
+
+    @Test
+    fun `the cast set refuses every other type, a group form, and every scope but a pair's own DM one`() {
+        val chat = dmFrame("c1", from = bob, to = alice).envelope
+        assertFalse(
+            "a chat frame is custodial and rides push, never a cast",
+            ScopeFrames.castEligible(chat, alice, scope(), inbound = true),
+        )
+        assertFalse(ScopeFrames.castEligible(profileFrame("p1", bob).envelope, alice, scope(), inbound = true))
+        val grouped =
+            RelayEnvelope(
+                type = FrameType.TALK,
+                id = "g",
+                senderId = bob,
+                recipientId = alice,
+                group = GroupInfo(id = groupId, members = listOf(alice, bob), createdBy = alice),
+                payload = ByteArray(24),
+            )
+        assertFalse(ScopeFrames.castEligible(grouped, alice, scope(), inbound = true))
+        assertFalse(ScopeFrames.castEligible(talk(from = bob, to = alice), alice, pairScope(), inbound = true))
+        assertFalse(ScopeFrames.castEligible(talk(from = bob, to = alice), alice, groupScope(), inbound = true))
+        assertFalse(ScopeFrames.castEligible(talk(from = bob, to = alice), alice, commonsScope(), inbound = true))
+    }
+
+    @Test
+    fun `an opened cast is a delivery to this phone alone, its signature kept`() {
+        val sig = ByteArray(ScopeCrypto.SIG_BYTES) { 3 }
+        val signed = WireCodec.encodeEnvelope(talk(from = bob, to = alice))
+        val opened = ScopeFrames.openCast(scope(), alice, ScopeFrames.sealCast(scope(), sig, signed))!!
+        assertEquals(0, opened.wire.ttl)
+        assertEquals(0, opened.wire.hops)
+        assertFalse(opened.wire.relay)
+        assertArrayEquals(sig, opened.wire.sig)
+        assertArrayEquals(signed, opened.wire.signed)
+        assertEquals(FrameType.TALK, opened.env.type)
+    }
+
+    @Test
+    fun `a cast that fails its seal or its set opens to nothing`() {
+        val sig = ByteArray(ScopeCrypto.SIG_BYTES) { 3 }
+        val inbound = WireCodec.encodeEnvelope(talk(from = bob, to = alice))
+        // Another scope's key, our own frame coming back, a chat frame cast anyway, and a frame blob passed as a cast.
+        assertNull(ScopeFrames.openCast(scope(), alice, ScopeFrames.sealCast(scope(secret = ByteArray(32) { 9 }), sig, inbound)))
+        assertNull(
+            ScopeFrames.openCast(
+                scope(),
+                alice,
+                ScopeFrames.sealCast(scope(), sig, WireCodec.encodeEnvelope(talk(from = alice, to = bob))),
+            ),
+        )
+        assertNull(
+            ScopeFrames.openCast(
+                scope(),
+                alice,
+                ScopeFrames.sealCast(scope(), sig, WireCodec.encodeEnvelope(dmFrame("c2", bob, alice).envelope)),
+            ),
+        )
+        assertNull(ScopeFrames.openCast(scope(), alice, ScopeFrames.seal(scope(), sig, inbound).blob))
+    }
 }

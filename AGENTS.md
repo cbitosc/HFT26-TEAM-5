@@ -120,6 +120,11 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   unsigned, compactly sealed `talk` frames nobody custodies, sized for Coded PHY (a pin in `TalkSealTest`), so nothing
   lands in the thread; a live call drops to one, without a frame, only when both OFFER and ANSWER carried the walkie
   bit (parked since 2026-10-09: `CallManager.dropToWalkie` is off, so a lost live call ends `no_route`); the flag is read once, as `CallWiring.WALKIE_WIRED`.
+  **Before touching casts — `SpoolCast`, `SpoolConnection.castOut` / `canCast` / `ticketedCast`, `ScopeSync.cast` /
+  `canCast` / `handleCast`, `ScopeCrypto.sealCast` / `openCast`, `ScopeFrames.castEligible`, `CallPayload.ct` or
+  `TalkLink.SPOOL`:** READ `docs/VOICE_CALLS.md` §2.7 and ADR 2026-10.79yb's sixth amendment — a chunk with no mesh path
+  is cast through the spools, signed, never stored, never answered and never a request, and on an `ent` spool only
+  where one subscriber's cast ticket unlocks the scope.
 - **When touching `location/`, the chat overflow's "Send location" item, or anything that reads the device's
   position:** READ ADR 2026-09.tss4. A shared position is a `geo:` line in the message body (no wire field,
   no capability bit); it is read only between the pin tap and the send, by `ChatViewModel.startLocation`,

@@ -5859,6 +5859,52 @@ class InboundPipelineTest {
             assertEquals("a malformed header is not evidence the session is broken", 0, rig.resetsSent())
         }
 
+    /**
+     * A walkie chunk's failed open is never reset evidence (docs/VOICE_CALLS.md §3.11), and the signed copy a spool casts
+     * (§2.7) is no exception: the signature authenticates the frame at the door, but a raced or lost chunk fails to open
+     * as a matter of course, and that must not cost the pair its session. The same unreadable frames as `chat` are the
+     * control: they do buy a reset, so the setup could have shown one.
+     */
+    @Test
+    fun aSignedTalkFrameThatFailsToOpenIsNeverResetEvidence() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            val era = System.currentTimeMillis() - 7 * HOUR_MS
+            rig.initiateEraAt(alice, era)
+            // An accepted contact, or handleTalk would refuse the frame before it ever tried to open it.
+            rig.peerMap[alice.nodeId] = rig.peerMap.getValue(alice.nodeId).copy(verified = true)
+            val before = rig.resetsSent()
+            val author = V2Author(alice, rig)
+            val sentAt = era + 60_000L
+
+            fun unreadable(id: String) =
+                author.dm(
+                    id,
+                    "unreadable",
+                    sentAt = sentAt,
+                ) { h -> RatchetHeader(se = h.se, ek = h.ek, pe = 1, n = h.n, init = null, flags = h.flags) }
+
+            repeat(RatchetSessions.RESET_DISTINCT_FRAMES) { i ->
+                val chat = unreadable("talk-$i")
+                val talk =
+                    RelayEnvelope(
+                        type = FrameType.TALK,
+                        id = chat.id,
+                        senderId = chat.senderId,
+                        sentAt = chat.sentAt,
+                        recipientId = chat.recipientId,
+                        payload = chat.payload,
+                    )
+                rig.deliver(alice, talk, from = ScopeSync.SPOOL_SOURCE_PREFIX + "wss://spool.test/spool/v1")
+            }
+            assertEquals(RatchetSessions.RESET_DISTINCT_FRAMES.toLong(), rig.drops(DropReason.RATCHET_AEAD_FAIL))
+            assertEquals("a signed talk frame that fails to open is not reset evidence", before, rig.resetsSent())
+
+            repeat(RatchetSessions.RESET_DISTINCT_FRAMES) { i -> rig.deliver(alice, unreadable("chat-$i")) }
+            assertEquals("the same frames as chat do prove the session broken", before + 1, rig.resetsSent())
+        }
+
     @Test
     fun anInboundResetReplacesTheSessionAndTriggersTheUnackedReseal() =
         runTest {

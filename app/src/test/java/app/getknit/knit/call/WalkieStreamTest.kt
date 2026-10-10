@@ -88,6 +88,16 @@ class WalkieStreamTest {
         assertEquals(TalkLink.NONE, TalkLink.of("p", neighbours = emptySet(), heardIndirectly = setOf("p")))
     }
 
+    /** §2.7: a relay that would cast to the peer is its link only where the mesh has none, as `sendCallTalk` sends. */
+    @Test
+    fun aRelayIsThePeersLinkOnlyWhereTheMeshHasNone() {
+        assertEquals(TalkLink.SPOOL, TalkLink.of("p", neighbours = emptySet(), heardIndirectly = emptySet(), cast = true))
+        assertEquals(TalkLink.SPOOL, TalkLink.of("p", neighbours = setOf("r"), heardIndirectly = emptySet(), cast = true))
+        assertEquals(TalkLink.DIRECT, TalkLink.of("p", neighbours = setOf("p"), heardIndirectly = emptySet(), cast = true))
+        assertEquals(TalkLink.MESH, TalkLink.of("p", neighbours = setOf("r"), heardIndirectly = setOf("p"), cast = true))
+        assertEquals(TalkLink.NONE, TalkLink.of("p", neighbours = emptySet(), heardIndirectly = emptySet(), cast = false))
+    }
+
     // ---- TalkQueue ----
 
     @Test
