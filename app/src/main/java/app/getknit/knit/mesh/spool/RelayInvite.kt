@@ -1,6 +1,7 @@
 package app.getknit.knit.mesh.spool
 
 import app.getknit.knit.TextLimits
+import app.getknit.knit.clampToUtf16
 import app.getknit.knit.mesh.crypto.cryptoCbor
 import app.getknit.knit.mesh.crypto.scope.ScopeCrypto
 import app.getknit.knit.normalizeSingleLine
@@ -186,7 +187,7 @@ object RelayInvite {
         return null
     }
 
-    private fun clampName(name: String): String = normalizeSingleLine(name).take(TextLimits.GROUP_NAME)
+    private fun clampName(name: String): String = normalizeSingleLine(name).clampToUtf16(TextLimits.GROUP_NAME)
 
     private const val COMPACT_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_="
 

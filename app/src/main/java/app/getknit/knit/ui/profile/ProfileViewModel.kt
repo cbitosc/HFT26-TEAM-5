@@ -6,6 +6,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.getknit.knit.TextLimits
+import app.getknit.knit.clampToUtf16
 import app.getknit.knit.data.AvatarStore
 import app.getknit.knit.data.BlobRepository
 import app.getknit.knit.data.settings.SettingsStore
@@ -99,8 +100,8 @@ class ProfileViewModel(
             nodeId.value = id
             alias.value = Alias.aliasFor(id)
             aliasMore.value = Alias.tokens(id, OWNER_TOKENS).last()
-            val name = normalizeSingleLine(settings.displayName.first()).take(TextLimits.DISPLAY_NAME)
-            val status = normalizeSingleLine(settings.status.first()).take(TextLimits.STATUS)
+            val name = normalizeSingleLine(settings.displayName.first()).clampToUtf16(TextLimits.DISPLAY_NAME)
+            val status = normalizeSingleLine(settings.status.first()).clampToUtf16(TextLimits.STATUS)
             _displayName.value = name
             _status.value = status
             lastSavedName.value = name
@@ -111,11 +112,11 @@ class ProfileViewModel(
     fun setDisplayName(value: String) {
         // Hold exactly what's typed (capped) so a space *between* words isn't eaten mid-keystroke;
         // normalization + persistence happen in [save].
-        _displayName.value = value.take(TextLimits.DISPLAY_NAME)
+        _displayName.value = value.clampToUtf16(TextLimits.DISPLAY_NAME)
     }
 
     fun setStatus(value: String) {
-        _status.value = value.take(TextLimits.STATUS)
+        _status.value = value.clampToUtf16(TextLimits.STATUS)
     }
 
     /**

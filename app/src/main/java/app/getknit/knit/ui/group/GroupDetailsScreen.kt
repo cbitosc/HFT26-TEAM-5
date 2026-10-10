@@ -58,6 +58,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.getknit.knit.R
 import app.getknit.knit.TextLimits
+import app.getknit.knit.clampToUtf16
 import app.getknit.knit.ui.components.Avatar
 import app.getknit.knit.ui.components.FullscreenImageViewer
 import app.getknit.knit.ui.components.GroupAvatar
@@ -374,7 +375,7 @@ private fun RenameGroupDialog(
         text = {
             OutlinedTextField(
                 value = name,
-                onValueChange = { name = it.take(TextLimits.GROUP_NAME) },
+                onValueChange = { name = it.clampToUtf16(TextLimits.GROUP_NAME) },
                 singleLine = true,
                 modifier = Modifier.noAutofillMenu(),
                 label = { Text(stringResource(R.string.chat_group_name_label)) },

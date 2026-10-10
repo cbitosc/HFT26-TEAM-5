@@ -39,6 +39,20 @@ object TextLimits {
 fun isValidReactionEmoji(emoji: String): Boolean = emoji.isNotBlank() && emoji.length <= TextLimits.REACTION
 
 /**
+ * The longest prefix of this string within [limit] UTF-16 units that ends on a code-point boundary: `take(limit)`,
+ * except that a cut which would split a surrogate pair stops before the pair. Every cut of user text to a
+ * [TextLimits] cap goes through it, on send and receive, so a name that ends mid-emoji keeps whole code points
+ * instead of a lone surrogate (which the JVM writes as `?` and iOS cannot hold), and both platforms cut the same
+ * text to the same prefix (knit-ios `TextLimits.truncated(_:toUTF16:)`; the interop audit's IOS-8).
+ */
+fun String.clampToUtf16(limit: Int): String {
+    if (length <= limit) return this
+    if (limit <= 0) return ""
+    val splitsPair = Character.isHighSurrogate(this[limit - 1]) && Character.isLowSurrogate(this[limit])
+    return substring(0, if (splitsPair) limit - 1 else limit)
+}
+
+/**
  * Normalizes a single-line field: trims the ends and collapses internal whitespace runs (including
  * stray newlines/tabs from a paste) down to single spaces. Apply this at commit time, never
  * per-keystroke — trimming the trailing space on every keystroke would stop the user from typing a

@@ -8,6 +8,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.getknit.knit.R
 import app.getknit.knit.TextLimits
+import app.getknit.knit.clampToUtf16
 import app.getknit.knit.data.AttachmentIdentities
 import app.getknit.knit.data.AttachmentStore
 import app.getknit.knit.data.BlobRepository
@@ -1703,7 +1704,7 @@ class ChatViewModel(
             _events.tryEmit(R.string.chat_location_not_ready)
             return null
         }
-        return listOf(text.take(TextLimits.MESSAGE - token.length - 1), token).filter { it.isNotEmpty() }.joinToString("\n")
+        return listOf(text.clampToUtf16(TextLimits.MESSAGE - token.length - 1), token).filter { it.isNotEmpty() }.joinToString("\n")
     }
 
     fun send(
@@ -1711,7 +1712,7 @@ class ChatViewModel(
         mentions: List<Mention> = emptyList(),
         replyTo: ReplyRef? = null,
     ) {
-        val trimmed = text.trim().take(TextLimits.MESSAGE)
+        val trimmed = text.trim().clampToUtf16(TextLimits.MESSAGE)
         val staged = _stagedLocation.value
         if (trimmed.isEmpty() && _pendingAttachment.value == null && staged == null) return
         // The Meshtastic room is not addressed to anybody: no recipient, no group, no attachment, no reply.

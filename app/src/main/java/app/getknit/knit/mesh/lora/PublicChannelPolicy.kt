@@ -1,6 +1,7 @@
 package app.getknit.knit.mesh.lora
 
 import app.getknit.knit.TextLimits
+import app.getknit.knit.clampToUtf16
 import app.getknit.knit.mesh.MeshPost
 import kotlin.math.roundToInt
 
@@ -102,14 +103,14 @@ internal object PublicChannelPolicy {
             packet.payload
                 .decodeToString()
                 .trim()
-                .take(TextLimits.MESSAGE)
+                .clampToUtf16(TextLimits.MESSAGE)
         if (body.isEmpty()) return Verdict.Refused(Refusal.EMPTY_BODY)
         return Verdict.Post(
             MeshPost(
                 node = packet.from.toLong(),
                 packetId = packet.id.toLong(),
                 body = body,
-                name = name?.takeIf { it.isNotBlank() }?.take(TextLimits.DISPLAY_NAME),
+                name = name?.takeIf { it.isNotBlank() }?.clampToUtf16(TextLimits.DISPLAY_NAME),
                 channel = primaryName(channels, radio),
                 hops = packet.hopsAway,
                 snrDeci = packet.rxSnr?.let { (it * DECI).roundToInt() },

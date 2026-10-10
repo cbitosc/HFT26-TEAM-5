@@ -61,6 +61,29 @@ class TextLimitsTest {
         assertFalse(isValidReactionEmoji(" "))
     }
 
+    @Test
+    fun `a 32-unit cut through an emoji keeps whole code points`() {
+        // 31 units of name, then 👋 (a surrogate pair): take(32) would keep a lone high surrogate.
+        val name = "x".repeat(31) + "\uD83D\uDC4B"
+        assertEquals("x".repeat(31), name.clampToUtf16(TextLimits.GROUP_NAME))
+        assertEquals("\uD83D", name.take(TextLimits.GROUP_NAME).takeLast(1)) // what the old cut kept
+        // A cut that lands between two pairs keeps both whole, and a short string is returned as it is.
+        assertEquals("x".repeat(30) + "\uD83D\uDC4B", ("x".repeat(30) + "\uD83D\uDC4B\uD83D\uDC4B").clampToUtf16(32))
+        assertEquals("ok", "ok".clampToUtf16(32))
+        assertEquals("", "\uD83D\uDC4B".clampToUtf16(1))
+        assertEquals("", "abc".clampToUtf16(0))
+    }
+
+    @Test
+    fun `a cut of a zwj sequence keeps whole code points, never a lone surrogate`() {
+        for (limit in 1..KISS_WITH_TONES.length) {
+            val cut = KISS_WITH_TONES.clampToUtf16(limit)
+            assertTrue(cut.length <= limit)
+            assertTrue("no split pair at $limit", cut.isEmpty() || !Character.isHighSurrogate(cut.last()))
+            assertTrue(KISS_WITH_TONES.startsWith(cut))
+        }
+    }
+
     private companion object {
         /** 👩🏽‍❤️‍💋‍👨🏼 — a two-person kiss with skin tones, the longest RGI ZWJ sequence (10 code points, 35 B UTF-8). */
         const val KISS_WITH_TONES = "\uD83D\uDC69\uD83C\uDFFD\u200D\u2764\uFE0F\u200D\uD83D\uDC8B\u200D\uD83D\uDC68\uD83C\uDFFC"

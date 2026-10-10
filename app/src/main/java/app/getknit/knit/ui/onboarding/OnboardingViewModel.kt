@@ -3,6 +3,7 @@ package app.getknit.knit.ui.onboarding
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.getknit.knit.TextLimits
+import app.getknit.knit.clampToUtf16
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.identity.Alias
 import app.getknit.knit.identity.Identity
@@ -69,7 +70,7 @@ class OnboardingViewModel(
     fun setName(value: String) {
         // Hold exactly what's typed (capped) so a space *between* words isn't eaten mid-keystroke;
         // normalization happens on commit and on leaving the page.
-        _name.value = value.take(TextLimits.DISPLAY_NAME)
+        _name.value = value.clampToUtf16(TextLimits.DISPLAY_NAME)
     }
 
     /** Snaps the visible field to its normalized form when it loses focus; nothing is persisted here. */
@@ -100,7 +101,7 @@ class OnboardingViewModel(
     }
 
     private fun persistName() {
-        val normalized = normalizeSingleLine(_name.value).take(TextLimits.DISPLAY_NAME)
+        val normalized = normalizeSingleLine(_name.value).clampToUtf16(TextLimits.DISPLAY_NAME)
         _name.value = normalized
         val changed = normalized != savedName
         savedName = normalized

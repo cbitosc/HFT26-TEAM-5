@@ -3,6 +3,7 @@ package app.getknit.knit.mesh
 import android.util.Log
 import androidx.room3.withWriteTransaction
 import app.getknit.knit.TextLimits
+import app.getknit.knit.clampToUtf16
 import app.getknit.knit.data.AnimatedImage
 import app.getknit.knit.data.AttachmentIdentities
 import app.getknit.knit.data.BlobRepository
@@ -1359,12 +1360,12 @@ class InboundPipeline(
         val advertised = payload.avatarHash
         // Held decides the pull (a held blob is never asked for again); adoptable decides the row.
         val haveAvatar = advertised != null && blobStore.has(advertised)
-        val name = payload.name.take(TextLimits.DISPLAY_NAME)
+        val name = payload.name.clampToUtf16(TextLimits.DISPLAY_NAME)
         peers.upsert(
             existing.copy(
                 // Clamp inbound, as the cleartext path does: our own cap bounds only what we originate.
                 name = name,
-                status = payload.status.take(TextLimits.STATUS),
+                status = payload.status.clampToUtf16(TextLimits.STATUS),
                 avatarHash = resolveAvatarHash(advertised, avatarAdoptable(advertised), existing.avatarHash),
                 updatedAt = version,
                 // The whole presentation set moves together (see ProfilePayload): a field this path did not
@@ -2129,7 +2130,7 @@ class InboundPipeline(
 
                 // The name is shared only when explicitly set; an unnamed (blank/null) frame never clears a name
                 // someone else set. Adopt an incoming name only if it's newer (last-writer-wins on sentAt).
-                val incomingName = group.name?.takeIf { it.isNotBlank() }?.take(TextLimits.GROUP_NAME)
+                val incomingName = group.name?.takeIf { it.isNotBlank() }?.clampToUtf16(TextLimits.GROUP_NAME)
                 val keepName = existing?.name.orEmpty()
                 val keepClock = existing?.nameUpdatedAt ?: 0L
                 val takeIncoming = incomingName != null && sentAt >= keepClock
@@ -2681,7 +2682,7 @@ class InboundPipeline(
                 // Clamp the inbound body: our sender-side TextLimits.MESSAGE only bounds what we originate, not
                 // what a peer floods (otherwise bounded only by the 512 KiB record cap → unbounded local growth).
                 // Mirrors the profile name/status clamp in handleProfile.
-                body = content.body.take(TextLimits.MESSAGE),
+                body = content.body.clampToUtf16(TextLimits.MESSAGE),
                 // Clamp a future-dated sentAt for local ordering so a bogus far-future frame can't pin itself to
                 // the top of the conversation forever (the local-display complement of ForwardRepository's custody
                 // guard). Honest clock skew within the window is kept as-is.
@@ -3145,7 +3146,7 @@ class InboundPipeline(
                     stored
                 }
             }
-        val name = content.name.take(TextLimits.DISPLAY_NAME)
+        val name = content.name.clampToUtf16(TextLimits.DISPLAY_NAME)
         applyPresentationFollowUps(
             env.senderId,
             applied.previous,
@@ -3240,12 +3241,12 @@ class InboundPipeline(
         // The pinned key is guaranteed unchanged here (a differing key was refused above), so carrying
         // the prior [verified] state through the upsert is safe.
         val base = existing ?: PeerEntity(senderId)
-        val name = content.name.take(TextLimits.DISPLAY_NAME)
+        val name = content.name.clampToUtf16(TextLimits.DISPLAY_NAME)
         peers.upsert(
             base.copy(
                 // Clamp inbound too: our own cap only bounds what we originate, not what a peer sends.
                 name = if (stalePresentation) base.name else name,
-                status = if (stalePresentation) base.status else content.status.take(TextLimits.STATUS),
+                status = if (stalePresentation) base.status else content.status.clampToUtf16(TextLimits.STATUS),
                 pubKey = pubKey,
                 verified = existing?.verified ?: false,
                 deviceTag = content.deviceTag ?: existing?.deviceTag,

@@ -1,6 +1,7 @@
 package app.getknit.knit.mesh.crypto
 
 import app.getknit.knit.TextLimits
+import app.getknit.knit.clampToUtf16
 import app.getknit.knit.identity.NodeId
 import app.getknit.knit.normalizeSingleLine
 import kotlinx.serialization.ExperimentalSerializationApi
@@ -220,7 +221,7 @@ object ContactCard {
 
     private fun isNodeId(id: String): Boolean = id.length == NodeId.LENGTH && id.all { it in NodeId.ALPHABET }
 
-    private fun clampName(name: String): String = normalizeSingleLine(name).take(TextLimits.DISPLAY_NAME)
+    private fun clampName(name: String): String = normalizeSingleLine(name).clampToUtf16(TextLimits.DISPLAY_NAME)
 
     private const val LEGACY_PREFIX = "knit-id:v1:"
     private const val COMPACT_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_="

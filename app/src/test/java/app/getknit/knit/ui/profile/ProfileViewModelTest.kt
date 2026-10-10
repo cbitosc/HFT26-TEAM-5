@@ -230,6 +230,20 @@ class ProfileViewModelTest {
         }
 
     @Test
+    fun theSentNameIsCutAtACodePointBoundary() =
+        runTest {
+            // IOS-8, send side: 31 units then 👋 — the cap keeps the 31, never a lone surrogate.
+            val vm = vm()
+            advanceUntilIdle()
+
+            vm.setDisplayName("x".repeat(31) + "\uD83D\uDC4B")
+            assertEquals("x".repeat(31), vm.displayName.value)
+            vm.save()
+            advanceUntilIdle()
+            coVerify { settings.setProfile("x".repeat(31), any()) }
+        }
+
+    @Test
     fun setDisplayNameCapsAtLimitWithoutNormalizing() =
         runTest {
             val vm = vm()

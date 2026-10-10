@@ -1138,6 +1138,18 @@ class InboundPipelineTest {
         }
 
     @Test
+    fun aReceivedNameIsCutAtACodePointBoundary() =
+        runTest {
+            // IOS-8, receive side: a 33-unit name whose 32nd unit opens 👋 is stored as its first 31.
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            val profile = rig.profile(alice, name = "x".repeat(31) + "\uD83D\uDC4B")
+            rig.pipeline.onDeliver(alice.sign(profile), profile, alice.nodeId)
+
+            assertEquals("x".repeat(31), rig.peerMap[alice.nodeId]?.name)
+        }
+
+    @Test
     fun aStrangersRenameNeverConjuresAThread() =
         runTest {
             val rig = Rig(backgroundScope)

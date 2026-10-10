@@ -2,6 +2,7 @@ package app.getknit.knit.mesh
 
 import android.util.Log
 import app.getknit.knit.TextLimits
+import app.getknit.knit.clampToUtf16
 import app.getknit.knit.data.AttachmentIdentities
 import app.getknit.knit.data.AttachmentStore
 import app.getknit.knit.data.BlobRepository
@@ -2691,8 +2692,8 @@ class MeshManager(
      */
     private suspend fun custodyPresentsOtherThan(live: OwnPresentation): Boolean {
         val held = WireCodec.decodePayload<ProfileContent>(ownProfile().second.payload) ?: return true
-        return held.name != normalizeSingleLine(live.name).take(TextLimits.DISPLAY_NAME) ||
-            held.status != normalizeSingleLine(live.status).take(TextLimits.STATUS) ||
+        return held.name != normalizeSingleLine(live.name).clampToUtf16(TextLimits.DISPLAY_NAME) ||
+            held.status != normalizeSingleLine(live.status).clampToUtf16(TextLimits.STATUS) ||
             held.avatarHash != settings.ownAvatarHash.first() ||
             held.openToChat != live.openToChat ||
             held.loraNode != live.board?.node ||
@@ -2857,8 +2858,8 @@ class MeshManager(
             ctl = MessageContent.CTL_PROFILE,
             pr =
                 ProfilePayload(
-                    name = normalizeSingleLine(settings.displayName.first()).take(TextLimits.DISPLAY_NAME),
-                    status = normalizeSingleLine(settings.status.first()).take(TextLimits.STATUS),
+                    name = normalizeSingleLine(settings.displayName.first()).clampToUtf16(TextLimits.DISPLAY_NAME),
+                    status = normalizeSingleLine(settings.status.first()).clampToUtf16(TextLimits.STATUS),
                     avatarHash = avatarHash,
                     version = version,
                     openToChat = settings.openToChat.first(),
@@ -2963,8 +2964,8 @@ class MeshManager(
             ProfileContent(
                 // Normalize/cap defensively: covers legacy values stored before the field gained a cap and
                 // the rare process-death-before-the-blur-commit case, so peers never receive an oversized name.
-                name = normalizeSingleLine(settings.displayName.first()).take(TextLimits.DISPLAY_NAME),
-                status = normalizeSingleLine(settings.status.first()).take(TextLimits.STATUS),
+                name = normalizeSingleLine(settings.displayName.first()).clampToUtf16(TextLimits.DISPLAY_NAME),
+                status = normalizeSingleLine(settings.status.first()).clampToUtf16(TextLimits.STATUS),
                 avatarHash = settings.ownAvatarHash.first(),
                 pubKey = identity.publicKeyBundle(),
                 deviceTag = identity.deviceTag(),

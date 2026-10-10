@@ -8,6 +8,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.getknit.knit.R
 import app.getknit.knit.TextLimits
+import app.getknit.knit.clampToUtf16
 import app.getknit.knit.data.AvatarStore
 import app.getknit.knit.data.BlobRepository
 import app.getknit.knit.data.GroupRepository
@@ -155,7 +156,7 @@ class GroupDetailsViewModel(
      * converge right away (no waiting for the next message). The name is last-writer-wins by timestamp.
      */
     fun renameGroup(newName: String) {
-        val trimmed = normalizeSingleLine(newName).take(TextLimits.GROUP_NAME)
+        val trimmed = normalizeSingleLine(newName).clampToUtf16(TextLimits.GROUP_NAME)
         if (trimmed.isEmpty()) return
         viewModelScope.launch {
             val group = groups.find(groupId) ?: return@launch
