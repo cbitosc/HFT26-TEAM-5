@@ -234,6 +234,7 @@ carries; never renumber an old one.
 | [2026-10.pj9w](decisions/2026-10-pj9w-ble-discovery-waits-run-on-the-elapsed-clock.md) | BLE discovery waits run on the elapsed clock, and a dial wakes when its dwell ripens | ble, transport, power |
 | [2026-10.qjap](decisions/2026-10-qjap-android-refuses-a-signed-envelope-whose-text-isn-t-utf-8.md) | Android refuses a signed envelope whose text isn't UTF-8, as iOS does | wire, crypto, interop |
 | [2026-10.ryak](decisions/2026-10-ryak-the-ble-presence-advert-runs-at-full-power.md) | The BLE presence advert runs at full power | ble, mesh, power |
+| [2026-10.swst](decisions/2026-10-swst-art-s-whitespace-is-the-law-for-both-ports.md) | ART's whitespace is the law for both ports | text, interop, testing |
 | [2026-10.unqn](decisions/2026-10-unqn-a-clean-bounded-picture-is-stripped-not-re-encoded.md) | A clean, bounded picture is stripped, not re-encoded | attachments, privacy |
 | [2026-10.wtyc](decisions/2026-10-wtyc-a-cut-attachment-resumes-from-the-bytes-the-receiver-kept.md) | A cut attachment resumes from the bytes the receiver kept | mesh, attachments, wire, blob-exchange |
 | [2026-10.y9qh](decisions/2026-10-y9qh-a-receiver-shows-how-far-an-incoming-attachment-has-got.md) | A receiver shows how far an incoming attachment has got | mesh, attachments, wire, ui |
