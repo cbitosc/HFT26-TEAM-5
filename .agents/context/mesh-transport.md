@@ -580,8 +580,9 @@ that reports `isLeCodedPhySupported`:
   *1M listening* after its last 1M hit, `Snapshot.codedLagMs`) is dialed at its Coded address. The clock runs only
   while a window listens on 1M (`BlePresenceTracker.onOneMListening`), because a Coded-only window cannot hear a 1M
   advert; on the wall clock it made every close peer Coded-only (the ADR's 2026-10-02 (3) amendment). The peer's mark
-  outlives its presence entry (64, least recently used out). A plain L2CAP connect to that address lands on Coded
-  (spike-verified). That dial's watchdog is 25 s, not 12 (`CodedPhyPolicy.connectTimeoutMs`): Android's initiator
+  outlives its presence entry (64, least recently used out). A peer with no 1M address yet (first heard in a Coded-only
+  window) is dialed at its Coded address too, as a Coded dial (`DialPlan.target`, #148). A plain L2CAP connect to that
+  address lands on Coded (spike-verified). That dial's watchdog is 25 s, not 12 (`CodedPhyPolicy.connectTimeoutMs`): Android's initiator
   listens on Coded 15 ms in every 60 while it connects, and the stack's own direct-connect timeout is 30 s. The
   tie-break and every dial rule are untouched.
 - **A drop at range makes the dialed side's Coded advert fast.** When a link with a PHY handle ends on its own

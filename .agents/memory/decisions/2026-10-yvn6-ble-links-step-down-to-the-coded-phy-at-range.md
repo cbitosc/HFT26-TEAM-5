@@ -473,3 +473,18 @@ fallback for a silent receiver and the feed of an iPhone or an older build. A PH
 as well as its round trip. The reasoning, the simulation and the owed desk and walk checks are 5buf's amendment of
 2026-10-08 (2).
 
+## Amendment 2026-10-10 — a fallback to the Coded address is a Coded dial (#148)
+
+`DialPlan.target` falls back to a peer's Coded address when its 1M one is unknown (a peer first heard in a Coded-only
+window, before its lag ripens), and a plain connect there opens on Coded. It returned the requested flag, so that dial
+got the 12 s 1M watchdog, went uncounted and logged `via=1m`. The flag now names the address returned: the fallback is
+a Coded dial, with `CodedPhyPolicy.CODED_CONNECT_TIMEOUT_MS`, `onBleCodedDial` and `via=coded`. The addresses chosen
+are unchanged. The 2026-10-04 amendment's note has the fallback the wrong way round: a dial that asks for Coded never
+falls back to the 1M address (`DialPlanTest`); a dial that asks for 1M falls back to the Coded one.
+
+What it costs: the 2026-10-02 cost line no longer holds as written. A 25 s scan pause now also covers a peer not
+yet heard on 1M, which may be close (a hunt's Coded-only windows make that likelier). The extra blind time is 13 s and
+only on a fallback dial that fails; a close peer's Coded connect lands fast and steps up through the fast hold. In the
+few seconds after the experiment is switched off, a running Coded window can still refill `codedDeviceFor`, so a
+fallback dial there counts in `onBleCodedDial` with no `via=`. It is left counted: that dial does go to a Coded address
+and opens on Coded. Test: `DialPlanTest`.

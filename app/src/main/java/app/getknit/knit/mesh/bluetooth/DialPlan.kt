@@ -85,15 +85,17 @@ internal object DialPlan {
     /**
      * Where a dial goes, and whether it is the Coded address: a peer heard on Coded alone ([viaCoded]) is dialed at its
      * [coded] address, any other at its [oneM] one, else its Coded one. Null when the one it needs is not known.
+     *
+     * The flag names the address returned, not the one asked for: a fallback to the Coded address is a Coded dial,
+     * with Coded's watchdog (`CodedPhyPolicy.connectTimeoutMs`), its count and its `via=coded` (#148). A peer first
+     * heard in a Coded-only window has no 1M address until its lag ripens, and a plain connect to its Coded set opens
+     * on Coded; under the request's flag it got the 12 s 1M watchdog and logged `via=1m`.
      */
     fun <T : Any> target(
         viaCoded: Boolean,
         oneM: T?,
         coded: T?,
-    ): Pair<T, Boolean>? {
-        val device = if (viaCoded) coded else oneM ?: coded
-        return device?.let { it to viaCoded }
-    }
+    ): Pair<T, Boolean>? = if (viaCoded || oneM == null) coded?.let { it to true } else oneM to false
 
     /** The peers another plane reports that [localId] would dial (the larger id dials): the only ones worth a chase. */
     fun initiable(

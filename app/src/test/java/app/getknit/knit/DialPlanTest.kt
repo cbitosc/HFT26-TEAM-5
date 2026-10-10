@@ -2,6 +2,7 @@ package app.getknit.knit
 
 import app.getknit.knit.mesh.ConnectFailReason
 import app.getknit.knit.mesh.bluetooth.BlePresenceTracker
+import app.getknit.knit.mesh.bluetooth.CodedPhyPolicy
 import app.getknit.knit.mesh.bluetooth.DialPlan
 import app.getknit.knit.mesh.bluetooth.LonelyDialPolicy
 import app.getknit.knit.mesh.bluetooth.PromotionPolicy
@@ -131,9 +132,14 @@ class DialPlanTest {
     }
 
     @Test
-    fun anyOtherPeerIsDialedAt1mElseItsCodedAddress() {
+    fun anyOtherPeerIsDialedAt1mElseAsACodedDialAtItsCodedAddress() {
         assertEquals("1m" to false, DialPlan.target(viaCoded = false, oneM = "1m", coded = "coded"))
-        assertEquals("coded" to false, DialPlan.target(viaCoded = false, oneM = null, coded = "coded"))
+        // #148: the flag follows the address, so the fallback gets Coded's watchdog, count and via=.
+        assertEquals("coded" to true, DialPlan.target(viaCoded = false, oneM = null, coded = "coded"))
+        assertEquals(
+            CodedPhyPolicy.CODED_CONNECT_TIMEOUT_MS,
+            CodedPhyPolicy.connectTimeoutMs(DialPlan.target(viaCoded = false, oneM = null, coded = "c")!!.second),
+        )
         assertNull(DialPlan.target<String>(viaCoded = false, oneM = null, coded = null))
     }
 

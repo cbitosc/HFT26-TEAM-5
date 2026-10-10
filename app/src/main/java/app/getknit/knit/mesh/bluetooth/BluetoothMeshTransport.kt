@@ -2032,7 +2032,8 @@ class BluetoothMeshTransport(
     /**
      * The address a dial to [snap]'s peer goes to, and whether it is the Coded one: a peer heard on Coded alone is
      * dialed at its Coded set, and the link opens on Coded (the 2026-10-01 spike: a plain L2CAP connect to a
-     * Coded-only advert lands on Coded, no initiating-PHY mask needed). Null when neither address is known.
+     * Coded-only advert lands on Coded, no initiating-PHY mask needed). A peer with no 1M address is dialed at its
+     * Coded set as a Coded dial too, even before its lag ripens (#148). Null when neither address is known.
      */
     private fun dialTarget(snap: BlePresenceTracker.Snapshot): Pair<BluetoothDevice, Boolean>? =
         DialPlan.target(codedOn() && CodedPhyPolicy.dialCoded(snap.codedLagMs), deviceFor[snap.nodeId], codedDeviceFor[snap.nodeId])
