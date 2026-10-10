@@ -102,6 +102,9 @@ document:
 - When a Bluetooth connection to a nearby phone ended while both phones stayed close, part of it could stay
   open until Bluetooth was turned off, and photos and files from either phone moved more slowly. Your phone
   now closes it within a few seconds.
+- Adding an iPhone contact from their code left "Waiting to reach…" on their profile for good, and some
+  messages said an update would bring an iPhone contact files, direct transfers or forward secrecy. Neither
+  happens now, since Knit for iPhone doesn't offer those.
 
 ## [2.8.0](https://github.com/getknit/knit/releases/tag/v2.8.0) — 2026-10-03T03:55:42Z
 
