@@ -76,6 +76,9 @@ class IntroSync(
     private val sendIntro: suspend (String) -> Boolean,
     // Whether our ratchet session with the peer is confirmed — the "connected" fact this driver reports.
     private val sessionConfirmed: suspend (String) -> Boolean,
+    // Whether the peer's pinned profile is known and lacks CAP_RATCHET: a v1-only peer (an iPhone today),
+    // whom no intro can ever reach. False while only a card's bundle is pinned and the profile is unknown.
+    private val ratchetless: suspend (String) -> Boolean = { false },
     // The pair-scope inputs moved: the set [pairPeers] names differs from the last publish, or a pending
     // peer's bundle was just pinned (the one pair input this driver does not hold — `ScopeRegistry` derives
     // a pair scope only once the peer's key is known). The spool plane re-derives its table on it instead
@@ -122,10 +125,13 @@ class IntroSync(
      * Registers an intro with [peerId] (the import seam). Idempotent; a peer whose session is already
      * confirmed needs no intro and is ignored. Beyond [maxPending] the oldest registration is dropped.
      * Sends immediately when the peer's prekey is already pinned (a LoRa beacon or a radio flood may
-     * have delivered it long before the card arrived).
+     * have delivered it long before the card arrived). A peer whose pinned profile lacks `CAP_RATCHET` is
+     * never registered, and an intro already pending to one is withdrawn: nothing can seal to it, so the
+     * intro could only ever say "Waiting to reach…" (ADR 042's 2026-10 amendment).
      */
     suspend fun want(peerId: String) {
         if (sessionConfirmed(peerId)) return
+        if (ratchetless(peerId)) return cancel(peerId)
         val now = clock()
         lock.withLock {
             val pending = store.pending().toMutableMap()
@@ -173,9 +179,14 @@ class IntroSync(
 
     /**
      * A profile for [peerId] was pinned on some plane: if an intro to it is pending, it can be sealed now, and
-     * so can the answer to an init of theirs that opened before the pin ([onPeerFrameOpened]).
+     * so can the answer to an init of theirs that opened before the pin ([onPeerFrameOpened]). A profile
+     * without `CAP_RATCHET` settles a pending intro instead: it is withdrawn, since none can be sealed to it.
      */
     suspend fun onProfilePinned(peerId: String) {
+        if (ratchetless(peerId)) {
+            owed.remove(peerId)
+            return cancel(peerId)
+        }
         if (peerId in lock.withLock { store.pending() }) {
             // A pair scope needs the bundle the pipeline just pinned; the table can derive it now.
             onPairsChanged()
@@ -228,11 +239,18 @@ class IntroSync(
         if (sendIntro(peerId)) metrics.onIntroAnswered() else lastAnswered.remove(peerId)
     }
 
-    /** The heal hook: settle confirmed peers, re-send stale pending intros, and expire finished grace windows. */
+    /**
+     * The heal hook: settle confirmed peers, withdraw intros to peers now known to lack `CAP_RATCHET` (one an
+     * older build registered), re-send stale pending intros, and expire finished grace windows.
+     */
     suspend fun retry() {
         val now = clock()
         val pending = lock.withLock { store.pending() }
         for (peerId in pending.keys) {
+            if (ratchetless(peerId)) {
+                cancel(peerId)
+                continue
+            }
             if (!settle(peerId)) trySend(peerId, now)
         }
         lock.withLock {

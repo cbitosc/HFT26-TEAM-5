@@ -74,3 +74,22 @@ silently at `EPOCH_GONE`); node-id-only import over the radios via `KeyExchange.
 over the pair scope for existing contacts (no `unsub` record, `maxScopes` pressure). Out of repo:
 `getknit.app/.well-known/assetlinks.json` with **both** signing certificates and a `/c` landing page
 building the `knit://` link client-side — until then Android 12+ opens the https link in the browser.
+
+## Amendment 2026-10-10 — no intro to a peer whose profile lacks `CAP_RATCHET`
+
+**What was observed.** The interop audit (AND-8): pasting an iPhone's `knit-id:v1` code into Add contact
+registered an intro that could never settle. The intro is a sealed v2 `CTL_PROFILE`, and Knit for iOS signs
+`E2E | GROUPS | REACTIONS | STORE_FORWARD` (`0xF`) without `CAP_RATCHET`, so `canSeal` never held and the
+profile showed "Waiting to reach…" for good.
+
+**The rule.** `IntroSync` takes a `ratchetless` probe: true once the peer's *profile* has pinned (it carries
+`protoVersion` and `capabilities`; a card carries neither) and lacks `CAP_RATCHET`. `want` registers nothing
+for such a peer, and an intro already pending to one is withdrawn, like a `cancel`, with no grace window,
+because no session ever confirmed. It's withdrawn on `onProfilePinned`, or on the heal's `retry` for one an
+older build registered. A card whose peer's profile is still unknown registers as before. The pair scope is
+how that profile arrives, so gating on an unknown profile would end contacts at a distance. The cost: a
+withdrawn intro leaves no record, so if that peer's Knit later gains `CAP_RATCHET`, nothing registers the intro
+again. A pair that shares only the Internet re-imports the code then; a pair that meets on a radio connects by the
+ordinary door. Keeping a dormant set would need a new settings key and its backup classification, and Knit for iOS
+has no spool client to lose it to today. Regression:
+`IntroSyncTest`'s three ratchetless cases, `MeshManagerTest.importingAnIPhonesCodeRegistersNoIntro`.

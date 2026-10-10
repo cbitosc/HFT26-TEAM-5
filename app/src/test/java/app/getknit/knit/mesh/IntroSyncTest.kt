@@ -39,6 +39,9 @@ class IntroSyncTest {
         val store = FakeStore()
         val sealable = mutableSetOf<String>()
         val confirmed = mutableSetOf<String>()
+
+        // Peers whose pinned profile lacks CAP_RATCHET — an iPhone's.
+        val ratchetless = mutableSetOf<String>()
         val sent = mutableListOf<String>()
         var refuseSend = false
         var pairsChanged = 0
@@ -59,6 +62,7 @@ class IntroSyncTest {
                     }
                 },
                 sessionConfirmed = { it in confirmed },
+                ratchetless = { it in ratchetless },
                 onPairsChanged = { pairsChanged++ },
                 metrics = metrics,
                 clock = { now },
@@ -458,6 +462,47 @@ class IntroSyncTest {
             rig.sync.want(BOB)
             assertEquals("the floor went with the cancel", listOf(BOB, BOB), rig.sent)
             assertEquals(IntroState.SENT, rig.sync.state(BOB).first())
+        }
+
+    @Test
+    fun `a peer whose profile lacks the ratchet is never registered`() =
+        runTest {
+            val rig = Rig()
+            rig.ratchetless += BOB
+            rig.sync.want(BOB)
+            rig.sync.wantIfRoom(BOB)
+            assertEquals(emptyMap<String, Long>(), rig.store.pending)
+            assertEquals(0, rig.store.writes)
+            assertNull("no Waiting to reach line", rig.sync.state(BOB).first())
+            assertEquals(emptySet<String>(), rig.sync.pairPeers())
+        }
+
+    @Test
+    fun `a pending intro is withdrawn when the peer's profile arrives without the ratchet`() =
+        runTest {
+            val rig = Rig()
+            rig.sync.want(BOB)
+            assertEquals(IntroState.AWAITING_PREKEY, rig.sync.state(BOB).first())
+
+            rig.ratchetless += BOB
+            rig.sync.onProfilePinned(BOB)
+            assertEquals(emptyMap<String, Long>(), rig.store.pending)
+            assertEquals("settled without a grace window: nothing ever connected", emptyMap<String, Long>(), rig.store.grace)
+            assertNull(rig.sync.state(BOB).first())
+            assertEquals(emptyList<String>(), rig.sent)
+        }
+
+    @Test
+    fun `an intro an older build registered to a ratchetless peer is withdrawn on the heal`() =
+        runTest {
+            val rig = Rig()
+            rig.store.pending = mapOf(BOB to rig.now, CAROL to rig.now)
+            rig.sync.prime()
+            rig.ratchetless += BOB
+            rig.sync.retry()
+            assertEquals(setOf(CAROL), rig.store.pending.keys)
+            assertNull(rig.sync.state(BOB).first())
+            assertEquals(IntroState.AWAITING_PREKEY, rig.sync.state(CAROL).first())
         }
 
     private companion object {
