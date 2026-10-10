@@ -77,6 +77,10 @@ Each evolves independently; bump the right one:
    `MessageContent.v` → drop locally + `metrics.onDropped(...)`, but still relay/carry (never throw out
    of `onDeliver`; never gate `canCarry` on a scheme version) so a peer that *can* read it still
    receives it.
+6. **Every nullable nested `@Serializable` type carries at least one required field.** kotlinx-cbor reads
+   an empty map as `null` for a nullable nested field, while iOS reads it as an object with its defaults,
+   or fails the whole payload. A nested type whose every field is defaulted can encode as `{}` and then
+   means two things. A required field keeps the map non-empty. `IosPayloadShapesTest` pins the quirk.
 
 ## Vectors other ports test against
 
@@ -706,6 +710,13 @@ starts; nothing on the link changes, since a queued file is the holder's own bus
 cutting one short would need a link record, which tears down an older peer's link. A build without the type refuses it
 as an unsigned frame, and the copy comes as before. `vectors/wire-v1.json` gained `blobCancelContent`.
 *Metadata cost:* none beyond the ask it withdraws.
+
+**Precedent — the nested-type rule (rule 6) came from the interop audit, not a split.** The 2026-10 audit
+decoded `{"inner": {}}` both ways: kotlinx-cbor gave a null `inner`, iOS an `inner` of defaults. No nested
+wire type was all-defaults then, so no frame read differently on the two platforms. The rule keeps it that
+way, so "absent" and "present with nothing set" never read differently across the two platforms.
+`IosPayloadShapesTest.an empty nested map decodes as null for a nullable field` pins
+kotlinx's half.
 
 **When you bump a version layer:** add a round-trip test plus an "unknown higher version drops locally
 but is counted" test. New crypto scheme ⇒ bump `EncEnvelope.MAX_SUPPORTED_VERSION` + every branch that
