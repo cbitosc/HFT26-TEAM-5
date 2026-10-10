@@ -131,3 +131,79 @@ Two observations from the same logs, not acted on here:
   connect was followed by an edge-driven enable 2.5 s later, and every refusal after it was the Coded set's. In 2
   of 8 samples, a presence enable that reported success still left the advert off until the next net turn, about 10 s
   later. That is the Coded experiment's cost to carry (ADR 2026-10.yvn6), not this decision's.
+
+## Amendment (2026-10-09): the side channel's page sets ride the re-assert (#143)
+
+"What it does not cover" left the side channel's two page sets (ADR 2026-09.sjaa) without a re-assert. Since
+2026-10-08 `BLE_SIDE_PLANE` is on in release, so a release phone runs four sets: presence, Coded presence and two page
+slots. The stack resumes all of them with one enable after each connection, with callbacks off. A refused resume left
+a slot dark, and the channel noticed nothing:
+
+- `BleSideChannel` retried a slot only after a start failure.
+- It pushed bytes with `BleAdvertiser.update`, which changes the data of a set the controller may have left off.
+- The carousel still counted the page as aired (`bleSidePartAired`).
+
+So an unlinked bystander missed the floodable frames the channel exists to carry.
+
+**What changed.**
+
+- **`BleSideChannel.reassert()`.** It calls `BleAdvertiser.reassert()` on every slot that has a page on the air. A
+  slot counts only if the channel is `live` and the slot's page is still recorded as pushed.
+  - A slot the carousel took down was stopped, and `stop()` keeps it down.
+  - A slot sitting out a refused start is stopped too, and has no pushed page, so it stays down until
+    `SLOT_RETRY_MS` is up.
+  - A dark or torn-down channel raises nothing.
+- **`advertLoop` calls it on the presence set's turns**: the settle after an ACL edge, the net and a heal. It runs
+  after the presence and Coded sets, and each set gets its own enable. The amendment above showed why that matters:
+  when the controller refuses an enable, a separate command keeps the refusal to that one set.
+- **A refusal is retried per slot, not by `advertKeeper`.** Each slot has its own `AdvertReassertPolicy.Keeper` with
+  no net, the shape `codedKeeper` already has. A refused or unasked-off enable retries on the 2.5–20 s doubling wait,
+  and the loop is woken so it picks up the shorter wait. Why not feed `advertKeeper`, as presence does:
+  - A slot's success would call `onEnabled` and wipe a presence refusal's pending retry and backoff.
+  - A slot's refusal would bring presence's enable forward for no reason.
+  - One keeper shared by both slots would have the same problem between the two slots: if one kept succeeding, the
+    other's backoff would never grow past 2.5 s.
+
+  The retry is needed because the 60 s net is too slow while linked. The refusal comes from a link at 15 ms, so the
+  node is linked, and a minute off the air is longer than a page's whole 12 s dwell plus 30 s linger. A retry that
+  comes due on a slot with nothing to air is used up rather than kept, so it cannot hold the loop's wait at its 1 s
+  floor.
+- **What callbacks a slot gets.** Page sets are non-connectable, so the stack's own terminated-set re-enable (the one
+  resume that reports back) never happens to them. A slot therefore hears refusals only in answer to our own enables.
+- **Oracles:** `ble-side slotN advert refused <status>, retry in <ms>ms` and
+  `ble-side slotN advert enabled again (refused for <ms>ms)` at debug, from the `BleSideChannel` tag.
+- **Lock order.** The order is `BleSideChannel`'s lock first, then the slot's. The enable callback runs on a binder
+  thread inside the slot's lock, so it touches only the slot's keeper. The start callback (`onSlotStatus`) used to
+  take the channel's lock from inside the slot's lock. That inverted the order, and the new turns call into the slots
+  under the channel's lock every 10 s, so the two could deadlock. Its reaction now runs on the channel's scope instead.
+- **A late start reaction.** Running on the scope opens a window between the binder callback and the reaction. Two
+  rules close it:
+  - A reaction that stands a slot down stops the slot's sets. A sit-out stops its own slot, and a halved page stops
+    every slot. Inside the window the slot's page is still pushed, so a turn or a carousel push can start the set
+    again. If that start succeeds before the stale reaction lands, a reaction that only cleared `pushed` would leave
+    a live set airing a page nothing tracks, holding one of the controller's sets.
+  - A reaction from before an adapter bounce is dropped. `bringUp` and `tearDown` bump a generation, which
+    `onSlotStatus` captures, and a fast bounce skips STATE_OFF (557d2d86). Without the check, an old reaction would
+    park a fresh slot for 60 s, halve the re-probed page, or turn the new session dark. A sit-out or halved page on a
+    channel that is no longer `live` is dropped as well.
+
+**What it costs.** One more binder call and HCI enable per live slot on each turn: two at most, every 10 s alone and
+every minute linked, plus one per edge. A slot with no page costs nothing. The enable does not add a set to the
+stack's enabled list, since a live slot is already on it, so the whole-command resume is exposed exactly as before.
+
+**Tests.** `BleSideChannelReassertTest` covers these cases:
+
+- A live slot is enabled again on a turn, and the empty slot is not raised.
+- A refused enable comes back after 2.5 s and wakes the loop.
+- A retry that comes due on a torn-down channel is used up.
+- Nothing raises a slot the carousel took down, a slot sitting out a refused start, a dark channel or a torn-down one.
+- With the reaction held on a standard test dispatcher, a sit-out or halved page that lands after a restart succeeded
+  stops that set.
+- A sit-out, halved page or feature refusal from before a tear-down and bring-up is dropped.
+
+The device trial is the 2026-10-01 probe with Coded and the side channel on: P7 with the Meshtastic board bonded,
+Moto G and P3, eight link up/down cycles each. The bar:
+
+- No presence silence on the ATS2851 longer than 11 s.
+- The iPhone links within 30 s in 7 of 8 samples.
+- After the cycles, pages from both slots are still caught (`bleSideHeard` / `bleSideReassembled` on a bystander).

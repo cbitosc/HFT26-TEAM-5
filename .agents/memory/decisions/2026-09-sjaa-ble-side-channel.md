@@ -154,3 +154,12 @@ far and no further. Left at MEDIUM, a peer sighted 8 dB further out than before 
 and never hear a page. The airtime is unchanged; each page costs more transmit current while it airs, about
 50–150 µA averaged while a slot is up. `BleAdvertiserTest.everyDiscoverySetAdvertisesAtFullPower` pins the pages to
 the presence advert's power.
+
+## Amendment 2026-10-09 — the page sets are enabled again after every connection (#143)
+
+The stack pauses every advertising set around each connection and resumes them with one enable, with callbacks off.
+If the controller refuses that resume (0x0d), a slot stays dark while the carousel counts its page as aired. Since
+this amendment, `BleSideChannel.reassert()` enables again every slot with a page on the air, on the presence set's
+re-assert turns, and a refused slot enable is retried on its own doubling wait. A slot the carousel took down, one
+sitting out a refused start (`SLOT_RETRY_MS`) and a dark channel stay down. The mechanism, the costs and the trial are
+ADR 2026-10.9utz's amendment of the same date.

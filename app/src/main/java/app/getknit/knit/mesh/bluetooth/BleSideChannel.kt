@@ -82,6 +82,9 @@ class BleSideChannel internal constructor(
 
         /** [live] changed after bring-up (a runtime refusal) — the presence advert's flag must follow. */
         fun onAvailabilityChanged()
+
+        /** A slot's enable was refused: [retryRefused] has a retry coming due, so the caller's loop should re-read [retryWaitMs]. */
+        fun onAdvertRefused()
     }
 
     private val adapter: BluetoothAdapter? =
@@ -113,6 +116,12 @@ class BleSideChannel internal constructor(
                 },
             )
         }
+
+    // Each slot's refused-enable retries (ADR 2026-10.9utz, amendment 2026-10-09). No net of their own: the slots ride
+    // the presence set's turns ([reassert]), as the Coded set does, so only a reported refusal brings one forward.
+    private val keepers: List<AdvertReassertPolicy.Keeper> =
+        List(config.slots) { AdvertReassertPolicy.Keeper(alonePeriodMs = NO_NET_MS, linkedPeriodMs = NO_NET_MS) }
+
     private val slots: List<BleAdvertiser> =
         List(config.slots) { i ->
             BleAdvertiser(
@@ -121,12 +130,19 @@ class BleSideChannel internal constructor(
                 serviceUuid = BleConstants.SIDE_SERVICE_UUID,
                 params = BleAdvertiser.sideParams(),
                 onStartStatus = { status -> onSlotStatus(i, status) },
+                onEnableStatus = { enabled, status -> onSlotEnabled(i, enabled, status) },
             )
         }
 
     // What each set was last told to air (by reference — the carousel hands back the same part objects).
     private val pushed = arrayOfNulls<ByteArray>(config.slots)
     private val slotRetryAt = LongArray(config.slots)
+
+    // Bumped under [lock] by every [bringUp] and [tearDown]. A slot's start reaction runs late, on [scope]
+    // ([onSlotStatus]), so one from before an adapter bounce must not land on the session after it (a fast bounce
+    // skips STATE_OFF, 557d2d86): read without [lock] on the binder thread, compared under it.
+    @Volatile
+    private var generation = 0
     private var timer: Job? = null
 
     private val scanner =
@@ -179,11 +195,13 @@ class BleSideChannel internal constructor(
         val maxData = if (extended) a.leMaximumAdvertisingDataLength else 0
         val page = pageFor(maxData)
         synchronized(lock) {
+            generation++
             pageMax = page
             live = extended && page >= MIN_PAGE_BYTES
             carousel.clear()
             pushed.fill(null)
             for (i in slots.indices) carousel.setSlotUsable(i, true)
+            keepers.forEach { it.start(now()) }
         }
         synchronized(rxLock) {
             reassembler.clear()
@@ -195,6 +213,7 @@ class BleSideChannel internal constructor(
     /** Radio down (adapter off, transport stop): every set and the scan go down; the seen window is kept. */
     fun tearDown() {
         synchronized(lock) {
+            generation++
             timer?.cancel()
             timer = null
             slots.forEach { it.stop() }
@@ -313,6 +332,66 @@ class BleSideChannel internal constructor(
         rescheduleLocked()
     }
 
+    /**
+     * Enables again every slot with a page on the air (ADR 2026-10.9utz, amendment 2026-10-09). The stack pauses all
+     * advertising sets around each connection and resumes them in one HCI enable with callbacks off, so a refused
+     * resume (0x0d) leaves a slot dark while the carousel counts its page as aired, and only the next pause and resume
+     * that happens to land would bring it back. The transport calls this on the presence set's turns (`advertLoop`'s
+     * settle after an ACL edge, its net, a heal), after the presence and Coded sets, each set its own enable.
+     *
+     * A slot is raised only while the channel is [live] and [pushed] holds its page. A slot the carousel took down, and
+     * one sitting out a refused start ([SlotReaction.SitOut]), was also [BleAdvertiser.stop]ped, which keeps it down by
+     * itself. A slot whose start failed but whose reaction has not landed yet may be started again here; the reaction
+     * stops it when it lands ([onSlotStatus]). Returns how many slots it asked the stack about.
+     */
+    fun reassert(): Int = synchronized(lock) { reassertLocked { true } }
+
+    /** Re-enables only the slots whose refused enable is due its retry ([keepers]' doubling wait). */
+    fun retryRefused(): Int =
+        synchronized(lock) {
+            val t = now()
+            reassertLocked { keepers[it].isDue(t, linked = true) }
+        }
+
+    /** How long until a slot's refused enable is due its retry ([retryRefused]); a very long wait while none is. */
+    fun retryWaitMs(): Long {
+        val t = now()
+        return keepers.minOf { it.waitMs(t, linked = true) }
+    }
+
+    /** Holds [lock]: enables each [due] slot with a page on the air, and spends the retry of every [due] one. */
+    private inline fun reassertLocked(due: (Int) -> Boolean): Int {
+        val t = now()
+        var asked = 0
+        for (i in slots.indices) {
+            if (!due(i)) continue
+            if (live && pushed[i] != null && slots[i].reassert()) asked++
+            keepers[i].reasserted(t) // spent even with nothing to air, or a stale retry would spin the caller's loop
+        }
+        return asked
+    }
+
+    /**
+     * Every enable outcome the stack reports for a slot: our own [reassert]s (a page set is non-connectable, so the
+     * stack's terminated-set re-enable, the one resume that calls back, never happens to it). Runs on a binder thread
+     * holding the slot's own lock, so it touches only the slot's keeper and never [lock] — the order everywhere else is
+     * [lock], then the slot.
+     */
+    private fun onSlotEnabled(
+        index: Int,
+        enabled: Boolean,
+        status: Int,
+    ) {
+        val t = now()
+        if (enabled && status == AdvertisingSetCallback.ADVERTISE_SUCCESS) {
+            keepers[index].onEnabled(t)?.let { log("ble-side slot$index advert enabled again (refused for ${it}ms)") }
+            return
+        }
+        val what = if (enabled) "refused $status" else "disabled"
+        keepers[index].onRefused(t)?.let { log("ble-side slot$index advert $what, retry in ${it}ms") }
+        listener?.onAdvertRefused()
+    }
+
     /** Holds [lock]. */
     private fun rescheduleLocked() {
         timer?.cancel()
@@ -331,26 +410,52 @@ class BleSideChannel internal constructor(
             }
     }
 
+    /**
+     * A slot's start outcome. The reaction runs off the caller's thread: the stack reports a start on a binder thread
+     * holding the slot's own lock, and everything else here takes [lock] first and the slot second ([applyLocked],
+     * [reassert]), so taking [lock] inside the callback could deadlock the two. Two things follow from running late: a
+     * reaction from an earlier session ([generation]) is dropped, and a reaction that stands down a slot stops its set
+     * rather than only forgetting it, because the slot may have been started again, and succeeded, in between.
+     */
     private fun onSlotStatus(
         index: Int,
         status: Int,
     ) {
-        when (slotReaction(status)) {
+        val reaction = slotReaction(status)
+        if (reaction == SlotReaction.None) return
+        val gen = generation
+        scope.launch { react(index, status, reaction, gen) }
+    }
+
+    private fun react(
+        index: Int,
+        status: Int,
+        reaction: SlotReaction,
+        gen: Int,
+    ) {
+        when (reaction) {
             SlotReaction.None -> {}
 
             SlotReaction.Dark -> {
-                goDark("advertising set refused: feature unsupported")
+                synchronized(lock) {
+                    if (gen != generation) return
+                    goDarkLocked("advertising set refused: feature unsupported")
+                }
             }
 
             SlotReaction.HalvePage -> {
                 // The controller's maximum lied, or a vendor reserves header room: halve the page and start over
                 // (the queued parts were cut for the old size; the flood carries them).
                 synchronized(lock) {
+                    if (gen != generation || !live) return
                     pageMax /= 2
                     if (pageMax < MIN_PAGE_BYTES) {
                         goDarkLocked("page maximum too small after DATA_TOO_LARGE")
                         return
                     }
+                    // Every set goes down with the pages it was told to air: a slot left up here would air a page
+                    // nothing tracks any more, and hold a controller set.
+                    slots.forEach { it.stop() }
                     carousel.clear()
                     pushed.fill(null)
                     applyLocked()
@@ -362,6 +467,9 @@ class BleSideChannel internal constructor(
             // this slot sits out for a while; the others keep going.
             SlotReaction.SitOut -> {
                 synchronized(lock) {
+                    if (gen != generation || !live) return
+                    // Stopped, not only forgotten: the slot may have been started again, and succeeded, since it failed.
+                    slots[index].stop()
                     carousel.setSlotUsable(index, false)
                     pushed[index] = null
                     slotRetryAt[index] = now() + SLOT_RETRY_MS
@@ -504,5 +612,8 @@ class BleSideChannel internal constructor(
         private const val HEARD_TTL_MS = 10 * 60_000L
         private const val LAST_PAGE_MAX = 64
         private const val MS_PER_S = 1_000L
+
+        // A slot's keeper has no net: the presence set's turns are it, so its period never comes due.
+        private const val NO_NET_MS = Long.MAX_VALUE / 2
     }
 }

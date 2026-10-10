@@ -442,6 +442,10 @@ class BluetoothMeshTransport(
                 readvertise() // the flag follows `live`
                 wakeSide()
             }
+
+            override fun onAdvertRefused() {
+                advertWake.trySend(Unit) // [advertLoop] re-reads the slot's retry wait
+            }
         }
 
     // Forwards a live link's decoded records into our flows and its teardown into [teardownLink]. One per link:
@@ -909,9 +913,11 @@ class BluetoothMeshTransport(
 
     /**
      * Enables the presence set again whenever [advertKeeper] says it is due — after a connection edge, a reported
-     * refusal, a heal, or the net — and the Coded set with it while that one is up. The Coded set rides these turns,
-     * and [codedKeeper] adds its own retries: a refused Coded enable, or a start the stack failed internally, comes back
-     * on the doubling wait. Every wait is a timeout, so a lost wake costs latency, never liveness.
+     * refusal, a heal, or the net — and the Coded set with it while that one is up, then the side channel's slots with a
+     * page on the air (9utz, amendment 2026-10-09), each set its own enable so one refused set never takes another down.
+     * The Coded set and the slots ride these turns; [codedKeeper] and the side channel's own keepers add retries for a
+     * refusal the stack reported, on the doubling wait. Every wait is a timeout, so a lost wake costs latency, never
+     * liveness.
      */
     private suspend fun advertLoop() {
         while (scope.isActive) {
@@ -923,9 +929,11 @@ class BluetoothMeshTransport(
             }
             val now = elapsed()
             val linked = links.isNotEmpty()
+            val side = sideChannel
             if (advertKeeper.isDue(now, linked)) {
                 advertiser.reassert()
                 if (codedUp()) codedAdvertiser.reassert()
+                side?.reassert()
                 advertKeeper.reasserted(now)
                 codedKeeper.reasserted(now)
             }
@@ -937,7 +945,9 @@ class BluetoothMeshTransport(
                 }
                 codedKeeper.reasserted(now)
             }
-            val wait = minOf(advertKeeper.waitMs(elapsed(), linked), codedKeeper.waitMs(elapsed(), linked))
+            side?.retryRefused()
+            val sideWait = side?.retryWaitMs() ?: Long.MAX_VALUE
+            val wait = minOf(advertKeeper.waitMs(elapsed(), linked), codedKeeper.waitMs(elapsed(), linked), sideWait)
             // stretches: the re-assert turns (9utz): settle, refusal retry, net. pj9w kept the net monotonic; the no-link retry is open.
             withTimeoutOrNull(wait) { advertWake.receive() }
         }

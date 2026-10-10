@@ -20,7 +20,9 @@ Bluetooth-adjacent routing that stays in `AGENTS.md`, because another subsystem 
   `FastFrameCodec` unit per 236-B page, never a chain, never presence, never a DM-form frame — gated per
   peer on the advert's flags byte and behind `BuildConfig.BLE_SIDE_PLANE`, on in release since 2026-10-08 with
   trials still owed (CHECK `.agents/memory/roadmap.md`). The receive scan is Off for an all-linked clique with nothing
-  streaming (ADR 2026-09.u8qj) — the link copy already reaches every linked peer; don't widen that gate. `hasFastPlane` is now true for Bluetooth: the link copy the
+  streaming (ADR 2026-09.u8qj) — the link copy already reaches every linked peer; don't widen that gate. Its slots are
+  enabled again on the presence set's re-assert turns (`BleSideChannel.reassert`, ADR 2026-10.9utz's 2026-10-09
+  amendment); the channel's lock is taken before a slot's, never inside a slot's callback. `hasFastPlane` is now true for Bluetooth: the link copy the
   composite used to send lives inside the transport's `fastFanout`/`fastSend`; don't add it back upstream.
 - **When touching `CodedPhyPolicy`, `PhyStepper`, `BlePhyControl`, `CodedPhyDiag`, `CodedAdvertPace`, `RangeHunt`,
   `AppVisibility`,
@@ -83,9 +85,12 @@ Bluetooth-adjacent routing that stays in `AGENTS.md`, because another subsystem 
   connection and the controller can refuse that (0x0d), reporting it only for a connection *to* the set — never for
   one the phone made — and never retrying. So the transport enables the live presence set again itself: 2.5 s after
   each ACL edge, on a doubling wait after a reported refusal, on a 10 s (no link) / 60 s net, and at once on `heal()`.
-  A stopped set must stay down (`stop()` clears what `reassert` would restart). The ACL receiver is
+  A stopped set must stay down (`stop()` clears what `reassert` would restart). The side channel's page slots ride the
+  same turns through `BleSideChannel.reassert` (the amendment of 2026-10-09, #143) — only a slot with a page pushed on a
+  live channel, never one sitting out a refused start — with per-slot refusal retries, never `advertKeeper`'s. The ACL receiver is
   `RECEIVER_EXPORTED` on purpose: the Bluetooth app (uid 1002), not `system_server`, sends `ACTION_ACL_*`, so a
-  non-exported receiver never fires (the ADR's amendment). Tests: `AdvertReassertPolicyTest`, `BleAdvertiserTest`.
+  non-exported receiver never fires (the ADR's amendment). Tests: `AdvertReassertPolicyTest`, `BleAdvertiserTest`,
+  `BleSideChannelReassertTest`.
 - **When touching `mesh/bluetooth/BleDoorbell`, `DoorbellPolicy`, `Protocol.CAP_DOORBELL`, or what
   `BluetoothMeshTransport.writeOnce` rings:** READ ADR 2026-09.dqvb (companion change A4 for the iOS port). A link
   rings only when the peer's HELLO carries `CAP_DOORBELL`, which Android never claims, so Android↔Android links never
