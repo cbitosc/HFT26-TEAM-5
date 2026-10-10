@@ -3,6 +3,7 @@ package app.getknit.knit.data
 import androidx.room3.withWriteTransaction
 import app.getknit.knit.data.group.GroupDao
 import app.getknit.knit.data.group.GroupEntity
+import app.getknit.knit.data.group.GroupMemberClockEntity
 import app.getknit.knit.data.group.GroupMembersStore
 import app.getknit.knit.data.message.StatusNotices
 import app.getknit.knit.mesh.crypto.ratchet.GroupRatchetStore
@@ -79,6 +80,15 @@ class GroupRepository(
         }
 
     /**
+     * When [memberId] last left [groupId], by their own signed `groupleave`'s clamped `sentAt`; 0 when never
+     * recorded — lenient, never a lock-out. The clock a rejoin must beat (`InboundPipeline.rejoinBy`).
+     */
+    suspend fun leftAt(
+        groupId: String,
+        memberId: String,
+    ): Long = dao.clocksOf(groupId, memberId)?.leftAt ?: 0L
+
+    /**
      * Records that [leaverId] left [groupId] (from their own signed `groupleave` frame): drops them from
      * the roster, tombstones them in [GroupEntity.departed] so a straggler's stale full roster can't
      * re-add them, and inserts a "member left" status notice stamped [leftAt] (the frame's sentAt, for
@@ -89,9 +99,11 @@ class GroupRepository(
      * and tells the caller not to surface anything. The status row's id is deterministic so a replay
      * upserts the same row rather than duplicating it.
      *
-     * A leave older than the member's recorded rejoin ([recordRejoin]'s notice) is also a no-op: once a
+     * A leave older than the member's recorded rejoin ([recordRejoin]'s clock) is also a no-op: once a
      * member can come back, a custody re-serve of their earlier `groupleave` would otherwise evict them
-     * again. Leave and rejoin are last-writer-wins on the member's own `sentAt` clock.
+     * again. Leave and rejoin are last-writer-wins on the member's own `sentAt` clock, and both clocks live in
+     * `group_member_clocks` beside the group, never in the notice lines, which the retention sweep may drop
+     * while the group lives on (IOS-6, ADR 2026-09.v6fu).
      */
     suspend fun recordDeparture(
         groupId: String,
@@ -103,8 +115,8 @@ class GroupRepository(
             if (group.left) return@withWriteTransaction false
             val members = GroupMembersStore.decode(group.members)
             if (leaverId !in members) return@withWriteTransaction false
-            val rejoinedAt = messages.sentAtOf(StatusNotices.rejoinId(groupId, leaverId)) ?: 0L
-            if (leftAt <= rejoinedAt) return@withWriteTransaction false
+            val clocks = dao.clocksOf(groupId, leaverId) ?: GroupMemberClockEntity(groupId, leaverId)
+            if (leftAt <= clocks.rejoinedAt) return@withWriteTransaction false
             val departed = GroupMembersStore.decode(group.departed)
             dao.upsert(
                 group.copy(
@@ -123,6 +135,7 @@ class GroupRepository(
             // splitting the obligation from the act is what makes rotation survive a crash between them,
             // and it is what lets the mint grace cover a deterministic re-minter who never comes back.
             groupRoots?.markRemintDue(groupId, leftAt)
+            dao.putClocks(clocks.copy(leftAt = leftAt))
             messages.save(StatusNotices.memberLeft(groupId, leaverId, leftAt))
             true
         }
@@ -131,8 +144,8 @@ class GroupRepository(
      * The mirror of [recordDeparture], for a founding member who left and re-added themselves with their
      * own signed frame (`InboundPipeline.reconcileGroup` decides that — it is the only writer of the
      * pinned roster, and has already moved [memberId] from `departed` back into `members` in this same
-     * transaction). This records the rest: a "member rejoined" notice stamped [rejoinedAt] (the frame's
-     * `sentAt`, the clock [recordDeparture] reads back), and — when [rekey] — the same rekey a departure
+     * transaction). This records the rest: the member's rejoin clock, [rejoinedAt] (the frame's `sentAt`, which
+     * [recordDeparture] reads back), a "member rejoined" notice stamped with it, and — when [rekey] — the same rekey a departure
      * forces: our send chains die so the next send mints a fresh epoch, distributed to the roster as it
      * is *now*, and the rejoiner reads nothing sealed while they were out. [rekey] is the caller's
      * per-(group, member) floor, so a leave/rejoin loop cannot make every member re-mint on each turn.
@@ -146,6 +159,8 @@ class GroupRepository(
     ) {
         db.withWriteTransaction {
             if (rekey) groupRatchet.deleteSendChains(groupId)
+            val clocks = dao.clocksOf(groupId, memberId) ?: GroupMemberClockEntity(groupId, memberId)
+            dao.putClocks(clocks.copy(rejoinedAt = rejoinedAt))
             messages.save(StatusNotices.memberRejoined(groupId, memberId, rejoinedAt))
         }
     }
@@ -164,6 +179,9 @@ class GroupRepository(
         db.withWriteTransaction {
             dao.markLeft(groupId)
             messages.deleteByConversation(groupId)
+            // The member clocks go with the thread whose lines they were (ADR 2026-09.v6fu): a group re-created
+            // after this starts every member afresh, as its roster does, and as knit-ios's fresh row does.
+            dao.deleteClocks(groupId)
             // All group ratchet state dies with our membership (chains, skipped keys, outbox) — and with it
             // the group's spool root, so the scope stops being derived the moment we leave.
             groupRatchet.purgeGroup(groupId)
@@ -181,6 +199,7 @@ class GroupRepository(
         db.withWriteTransaction {
             dao.deleteById(groupId)
             messages.deleteByConversation(groupId)
+            dao.deleteClocks(groupId)
             // A re-created group (via reconcileGroup) starts with clean ratchet state — and a clean root, so
             // it re-adopts the current one from the first gossiping ctl DM rather than reviving a stale scope.
             groupRatchet.purgeGroup(groupId)

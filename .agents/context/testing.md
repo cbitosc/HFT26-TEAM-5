@@ -275,7 +275,8 @@ hop (fixed in `MeshRouter.countOverheard`, pinned by `MeshRouterTest`).
   Give every node in a scenario the same custody numbers — the digest is folded over what they keep.
 - **The second batch of classes** (2026-09-14, 45 scenarios): `GroupMembershipLabTest` (leave-rekey, the
   self-rejoin of ADR 2026-09.v6fu, the rejoiner's seed rejoining them itself since ADR 2026-09.mjaj — it used
-  to park under "sender departed" — the `left:` notice as an LWW clock, a member who missed the leave,
+  to park under "sender departed" — the leave and rejoin as LWW clocks that outlive their notice lines (the
+  sweep may take those), a member who missed the leave,
   concurrent renames), `ReactionLabTest` (DM / group / room forms, a retraction
   crossing its reaction, a reaction ahead of its DM, a group reaction founding the group), `ProfileUpdateLabTest`
   (rename to a contact and a stranger, a re-served older profile, status + flag surviving a sealed update, an

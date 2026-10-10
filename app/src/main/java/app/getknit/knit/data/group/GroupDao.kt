@@ -1,6 +1,8 @@
 package app.getknit.knit.data.group
 
 import androidx.room3.Dao
+import androidx.room3.Insert
+import androidx.room3.OnConflictStrategy
 import androidx.room3.Query
 import androidx.room3.Upsert
 import kotlinx.coroutines.flow.Flow
@@ -58,4 +60,19 @@ interface GroupDao {
     /** Hard-deletes the group row (no tombstone), so a future inbound group frame can re-create it. */
     @Query("DELETE FROM groups WHERE groupId = :groupId")
     suspend fun deleteById(groupId: String)
+
+    /** [memberId]'s leave and rejoin clocks in [groupId], or null when neither was ever recorded (both read as 0). */
+    @Query("SELECT * FROM group_member_clocks WHERE groupId = :groupId AND memberId = :memberId")
+    suspend fun clocksOf(
+        groupId: String,
+        memberId: String,
+    ): GroupMemberClockEntity?
+
+    /** Writes one member's clocks whole; the caller read them in the same transaction ([clocksOf]). */
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun putClocks(clocks: GroupMemberClockEntity)
+
+    /** Drops every member clock [groupId] holds — with the group, or with the thread on our own leave. */
+    @Query("DELETE FROM group_member_clocks WHERE groupId = :groupId")
+    suspend fun deleteClocks(groupId: String)
 }

@@ -156,6 +156,44 @@ class GroupRepositoryTest : RoomDbTest() {
             assertFalse("b" in GroupMembersStore.decode(db.groupDao().findById("g")!!.members))
         }
 
+    @Test
+    fun `the clocks live on the group, so a sweep that takes the lines leaves both guards standing`() =
+        runTest {
+            // IOS-6: the retention sweep may drop a request thread's `leave:` and `rejoin:` lines while the group
+            // lives on. The clocks are no longer read off them (ADR 2026-09.v6fu).
+            seedGroup("g", listOf("a", "b", "c"))
+            assertTrue(repo().recordDeparture("g", "b", leftAt = 100L))
+            messages.deleteByConversation("g")
+            assertEquals("the leave clock outlives its line", 100L, repo().leftAt("g", "b"))
+
+            repo().recordRejoin("g", "b", rejoinedAt = 200L, rekey = false)
+            messages.deleteByConversation("g")
+            // The departure shrank the roster; the rejoin's caller (reconcileGroup) restores it, so stand in for it.
+            seedGroup("g", listOf("a", "b", "c"))
+            assertFalse("an old leave cannot evict again once the rejoin line is gone", repo().recordDeparture("g", "b", leftAt = 150L))
+            assertEquals(100L, repo().leftAt("g", "b"))
+            assertTrue(repo().recordDeparture("g", "b", leftAt = 300L))
+            assertEquals(300L, repo().leftAt("g", "b"))
+        }
+
+    @Test
+    fun `leave drops the clocks, so a group re-created after leaving starts every member afresh`() =
+        runTest {
+            // ContactsViewModel.createGroup re-creates a group we left as a fresh row with the whole founding
+            // roster; its clocks start at 0 with it, as they did when the lines went with the thread, and as on
+            // knit-ios, whose re-created group is a fresh record.
+            seedGroup("g", listOf("a", "b", "c"))
+            assertTrue(repo().recordDeparture("g", "b", leftAt = 100L))
+            repo().recordRejoin("g", "b", rejoinedAt = 200L, rekey = false)
+
+            repo().leave("g")
+            assertNull(db.groupDao().clocksOf("g", "b"))
+
+            seedGroup("g", listOf("a", "b", "c")) // the row createGroup writes
+            assertEquals(0L, repo().leftAt("g", "b"))
+            assertTrue(repo().recordDeparture("g", "b", leftAt = 150L))
+        }
+
     private fun sendChain(groupId: String) =
         GroupRatchetEngine.SendChain(
             groupId = groupId,
@@ -198,15 +236,18 @@ class GroupRepositoryTest : RoomDbTest() {
         }
 
     @Test
-    fun `delete removes the group row and its messages`() =
+    fun `delete removes the group row, its messages and its member clocks`() =
         runTest {
             seedGroup("g", listOf("a", "b"))
             messages.upsert(MessageEntity(id = "m1", senderId = "a", conversationId = "g", body = "hi", sentAt = 1L))
+
+            assertTrue(repo().recordDeparture("g", "b", leftAt = 100L))
 
             repo().delete("g")
 
             assertNull(db.groupDao().findById("g"))
             assertFalse(messages.exists("m1"))
+            assertNull("the clocks go with the group", db.groupDao().clocksOf("g", "b"))
         }
 
     /**

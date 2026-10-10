@@ -233,6 +233,9 @@ class InboundPipelineTest {
         val proofs = ConcurrentHashMap<String, Pair<ByteArray, Long>>()
         val msgMap = ConcurrentHashMap<String, MessageEntity>()
         val groupMap = ConcurrentHashMap<String, GroupEntity>()
+
+        // (groupId, memberId) -> the member's leave clock, as `group_member_clocks` holds it (ADR 2026-09.v6fu).
+        val leftAtMap = ConcurrentHashMap<Pair<String, String>, Long>()
         val peers = mockk<PeerRepository>(relaxed = true)
         val messages = mockk<MessageRepository>(relaxed = true)
 
@@ -372,7 +375,7 @@ class InboundPipelineTest {
             }
             coEvery { messages.recipientOf(any()) } answers { msgMap[firstArg<String>()]?.recipientId }
             coEvery { messages.conversationOf(any()) } answers { msgMap[firstArg<String>()]?.conversationId }
-            coEvery { messages.sentAtOf(any()) } answers { msgMap[firstArg<String>()]?.sentAt }
+            coEvery { groups.leftAt(any(), any()) } answers { leftAtMap[firstArg<String>() to secondArg<String>()] ?: 0L }
             // The real repository writes the tick and the acker row in one transaction; the fake keeps that
             // pairing so the existing markReceived verifications still describe what the pipeline did.
             coEvery { receipts.record(any(), any(), any(), any()) } coAnswers {
@@ -6887,7 +6890,7 @@ class InboundPipelineTest {
     // --- self-rejoin: a founding member who left re-adds themselves by their own signed frame ---
 
     /** Puts [member] in the rig's tombstones for [group] as `recordDeparture` leaves things: out of the
-     *  members, in `departed`, with the leave notice (their departure clock) stamped [leftAt]. */
+     *  members, in `departed`, with their leave clock and the leave notice stamped [leftAt]. */
     private fun Rig.depart(
         group: GroupInfo,
         member: Party,
@@ -6899,6 +6902,7 @@ class InboundPipelineTest {
                 members = GroupMembersStore.encode(GroupMembersStore.decode(stored.members) - member.nodeId),
                 departed = GroupMembersStore.encode(GroupMembersStore.decode(stored.departed) + member.nodeId),
             )
+        leftAtMap[group.id to member.nodeId] = leftAt
         msgMap[StatusNotices.leaveId(group.id, member.nodeId)] = StatusNotices.memberLeft(group.id, member.nodeId, leftAt)
     }
 

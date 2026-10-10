@@ -526,6 +526,36 @@ object KnitMigrations {
             }
         }
 
+    /**
+     * v21 → v22: one `group_member_clocks` table — each founding member's leave and rejoin clocks per group, moved
+     * off the `sentAt` of the `leave:<group>:<member>` and `rejoin:<group>:<member>` status lines, which the
+     * retention sweep may drop while the group lives on (IOS-6, ADR 2026-09.v6fu). Filled from the lines a device
+     * holds at upgrade, for groups it still holds; the member is read off the line's id, the id the clocks were
+     * always keyed by. A line already swept is a clock already lost, and stays 0 — the reading it had. The CREATE
+     * must stay byte-equivalent to what Room generates for `app/schemas/**/22.json`.
+     */
+    val MIGRATION_21_22 =
+        object : Migration(21, 22) {
+            override suspend fun migrate(connection: SQLiteConnection) {
+                connection.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `group_member_clocks` (`groupId` TEXT NOT NULL, `memberId` TEXT NOT NULL, " +
+                        "`leftAt` INTEGER NOT NULL, `rejoinedAt` INTEGER NOT NULL, PRIMARY KEY(`groupId`, `memberId`))",
+                )
+                connection.execSQL(
+                    "INSERT INTO `group_member_clocks` (`groupId`, `memberId`, `leftAt`, `rejoinedAt`) " +
+                        "SELECT groupId, memberId, MAX(leftAt), MAX(rejoinedAt) FROM (" +
+                        "SELECT g.groupId AS groupId, substr(m.id, length('leave:' || g.groupId || ':') + 1) AS memberId, " +
+                        "m.sentAt AS leftAt, 0 AS rejoinedAt FROM messages m JOIN groups g ON m.conversationId = g.groupId " +
+                        "WHERE substr(m.id, 1, length('leave:' || g.groupId || ':')) = 'leave:' || g.groupId || ':' " +
+                        "UNION ALL " +
+                        "SELECT g.groupId, substr(m.id, length('rejoin:' || g.groupId || ':') + 1), 0, m.sentAt " +
+                        "FROM messages m JOIN groups g ON m.conversationId = g.groupId " +
+                        "WHERE substr(m.id, 1, length('rejoin:' || g.groupId || ':')) = 'rejoin:' || g.groupId || ':'" +
+                        ") WHERE memberId != '' GROUP BY groupId, memberId",
+                )
+            }
+        }
+
     /** All migrations, applied by Room in order. */
     val ALL: Array<Migration> =
         arrayOf(
@@ -549,5 +579,6 @@ object KnitMigrations {
             MIGRATION_18_19,
             MIGRATION_19_20,
             MIGRATION_20_21,
+            MIGRATION_21_22,
         )
 }

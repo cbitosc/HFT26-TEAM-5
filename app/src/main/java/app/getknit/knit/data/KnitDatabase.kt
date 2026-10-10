@@ -21,6 +21,7 @@ import app.getknit.knit.data.forward.ForwardDao
 import app.getknit.knit.data.forward.ForwardEntity
 import app.getknit.knit.data.group.GroupDao
 import app.getknit.knit.data.group.GroupEntity
+import app.getknit.knit.data.group.GroupMemberClockEntity
 import app.getknit.knit.data.message.MessageDao
 import app.getknit.knit.data.message.MessageEntity
 import app.getknit.knit.data.message.MessageFtsEntity
@@ -52,7 +53,7 @@ import net.zetetic.database.sqlcipher.driver.SQLCipherDriver
  * The `@Database` version, as a top-level constant so the annotation and [KnitDatabase.SCHEMA_VERSION] read
  * one number (an annotation argument cannot name the class's own companion).
  */
-internal const val KNIT_DB_SCHEMA_VERSION = 21
+internal const val KNIT_DB_SCHEMA_VERSION = 22
 
 @Database(
     entities = [
@@ -65,7 +66,7 @@ internal const val KNIT_DB_SCHEMA_VERSION = 21
         GroupRootEntity::class, MessageReceiptEntity::class, DraftEntity::class,
         MessageFtsEntity::class, CommonsEntity::class, CommonsOutboxEntity::class,
         CommonsMemberEntity::class, MetPeerEntity::class, SavedFileEntity::class,
-        PeerProfileEntity::class,
+        PeerProfileEntity::class, GroupMemberClockEntity::class,
     ],
     // v1: frozen launch baseline. The pre-1.0 alpha schema churn (the old destructive v2…v22 bumps that
     //     rode the wire/crypto breaks) is collapsed; docs/WIRE_COMPAT.md keeps the historical break record.
@@ -194,6 +195,11 @@ internal const val KNIT_DB_SCHEMA_VERSION = 21
     //     new-era frame on an old era's chain (#135, ADR 2026-10.gcrd). Local only, no wire change. Both tables are
     //     recreated empty (a tag cannot be computed in SQL, and a guessed one would keep a stale row live);
     //     migrated by KnitMigrations.MIGRATION_20_21.
+    // v22: one `group_member_clocks` table — each founding member's leave and rejoin clocks per group, which until
+    //     now were read back off the `sentAt` of the `leave:` / `rejoin:` status lines. The retention sweep may drop
+    //     a request thread's lines while the group lives on, and a frame custody re-served after that flipped the
+    //     roster on Android alone (IOS-6, ADR 2026-09.v6fu). Local only, no wire change; carried in a backup like
+    //     `groups`. Filled from the lines that exist at upgrade; migrated by KnitMigrations.MIGRATION_21_22.
     version = KNIT_DB_SCHEMA_VERSION,
     // Export the schema JSON to app/schemas/ (location set by the androidx.room Gradle plugin's
     // room { schemaDirectory(...) } in app/build.gradle.kts). Keeps the schema diffable in review and feeds

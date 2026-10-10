@@ -47,7 +47,7 @@ class KnitDatabaseMigrationTest {
         )
 
     @Test
-    fun `the current schema (v21) creates and opens from the exported JSON`() =
+    fun `the current schema (v22) creates and opens from the exported JSON`() =
         runTest {
             helper.createDatabase(CURRENT_VERSION).close()
         }
@@ -800,18 +800,53 @@ class KnitDatabaseMigrationTest {
             }
         }
 
+    @Test
+    fun `migrate 21 to 22 fills each member's clocks from the leave and rejoin lines of the groups still held`() =
+        runTest {
+            // The lines' `sentAt`s were the clocks until now (ADR 2026-09.v6fu); a line the sweep already took is a
+            // clock already lost and stays 0, the reading it had. A line in a thread whose group is gone fills nothing.
+            helper.createDatabase(21).use { c ->
+                c.execSQL(
+                    "INSERT INTO groups (groupId, name, members, createdBy, createdAt, nameUpdatedAt, left, departed, " +
+                        "photoHash, photoUpdatedAt, photoShownHash) VALUES ('g-1','','[\"me\",\"bo\"]','me',1,0,0,'[\"cy\"]',NULL,0,NULL)",
+                )
+                // Alice left and came back, Cy left, Bo only spoke; and a line in a thread with no group row.
+                c.execSQL(INSERT_V21 + "VALUES ('leave:g-1:al','al','g-1','',10,1,0,'[]',0,0,0,1,0,0,0)")
+                c.execSQL(INSERT_V21 + "VALUES ('rejoin:g-1:al','al','g-1','',20,1,0,'[]',0,0,0,9,0,0,0)")
+                c.execSQL(INSERT_V21 + "VALUES ('leave:g-1:cy','cy','g-1','',30,1,0,'[]',0,0,0,1,0,0,0)")
+                c.execSQL(INSERT_V21 + "VALUES ('m-1','bo','g-1','leave:g-1:bo',40,1,0,'[]',0,0,0,0,0,0,0)")
+                c.execSQL(INSERT_V21 + "VALUES ('leave:g-gone:al','al','g-gone','',50,1,0,'[]',0,0,0,1,0,0,0)")
+            }
+            helper.runMigrationsAndValidate(22, listOf(KnitMigrations.MIGRATION_21_22)).use { c ->
+                val clocks = mutableMapOf<Pair<String, String>, Pair<Long, Long>>()
+                c.prepare("SELECT groupId, memberId, leftAt, rejoinedAt FROM group_member_clocks").use { s ->
+                    while (s.step()) clocks[s.getText(0) to s.getText(1)] = s.getLong(2) to s.getLong(3)
+                }
+                assertEquals(mapOf(("g-1" to "al") to (10L to 20L), ("g-1" to "cy") to (30L to 0L)), clocks)
+                c.prepare("SELECT COUNT(*) FROM messages WHERE kind IN (1, 9)").use { s ->
+                    assertTrue(s.step())
+                    assertEquals("the lines stay, as lines", 4L, s.getLong(0))
+                }
+            }
+        }
+
     private companion object {
         /**
          * KnitDatabase `@Database(version = …)` — bump alongside the DB (its retention is CLASS, so the version
          * can't be read reflectively). A missing schemas/<db>/<version>.json fails the smoke test.
          */
-        const val CURRENT_VERSION = 21
+        const val CURRENT_VERSION = 22
 
         /** The v16 column list with an attachment — MIGRATION_16_17's test seeds rows through it. */
         const val INSERT_V16 =
             "INSERT INTO messages (id, senderId, conversationId, body, sentAt, received, receivedVia, " +
                 "mentions, replyToHasAttachment, moderation, pendingKey, kind, originViaMqtt, originSigned, " +
                 "attachmentHash, attachmentMime) "
+
+        /** The v21 column list without an attachment — MIGRATION_21_22's test seeds rows through it. */
+        const val INSERT_V21 =
+            "INSERT INTO messages (id, senderId, conversationId, body, sentAt, received, receivedVia, " +
+                "mentions, replyToHasAttachment, moderation, pendingKey, kind, originViaMqtt, originSigned, attachmentAnimated) "
 
         /** The v11 column list, as MIGRATION_10_11's test seeds it. */
         const val INSERT_V11 =

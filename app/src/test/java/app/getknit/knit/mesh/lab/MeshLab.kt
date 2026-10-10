@@ -815,6 +815,8 @@ data class LabLimits(
     val roomMaxMessages: Int = 2_000,
     /** Newest posts a room keeps per stranger ([MessageRepository]'s `roomMaxPerStranger`). */
     val roomMaxPerStranger: Int = 200,
+    /** Newest rows a request thread keeps ([MessageRepository]'s `maxPerPendingThread`). */
+    val maxPerPendingThread: Int = 50,
     /** Room posts one link may hand over at once ([IngressBudget]'s `burst`). */
     val ingressBurst: Int = IngressBudget.DEFAULT_BURST,
     /** Room posts per minute one link may sustain ([IngressBudget]'s `perMinute`). */
@@ -1041,6 +1043,7 @@ class LabNode internal constructor(
                 db.messageDao(),
                 nearbyMaxMessages = limits.roomMaxMessages,
                 roomMaxPerStranger = limits.roomMaxPerStranger,
+                maxPerPendingThread = limits.maxPerPendingThread,
             )
         commons = if (withCommons) CommonsRepository(db.commonsDao(), messages, db) else null
         val reactions = ReactionRepository(db.reactionDao(), db).also { reactionStore = it }

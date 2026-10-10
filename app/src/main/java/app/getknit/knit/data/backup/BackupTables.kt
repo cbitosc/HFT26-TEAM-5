@@ -24,6 +24,7 @@ object BackupTables {
             "peer_profiles",
             "met_peers",
             "groups",
+            "group_member_clocks",
             "group_roots",
             "commons",
             "commons_members",

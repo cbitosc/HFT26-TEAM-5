@@ -40,9 +40,9 @@ object StatusNotices {
     /**
      * [MessageEntity.KIND_MEMBER_REJOINED] — [memberId], who had left [groupId], re-added themselves with a
      * frame stamped [rejoinedAt]. Same deterministic id shape as [memberLeft], so a leave/rejoin cycle keeps
-     * one line of each and the pair's `sentAt`s are the clocks the roster guards read: a rejoin only counts
-     * when its frame is newer than the recorded leave, and a leave only when newer than the recorded rejoin
-     * (a custody re-serve of either must not flip the roster back).
+     * one line of each. The lines are what a person reads, not the clocks the roster guards read: those live
+     * in `group_member_clocks` beside the group, since the retention sweep may drop these lines while the
+     * group lives on (ADR 2026-09.v6fu).
      */
     fun memberRejoined(
         groupId: String,
@@ -57,13 +57,13 @@ object StatusNotices {
             kind = MessageEntity.KIND_MEMBER_REJOINED,
         )
 
-    /** The row id of [memberLeft]'s notice — read back as the member's departure clock. */
+    /** The row id of [memberLeft]'s notice; the v22 migration read the member's leave clock off it. */
     fun leaveId(
         groupId: String,
         memberId: String,
     ): String = "leave:$groupId:$memberId"
 
-    /** The row id of [memberRejoined]'s notice — read back as the member's rejoin clock. */
+    /** The row id of [memberRejoined]'s notice; the v22 migration read the member's rejoin clock off it. */
     fun rejoinId(
         groupId: String,
         memberId: String,

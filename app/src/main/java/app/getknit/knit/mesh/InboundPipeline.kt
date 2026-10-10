@@ -2277,9 +2277,9 @@ class InboundPipeline(
      * one roster growth that needs no coordination: nobody can re-add anyone else (the tombstone is keyed
      * on the signer), and nobody can be re-added against their will. The `sentAt` guard is what keeps a
      * custody re-serve of a *pre-leave* frame (in which they were, of course, a member) from undoing the
-     * leave; its clock is the leave notice's `sentAt`, written atomically with the tombstone by
-     * [GroupRepository.recordDeparture], and a missing notice reads as "left at 0" — lenient, never a
-     * lock-out. Why it exists at all: a group's id is the hash of its member set, so "create a group with
+     * leave; its clock is the member's leave clock on the group ([GroupRepository.leftAt]), written atomically
+     * with the tombstone by [GroupRepository.recordDeparture], and a missing one reads as "left at 0" — lenient,
+     * never a lock-out. Why it exists at all: a group's id is the hash of its member set, so "create a group with
      * the same people" after leaving resolves to the *same* group everywhere, and without this the
      * creator's `createGroup` "re-creating rejoins it" was only ever true on their own phone.
      */
@@ -2291,8 +2291,7 @@ class InboundPipeline(
     ): Boolean {
         if (senderId !in GroupMembersStore.decode(existing.departed)) return false
         if (senderId !in group.members) return false
-        val leftAt = messages.sentAtOf(StatusNotices.leaveId(group.id, senderId)) ?: 0L
-        return sentAt > leftAt
+        return sentAt > groups.leftAt(group.id, senderId)
     }
 
     // (groupId, memberId) -> when we last rekeyed for their rejoin. A rejoin always restores membership;

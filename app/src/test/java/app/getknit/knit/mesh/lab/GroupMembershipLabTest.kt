@@ -17,10 +17,11 @@ import org.robolectric.RobolectricTestRunner
  * A group's roster changing hands: the signed leave, the rekey it forces on the remainder, the rejoin by the
  * member's own frame (ADR 2026-09.v6fu — "leave a group and start it again with the same people" is the same
  * group id, and every other member held you departed for good), the seed that outruns the rejoin frame and
- * must park rather than be consumed (`8e041ba9`), and the two notice rows that act as last-writer-wins clocks
- * (`docs/GROUP_FORWARD_SECRECY.md` §6.1). A leaver deletes the thread locally, so its message set legitimately
- * differs from the remainder's: the remainder converges through the oracle and the leaver rides along as a
- * carrier, which still holds its custody, its metrics and its peer rows to the same invariants.
+ * must park rather than be consumed (`8e041ba9`), and the leave and rejoin as last-writer-wins clocks held on the
+ * group, which outlive the notice lines a sweep may take (`docs/GROUP_FORWARD_SECRECY.md` §6.1). A leaver deletes
+ * the thread locally, so its message set legitimately differs from the remainder's: the remainder converges
+ * through the oracle and the leaver rides along as a carrier, which still holds its custody, its metrics and its
+ * peer rows to the same invariants.
  */
 @RunWith(RobolectricTestRunner::class)
 class GroupMembershipLabTest {
@@ -188,7 +189,7 @@ class GroupMembershipLabTest {
         }
 
     /**
-     * The `left:` notice is a clock. A frame Alice sealed *before* leaving, re-served to Bob after her leave
+     * The leave is a clock. A frame Alice sealed *before* leaving, re-served to Bob after her leave
      * (custody does this routinely), lists her in the roster — and must not rejoin her: only a frame newer
      * than the leave can. The hold reverses the two so the stale roster lands second.
      */
@@ -221,6 +222,138 @@ class GroupMembershipLabTest {
                         it == MessageEntity.KIND_MEMBER_REJOINED
                 },
             )
+        }
+
+    /**
+     * Bob–Alice–Carol in a line, so Bob hears the group only through Alice; Bob trims a request thread to
+     * [keep] rows and Carol is no one he talks to, so the group stays one. Returns the group id.
+     */
+    private suspend fun lineWithARequestGroup(
+        alice: LabNode,
+        bob: LabNode,
+        carol: LabNode,
+    ): String {
+        lab.linkAll(bob to alice, alice to carol)
+        lab.awaitAcquainted(alice, bob, carol)
+        val groupId = alice.createGroup(bob, carol)
+        assertTrue(alice.sendGroup(groupId, "founded"))
+        lab.assertConverged(listOf(alice, bob, carol), atLeast = 1) { groupId }
+        return groupId
+    }
+
+    /**
+     * Carol posts [KEEP] lines and Bob's sweep trims his request thread down to them alone. She posts only once she
+     * holds Bob's roster: the leave or rejoin she has not handled yet would kill the send chain her first line
+     * seals under, and the re-mint's seed, same epoch, newer stamp, would supersede it on Bob's side. A roster
+     * Carol already held before the change proves nothing, so [after] names the last frame Bob handled: Alice's
+     * pipe to Carol is in order and her router handles one frame at a time, so reading it puts the change behind her.
+     */
+    private suspend fun pushOutBobsNotices(
+        bob: LabNode,
+        carol: LabNode,
+        groupId: String,
+        after: String? = null,
+    ) {
+        if (after != null) {
+            assertTrue(
+                "carol never read \"$after\"",
+                lab.tryAwait(1) { carol.decrypted(groupId).count { it.second == after } },
+            )
+        } else {
+            val departed = bob.groupShape(groupId)?.departed
+            assertTrue(
+                "carol never reached bob's roster $departed",
+                lab.tryAwait(1) { if (carol.groupShape(groupId)?.departed == departed) 1 else 0 },
+            )
+        }
+        val lines = (1..KEEP).map { "carol $it" }
+        lines.forEach { assertTrue(carol.sendGroup(groupId, it)) }
+        val read = lab.tryAwait(KEEP) { bob.decrypted(groupId).count { it.second in lines } }
+        assertTrue("bob never read carol's lines: ${bob.decrypted(groupId)}\n${lab.report(listOf(bob, carol))}", read)
+        bob.sweepLocalStorage()
+        assertEquals("the sweep kept carol's lines alone", lines.toSet(), bob.decrypted(groupId).map { it.second }.toSet())
+        assertEquals("no notice row survived the sweep", emptyList<Int>(), bob.notices(groupId))
+    }
+
+    /** Lets Alice's dropped frame [id] through to Bob and waits for the re-offer to hand it over and Bob to handle it. */
+    private suspend fun reServeToBob(
+        alice: LabNode,
+        bob: LabNode,
+        id: String,
+    ) {
+        alice.transport.lossy(bob.transport)
+        assertTrue(
+            "alice's custody never re-served the frame",
+            lab.tryAwait(1) {
+                // Bob's digest is what tells Alice the frame is missing on his side.
+                bob.reoffer()
+                if (id in bob.custodyIds()) 1 else 0
+            },
+        )
+        bob.transport.awaitInboundDrained()
+    }
+
+    /**
+     * The leave's clock outlives its line (IOS-6). Bob trims the request thread past the `leave:` notice, and a
+     * frame Alice sealed before she left reaches him only then, from custody: it lists her, and it is older than
+     * the leave held on the group, so she stays out. Before the clock moved onto the group it was the notice's
+     * `sentAt`, gone with the row, and the stale roster read as a rejoin.
+     */
+    @Test
+    fun aPreLeaveFrameReServedAfterTheSweepDroppedTheLeaveLineCannotUndoTheLeave() =
+        runBlocking {
+            val alice = lab.node("alice").apply { setDisplayName("Alice") }
+            val bob = lab.node("bob", LabLimits(maxPerPendingThread = KEEP)).apply { setDisplayName("Bob") }
+            val carol = lab.node("carol").apply { setDisplayName("Carol") }
+            val groupId = lineWithARequestGroup(alice, bob, carol)
+
+            alice.transport.lossy(bob.transport) { it.decoded()?.let { e -> e.senderId == alice.nodeId && e.group != null } == true }
+            assertTrue(alice.sendGroup(groupId, "last words"))
+            val lastWords = alice.lostTo()
+            alice.leaveGroup(groupId)
+            assertTrue(lab.tryAwait(1) { if (bob.groupShape(groupId)?.departed == setOf(alice.nodeId)) 1 else 0 })
+            pushOutBobsNotices(bob, carol, groupId)
+
+            reServeToBob(alice, bob, lastWords)
+            assertEquals("the pre-leave roster did not rejoin alice", setOf(alice.nodeId), bob.groupShape(groupId)?.departed)
+            assertEquals(setOf(bob.nodeId, carol.nodeId), bob.groupShape(groupId)?.members)
+        }
+
+    /**
+     * The mirror: the rejoin's clock outlives its line. Alice leaves once where Bob cannot hear it and comes
+     * back, then leaves and comes back again where he can. Bob trims the thread past the `rejoin:` notice, and
+     * her first leave reaches him only then, from custody: it is older than the rejoin held on the group, so she
+     * stays in.
+     */
+    @Test
+    fun anOldLeaveReServedAfterTheSweepDroppedTheRejoinLineCannotEvictAgain() =
+        runBlocking {
+            val alice = lab.node("alice").apply { setDisplayName("Alice") }
+            val bob = lab.node("bob", LabLimits(maxPerPendingThread = KEEP)).apply { setDisplayName("Bob") }
+            val carol = lab.node("carol").apply { setDisplayName("Carol") }
+            val groupId = lineWithARequestGroup(alice, bob, carol)
+
+            alice.transport.lossy(bob.transport) { it.decoded()?.type == "groupleave" }
+            alice.leaveGroup(groupId)
+            val firstLeave = alice.lostTo()
+            assertTrue(lab.tryAwait(1) { if (carol.groupShape(groupId)?.departed == setOf(alice.nodeId)) 1 else 0 })
+            alice.transport.lossy(bob.transport) { it.decoded()?.id == firstLeave }
+            alice.createGroup(bob, carol)
+            assertTrue(alice.sendGroup(groupId, "back once"))
+            assertTrue(lab.tryAwait(1) { bob.decrypted(groupId).count { it.second == "back once" } })
+            assertTrue(lab.tryAwait(1) { if (carol.groupShape(groupId)?.departed?.isEmpty() == true) 1 else 0 })
+
+            alice.leaveGroup(groupId)
+            assertTrue(lab.tryAwait(1) { if (bob.groupShape(groupId)?.departed == setOf(alice.nodeId)) 1 else 0 })
+            alice.createGroup(bob, carol)
+            assertTrue(alice.sendGroup(groupId, "back twice"))
+            assertTrue(lab.tryAwait(1) { bob.decrypted(groupId).count { it.second == "back twice" } })
+            assertEquals("bob took alice back", emptySet<String>(), bob.groupShape(groupId)?.departed)
+            pushOutBobsNotices(bob, carol, groupId, after = "back twice")
+
+            reServeToBob(alice, bob, firstLeave)
+            assertEquals("the old leave did not evict alice again", emptySet<String>(), bob.groupShape(groupId)?.departed)
+            assertEquals(setOf(alice.nodeId, bob.nodeId, carol.nodeId), bob.groupShape(groupId)?.members)
         }
 
     /**
@@ -274,7 +407,21 @@ class GroupMembershipLabTest {
             assertTrue(MessageEntity.KIND_GROUP_RENAMED in alice.notices(groupId))
         }
 
+    private fun WireEnvelope.decoded() = WireCodec.decodeEnvelope(signed)
+
+    /** The one frame this node's link has lost so far (a re-offer may have lost it twice). */
+    private fun LabNode.lostTo(): String =
+        transport.lost
+            .mapNotNull { it.decoded()?.id }
+            .distinct()
+            .single()
+
     private fun WireEnvelope.isGroupFrame(): Boolean = WireCodec.decodeEnvelope(signed)?.group != null
 
     private fun WireEnvelope.isLeaveFrame(): Boolean = WireCodec.decodeEnvelope(signed)?.type == "groupleave"
+
+    private companion object {
+        /** The rows Bob keeps per request thread: Carol's two lines push every notice out. */
+        const val KEEP = 2
+    }
 }

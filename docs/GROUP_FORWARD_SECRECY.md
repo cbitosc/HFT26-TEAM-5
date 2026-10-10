@@ -251,9 +251,10 @@ they were out (`GroupRepository.recordRejoin`, atomic with the roster change in 
 transaction). Membership itself is never rate-limited — the rejoiner is back the moment their frame
 lands — but the rekey it triggers is floored per (group, member) at one an hour
 (`InboundPipeline.REJOIN_REKEY_FLOOR_MS`), so a leave/rejoin loop cannot make every member re-mint and
-fan seeds out on each turn. Leave and rejoin are last-writer-wins on the member's own `sentAt`: the
-two deterministic notice rows (`leave:`/`rejoin:` + group + member) are the clocks, so a custody
-re-serve of a pre-leave frame cannot rejoin them and a re-served old leave cannot evict them again.
+fan seeds out on each turn. Leave and rejoin are last-writer-wins on the member's own `sentAt`, kept per
+(group, member) in `group_member_clocks` beside the group (never in the notice lines, which the retention
+sweep may drop while the group lives on), so a custody re-serve of a pre-leave frame cannot rejoin them and
+a re-served old leave cannot evict them again.
 The rejoiner's seed usually floods ahead of the frame that rejoins them — the seed-before-roster race
 in its second shape. Since the seed carries the founding roster (§3) it is itself the rejoiner's own signed
 frame listing them, so it rejoins them and adopts on its first pass; a roster-less seed from an older build
