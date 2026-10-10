@@ -130,8 +130,15 @@ an accepted link, the reply on a dialed one). Two rules:
   presence heard it within `DOORBELL_HEARD_MS` (12 000 ms, equal to `PromotionConfig.dwellThresholdMs`; read from
   `Snapshot.lastSeenAgoMs`). Otherwise it takes the unsighted rows: admitted in either order, and replacing a held
   link once that link is 30 s old. An iPhone heard that recently is in front, and this phone can dial it; one it
-  can no longer hear may be in the background, where its own dial is its only way back. `CodedPhyPolicy.sightedForAdmission`
+  can no longer hear may be in the background, where its own dial may be its only way back. `CodedPhyPolicy.sightedForAdmission`
   still feeds the `sighted` input.
+
+This phone does not need to hear a backgrounded iPhone to dial it back. In the 2026-10-10 trial (iOS's
+`android-keeps-iphone`, run 1, Pixel 8 at `b7c13e57`), the Pixel re-dialed the backgrounded iPhone itself 8.3 s
+after shedding its link, from the presence entry still held in the 90 s linger, about 30 s after it last heard it,
+once the eviction backoff ran out; the lab iPhone keeps its address, so the stale dial landed (doorbell found,
+`timeout=5000ms`). The admission rule matters only when this phone's own dial cannot land: the iPhone's address
+rotated, or the link faded on one side only.
 
 The parallel iOS change (`iphone-dials-flagged-android`) has a foreground iPhone dial a flagged larger Android after a
 15 s head start. That dial is refused only when this phone heard the iPhone within 12 s, which between
