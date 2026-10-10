@@ -992,6 +992,42 @@ class BlobHolderQueryTest {
             assertEquals("c holds it: asked, rather than b's stream waited out", listOf("a"), c.asksFrom(hash))
         }
 
+    /**
+     * Interop audit (`test/interop-audit`, knit-ios IOS-1): knit-ios `InteropAuditMeshTests`' sequence through the
+     * reference. The author is asked blind, then answers NONE while it streams us another file, and a linked holder
+     * answers HAVE with nothing feeding: the fetch drops the author ([askedLacking]) and the holder is asked.
+     */
+    @Test
+    fun interopAuditTheHolderIsAskedOnceTheAuthorAnsweredLackingWhileItStreams() =
+        runTest(UnconfinedTestDispatcher()) {
+            val me = Node("a", backgroundScope)
+            val author = Node("b", backgroundScope).apply { mute = true }
+            val holder = Node("c", backgroundScope).apply { mute = true }
+            me.transport.connect(author.transport)
+            me.transport.connect(holder.transport)
+            val hash = holder.store.seed(picture())
+
+            me.now = 0
+            me.exchange.want(hash, author = "b") // both queried at t = 0, neither answers
+            me.now = BlobExchange.QUERY_WAIT_MS
+            me.exchange.reask()
+            assertEquals("the blind ask goes to the author", listOf("a"), author.asksFrom(hash))
+            assertTrue(holder.asksFrom(hash).isEmpty())
+
+            fun queryTo(node: Node) =
+                node.heard
+                    .last { it.first == FrameType.BLOB_HAVE }
+                    .third.id
+            me.now = 6_000
+            me.exchange.onHaveAnswer(BlobHasContent(listOf(BlobHasItem(hash, BlobHasItem.NONE)), 0, queryTo(author)), "b")
+            me.exchange.onHaveAnswer(BlobHasContent(listOf(BlobHasItem(hash, BlobHasItem.HAVE)), 0, queryTo(holder)), "c")
+            me.transport.arrivingFrom += "b" // the author streams something else to us; the holder is quiet
+            assertTrue("not on the answers alone", holder.asksFrom(hash).isEmpty())
+            me.now = 6_500
+            me.exchange.reask()
+            assertEquals("the holder is asked at the last step", listOf("a"), holder.asksFrom(hash))
+        }
+
     @Test
     fun aFetchLeavesAHolderWhoseOtherStreamHasLongToRunForAnIdleOne() =
         runTest(UnconfinedTestDispatcher()) {
