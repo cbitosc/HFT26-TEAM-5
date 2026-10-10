@@ -231,12 +231,12 @@
     <string name="chat_file_risky_body">Knit can\'t look inside %1$s. Open it only if you trust who sent it.</string>
     <string name="chat_file_risky_confirm">Save anyway</string>
     <string name="chat_share_needs_chat">Open a direct message or group chat to send a file</string>
-    <string name="chat_file_peer_too_old">They need a newer version of Knit to receive files</string>
+    <string name="chat_file_peer_too_old">Their version of Knit can\'t receive files</string>
 
     <!-- Direct file transfer (transfer/): a large file over a one-shot Wi-Fi Direct link, never through the mesh -->
     <string name="chat_send_large_file">Direct file send</string>
     <string name="chat_transfer_needs_dm">Direct transfers work in a one-to-one chat</string>
-    <string name="chat_transfer_peer_too_old">They need a newer version of Knit for direct transfers</string>
+    <string name="chat_transfer_peer_too_old">Their version of Knit can\'t take direct transfers</string>
     <string name="chat_transfer_peer_not_nearby">They have to be nearby, since the file goes straight from phone to phone</string>
     <string name="chat_transfer_wifi_off">Turn on Wi-Fi to send a file directly</string>
     <string name="chat_transfer_no_wifi_direct">This phone can\'t make a direct Wi-Fi connection</string>
@@ -436,7 +436,7 @@
     <string name="group_details_members">Members</string>
     <string name="group_details_view_photo">View photo</string>
     <string name="group_details_fs_active">Messages here are sent with forward secrecy</string>
-    <string name="group_details_fs_waiting">Legacy encryption until %1$s updates Knit</string>
+    <string name="group_details_fs_waiting">Legacy encryption while %1$s can\'t use forward secrecy</string>
     <string name="blocked_users_title">Blocked users</string>
     <string name="blocked_users_empty">No blocked users</string>
     <string name="blocked_users_unblock">Unblock</string>
@@ -1237,7 +1237,7 @@
     <string name="chat_relay_pending_body">This conversation does not have a relay channel yet. It usually appears on its own once both sides have exchanged encryption keys. Until then, messages travel by Wi-Fi and Bluetooth.</string>
     <string name="chat_relay_no_fs">This conversation can\'t use relays</string>
     <string name="chat_relay_no_fs_title">Relays need forward secrecy</string>
-    <string name="chat_relay_no_fs_body">%1$s\'s version of Knit doesn\'t support forward secrecy yet, and relays carry a direct message only when both sides use it. Messages here still travel by Wi-Fi and Bluetooth, end-to-end encrypted. Once %1$s updates Knit, relays can carry this conversation too.</string>
+    <string name="chat_relay_no_fs_body">Messages here travel by Wi-Fi and Bluetooth, end-to-end encrypted. Relays carry a direct message only when both sides use forward secrecy, and %1$s\'s version of Knit doesn\'t support it.</string>
     <string name="chat_relay_notice_dismiss">Dismiss</string>
     <string name="chat_relay_nearby_only">Nearby only</string>
     <string name="chat_relay_nearby_only_desc">Attachment will not be sent over the Internet</string>
