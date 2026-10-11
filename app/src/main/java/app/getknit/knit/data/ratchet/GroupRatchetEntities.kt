@@ -9,7 +9,9 @@ import androidx.room3.Index
  * (≤48 h past its successor's mint, for key-request recovery of custody re-serves) — **deleting these
  * rows is the sender-side forward-secrecy guarantee** (see `GroupRatchetRepository.sweep`). Key
  * material lives in the SQLCipher-encrypted DB, same at-rest posture as the DM ratchet's; group chains
- * die with a DB wipe by design (the re-mint + key-request path recovers).
+ * die with a DB wipe by design (the re-mint + key-request path recovers). A row with an empty [seed] is a
+ * retired epoch (a departure or rejoin rekey, ADR 2026-10.xgwj): no key, only the number the next mint
+ * must pass.
  */
 @Entity(
     tableName = "group_send_chains",

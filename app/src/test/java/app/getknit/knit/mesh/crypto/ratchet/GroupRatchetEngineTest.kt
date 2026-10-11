@@ -103,6 +103,11 @@ class GroupRatchetEngineTest {
             recv.clear()
             skipped.clear()
         }
+
+        /** A departure or rejoin rekey, as `GroupRatchetStore.retireSendChains` leaves the newest chain. */
+        fun retire() {
+            send = send?.retired()
+        }
     }
 
     private fun aad(id: String): ByteArray = "$id|$GROUP".toByteArray()
@@ -230,6 +235,47 @@ class GroupRatchetEngineTest {
         assertTrue(engine.needsNewEpoch(null, now = 1L))
         assertTrue(engine.needsNewEpoch(chain.copy(count = GroupRatchetEngine.MAX_EPOCH_MESSAGES), now = 1L))
         assertTrue(engine.needsNewEpoch(chain, now = GroupRatchetEngine.MAX_EPOCH_AGE_MS))
+    }
+
+    /**
+     * #167 (ADR 2026-10.xgwj): a forced rekey keeps the epoch's number and drops its keys, so the next mint is a
+     * new number and its seed adopts beside the earlier one in either order. When the rekey deleted the chain,
+     * the re-mint reused epoch 1 under a newer stamp, the earlier seed arriving second was `Stale`, and the frame
+     * sealed under it failed the AEAD for good.
+     */
+    @Test
+    fun aRetiredChainMintsPastItSoBothSeedsAdoptInEitherOrder() {
+        val carol = Member("carol000")
+        val bob = Member("bob00000")
+        val before = carol.seal("m0", "before the leave", now = 1L)
+        val seedA = checkNotNull(carol.send)
+
+        carol.retire()
+        val retired = checkNotNull(carol.send)
+        assertTrue(retired.isRetired)
+        assertEquals(seedA.epoch, retired.epoch)
+        assertEquals(seedA.mintedAt, retired.mintedAt)
+        assertEquals(0, retired.seed.size + retired.chainKey.size + retired.export.size)
+        assertTrue(engine.needsNewEpoch(retired, now = 2L))
+        assertNull("a retired chain never seals", engine.seal(retired, "x".toByteArray(), aad("mx")))
+
+        val after = carol.seal("m1", "after the leave", now = 2L)
+        val seedB = checkNotNull(carol.send)
+        assertEquals(seedA.epoch + 1, seedB.epoch)
+
+        // The re-mint's seed reaches Bob first; the earlier one is still a fresh epoch to him.
+        assertTrue(bob.adopt(carol, seedB, now = 3L) is GroupRatchetEngine.AdoptOutcome.Adopt)
+        assertTrue(bob.adopt(carol, seedA, now = 4L) is GroupRatchetEngine.AdoptOutcome.Adopt)
+        assertEquals("before the leave", bob.openedText(before, now = 5L))
+        assertEquals("after the leave", bob.openedText(after, now = 6L))
+    }
+
+    @Test
+    fun anExhaustedLiveChainIsNotRetired() {
+        // Rule 2 keeps the seed: the frames sealed under it may still need it re-served.
+        val chain = Member("alice000").mint(now = 0L).copy(count = GroupRatchetEngine.MAX_EPOCH_MESSAGES)
+        assertFalse(chain.isRetired)
+        assertTrue(chain.retired().retired().isRetired)
     }
 
     @Test

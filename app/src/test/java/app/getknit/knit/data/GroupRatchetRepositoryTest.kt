@@ -2,6 +2,7 @@ package app.getknit.knit.data
 
 import app.getknit.knit.data.ratchet.GroupRatchetRepository
 import app.getknit.knit.mesh.crypto.ratchet.GroupRatchetEngine
+import app.getknit.knit.mesh.crypto.ratchet.GroupRatchetSessions
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -161,7 +162,9 @@ class GroupRatchetRepositoryTest : RoomDbTest() {
 
             repo.purgeGroup(GROUP)
 
-            assertNull(repo.sendChain(GROUP))
+            // The send chain's keys go; its number stays on a retired row (ADR 2026-10.xgwj).
+            assertTrue(checkNotNull(repo.sendChain(GROUP)).isRetired)
+            assertTrue(repo.sendChains(GROUP).isEmpty())
             assertTrue(repo.recvChains(GROUP, SENDER, 1).isEmpty())
             assertTrue(repo.skippedKeys(GROUP, SENDER, 1, 0).isEmpty())
             assertNull(repo.keySend(GROUP, MEMBER))
@@ -213,7 +216,149 @@ class GroupRatchetRepositoryTest : RoomDbTest() {
             assertNotNull(repo.sendChain(GROUP))
         }
 
+    /**
+     * #167 (ADR 2026-10.xgwj): a departure or rejoin rekey retires the chains — keys gone, the newest number
+     * kept — so the next seal mints the next number, never a second epoch 1 a receiver would hold as stale.
+     */
+    @Test
+    fun aForcedRekeyRetiresTheChainsAndTheNextSealMintsPastThem() =
+        runTest {
+            val sessions = GroupRatchetSessions(repo)
+            // An exhausted epoch 1, still draining, so the seal mints epoch 2 over it.
+            repo.commitSend(sendChain(epoch = 1, mintedAt = NOW - 10, count = GroupRatchetEngine.MAX_EPOCH_MESSAGES))
+            val first = checkNotNull(sessions.sealGroup(GROUP, SELF, "one".toByteArray(), "a".toByteArray(), now = NOW))
+            val firstEpoch = checkNotNull(first.minted).epoch
+            assertEquals(listOf(2, 1), repo.sendChains(GROUP).map { it.epoch })
+
+            repo.retireSendChains(GROUP)
+
+            val retired = checkNotNull(repo.sendChain(GROUP))
+            assertEquals(firstEpoch, retired.epoch)
+            assertEquals(NOW, retired.mintedAt)
+            assertTrue(retired.isRetired)
+            assertEquals("no key byte survives", 0, retired.seed.size + retired.chainKey.size + retired.export.size)
+            assertEquals(GroupRatchetEngine.MAX_EPOCH_MESSAGES, retired.count)
+            assertEquals("the draining seed went too", 1, db.groupRatchetDao().sendChains(GROUP).size)
+            assertTrue("a retired chain is never re-served", repo.sendChains(GROUP).isEmpty())
+            assertTrue(sessions.currentSeeds(GROUP).isEmpty())
+
+            val second = checkNotNull(sessions.sealGroup(GROUP, SELF, "two".toByteArray(), "b".toByteArray(), now = NOW + 1))
+            assertEquals(firstEpoch + 1, checkNotNull(second.minted).epoch)
+            assertEquals(listOf(firstEpoch + 1), repo.sendChains(GROUP).map { it.epoch })
+            assertEquals(listOf(firstEpoch + 1), sessions.currentSeeds(GROUP).map { it.epoch })
+        }
+
+    @Test
+    fun retiringTwiceKeepsTheNumberAndRetiringNothingIsANoOp() =
+        runTest {
+            repo.retireSendChains(GROUP)
+            assertNull(repo.sendChain(GROUP))
+            assertTrue(db.groupRatchetDao().sendChainGroupIds().isEmpty())
+
+            repo.commitSend(sendChain(epoch = 4))
+            repo.retireSendChains(GROUP)
+            repo.retireSendChains(GROUP)
+            assertEquals(4, checkNotNull(repo.sendChain(GROUP)).epoch)
+            assertTrue(checkNotNull(repo.sendChain(GROUP)).isRetired)
+        }
+
+    @Test
+    fun anExhaustedLiveChainIsStillReServed() =
+        runTest {
+            // Rule 2 (count) keeps the seed; only a forced rekey's retired row is filtered out.
+            repo.commitSend(sendChain(epoch = 2, count = GroupRatchetEngine.MAX_EPOCH_MESSAGES))
+            assertEquals(listOf(2), repo.sendChains(GROUP).map { it.epoch })
+        }
+
+    @Test
+    fun theSweepKeepsARetiredNewestAndDrainsItAfterTheNextMint() =
+        runTest {
+            repo.commitSend(sendChain(epoch = 1, mintedAt = NOW - GroupRatchetRepository.PREV_SEED_RETAIN_MS))
+            repo.retireSendChains(GROUP)
+
+            // Newest, older than any drain window: it holds the number the next mint must pass.
+            repo.sweep(NOW)
+            assertEquals(1, checkNotNull(repo.sendChain(GROUP)).epoch)
+
+            repo.commitSend(sendChain(epoch = 2, mintedAt = NOW))
+            repo.sweep(NOW + 1)
+            assertEquals(listOf(2, 1), db.groupRatchetDao().sendChains(GROUP).map { it.epoch })
+            assertEquals(listOf(2), repo.sendChains(GROUP).map { it.epoch })
+
+            repo.sweep(NOW + GroupRatchetRepository.PREV_SEED_RETAIN_MS)
+            assertEquals(listOf(2), db.groupRatchetDao().sendChains(GROUP).map { it.epoch })
+        }
+
+    /**
+     * A local leave or delete (ADR 2026-10.xgwj): the same people re-created are the same group id, so the purge
+     * keeps the epoch number the others hold, and the next mint numbers past it instead of reusing epoch 1.
+     */
+    @Test
+    fun aPurgeKeepsAKeylessRetiredRowAndTheNextMintNumbersPastIt() =
+        runTest {
+            val sessions = GroupRatchetSessions(repo)
+            val first = checkNotNull(sessions.sealGroup(GROUP, SELF, "one".toByteArray(), "a".toByteArray(), now = NOW))
+            val epoch = checkNotNull(first.minted).epoch
+
+            repo.purgeGroup(GROUP)
+
+            val retired = checkNotNull(repo.sendChain(GROUP))
+            assertEquals(epoch, retired.epoch)
+            assertEquals("no key byte survives", 0, retired.seed.size + retired.chainKey.size + retired.export.size)
+            assertTrue(repo.sendChains(GROUP).isEmpty())
+
+            val second = checkNotNull(sessions.sealGroup(GROUP, SELF, "two".toByteArray(), "b".toByteArray(), now = NOW + 1))
+            assertEquals(epoch + 1, checkNotNull(second.minted).epoch)
+        }
+
+    /**
+     * ADR 2026-10.xgwj: a retired number is never dropped while it is the newest — numbering only rises, except
+     * after a wipe. A left group keeps this one key-less row for good.
+     */
+    @Test
+    fun aRetiredNewestRowKeepsItsNumberAndNoKeyForever() =
+        runTest {
+            repo.commitSend(sendChain(epoch = 3, mintedAt = NOW))
+            repo.retireSendChains(GROUP)
+
+            repo.sweep(NOW + THIRTY_DAYS)
+
+            val retired = checkNotNull(repo.sendChain(GROUP))
+            assertEquals(3, retired.epoch)
+            assertTrue(retired.isRetired)
+            assertEquals("no key byte", 0, retired.seed.size + retired.chainKey.size + retired.export.size)
+            assertTrue(repo.sendChains(GROUP).isEmpty())
+
+            val next =
+                checkNotNull(
+                    GroupRatchetSessions(repo).sealGroup(
+                        GROUP,
+                        SELF,
+                        "x".toByteArray(),
+                        "a".toByteArray(),
+                        now =
+                            NOW + THIRTY_DAYS,
+                    ),
+                )
+            assertEquals(4, checkNotNull(next.minted).epoch)
+        }
+
+    @Test
+    fun theSweepNeverDropsALiveNewestChain() =
+        runTest {
+            // Long past every window, but live: it is still the sealing epoch and the re-distribution source.
+            repo.commitSend(sendChain(epoch = 5, mintedAt = NOW))
+            repo.sweep(NOW + THIRTY_DAYS)
+            assertEquals(listOf(5), repo.sendChains(GROUP).map { it.epoch })
+
+            repo.commitSend(sendChain(epoch = 6, mintedAt = NOW, count = GroupRatchetEngine.MAX_EPOCH_MESSAGES))
+            repo.sweep(NOW + THIRTY_DAYS)
+            assertEquals("an exhausted chain is not a retired one", listOf(6), repo.sendChains(GROUP).map { it.epoch })
+        }
+
     private companion object {
+        const val SELF = "self0000"
+        const val THIRTY_DAYS = 30 * 24 * 60 * 60_000L
         const val NOW = 1_700_000_000_000L
         const val GROUP = "g-0123456789abcdef01234567"
         const val SENDER = "sender00"

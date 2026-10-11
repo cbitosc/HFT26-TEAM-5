@@ -37,7 +37,24 @@ class GroupRatchetEngine(
         val count: Int,
         val mintedAt: Long,
         val export: ByteArray,
-    )
+    ) {
+        /**
+         * A chain a forced rekey retired ([retired]): its number survives, its keys do not. Judged on the
+         * seed, never on [count] — a rule-2 chain that reached [MAX_EPOCH_MESSAGES] keeps its seed and is
+         * still re-served for the frames sealed under it.
+         */
+        val isRetired: Boolean get() = seed.isEmpty()
+
+        /**
+         * This chain with every key byte gone and the epoch spent — what a departure or a rejoin rekey, a
+         * local leave or a delete (docs/GROUP_FORWARD_SECRECY.md §4, §6.1; ADR 2026-10.xgwj) leaves of our newest epoch, so
+         * the next mint numbers past it. Deleting the row instead restarted numbering at 1 under a newer
+         * `mintedAt`, and a receiver that met the re-mint's seed first dropped the older one as stale and
+         * lost every frame sealed under it for good (#167). [count] at the cap makes [needsNewEpoch] mint
+         * and [seal] refuse; the empty seed keeps it out of every re-distribution (`GroupRatchetStore.sendChains`).
+         */
+        fun retired(): SendChain = copy(seed = ByteArray(0), chainKey = ByteArray(0), count = MAX_EPOCH_MESSAGES, export = ByteArray(0))
+    }
 
     /** One inbound per-sender epoch chain (mirrors a `group_recv_chains` row). Keyed by
      *  `(groupId, senderId, epoch, mintedAt)` so a wiped sender's re-mint coexists with the draining
@@ -151,8 +168,9 @@ class GroupRatchetEngine(
     /**
      * Whether the next send must mint a fresh epoch. Count and age mirror the custody bounds (one
      * epoch never exceeds a re-servable backlog; no re-deliverable frame belongs to an epoch older
-     * than one retention generation) — the forced cases (departure rekey, wipe) surface as a deleted
-     * chain, i.e. null.
+     * than one retention generation). The forced cases surface here too: a departure or rejoin rekey, a
+     * local leave or a delete as a [SendChain.retired] chain, whose count is at the cap, so the mint numbers
+     * past it; a wipe as no chain at all, i.e. null — the one case that restarts numbering at 1.
      */
     fun needsNewEpoch(
         chain: SendChain?,

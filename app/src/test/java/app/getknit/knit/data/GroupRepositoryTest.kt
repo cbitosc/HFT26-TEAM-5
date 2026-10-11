@@ -75,9 +75,10 @@ class GroupRepositoryTest : RoomDbTest() {
 
             assertTrue(repo().recordDeparture("g", "b", leftAt = 100L))
 
-            // Send chains die with the departure — the next send mints a fresh epoch that the leaver
-            // never receives; the leaver stops being a distribution target, remaining members keep theirs.
-            assertNull(groupRatchet.sendChain("g"))
+            // Send chains are retired with the departure — every key gone, the number kept, so the next send
+            // mints epoch 2 (never a second epoch 1, #167) that the leaver never receives; nothing is re-served.
+            // The leaver stops being a distribution target, remaining members keep theirs.
+            assertRetiredAt(epoch = 1)
             assertNull(groupRatchet.keySend("g", "b"))
             assertEquals(1, groupRatchet.keySend("g", "c")?.sentEpoch)
         }
@@ -112,7 +113,8 @@ class GroupRepositoryTest : RoomDbTest() {
 
             repo().leave("g")
 
-            assertNull(groupRatchet.sendChain("g"))
+            // Keys gone, number kept: re-creating the same people is the same id (ADR 2026-10.xgwj).
+            assertRetiredAt(epoch = 1)
             assertTrue(groupRatchet.recvChains("g", "b", 1).isEmpty())
             assertNull(groupRatchet.keySend("g", "b"))
         }
@@ -125,8 +127,8 @@ class GroupRepositoryTest : RoomDbTest() {
 
             repo().recordRejoin("g", "b", rejoinedAt = 200L, rekey = true)
 
-            // Our send chain died with the membership change, exactly as on a departure…
-            assertNull(groupRatchet.sendChain("g"))
+            // Our send chain was retired with the membership change, exactly as on a departure…
+            assertRetiredAt(epoch = 1)
             val notice = messages.observeNewestForConversation("g", 10).first().single()
             assertEquals(MessageEntity.KIND_MEMBER_REJOINED, notice.kind)
             assertEquals("b", notice.senderId)
@@ -193,6 +195,13 @@ class GroupRepositoryTest : RoomDbTest() {
             assertEquals(0L, repo().leftAt("g", "b"))
             assertTrue(repo().recordDeparture("g", "b", leftAt = 150L))
         }
+
+    private suspend fun assertRetiredAt(epoch: Int) {
+        val chain = checkNotNull(groupRatchet.sendChain("g")) { "the rekey dropped the epoch's number" }
+        assertEquals(epoch, chain.epoch)
+        assertTrue("the retired row holds no key", chain.isRetired && chain.chainKey.isEmpty() && chain.export.isEmpty())
+        assertTrue("a retired chain is never re-served", groupRatchet.sendChains("g").isEmpty())
+    }
 
     private fun sendChain(groupId: String) =
         GroupRatchetEngine.SendChain(

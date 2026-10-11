@@ -26,17 +26,32 @@ class GroupKeySendState(
  */
 @Suppress("TooManyFunctions") // one seam, four row families (send/recv/skipped/outbox); splitting would obscure
 interface GroupRatchetStore {
-    /** Our newest send chain for [groupId] (the sealing epoch), or null when none was ever minted. */
+    /**
+     * Our newest send chain for [groupId] (the sealing epoch), or null when none was ever minted (or a wipe
+     * or a local leave took them all). May be a [GroupRatchetEngine.SendChain.isRetired] row — the number a
+     * forced rekey kept so the next mint numbers past it; the seal path is the one reader that needs it.
+     */
     suspend fun sendChain(groupId: String): GroupRatchetEngine.SendChain?
 
-    /** Our retained send chains newest-epoch-first (the current one plus the ≤48 h draining previous). */
+    /**
+     * Our retained send chains newest-epoch-first (the current one plus the ≤48 h draining previous) — the
+     * seeds we re-serve (key-request answer, re-send flush, root gossip). Never a retired row: it has no seed to
+     * serve, and an empty one in a `CTL_GROUP_KEY` would be a seed every receiver derives the same wrong chain from.
+     */
     suspend fun sendChains(groupId: String): List<GroupRatchetEngine.SendChain>
 
     /** Persists a mint or a seal advance (PK `(groupId, epoch)` — a mint inserts, an advance updates). */
     suspend fun commitSend(chain: GroupRatchetEngine.SendChain)
 
-    /** Drops ALL our send chains for [groupId] — the leave-rekey force (next send mints fresh). */
-    suspend fun deleteSendChains(groupId: String)
+    /**
+     * The forced rekey of a departure or a rejoin (docs/GROUP_FORWARD_SECRECY.md §4 rule 4, §6.1; ADR
+     * 2026-10.xgwj): deletes every send chain for [groupId] — every seed and chain key, the draining previous
+     * included — and keeps the newest epoch's number as one [GroupRatchetEngine.SendChain.retired] row, so the
+     * next send mints `newest + 1`, never a second epoch under a number receivers already hold (#167). A no-op
+     * when we never minted. The retired row stays while it is the newest, and drains through [sweep] like any
+     * superseded chain once a mint follows it.
+     */
+    suspend fun retireSendChains(groupId: String)
 
     /** Recv chains for the header's coordinates, newest-mint-first (live mint + draining older era). */
     suspend fun recvChains(
@@ -70,7 +85,12 @@ interface GroupRatchetStore {
         headerN: Int,
     )
 
-    /** Drops ALL group-ratchet state for [groupId] (local leave/delete): chains, keys, outbox. */
+    /**
+     * Drops the group-ratchet state for [groupId] on a local leave or delete: receive chains, skipped keys and
+     * the outbox go, and the send chain is retired through [retireSendChains] rather than deleted — the same
+     * people put together again are the same group id, and the next mint must number past what the others
+     * still hold (ADR 2026-10.xgwj). A group left for good keeps that one key-less row.
+     */
     suspend fun purgeGroup(groupId: String)
 
     /** The outbox row for one member, or null when never distributed. */
@@ -107,7 +127,8 @@ interface GroupRatchetStore {
     /**
      * Retention GC, riding the existing sweep loops: recv chains + skipped keys past 48 h of last
      * use, the group skipped-key global cap, and superseded send chains 48 h past their successor's
-     * mint — the sender-side forward-secrecy enforcement point.
+     * mint — the sender-side forward-secrecy enforcement point. A retired newest chain is never swept: it
+     * holds the number the next mint must pass (ADR 2026-10.xgwj).
      */
     suspend fun sweep(now: Long)
 }

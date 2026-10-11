@@ -63,6 +63,8 @@ document:
 - In a group still in your message requests, someone who had left could reappear, or someone who had come
   back could disappear again, after Knit cleared the group's older messages. Your phone now shows the same
   members as everyone else's.
+- A group message sent just as another member left or came back could stay unreadable for everyone else, with
+  no warning on either phone. It now opens like any other message in the group.
 - Direct messages and groups now catch racial and other identity slurs, which only the Nearby room used to
   catch. A slur that arrives stays hidden until tapped, and everyday swearing in private chats still goes
   through.

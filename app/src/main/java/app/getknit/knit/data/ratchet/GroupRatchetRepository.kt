@@ -19,7 +19,10 @@ class GroupRatchetRepository(
 ) : GroupRatchetStore {
     override suspend fun sendChain(groupId: String): GroupRatchetEngine.SendChain? = dao.newestSendChain(groupId)?.toChain()
 
-    override suspend fun sendChains(groupId: String): List<GroupRatchetEngine.SendChain> = dao.sendChains(groupId).map { it.toChain() }
+    // Retired rows are filtered here rather than in the DAO's query: the sweep reads the DAO's whole list, and
+    // a retired row has to count there as the newest (it holds the number) and then drain like any other.
+    override suspend fun sendChains(groupId: String): List<GroupRatchetEngine.SendChain> =
+        dao.sendChains(groupId).map { it.toChain() }.filterNot { it.isRetired }
 
     override suspend fun commitSend(chain: GroupRatchetEngine.SendChain) {
         dao.upsertSendChain(
@@ -36,8 +39,10 @@ class GroupRatchetRepository(
         )
     }
 
-    override suspend fun deleteSendChains(groupId: String) {
+    override suspend fun retireSendChains(groupId: String) {
+        val newest = dao.newestSendChain(groupId)?.toChain() ?: return
         dao.deleteSendChainsFor(groupId)
+        commitSend(newest.retired())
     }
 
     override suspend fun recvChains(
@@ -92,8 +97,11 @@ class GroupRatchetRepository(
         if (delta.consumedSkippedIdx != null) dao.deleteSkippedKeysAt(groupId, senderId, headerSe, headerN)
     }
 
+    // The send chain is retired, not deleted (ADR 2026-10.xgwj): a group left or deleted here comes back under
+    // the same id when the same people are put together again (`ContactsViewModel.createGroup`), and a mint
+    // numbered from 1 would collide with the epoch the others still hold from before the leave.
     override suspend fun purgeGroup(groupId: String) {
-        dao.deleteSendChainsFor(groupId)
+        retireSendChains(groupId)
         dao.deleteRecvChainsFor(groupId)
         dao.deleteSkippedKeysFor(groupId)
         dao.deleteKeySendsFor(groupId)
@@ -155,7 +163,11 @@ class GroupRatchetRepository(
      * Retires superseded send epochs for [groupId] — the sender-side PFS window. The newest chain
      * always survives (it is the sealing epoch and the re-distribution source); the previous one
      * drains for [PREV_SEED_RETAIN_MS] past the newest's mint (key-request recovery of frames still
-     * re-serving from custody), then everything below the newest goes.
+     * re-serving from custody), then everything below the newest goes. A key-less row a forced rekey or a
+     * local leave left ([retireSendChains], [purgeGroup]) is read here like any other: as the newest it stays
+     * until the next mint, however old — it holds the number that mint must pass, so it is never dropped
+     * (ADR 2026-10.xgwj: numbering only rises, except after a wipe) — and as the previous it drains with the
+     * same 48 h. A group left for good keeps that one key-less row.
      */
     private suspend fun sweepSendChains(
         groupId: String,

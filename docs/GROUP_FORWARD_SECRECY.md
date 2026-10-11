@@ -171,12 +171,28 @@ Epochs derive independently (no chaining across epochs): any subset of a sender'
 any order, and a wholly-evicted epoch loses only itself — the same custody-hole invariant as the DM
 scheme. **Advance rules** (sender-local; no cross-member coordination by construction):
 
-1. no live chain (first eligible send, or state deleted by a forced case below);
+1. no live chain (first eligible send, or state lost to a wipe below);
 2. `count ≥ 200` — one epoch never exceeds the per-group/per-sender custody quota;
 3. epoch age ≥ 24 h — the custody TTL;
-4. (forced) membership departure processed (§6.1) — the chain rows are deleted in the departure
-   transaction, so the next send mints and distributes to the remaining members only;
-5. (forced) device wipe — no state; the re-mint restarts numbering at 1 with a fresh `mintedAt`.
+4. (forced) membership departure or rejoin processed (§6.1) — the chain is **retired** in that
+   transaction: every send chain's seed and chain key is deleted, the draining previous included, and
+   the newest epoch's *number* is kept on a key-less row, so the next send mints `newest + 1` and
+   distributes it to the roster as it now stands. A retired chain is never re-served (key-request
+   answer, re-send flush, root gossip). Its number must survive: a re-mint under a number receivers
+   already hold is told apart from the first mint only by `mintedAt`, so a receiver that met the
+   re-mint's seed first dropped the earlier seed as stale and lost every frame sealed under it, with
+   nothing left to answer a §7 request (#167, ADR 2026-10.xgwj);
+5. (forced) device wipe — no state; the re-mint restarts numbering at 1 with a fresh `mintedAt`. This
+   is the only restart: a wipe takes the seed outbox with it (as does a restore, which carries neither
+   table — `BackupTables.TRANSIENT`), so no recorded ack counts the old numbering, and an ack of the old
+   numbering still in flight was sealed under a DM session the wipe's session reset has left behind.
+
+A local leave or delete retires the chain exactly as rule 4 does, receive state and outbox aside: the same
+people put together again are the same group id (§1), and a re-created group's first mint must number past
+what the others still hold. A retired chain is never dropped while it is the newest — however old, it holds
+the number the next mint must pass — and once a mint follows it, it drains as the previous chain (48 h). So
+numbering only rises except after a wipe, and a group left for good keeps one key-less row (a few bytes, no
+key material) for as long as the database lives.
 
 **Wipe recovery is mint-stamped, not session-replaced.** Receivers key rows by
 `(group, sender, epoch, mintedAt)`: adopting a newer mint of an epoch they already hold keeps the
@@ -240,15 +256,18 @@ stay silent and heal via §7 (the DM precedent).
 
 ### 6.1 Leave-rekey (eventual, by construction)
 
-Processing a member's signed `groupleave` (`GroupRepository.recordDeparture`) deletes the group's
-send chains and the leaver's outbox row **in the same transaction** as the roster shrink; the next
-send mints a fresh epoch distributed to the remaining members only. The leaver's recv chains drain
+Processing a member's signed `groupleave` (`GroupRepository.recordDeparture`) retires the group's
+send chains (§4 rule 4: every seed and chain key deleted, the newest epoch number kept) and deletes the
+leaver's outbox row **in the same transaction** as the roster shrink; the next send mints the next
+epoch number, distributed to the remaining members only. The leaver's recv chains drain
 via the 48 h sweep (their pre-leave frames may still legitimately re-serve). Local leave/delete
-purges all group ratchet state for the group.
+purges the group's ratchet state — receive chains, skipped keys, the outbox — and retires our send chain
+rather than deleting it (§4), so a group re-created with the same people mints past the epoch the others
+hold.
 
 A rejoin (§1's self-re-add) rekeys the same way, so the returning member reads nothing sealed while
-they were out (`GroupRepository.recordRejoin`, atomic with the roster change in `reconcileGroup`'s
-transaction). Membership itself is never rate-limited — the rejoiner is back the moment their frame
+they were out — the retired seed is never re-served to them, nor to anyone (`GroupRepository.recordRejoin`,
+atomic with the roster change in `reconcileGroup`'s transaction). Membership itself is never rate-limited — the rejoiner is back the moment their frame
 lands — but the rekey it triggers is floored per (group, member) at one an hour
 (`InboundPipeline.REJOIN_REKEY_FLOOR_MS`), so a leave/rejoin loop cannot make every member re-mint and
 fan seeds out on each turn. Leave and rejoin are last-writer-wins on the member's own `sentAt`, kept per

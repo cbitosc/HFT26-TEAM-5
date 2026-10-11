@@ -173,10 +173,10 @@ class GroupRatchetSessions(
 
     /**
      * Seals one outbound group frame under our send chain for [groupId], minting a fresh epoch when
-     * the advance rules fire ([GroupRatchetEngine.needsNewEpoch]: none yet / count / age — the forced
-     * cases arrive here as deleted chains). Runs read → mint → seal → persist atomically under the
-     * shared lock; distribution of a minted seed happens strictly AFTER (the caller seals per-member
-     * ctl DMs via [RatchetSessions.sealDm], which takes this same lock).
+     * the advance rules fire ([GroupRatchetEngine.needsNewEpoch]: none yet / count / age — a forced rekey
+     * arrives here as a retired chain, so the mint numbers past it, and a wipe as none). Runs read → mint →
+     * seal → persist atomically under the shared lock; distribution of a minted seed happens strictly AFTER
+     * (the caller seals per-member ctl DMs via [RatchetSessions.sealDm], which takes this same lock).
      */
     suspend fun sealGroup(
         groupId: String,
@@ -198,7 +198,8 @@ class GroupRatchetSessions(
         }
 
     /** Our retained seeds for [groupId] (current + draining previous), newest first — the
-     *  re-distribution payload for key requests and proactive re-sends. */
+     *  re-distribution payload for key requests and proactive re-sends. Empty right after a forced rekey:
+     *  the retired chain holds no seed and is never re-served (ADR 2026-10.xgwj). */
     suspend fun currentSeeds(groupId: String): List<GroupSeed> =
         locked {
             store.sendChains(groupId).map { GroupSeed(epoch = it.epoch, seed = it.seed, mintedAt = it.mintedAt) }

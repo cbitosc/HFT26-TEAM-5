@@ -1,6 +1,7 @@
 package app.getknit.knit.mesh.lab
 
 import app.getknit.knit.data.message.MessageEntity
+import app.getknit.knit.mesh.DropReason
 import app.getknit.knit.mesh.protocol.WireCodec
 import app.getknit.knit.mesh.protocol.WireEnvelope
 import kotlinx.coroutines.runBlocking
@@ -242,30 +243,16 @@ class GroupMembershipLabTest {
     }
 
     /**
-     * Carol posts [KEEP] lines and Bob's sweep trims his request thread down to them alone. She posts only once she
-     * holds Bob's roster: the leave or rejoin she has not handled yet would kill the send chain her first line
-     * seals under, and the re-mint's seed, same epoch, newer stamp, would supersede it on Bob's side. A roster
-     * Carol already held before the change proves nothing, so [after] names the last frame Bob handled: Alice's
-     * pipe to Carol is in order and her router handles one frame at a time, so reading it puts the change behind her.
+     * Carol posts [KEEP] lines and Bob's sweep trims his request thread down to them alone. She need not hold Bob's
+     * roster first: a leave or rejoin she handles between two of her lines retires the chain the first sealed under,
+     * and the re-mint takes the next epoch number, so its seed adopts beside the first on Bob's side in either order
+     * (#167, ADR 2026-10.xgwj).
      */
     private suspend fun pushOutBobsNotices(
         bob: LabNode,
         carol: LabNode,
         groupId: String,
-        after: String? = null,
     ) {
-        if (after != null) {
-            assertTrue(
-                "carol never read \"$after\"",
-                lab.tryAwait(1) { carol.decrypted(groupId).count { it.second == after } },
-            )
-        } else {
-            val departed = bob.groupShape(groupId)?.departed
-            assertTrue(
-                "carol never reached bob's roster $departed",
-                lab.tryAwait(1) { if (carol.groupShape(groupId)?.departed == departed) 1 else 0 },
-            )
-        }
         val lines = (1..KEEP).map { "carol $it" }
         lines.forEach { assertTrue(carol.sendGroup(groupId, it)) }
         val read = lab.tryAwait(KEEP) { bob.decrypted(groupId).count { it.second in lines } }
@@ -349,7 +336,7 @@ class GroupMembershipLabTest {
             assertTrue(alice.sendGroup(groupId, "back twice"))
             assertTrue(lab.tryAwait(1) { bob.decrypted(groupId).count { it.second == "back twice" } })
             assertEquals("bob took alice back", emptySet<String>(), bob.groupShape(groupId)?.departed)
-            pushOutBobsNotices(bob, carol, groupId, after = "back twice")
+            pushOutBobsNotices(bob, carol, groupId)
 
             reServeToBob(alice, bob, firstLeave)
             assertEquals("the old leave did not evict alice again", emptySet<String>(), bob.groupShape(groupId)?.departed)
@@ -380,6 +367,104 @@ class GroupMembershipLabTest {
             lab.assertConverged(listOf(bob, carol), atLeast = 2, carriers = listOf(alice)) { groupId }
             assertEquals(setOf(alice.nodeId), carol.groupShape(groupId)?.departed)
             assertTrue(MessageEntity.KIND_MEMBER_LEFT in carol.notices(groupId))
+        }
+
+    /**
+     * #167 (ADR 2026-10.xgwj): Carol posts, handles Alice's leave, and posts again, and Bob, behind a held link,
+     * hears the second post's seed before the first's. The leave rekey used to delete Carol's send chain, so the
+     * re-mint was epoch 1 again under a newer stamp: Bob adopted it, dropped the first seed as stale, and the first
+     * post failed the AEAD for good — no key request could bring back a seed Carol had deleted. Retired instead of
+     * deleted, the chain keeps its number and the re-mint is epoch 2, which Bob adopts beside epoch 1 in either order.
+     * A line, so nothing of Carol's reaches Bob except through the held pipe.
+     */
+    @Test
+    fun aLeaveRekeysSeedThatOvertakesTheEarlierOneLosesNothing() =
+        runBlocking {
+            val alice = lab.node("alice").apply { setDisplayName("Alice") }
+            val bob = lab.node("bob").apply { setDisplayName("Bob") }
+            val carol = lab.node("carol").apply { setDisplayName("Carol") }
+            lab.linkAll(alice to carol, carol to bob)
+            lab.awaitAcquainted(alice, bob, carol)
+            val groupId = alice.createGroup(bob, carol)
+            assertTrue(alice.sendGroup(groupId, "founded"))
+            lab.assertConverged(listOf(alice, bob, carol), atLeast = 1) { groupId }
+            val seedsBefore = carol.metrics.groups().groupSeedsSent
+
+            carol.transport.hold(bob.transport)
+            assertTrue(carol.sendGroup(groupId, "before the leave"))
+            alice.leaveGroup(groupId)
+            assertTrue(
+                "carol never recorded the departure",
+                lab.tryAwait(1) { if (carol.groupShape(groupId)?.departed == setOf(alice.nodeId)) 1 else 0 },
+            )
+            assertTrue(carol.sendGroup(groupId, "after the leave"))
+            assertTrue(
+                "carol did not mint twice (one seed each to alice and bob, then one to bob)",
+                carol.metrics.groups().groupSeedsSent >= seedsBefore + 3,
+            )
+            // Carol's own DMs to Bob (the two seeds among them) newest first, ahead of everything else in send order.
+            carol.transport.release(bob.transport) { batch ->
+                val toBob = batch.filter { it.isDm(from = carol, to = bob) }
+                toBob.reversed() + batch.filterNot { it.isDm(from = carol, to = bob) }
+            }
+
+            lab.assertConverged(listOf(bob, carol), atLeast = 3, carriers = listOf(alice)) { groupId }
+            assertEquals(
+                setOf("founded", "before the leave", "after the leave"),
+                bob.decrypted(groupId).map { it.second }.toSet(),
+            )
+            assertEquals("a seed was lost as stale", 0L, bob.drops(DropReason.GROUP_RATCHET_AEAD_FAIL))
+            assertEquals(setOf(alice.nodeId), bob.groupShape(groupId)?.departed)
+        }
+
+    /**
+     * The local half of #167 (ADR 2026-10.xgwj): Alice posts, leaves, and puts the same people together again —
+     * the same group id — and posts once more; Carol, behind a held link, hears the second post's seed first. A
+     * leave used to purge Alice's send chain whole, so the re-created group minted epoch 1 again under a newer
+     * stamp, Carol dropped the first seed as stale, and the post sealed before the leave failed the AEAD for good.
+     * The purge now keeps the number, and the re-mint is the next one. Alice sits between Bob and Carol, so
+     * nothing of hers reaches Carol except through the held pipe.
+     */
+    @Test
+    fun aRecreatedGroupsSeedThatOvertakesThePreLeaveOneLosesNothing() =
+        runBlocking {
+            val alice = lab.node("alice").apply { setDisplayName("Alice") }
+            val bob = lab.node("bob").apply { setDisplayName("Bob") }
+            val carol = lab.node("carol").apply { setDisplayName("Carol") }
+            lab.linkAll(bob to alice, alice to carol)
+            lab.awaitAcquainted(alice, bob, carol)
+            // Bob founds it, so Alice has minted nothing before the hold and both her seeds go through it.
+            val groupId = bob.createGroup(alice, carol)
+            assertTrue(bob.sendGroup(groupId, "founded"))
+            lab.assertConverged(listOf(alice, bob, carol), atLeast = 1) { groupId }
+            val seedsBefore = alice.metrics.groups().groupSeedsSent
+
+            alice.transport.hold(carol.transport)
+            assertTrue(alice.sendGroup(groupId, "before the leave"))
+            alice.leaveGroup(groupId)
+            assertTrue(
+                "bob never recorded the departure",
+                lab.tryAwait(1) { if (bob.groupShape(groupId)?.departed == setOf(alice.nodeId)) 1 else 0 },
+            )
+            assertEquals(groupId, alice.createGroup(bob, carol))
+            assertTrue(alice.sendGroup(groupId, "back again"))
+            assertTrue(
+                "alice did not mint twice (one seed each to bob and carol, both times)",
+                alice.metrics.groups().groupSeedsSent >= seedsBefore + 4,
+            )
+            // Alice's own DMs to Carol (the two seeds among them) newest first, ahead of everything else in send order.
+            alice.transport.release(carol.transport) { batch ->
+                val toCarol = batch.filter { it.isDm(from = alice, to = carol) }
+                toCarol.reversed() + batch.filterNot { it.isDm(from = alice, to = carol) }
+            }
+
+            lab.assertConverged(listOf(bob, carol), atLeast = 3, carriers = listOf(alice)) { groupId }
+            assertEquals(
+                setOf("founded", "before the leave", "back again"),
+                carol.decrypted(groupId).map { it.second }.toSet(),
+            )
+            assertEquals("a seed was lost as stale", 0L, carol.drops(DropReason.GROUP_RATCHET_AEAD_FAIL))
+            assertEquals(emptySet<String>(), carol.groupShape(groupId)?.departed)
         }
 
     /**
@@ -417,6 +502,11 @@ class GroupMembershipLabTest {
             .single()
 
     private fun WireEnvelope.isGroupFrame(): Boolean = WireCodec.decodeEnvelope(signed)?.group != null
+
+    private fun WireEnvelope.isDm(
+        from: LabNode,
+        to: LabNode,
+    ): Boolean = decoded()?.let { it.senderId == from.nodeId && it.recipientId == to.nodeId } == true
 
     private fun WireEnvelope.isLeaveFrame(): Boolean = WireCodec.decodeEnvelope(signed)?.type == "groupleave"
 

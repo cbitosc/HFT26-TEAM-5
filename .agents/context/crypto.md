@@ -87,6 +87,18 @@ LoRa plane (2026-09.ggq4).
   0528b0de, and 074449d5 for a seed lost to a restart). A key request never advances an epoch; the re-distribution
   floor is 15 min per (group, member, pairwise root); a session reset forces the flush past stale acks (8a102baf).
   Eligibility is all-or-nothing per message, and a blocked member still gets seeds (ADR 010).
+- **When touching `GroupRatchetStore.retireSendChains` / `sendChains` / `purgeGroup`, `GroupRatchetEngine.SendChain.retired`
+  / `isRetired`, `needsNewEpoch`, the group send-chain sweep, or the rekey in `GroupRepository.recordDeparture` /
+  `recordRejoin` / `leave` / `delete`:** READ ADR 2026-10.xgwj and GFS §4 rules 4 and 5, §6.1. A forced rekey, a local
+  leave and a delete all retire the chain: every seed and chain key goes in the same transaction, the newest epoch's
+  number stays on a key-less row, and the next mint numbers past it — the same people re-created are the same group
+  id. A receiver tells two mints of one number apart by `mintedAt` alone and drops the older as stale (#167), so
+  numbering only rises, except after a wipe (or a restore), which takes the seed outbox too: the outbox counts acks by
+  epoch. A retired newest row is never swept — a drop after a bound was built and withdrawn, because a late or stale
+  ack of the dropped number hides the restarted epochs — and drains as the previous row once a mint follows; a left
+  group keeps that one key-less row. A retired row is never re-served: filter on the empty seed, never on the count
+  (a rule-2 chain keeps its seed). Regression: `GroupRatchetRepositoryTest`, `GroupMembershipLabTest.aLeaveRekeysSeed…`
+  / `aRecreatedGroupsSeed…`.
 - **When touching a group's roster — `reconcileGroup`/`vetRoster`, `groupleave`, `GroupRepository.recordDeparture`
   / `recordRejoin`, `PendingGroupKeys`, `GroupKeyPayload.group` / `pinRosterFromSeed`, or how a member learns
   of a new group:** READ `docs/GROUP_FORWARD_SECRECY.md` §1 (the pinned founding roster) and §6.1

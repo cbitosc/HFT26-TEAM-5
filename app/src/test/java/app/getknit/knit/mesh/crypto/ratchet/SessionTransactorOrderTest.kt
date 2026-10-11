@@ -79,7 +79,7 @@ class SessionTransactorOrderTest {
             this.chain = chain
         }
 
-        override suspend fun deleteSendChains(groupId: String) = guard("deleteSendChains")
+        override suspend fun retireSendChains(groupId: String) = guard("retireSendChains")
 
         override suspend fun recvChains(
             groupId: String,

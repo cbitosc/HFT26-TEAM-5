@@ -124,11 +124,13 @@ class GroupRepository(
                     departed = GroupMembersStore.encode((departed + leaverId).distinct()),
                 ),
             )
-            // Leave-rekey (docs/GROUP_FORWARD_SECRECY.md #6.1), atomic with the roster shrink: drop our
-            // send chains so the next send mints a fresh epoch distributed to the REMAINING members only
-            // (the leaver reads nothing sealed after this commits), and drop the leaver's outbox row.
+            // Leave-rekey (docs/GROUP_FORWARD_SECRECY.md #6.1), atomic with the roster shrink: retire our
+            // send chains — every key gone, the newest number kept — so the next send mints a fresh epoch
+            // numbered past it, distributed to the REMAINING members only (the leaver reads nothing sealed
+            // after this commits), and drop the leaver's outbox row. Reusing the number let a receiver that
+            // met the re-mint's seed first drop the earlier one as stale (#167, ADR 2026-10.xgwj).
             // Their recv chains drain via the 48h sweep — their pre-leave frames may still re-serve.
-            groupRatchet.deleteSendChains(groupId)
+            groupRatchet.retireSendChains(groupId)
             groupRatchet.deleteKeySend(groupId, leaverId)
             // The spool plane's rotation hook (docs/SPOOL_PROTOCOL.md §3.2), atomic with the same roster
             // shrink: record that a re-mint is OWED. The mint itself happens on the heal pass, not here —
@@ -146,7 +148,7 @@ class GroupRepository(
      * pinned roster, and has already moved [memberId] from `departed` back into `members` in this same
      * transaction). This records the rest: the member's rejoin clock, [rejoinedAt] (the frame's `sentAt`, which
      * [recordDeparture] reads back), a "member rejoined" notice stamped with it, and — when [rekey] — the same rekey a departure
-     * forces: our send chains die so the next send mints a fresh epoch, distributed to the roster as it
+     * forces: our send chains are retired so the next send mints a fresh epoch, distributed to the roster as it
      * is *now*, and the rejoiner reads nothing sealed while they were out. [rekey] is the caller's
      * per-(group, member) floor, so a leave/rejoin loop cannot make every member re-mint on each turn.
      * The group's spool root is untouched: a rejoiner adopts the current one from the next gossip.
@@ -158,7 +160,7 @@ class GroupRepository(
         rekey: Boolean,
     ) {
         db.withWriteTransaction {
-            if (rekey) groupRatchet.deleteSendChains(groupId)
+            if (rekey) groupRatchet.retireSendChains(groupId)
             val clocks = dao.clocksOf(groupId, memberId) ?: GroupMemberClockEntity(groupId, memberId)
             dao.putClocks(clocks.copy(rejoinedAt = rejoinedAt))
             messages.save(StatusNotices.memberRejoined(groupId, memberId, rejoinedAt))
@@ -183,7 +185,9 @@ class GroupRepository(
             // after this starts every member afresh, as its roster does, and as knit-ios's fresh row does.
             dao.deleteClocks(groupId)
             // All group ratchet state dies with our membership (chains, skipped keys, outbox) — and with it
-            // the group's spool root, so the scope stops being derived the moment we leave.
+            // the group's spool root, so the scope stops being derived the moment we leave. Our send chain's
+            // keys go too, but its epoch number is kept on a retired row: re-creating the group with the same
+            // people is the same id, and its next mint must number past what the others hold (ADR 2026-10.xgwj).
             groupRatchet.purgeGroup(groupId)
             groupRoots?.purge(groupId)
         }
@@ -202,6 +206,8 @@ class GroupRepository(
             dao.deleteClocks(groupId)
             // A re-created group (via reconcileGroup) starts with clean ratchet state — and a clean root, so
             // it re-adopts the current one from the first gossiping ctl DM rather than reviving a stale scope.
+            // Only the send chain's epoch number survives, key-less, so a mint after the re-creation numbers
+            // past it (ADR 2026-10.xgwj).
             groupRatchet.purgeGroup(groupId)
             groupRoots?.purge(groupId)
         }
