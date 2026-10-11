@@ -1271,7 +1271,7 @@ class InboundPipeline(
         // A cleared avatar is a change too, but there is no "removed their photo" line to draw and the
         // reclaim path already handles the bytes, so only an actual new avatar is announced.
         if (advertisedAvatar != null && advertisedAvatar != previous.avatarHash) {
-            savePeerNotice(peerId, StatusNotices.peerAvatarChanged(peerId, advertisedAvatar, version), once = true)
+            savePeerNotice(peerId, StatusNotices.peerAvatarChanged(peerId, newName, advertisedAvatar, version), once = true)
         }
     }
 
