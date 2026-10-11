@@ -173,6 +173,7 @@ Proposed §10.1 bullet:
 ### 2.6 Entitlement tickets and STUN (experimental)
 
 Two additions for a spool whose operator sells TURN (Knit Anywhere; knit-spool ADR 2026-10.bxsg).
+Which capabilities need a ticket is the operator's choice, advertised in HELLO (knit-spool ADR 2026-10.h6pt).
 A **ticket** is an Ed25519 grant an issuer signs and the spool checks with only the public half, so
 the spool can tell a paying caller from anyone else without holding an account. A **STUN list** lets
 any client, paying or not, learn its own public address — without which a free phone offers only
@@ -183,29 +184,34 @@ private addresses, and a paying peer's relay cannot permit it (coturn keys permi
 | `ent`  | c→s       | `t, q: Long, tk: bytes, sig: bytes(64)`   | Present a ticket. Answered by `ok`, or by `err ticket` with `msg` |
 
 ```
-Ticket {                 // tk: the house CBOR, every field required, unknown keys ignored
+Ticket {                 // tk: the house CBOR, every field but ab required, unknown keys ignored
     v:   1
     kid: bytes(8)        // SHA-256(raw Ed25519 public key)[0..8]
     aud: String          // the one spool it is good for
     nbf: uint            // Unix seconds
     exp: uint            // Unix seconds, exp - nbf <= 48 h
     ps:  bytes(16)       // the holder's pseudonym for the day, opaque to the spool
-    fl:  uint            // bit 0: may ask for TURN; bit 3: may cast, and unlocks casts for the scope (§2.7)
+    fl:  uint            // bit 0: may ask for TURN; bit 1: may upload attachments; bit 3: may cast, and
+                         // unlocks casts for the scope (§2.7). Bit 2 is reserved.
+    ab:  uint?           // upload budget in bytes for this pseudonym's day; absent means the spool's own
 }
 sig = Ed25519(issuer key, "knit/spool/v1/ticket" ‖ tk)
 ```
 
 | ID           | Requirement                                                                                                                                                                                                                      |
 |--------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **S-7.6-13** | A spool configured with a ticket key advertises `ent: true` in HELLO; one that is not MUST omit it. A spool that advertises STUN puts a non-empty `stun: [String]` of `stun:`/`stuns:` URIs in HELLO, with no credential.        |
+| **S-7.6-13** | A spool configured with a ticket key advertises `ent: true` in HELLO; one that is not MUST omit it. Beside `ent` it sends `entGates: uint`, the `fl` bits it requires a ticket for; a client that sees `ent` without `entGates` reads it as 9 (bits 0 and 3). A spool that advertises STUN puts a non-empty `stun: [String]` of `stun:`/`stuns:` URIs in HELLO, with no credential. |
 | **S-7.6-14** | On `ent`, a spool MUST refuse with `err ticket` and a `msg` of `malformed`, `key`, `signature`, `audience`, `early` or `expired` unless `tk` decodes, `kid` names its key, `sig` verifies, `aud` is its own, and `nbf - 300 s <= now <= exp + 300 s`. |
 | **S-7.6-15** | An accepted ticket binds to the connection until it expires, and a later accepted `ent` replaces it. A refused `ent` MUST leave an earlier ticket in place, and is never a strike.                                               |
-| **S-7.6-16** | On a connection whose HELLO carried `ent`, `turnreq` needs a live ticket with bit 0 of `fl`, else `err ticket` with `msg` `missing`, `expired` or `flags`. With one, no subscription is needed. S-7.6-5's limits still apply.   |
+| **S-7.6-16** | On a connection whose HELLO carried `ent` with bit 0 in `entGates`, `turnreq` needs a live ticket with bit 0 of `fl`, else `err ticket` with `msg` `missing`, `expired` or `flags`. With one, no subscription is needed. S-7.6-5's limits still apply.   |
 | **S-7.6-17** | A ticketed credential's suffix is `SHA-256("knit/spool/v1/turn-user" ‖ ps)[0..10]`, so every issue under one pseudonym shares it, and the TURN server's per-user quota counts the holder, not the credential.                |
 | **S-7.6-18** | A spool MUST NOT log or persist a ticket or a pseudonym. Metrics MAY count acceptances and refusals by `msg`.                                                                                                                     |
 | **C-7.6-19** | A client that holds a ticket for a spool sends `ent` right after HELLO when the spool advertised `ent`, and again before the ticket expires. It MUST NOT retry a refused ticket on every round.                                 |
 | **C-7.6-20** | A client SHOULD gather from every `stun` URI its connected spools advertise, on every call, whether or not it obtained a TURN credential.                                                                                       |
 | **C-7.6-21** | A client that holds a ticket for a spool SHOULD ask that spool for TURN on every call, whether or not the DM scope is subscribed there; this refines C-7.6-12.                                                                   |
+| **S-7.6-22** | On a connection whose HELLO carried `ent` with bit 1 in `entGates`, `aput` needs the uploading connection's own live ticket with bit 1 of `fl` and budget left, else `err ticket` with `q`, `scope` and a `msg` of `missing`, `expired`, `flags` or `budget`. Another subscriber's ticket never admits it. The budget is `min(ab, the spool's own)` bytes per pseudonym, charged only for chunks stored, at the size the spool charges them. A refusal is never a strike. |
+| **S-7.6-23** | A ticket never gates `aget`: a member without one fetches every attachment a member with one stored.                                                                                                                             |
+| **C-7.6-24** | A client without a files ticket for a spool whose `entGates` has bit 1 does not offer to send attachments through it, and still fetches the ones it receives. After `budget` it does not upload there again on that ticket.      |
 
 > **Why one ticket per connection.** The spool already ties a connection to every scope it
 > subscribes, so a ticket on each record would buy no unlinkability and cost a signature check per
@@ -215,6 +221,11 @@ sig = Ed25519(issuer key, "knit/spool/v1/ticket" ‖ tk)
 > **Why the suffix is hashed.** coturn's `user-quota` counts the part of the username after the colon
 > (4.18.0, `get_real_username`), so a stable suffix per pseudonym is what makes a quota per customer
 > possible. Hashing it keeps the spool-side pseudonym out of the TURN server's logs verbatim.
+>
+> **Why only the uploader's ticket admits an upload.** TURN and casts let one payer unlock a conversation,
+> because a call or a walkie that only one side can use is broken. Attachments are not: a free member
+> still receives every one. A rule under which sending works in some conversations and not others, for
+> reasons the sender cannot see, would need explaining in every client (knit-spool ADR 2026-10.h6pt).
 >
 > **Why STUN rides HELLO.** A free phone that is the *caller* gathers before any answer arrives, so a
 > STUN URI carried in the paying peer's signaling would come too late. coturn answers STUN without a
@@ -229,6 +240,17 @@ tk  = a7617601636b69644821fe31dfa154a261636175646b6c61622e6578616d706c65636e6266
       636578701a6b4b238062707350000102030405060708090a0b0c0d0e0f62666c01
 sig = c0740d14d5f46f2771721c593fa34a6e926b39182955cc6f8fb15365dddcf229
       da2cb33bdf6f23881cf4b153eedc4238e143fa53ef1a834961040bb55818b809
+```
+
+The same fixture with `fl = 3` (TURN and files) and `ab = 134217728`, and a HELLO with `ent` and
+`entGates = 11` (TURN, files and cast):
+
+```
+tk            = a8617601636b69644821fe31dfa154a261636175646b6c61622e6578616d706c65636e62661a6b49d200
+                636578701a6b4b238062707350000102030405060708090a0b0c0d0e0f62666c036261621a08000000
+sig           = 1942b4b07f1ef10f7e4061e822d909876b2e5a1597469c5aa70c87c5909dbc9c
+                c24dc7703dfcb8a33ea190b19e4b9a9f460319f9ec2d11d17e787afe551b5d0a
+helloEntGates = a461746568656c6c6f61760163656e74f568656e7447617465730b
 ```
 
 ### 2.7 Casts: a walkie's chunks through a spool (experimental)
@@ -253,10 +275,10 @@ into `docs/SPOOL_PROTOCOL.md` as §7.7 (knit-spool ADR 2026-10.3wdy; here, ADR 2
 | **S-7.7-3**  | A cast is fanned out only when its connection holds a `sub` for the scope, its `data` is at most `maxBytes`, it is within the per-connection, per-IP and spool-wide budgets, the scope is not the commons, and the ticket rule (S-7.7-6) holds. Anything else is dropped, and MAY be counted. |
 | **S-7.7-4**  | A spool MUST NOT store a cast or let one touch a stored scope: no blob, digest fold, tombstone, listing, `maxScopes` hold, creation gate or disk write. A cast for a scope the store has shed still fans out while subscribers hold the scope. |
 | **S-7.7-5**  | Fan-out is best-effort, and a dropped copy MUST NOT count toward the slow-consumer close: a subscriber whose channel is full loses that cast and nothing else. |
-| **S-7.7-6**  | On a connection whose HELLO carried `ent`, a cast fans out only while some live subscriber of its scope on this spool holds an accepted ticket with bit 3 of `fl` (`FL_CAST = 8`): the caster first, then the others. Liveness and skew are S-7.6-14's. A spool without a ticket key admits any subscriber's cast. |
+| **S-7.7-6**  | On a connection whose HELLO carried `ent` with bit 3 in `entGates`, a cast fans out only while some live subscriber of its scope on this spool holds an accepted ticket with bit 3 of `fl` (`FL_CAST = 8`): the caster first, then the others. Liveness and skew are S-7.6-14's. A spool without a ticket key admits any subscriber's cast. |
 | **S-7.7-7**  | A dropped cast MUST NOT be a strike. A flood still pays the per-record budget that every record pays, and that budget strikes. |
 | **S-7.7-8**  | A spool MUST NOT log or persist a cast, the scope it names, a ticket or a pseudonym. Metrics MAY count casts, copies fanned out and drops by reason. |
-| **C-7.7-9**  | A client MUST NOT cast to a spool whose HELLO omitted `cast`, and MUST keep within its `maxBytes` and `rate` unprompted, because a refusal is silent. On an `ent` spool it casts only while it holds a cast ticket there, or its peer said it does (`CallPayload.ct`, §3.2). |
+| **C-7.7-9**  | A client MUST NOT cast to a spool whose HELLO omitted `cast`, and MUST keep within its `maxBytes` and `rate` unprompted, because a refusal is silent. On a spool whose `entGates` has bit 3 it casts only while it holds a cast ticket there, or its peer said it does (`CallPayload.ct`, §3.2). |
 | **C-7.7-10** | A client casts only into a scope whose SUB that spool has answered. |
 | **C-7.7-11** | Every cast is signed: its `sig` is the Ed25519 frame signature over `signed`, whatever the same frame's radio copy carries. |
 | **C-7.7-12** | The seal is the one below: its own version byte, nonce label and aad, the plaintext padded to a multiple of 128 bytes. An opener refuses any plaintext but the canonical one: whole blocks, a nonzero length inside them, at most one block of padding, all of it zero. |
