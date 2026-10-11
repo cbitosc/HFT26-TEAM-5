@@ -117,6 +117,18 @@ internal object DialPlan {
     ): Boolean = address !in linkAddresses && !dialing() && !arbiterBusy
 
     /**
+     * Whether [promote] holds a dial the transport can make ([canDial]: an address to go to, as `initiateTo` needs), so
+     * a GATT read that comes due yields to it (`GattPayloads.yieldTo`, #154). A promoted peer with no address is left
+     * out: `initiateTo` returns without dialing it, and it would stay promoted, holding every read off, for as long as
+     * presence keeps it (a peer heard on Coded alone once the Coded mode goes off). One that is dialed and fails is
+     * backed off, and so leaves the promotion by itself.
+     */
+    fun dialWaiting(
+        promote: List<String>,
+        canDial: (String) -> Boolean,
+    ): Boolean = promote.any(canDial)
+
+    /**
      * Whether a failed dial forgets the peer's GATT payload, so its next advert reads it afresh: a dial that failed
      * before its channel opened may have used a PSM the peer no longer listens on (an iPhone that restarted); a HELLO
      * refusal says nothing of the PSM (companion change A3, ADR 2026-09.kwq2).

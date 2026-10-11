@@ -190,4 +190,13 @@ class DialPlanTest {
             assertTrue("$it may have used a stale PSM", DialPlan.forgetsGattPayload(it))
         }
     }
+
+    @Test
+    fun aGattReadYieldsOnlyToAPromotedPeerWithAnAddressToDial() {
+        // #154: a promoted peer initiateTo cannot dial (no address) would hold every read off for its whole linger.
+        val addressed = setOf("A")
+        assertTrue(DialPlan.dialWaiting(listOf("B", "A")) { it in addressed })
+        assertFalse("no address, no dial", DialPlan.dialWaiting(listOf("B")) { it in addressed })
+        assertFalse("nothing promoted", DialPlan.dialWaiting(emptyList()) { true })
+    }
 }

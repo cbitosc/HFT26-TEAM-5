@@ -35,7 +35,8 @@ so it can be found by reading it.
   `0xFE30` service, no payload characteristic, or a value under 23 bytes. `cancel()` runs on radio stop. Android adds
   one thing: each of the two maps keeps at most 64 addresses, least recently used first out, because an iPhone rotates
   its address about every 15 min and iOS never prunes. `GattPayloadsTest` mirrors `GattPayloadsTests.swift` case for
-  case, plus the cap and the quiet clock.
+  case, plus the cap and the quiet clock. The 2026-10-11 amendment adds a second Android-only rule: a budget across
+  addresses, and a ripe dial goes first.
 - **The payload lifetime** (the contract, revised after the first device gate, on both sides). A payload serves every
   advert from its address until the transport forgets the address, which it does on any of three rules:
   1. A dial to that address fails before its channel opens (`failConnect`, never on HANDSHAKE). This catches an
@@ -98,7 +99,8 @@ while the gate is on. The iOS worker's gate scenario greps these lines.
   its `weDial` must ignore a service-data peer's flag while backgrounded. Both sides record this limit, and neither
   changes code for it here.
 - **`0xFE30` is not Knit's alone.** A stranger costs one connection per 10 min per address, and 64 addresses at most
-  are remembered.
+  are remembered. Those waits are per address, so they never bounded the reads in all: the 2026-10-11 amendment
+  adds a budget across addresses.
 
 The mesh lab has no radio layer, so no lab scenario covers this. `GattPayloadsTest`, `BleAdvertPayloadTest` and
 `DoorbellPolicyTest` pin the rules and identifiers. The reader is device-verified only, like `BleDoorbell`.
@@ -139,3 +141,70 @@ its live link scored −127 and was the first shed at the 6-link budget. Both no
 the link's HELLO (ADR 2026-09.shzv's AND-3 amendment): such a link scores the −90 floor out of presence, and such a
 dialer is sighted for admission only if heard within 12 s. The "backgrounded iPhone" limit above still holds for a
 first link: this phone cannot sight one and so never dials it, and one below a flagged phone still waits.
+
+## Amendment 2026-10-11 — a budget across addresses, and a ripe dial goes first (#154)
+
+**What was wrong.** The pacing was per address only. One read ran at a time, but nothing bounded the reads in all.
+Every read is a connection: the reader holds `BleConnectArbiter`, both scans pause, and `driveConnections` skips
+every dial while one runs. One radio rotating random addresses under `0xFE30`, or a crowd of stranger devices, kept
+a read in flight nearly all the time and starved this phone's dials and relinks. There was a race too. A read's end
+calls `finish()` and then `wake()`, and under an advert stream the next scan result on the main thread could
+`begin()` a new read before the connect loop ran. A ripe dial lost to read after read.
+
+**What changed.** Two Android additions, beside the 64-address cap. Neither moves the wire or the iOS pacing.
+
+- **A budget across addresses.** At most 12 charged reads in any 10 minutes of the elapsed clock
+  (`GattPayloads.BUDGET_READS`, `BUDGET_WINDOW_MS`). `begin` answers false while the window is full. Twelve is sized
+  for honest rotations: about one read per iPhone per 15 minutes, plus a re-read after a PSM change.
+  - Every read that ends is charged, whatever it found: a payload, a failure or a stranger. The payload is
+    unauthenticated, so a read that found one proves nothing. A rotating advertiser that serves a valid payload
+    naming an id above every real one is never dialed, so a free read would bring the starvation back whole.
+  - Only a completed L2CAP link with a HELLO vouches for a payload. When `registerLink` pairs an address with the
+    HELLO's node, on a link we dialed or one we accepted, `GattPayloads.confirmed` refunds the charge of a read at
+    that address whose payload named that node. A charge is refunded once: the refund removes it. A HELLO naming
+    another node, or the same node at another address, refunds nothing.
+  - A charge nothing refunds ages out of the window. That covers an address forgotten or evicted from the cap, and a
+    refund that comes after its charge has left the window is a no-op.
+  - A cancelled read is free: the radio went down under it. No forget is charged, by any of the three rules. The
+    re-read a forget makes due is charged when it ends, like any other.
+- **A ripe dial goes first.** The connect loop calls `GattPayloads.yieldTo` on every pass, before its read gate,
+  with whether the decision has a dial to make. While it has, `begin` answers false. A read already in flight runs
+  on, so a dial waits for that one read at most (12 s), never for a second. `cancel()` clears the flag.
+  - The flag counts only a promoted peer with an address to dial (`DialPlan.dialWaiting`, against `dialTarget`).
+    `initiateTo` returns without dialing a peer it has no address for, and such a peer stays promoted for as long
+    as presence keeps it: a peer heard on Coded alone once the Coded mode goes off. Counted, it would hold every
+    read off for its whole linger. A peer that is dialed and fails is backed off, and so leaves the promotion.
+  - A flag left set by a peer that has since gone lasts until the loop's next pass, at most its one-minute ceiling.
+
+**What it costs.**
+
+- Once strangers or a forger have spent the budget, an honest iPhone at a new address waits for a slot, up to the
+  window. It is still sighted at once if it dials us (A1, ADR 2026-09.shzv) or advertises service data. Only the
+  order where its id sorts below this flagged phone waits on the read.
+- An iPhone at the edge of range pays one unit for each re-read until it links. Each failed dial forgets its payload
+  (rule 1), and the next read is charged and never refunded. With the doubling backoff, that comes to seven or eight
+  units in ten minutes: one such iPhone fits, and two spend the budget.
+- An honest iPhone that is read but never linked by us is never refunded. That happens when the link budget is full,
+  when it sorts above us and does not dial, or when the quiet rule forgets it and it is read again. It is charged once
+  per address rotation (about 15 minutes) and once per quiet forget. In a crowd of ten or more Knit iPhones these
+  charges alone come near the budget, and a newcomer below this phone waits up to the window to be read. The crowd
+  cell of the trial measures it; the numbers change only if it shows.
+
+**Diagnostics.** `bt gatt budget spent (12 in 600000ms)` and `bt gatt budget free` at info, once per edge, checked at
+an advert that would start a read and never logged per advert. `bt gatt confirmed <addr> → <id>` at debug for a
+refund. `gattBudget=<used>/<budget>` follows `gattReads=` on the `bt state` line. The existing oracles are unchanged.
+`GattPayloadsTest` and `DialPlanTest` pin the rules.
+
+**Device trial owed.** Two stimulus variants, 30 minutes each, each beside a Pixel and an Android peer the Pixel
+should dial:
+
+1. A rotating `0xFE30` advertiser that serves no payload characteristic.
+2. A rotating `0xFE30` advertiser that serves a forged, valid payload naming a large id, rotating about every 20 s.
+
+Both pass on at most 12 charged reads per 10 minutes, the budget-spent edge logged, and no `bt initiating to` more
+than one read (12 s) after its `promote=`. The cost cell: an iPhone at the edge of range for 15 minutes, then a
+second iPhone in range, read within one scan window. With no strangers present an honest iPhone is still read and
+linked, and `bt gatt confirmed` follows its read at the same address. Run that once with the iPhone dialing us, to
+check that an accepted link reports the address we read. The crowd cell: ten or more Knit iPhones in range, where
+`gattBudget=` shows how much of the budget honest rotations spend. knit-ios's `scripts/interop.py` has no rotation
+mode yet: that is knit-ios #3.

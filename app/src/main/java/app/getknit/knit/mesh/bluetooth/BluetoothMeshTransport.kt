@@ -402,6 +402,9 @@ class BluetoothMeshTransport(
     // logged once per transition, the BLE twin of WifiAwareTransport's `lonely: relaxed …` line. Loop thread only.
     private var lonelyRelaxedLogged = false
 
+    // The GATT read budget's last logged edge ([logGattBudget]); written on the scan callback's main thread only.
+    private var gattBudgetSpentLogged = false
+
     // Side channel: which sighted/linked peers advertise the flag, the loop that keeps its scan tier right,
     // and the tier last logged. [sideWake] is its own conflated channel for the same reason [scanWake] is.
     private val sideCapable = SideCapableTracker()
@@ -1935,7 +1938,9 @@ class BluetoothMeshTransport(
         val address = device.address
         if (!::localNodeId.isInitialized) return
         if (!DialPlan.mayReadGatt(address, linkAddresses.values, arbiter.busy.value) { inFlightSnapshot().isNotEmpty() }) return
-        if (!gattPayloads.begin(address, elapsed())) return
+        val now = elapsed()
+        logGattBudget(gattPayloads.budgetSpent(now))
+        if (!gattPayloads.begin(address, now)) return
         gattReads.incrementAndGet()
         Log.d(TAG, "bt gatt reading $address")
         gattJob =
@@ -1964,6 +1969,21 @@ class BluetoothMeshTransport(
                 wake() // the arbiter is free again, and a dial held back for the read may go
                 advertEdge() // the read's connection has closed (#112: it opened at a 15 ms interval)
             }
+    }
+
+    /**
+     * One line per edge of the GATT read budget (#154), so a device trial can grep when strangers spent it and when it
+     * came back. Read at a due-looking advert, never logged per advert.
+     */
+    private fun logGattBudget(spent: Boolean) {
+        if (spent == gattBudgetSpentLogged) return
+        gattBudgetSpentLogged = spent
+        if (spent) {
+            val config = gattPayloads.configuration
+            Log.i(TAG, "bt gatt budget spent (${config.budgetReads} in ${config.budgetWindowMs}ms)")
+        } else {
+            Log.i(TAG, "bt gatt budget free")
+        }
     }
 
     /** Gives up the read in progress without a wait: the radio went down under it. */
@@ -2115,6 +2135,8 @@ class BluetoothMeshTransport(
             teardownLink(id, "evicted", only = fl)
         }
         // A GATT read is a connection too; a dial waits for it (the read's end wakes this loop), as a read waits for a dial.
+        // Said before the gate, so no read starts between the end of the one in flight and the next pass (#154).
+        gattPayloads.yieldTo(DialPlan.dialWaiting(decision.promote) { id -> snaps.any { it.nodeId == id && dialTarget(it) != null } })
         if (gattPayloads.current == null) dial(decision.promote, lonely)
     }
 
@@ -2325,6 +2347,7 @@ class BluetoothMeshTransport(
         device?.let {
             linkAddresses[framed] = it.address
             linkDevices[framed] = it
+            confirmGattPayload(it.address, nodeId)
         }
         val prev = links.put(nodeId, framed)
         if (prev != null) {
@@ -2477,6 +2500,7 @@ class BluetoothMeshTransport(
     /**
      * Forgets [address]'s GATT payload and any wait before its next read, so its next advert reads it afresh (the
      * contract's payload lifetime). Logged only when a payload went: `bt gatt forget <addr> (dial|hello <id>|quiet)`.
+     * Nothing here touches the read budget (#154): the re-read it makes due is charged when it ends.
      */
     private fun forgetGattPayload(
         address: String,
@@ -2484,6 +2508,17 @@ class BluetoothMeshTransport(
     ) {
         if (gattPayloads.payload(of = address) != null) Log.i(TAG, "bt gatt forget $address ($reason)")
         gattPayloads.forget(address)
+    }
+
+    /**
+     * A link's HELLO at [address] named [nodeId], so a payload read there naming that node is vouched for: the read's
+     * budget charge is refunded, once (#154). The payload is unauthenticated, and only a link vouches for it.
+     */
+    private fun confirmGattPayload(
+        address: String,
+        nodeId: String,
+    ) {
+        if (gattPeers && gattPayloads.confirmed(address, nodeId, elapsed())) Log.d(TAG, "bt gatt confirmed $address → $nodeId")
     }
 
     /** Rule 2: a HELLO on a link to [address] named [nodeId], and the payload held for the address names another. */
@@ -2792,12 +2827,17 @@ class BluetoothMeshTransport(
                         ""
                     }
                 ) +
-                (if (gattPeers) " gattPayloads=${gattPayloads.payloadCount} gattReads=${gattReads.get()}" else "") +
+                (if (gattPeers) gattDiag() else "") +
                 (if (codedOn()) " phy=${codedMode.wire} coded=$codedAdvert phyLinks=${phyControls.size} hunt=$hunting" else "") +
                 (sideChannel?.let { " ${it.diag()} $sideDecision" } ?: "") +
                 " linkScores=${links.values.joinToString(",") { "${it.nodeId}:${linkScore(it, rssiByNode).toInt()}" }}",
         )
     }
+
+    /** The GATT payload reads' part of the `bt state` line; `gattPayloads=` / `gattReads=` are read by the iOS harness. */
+    private fun gattDiag(): String =
+        " gattPayloads=${gattPayloads.payloadCount} gattReads=${gattReads.get()} " +
+            "gattBudget=${gattPayloads.budgetUsed(elapsed())}/${gattPayloads.configuration.budgetReads}"
 
     /** Why [armAcl] attaches: an arm [orphans] records, the stop's last arm, or an orphan's release. */
     private enum class AclArm { ARM, STOP, RELEASE }

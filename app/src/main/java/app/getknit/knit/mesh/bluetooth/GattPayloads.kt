@@ -17,8 +17,20 @@ package app.getknit.knit.mesh.bluetooth
  *   waits [Configuration.strangerRetryMs]: `0xFE30` is not Knit's alone, and a stranger's device should not be
  *   connected to twice a minute.
  *
- * One Android addition: each map holds at most [Configuration.maxAddresses] addresses, the least recently used going
- * first. An iPhone rotates its resolvable private address about every fifteen minutes, and iOS never prunes.
+ * Two Android additions, both pacing on this side alone:
+ *
+ * - **An address cap.** Each map holds at most [Configuration.maxAddresses] addresses, the least recently used going
+ *   first. An iPhone rotates its resolvable private address about every fifteen minutes, and iOS never prunes.
+ * - **A budget across addresses, and a ripe dial goes first** (#154, ADR 2026-09.kwq2's amendment of 2026-10-11).
+ *   The per-address waits never bound the reads in all: one radio rotating random addresses under `0xFE30`, or a
+ *   crowd of strangers, kept a read in flight nearly all the time, and every read pauses the scans and holds every
+ *   dial back. So at most [Configuration.budgetReads] charged reads run in any [Configuration.budgetWindowMs] of the
+ *   elapsed clock. Every read that ends is charged, whatever it found: the payload is unauthenticated, so a payload
+ *   read proves nothing (a rotating forger serving a valid payload that names an id above every real one is never
+ *   dialed). Only a link vouches for it: a HELLO on a link at the address naming the payload's node refunds that
+ *   read's charge ([confirmed]), once. An honest iPhone that links costs nothing net; a charge nothing refunds ages
+ *   out of the window. A cancelled read is free. And while the transport has a dial to make ([yieldTo]), no new read
+ *   starts: the dial waits at most for the read already in flight, never for a second.
  *
  * Pure and thread-safe (the scan callback runs on the main thread, a read ends on the transport's scope, a failed
  * dial on an IO thread), so the rules are a JVM test ([app.getknit.knit.GattPayloadsTest]).
@@ -38,6 +50,10 @@ internal class GattPayloads(
         val quietMs: Long = QUIET_MS,
         /** How many addresses each of the payloads and the waits keeps. */
         val maxAddresses: Int = MAX_ADDRESSES,
+        /** How many charged reads (every read that ended, less those a link confirmed) any window may hold. */
+        val budgetReads: Int = BUDGET_READS,
+        /** The window [budgetReads] is counted over, on the elapsed clock. */
+        val budgetWindowMs: Long = BUDGET_WINDOW_MS,
     )
 
     /** How a read ended. */
@@ -77,6 +93,21 @@ internal class GattPayloads(
     private var scanClock = 0L
     private val retryAt = lru<Long>()
 
+    // A read's charge: when it ended, the address it read, and the node its payload named (null for a failure or a
+    // stranger, which nothing refunds).
+    private class Charge(
+        val at: Long,
+        val address: String,
+        val nodeId: String?,
+    )
+
+    // The charges still inside the budget's window. A link refunds one, its address's latest read naming its node: the
+    // re-reads before it (a failed dial forgets the payload) stay charged until they age out.
+    private val charged = ArrayDeque<Charge>()
+
+    // Whether the transport has a dial to make: no new read starts until it has gone.
+    private var dialWaiting = false
+
     /** The payload [address] served, if a read found one. */
     @Synchronized
     fun payload(of: String): BleAdvertPayload.Parsed? = payloads[of]?.payload
@@ -109,9 +140,29 @@ internal class GattPayloads(
     @get:Synchronized
     val payloadCount: Int get() = payloads.size
 
+    /** How many charged reads the budget's window holds at [now], for the debug state line. */
+    @Synchronized
+    fun budgetUsed(now: Long): Int {
+        prune(now)
+        return charged.size
+    }
+
+    /** Whether the budget's window is full at [now], so no read starts until its oldest charge leaves it. */
+    @Synchronized
+    fun budgetSpent(now: Long): Boolean = budgetUsed(now) >= configuration.budgetReads
+
     /**
-     * Starts reading [address], and answers true, when nothing else is being read, it has no payload yet, and it is
-     * not waiting to be tried again.
+     * Whether the transport has a dial to make ([dial]): while it has, no new read starts, and a read already in flight
+     * runs on. The connect loop says so on every pass, so the read's end cannot hand the radio to the next read first.
+     */
+    @Synchronized
+    fun yieldTo(dial: Boolean) {
+        dialWaiting = dial
+    }
+
+    /**
+     * Starts reading [address], and answers true, when nothing else is being read, no dial is waiting, the budget has
+     * room, it has no payload yet, and it is not waiting to be tried again.
      */
     @Synchronized
     fun begin(
@@ -119,7 +170,8 @@ internal class GattPayloads(
         now: Long,
     ): Boolean {
         retryAt.entries.removeAll { it.value <= now }
-        if (current != null || payloads[address] != null || retryAt[address] != null) return false
+        if (current != null || dialWaiting || budgetSpent(now)) return false
+        if (payloads[address] != null || retryAt[address] != null) return false
         current = Read(address, now + configuration.readTimeoutMs)
         return true
     }
@@ -133,6 +185,7 @@ internal class GattPayloads(
     ) {
         if (current?.address != address) return
         current = null
+        charged.addLast(Charge(now, address, (outcome as? Outcome.Read)?.payload?.nodeId))
         when (outcome) {
             is Outcome.Read -> payloads[address] = Held(outcome.payload, scanClock)
             Outcome.Failed -> retryAt[address] = now + configuration.retryMs
@@ -140,20 +193,48 @@ internal class GattPayloads(
         }
     }
 
-    /** Ends the read in progress without learning anything and without a wait: the radio went down under it. */
+    /**
+     * A link's HELLO at [address] named [nodeId]: a read of the address whose payload named that node is vouched for,
+     * and its charge is refunded. Once per charge (the charge goes), and a no-op once it has aged out of the window or
+     * when the HELLO names another node. Answers whether a charge was refunded.
+     */
     @Synchronized
-    fun cancel() {
-        current = null
+    fun confirmed(
+        address: String,
+        nodeId: String,
+        now: Long,
+    ): Boolean {
+        prune(now)
+        val charge = charged.lastOrNull { it.address == address && it.nodeId == nodeId } ?: return false
+        return charged.remove(charge)
     }
 
     /**
-     * Forgets what [address] served, and any wait before its next read: a dial to it failed, or the radio lost it. A
-     * read of it in progress runs on, since it is fetching the payload afresh.
+     * Ends the read in progress without learning anything, without a wait and without a charge: the radio went down
+     * under it. A dial said to be waiting goes with it, since the connect loop says so again on its next pass.
+     */
+    @Synchronized
+    fun cancel() {
+        current = null
+        dialWaiting = false
+    }
+
+    /**
+     * Forgets what [address] served, and any wait before its next read: a dial to it failed, a HELLO named another
+     * node, or it went quiet. A read of it in progress runs on, since it is fetching the payload afresh. Nothing is
+     * charged here: the re-read a forget makes due is charged when it ends. A charge of the address's earlier read
+     * stays, and ages out of the window if no link confirms it.
      */
     @Synchronized
     fun forget(address: String) {
         payloads.remove(address)
         retryAt.remove(address)
+    }
+
+    // Drops the charges older than the budget's window. A filter, not a pop from the front: the elapsed time a read's
+    // end is stamped with is read before the lock, so the times need not arrive in order.
+    private fun prune(now: Long) {
+        charged.removeAll { now - it.at >= configuration.budgetWindowMs }
     }
 
     // Access-ordered, so a payload read on every advert stays and a rotated-away address ages out first.
@@ -168,6 +249,8 @@ internal class GattPayloads(
         const val STRANGER_RETRY_MS = 600_000L
         const val QUIET_MS = 60_000L
         const val MAX_ADDRESSES = 64
+        const val BUDGET_READS = 12
+        const val BUDGET_WINDOW_MS = 600_000L
 
         private const val INITIAL_CAPACITY = 16
         private const val LOAD_FACTOR = 0.75f

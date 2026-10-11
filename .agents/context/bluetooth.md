@@ -125,7 +125,12 @@ Bluetooth-adjacent routing that stays in `AGENTS.md`, because another subsystem 
   READ ADR 2026-09.kwq2 (companion change A3; knit-ios ADR 2026-09.xzpt) and its section in
   `.agents/context/mesh-transport.md`. A foreground iPhone is found by reading its GATT payload and dialed by the
   unchanged rule (larger id dials); `GattPayloads` is the iOS pacing line for line (one read at a time, 12 s,
-  30 s / 10 min waits) plus a 64-address LRU, and a payload lives until one of the contract's three rules forgets it: a
+  30 s / 10 min waits) plus two Android additions: a 64-address LRU, and a budget across addresses with a yield to a
+  ripe dial (the 2026-10-11 amendment, #154: at most 12 charged reads per 10 min; every read that ends is charged,
+  a payload read included, because the payload is unauthenticated; only a link's HELLO at the address naming the
+  payload's node refunds it, once (`GattPayloads.confirmed` in `registerLink`); a cancel is free and no forget is
+  charged; and no new read while the connect loop has a dial it can make, `DialPlan.dialWaiting` over promoted peers
+  with an address). A payload lives until one of the contract's three rules forgets it: a
   dial failing before its channel opens (never on HANDSHAKE), a HELLO on a link to the address naming another node,
   or 60 s of scanning unheard with no link up. The flag is set only while the reader runs — one build switch gates filter, reader and flag, on in
   release since 2026-10-08, the trial still owed. A1 (shzv) stays whole: it is the fallback that makes a clear flag safe.

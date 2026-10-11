@@ -491,8 +491,15 @@ characteristic `848eedcd-a2e3-4fb2-86f9-e2c80821a497` (`DoorbellPolicy.PAYLOAD_U
 - **`onScanResult` splits.** Service data → `sight`, as always. A UUID-only advert → the cached payload for its
   address, sighted at this advert's RSSI; else a read launched on the transport's scope, with no scan wake.
 - **`GattPayloads` paces the reads**, line for line with iOS: one at a time, 12 s each, 30 s after a failure, 10
-  min after a stranger (no service, no characteristic, a value under 23 B); `cancel()` on radio stop; at most 64
-  addresses, LRU (an iPhone's address rotates).
+  min after a stranger (no service, no characteristic, a value under 23 B); `cancel()` on radio stop. Two Android
+  additions: at most 64 addresses, LRU (an iPhone's address rotates); and a budget across addresses (kwq2's
+  2026-10-11 amendment, #154). At most 12 charged reads run in any 10 min of the elapsed clock. Every read that ends
+  is charged, a payload read included: the payload is unauthenticated, and a forger naming a large id is never
+  dialed. A link's HELLO at the address naming the payload's node refunds that read once (`GattPayloads.confirmed`,
+  from `registerLink`); an unrefunded charge ages out, which is the cost to an iPhone read but never linked (link
+  budget full, sorting above us, a quiet forget) or one at the edge of range. A cancel is free and no forget is charged. While the
+  connect loop has a dial it can make (`GattPayloads.yieldTo`, `DialPlan.dialWaiting`), no new read starts, so a
+  dial waits for at most the one read in flight.
 - **A payload lives until one of three rules forgets its address** (the contract's payload lifetime): a dial to it
   fails before its channel opens (never on HANDSHAKE); a HELLO on a link to it, accepted or the reply to ours, names
   another node; or it goes 60 s of scanning unheard with no link up (`GattPayloads.scanned`, fed each scan window).
@@ -511,7 +518,8 @@ during iOS's PSM-change service swap is a 10-minute stranger, kept line for line
 cannot be sighted, and one below a flagged phone waits for a dial that can't come (free until iOS gains background
 discovery) — once linked, though, it keeps its link and its re-dial gets in (AND-3, above); an identity change at an address that never goes quiet, new node below a flagged phone and old above,
 keeps the old sighting until the address rotates or goes quiet. Oracle: `bt gatt read <addr> → <id>` /
-`failed (<phase>)` / `stranger (<phase>)` and `bt gatt forget <addr> (dial|hello <id>|quiet)` at info, `bt gatt reading <addr>` at debug, `gattPayloads=`/`gattReads=` on `bt state`. Tests:
+`failed (<phase>)` / `stranger (<phase>)` and `bt gatt forget <addr> (dial|hello <id>|quiet)` at info, `bt gatt reading <addr>` at debug, `gattPayloads=`/`gattReads=`/`gattBudget=` on `bt state`, `bt gatt budget spent (…)` / `bt gatt budget free` per
+edge, `bt gatt confirmed <addr> → <id>` at debug. Tests:
 `GattPayloadsTest`, `BleAdvertPayloadTest`, `DoorbellPolicyTest`; the reader is device-verified only.
 
 A debug build can cap the link budget below `PromotionConfig.DEFAULT_MAX_LINKS` (6) from Diagnostics or
