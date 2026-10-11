@@ -73,6 +73,8 @@ import app.getknit.knit.ui.share.ShareInbox
 import app.getknit.knit.ui.share.ShareTargetScreen
 import app.getknit.knit.ui.theme.KnitMotion
 import app.getknit.knit.ui.theme.LocalReduceMotion
+import app.getknit.knit.ui.whatsnew.WhatsNew
+import app.getknit.knit.ui.whatsnew.WhatsNewScreen
 import app.getknit.knit.ui.yourmesh.YourMeshScreen
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.first
@@ -103,6 +105,7 @@ private object Routes {
     const val SEARCH = "search"
     const val ABOUT = "about"
     const val LICENSES = "licenses"
+    const val WHATS_NEW = "whatsNew"
 
     // Backup and restore; `restore=true` is the onboarding door, which shows the restore half alone.
     const val BACKUP = "backup?restore={restore}"
@@ -390,6 +393,7 @@ fun KnitApp(startRoute: String? = null) {
                 onOpenMessageRequests = { navController.navigate(Routes.MESSAGE_REQUESTS) },
                 onOpenDonate = { navController.navigate(Routes.DONATE) },
                 onOpenAddContact = { navController.navigate(Routes.ADD_CONTACT) },
+                onOpenWhatsNew = { navController.navigate(Routes.WHATS_NEW) },
             )
         }
         composable(Routes.CONTACTS) {
@@ -528,7 +532,15 @@ fun KnitApp(startRoute: String? = null) {
                 onOpenLicenses = { navController.navigate(Routes.LICENSES) },
                 onOpenBackup = { navController.navigate(Routes.backup()) },
                 onOpenBlockedUsers = { navController.navigate(Routes.BLOCKED_USERS) },
+                onOpenWhatsNew = { navController.navigate(Routes.WHATS_NEW) },
             )
+        }
+        composable(Routes.WHATS_NEW) {
+            // Reading the screen reads the newest announcement, whichever door it came through.
+            val settings = koinInject<SettingsStore>()
+            LaunchedEffect(Unit) { WhatsNew.latest?.let { settings.markWhatsNewSeen(it.id) } }
+            val context = LocalContext.current
+            WhatsNewScreen(onBack = { navController.popBackStack() }, onOpenUrl = { openUrl(context, it) })
         }
         composable(Routes.PROFILE) {
             ProfileScreen(onBack = { navController.popBackStack() })

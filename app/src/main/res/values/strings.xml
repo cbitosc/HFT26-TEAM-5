@@ -504,6 +504,23 @@
     <string name="chat_list_hint_body">Messages hop from phone to phone — no internet needed. Say hello in Nearby to reach everyone in range, or add a contact to message one person directly.</string>
     <string name="chat_list_hint_nearby">Say hello</string>
     <string name="chat_list_hint_add_contact">Add a contact</string>
+    <!-- What's New (ui/whatsnew/WhatsNew.kt): the chat list's card, the screen, and one block per announcement. -->
+    <string name="whats_new_title">What\'s new</string>
+    <string name="whats_new_card_eyebrow">New in Knit %1$s</string>
+    <string name="whats_new_card_open">See what\'s new</string>
+    <string name="whats_new_card_dismiss">Dismiss what\'s new</string>
+    <string name="whats_new_version">Knit %1$s</string>
+    <string name="whats_new_full_changelog">Full %1$s changelog on whatsnew.fyi</string>
+    <string name="whats_new_2_9_headline">Farther Bluetooth, and progress on incoming photos</string>
+    <string name="whats_new_2_9_summary">Phones connect from farther apart, and incoming photos show their progress.</string>
+    <string name="whats_new_2_9_range_title">Longer Bluetooth range</string>
+    <string name="whats_new_2_9_range_body">Phones now find each other over Bluetooth from farther apart. Near the edge of range, a connection switches to Bluetooth\'s long-range mode to stay up. Both phones need that mode, so iPhones and phones without it connect as before.</string>
+    <string name="whats_new_2_9_progress_title">See a photo arriving</string>
+    <string name="whats_new_2_9_progress_body">Photos, voice messages and files from a nearby phone show a ring that fills as they arrive, so you can tell slow from stuck.</string>
+    <string name="whats_new_2_9_filter_title">You decide what\'s hidden</string>
+    <string name="whats_new_2_9_filter_body">Direct messages and groups are no longer screened when they\'re sent. With Content filtering on, flagged text and pictures you receive stay hidden until you tap them. Posts to the Nearby and Meshtastic rooms are still screened before they go out.</string>
+    <string name="whats_new_2_9_field_log_title">Help tune Knit with a field log</string>
+    <string name="whats_new_2_9_field_log_body">Turn on the field log in Diagnostics to record three days of how your phone\'s radios behaved, with no names, messages or ids. It stays on your phone unless you share it.</string>
     <string name="chat_list_preview_photo">📷 Photo</string>
     <string name="chat_list_preview_gif">🎞️ GIF</string>
     <string name="chat_list_preview_voice">🎤 Voice message</string>
@@ -918,6 +935,7 @@
     <string name="backup_problem_io">the file couldn\'t be read or written</string>
     <string name="onboarding_restore">Restore from a backup</string>
 
+    <string name="settings_menu_whats_new">What\'s new</string>
     <string name="settings_menu_about">About Knit</string>
     <string name="settings_menu_licenses">Open-source licenses</string>
     <string name="about_title">About Knit</string>

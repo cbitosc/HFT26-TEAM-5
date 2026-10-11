@@ -377,6 +377,17 @@ class SettingsStore(
      */
     override val cloneDismissedAt: Flow<Long> = dataStore.data.map { it[KEY_CLONE_DISMISSED_AT] ?: 0L }
 
+    /** What this person has seen of the What's New announcements — see [WhatsNewRecord]. */
+    val whatsNewRecord: Flow<WhatsNewRecord> =
+        dataStore.data.map {
+            WhatsNewRecord(
+                seenId = it[KEY_WHATS_NEW_SEEN],
+                shownId = it[KEY_WHATS_NEW_SHOWN],
+                shownAt = it[KEY_WHATS_NEW_SHOWN_AT] ?: 0L,
+                opens = it[KEY_WHATS_NEW_OPENS] ?: 0,
+            )
+        }
+
     /**
      * Whether the user has dismissed the Nearby room's "never sent over the Internet" notice. Sticky by
      * design: the notice states a permanent structural fact (the room is not scope-eligible, spec §4.4),
@@ -872,6 +883,28 @@ class SettingsStore(
     /** Hides the room's relay notice for good. See [relayRoomNoticeDismissed]; there is no un-dismiss. */
     suspend fun dismissRelayRoomNotice() = dataStore.edit { it[KEY_RELAY_ROOM_NOTICE_DISMISSED] = true }
 
+    /** The user closed the What's New card or opened the screen while [id] was the newest announcement. */
+    suspend fun markWhatsNewSeen(id: String) = dataStore.edit { it[KEY_WHATS_NEW_SEEN] = id }
+
+    /**
+     * One visit to the chat list while [id] is the newest announcement: the first stamps when the card went
+     * up, every one counts toward its retirement. One edit, so two visits cannot lose a count, and a no-op
+     * once [id] is seen.
+     */
+    suspend fun noteWhatsNewOpen(
+        id: String,
+        now: Long,
+    ) = dataStore.edit {
+        if (it[KEY_WHATS_NEW_SEEN] == id) return@edit
+        if (it[KEY_WHATS_NEW_SHOWN] == id) {
+            it[KEY_WHATS_NEW_OPENS] = (it[KEY_WHATS_NEW_OPENS] ?: 0) + 1
+        } else {
+            it[KEY_WHATS_NEW_SHOWN] = id
+            it[KEY_WHATS_NEW_SHOWN_AT] = now
+            it[KEY_WHATS_NEW_OPENS] = 1
+        }
+    }
+
     /** Parks or un-parks one configured relay. See [disabledSpoolUrls]; the plane's own switch is [setSpoolEnabled]. */
     suspend fun setSpoolUrlEnabled(
         url: String,
@@ -987,6 +1020,10 @@ class SettingsStore(
         val KEY_CLONE_SEEN_AT = longPreferencesKey("clone_seen_at")
         val KEY_CLONE_DISMISSED_AT = longPreferencesKey("clone_dismissed_at")
         val KEY_RELAY_ROOM_NOTICE_DISMISSED = booleanPreferencesKey("relay_room_notice_dismissed")
+        val KEY_WHATS_NEW_SEEN = stringPreferencesKey("whats_new_seen")
+        val KEY_WHATS_NEW_SHOWN = stringPreferencesKey("whats_new_shown")
+        val KEY_WHATS_NEW_SHOWN_AT = longPreferencesKey("whats_new_shown_at")
+        val KEY_WHATS_NEW_OPENS = intPreferencesKey("whats_new_opens")
         val KEY_LORA_ENABLED = booleanPreferencesKey("lora_enabled")
         val KEY_LORA_DM_ENABLED = booleanPreferencesKey("lora_dm_enabled")
         val KEY_LORA_BRIDGE_ENABLED = booleanPreferencesKey("lora_bridge_enabled")

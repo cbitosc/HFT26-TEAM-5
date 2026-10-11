@@ -20,6 +20,12 @@ const val ISSUES_URL = "https://github.com/getknit/knit/issues"
 /** The project site — the About screen's Website row. */
 const val WEBSITE_URL = "https://getknit.app"
 
+/**
+ * A release's notes on What's New (whatsnew.fyi), which indexes `CHANGELOG.md`; the permalink is derived from
+ * the full version ("2.9.0"), so it is right before the release is published and never needs looking up.
+ */
+fun releaseNotesUrl(version: String): String = "https://whatsnew.fyi/product/knit/releases/$version"
+
 /** Opens [url] in the user's browser. Swallows ActivityNotFoundException if nothing can handle it. */
 fun openUrl(
     context: Context,

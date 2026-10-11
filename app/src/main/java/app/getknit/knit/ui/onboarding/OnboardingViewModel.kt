@@ -8,6 +8,7 @@ import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.identity.Alias
 import app.getknit.knit.identity.Identity
 import app.getknit.knit.normalizeSingleLine
+import app.getknit.knit.ui.whatsnew.WhatsNew
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -111,6 +112,8 @@ class OnboardingViewModel(
                 // own-profile frame is built from whatever is stored, which is exactly this.
                 if (changed) settings.setDisplayName(normalized)
                 settings.markOnboardingSeen()
+                // A new install has nothing to compare against, so it starts caught up on What's New.
+                WhatsNew.latest?.let { settings.markWhatsNewSeen(it.id) }
             }
         }
     }

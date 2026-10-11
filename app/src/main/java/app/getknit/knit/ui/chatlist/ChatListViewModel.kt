@@ -32,6 +32,9 @@ import app.getknit.knit.transfer.TransferState
 import app.getknit.knit.ui.ConversationTable
 import app.getknit.knit.ui.chat.DeliveryStatus
 import app.getknit.knit.ui.observeConversationTable
+import app.getknit.knit.ui.whatsnew.WhatsNew
+import app.getknit.knit.ui.whatsnew.WhatsNewEntry
+import app.getknit.knit.ui.whatsnew.WhatsNewPolicy
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -335,6 +338,28 @@ class ChatListViewModel(
             Snapshot(table, inputs, directory, lastReadAll, mesh)
         }.mapLatest { snapshot -> ChatListAssembler(context, snapshot).build().withUnread(snapshot) }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ChatListUiState(isLoading = true))
+
+    /**
+     * The announcement the list's card offers, or null ([WhatsNewPolicy]). Its own flow rather than a field of
+     * [state]: it changes once in a release, and the list's combine has no arity to spare for it.
+     */
+    val whatsNew: StateFlow<WhatsNewEntry?> =
+        settings.whatsNewRecord
+            .map { WhatsNewPolicy.cardFor(WhatsNew.latest, it, System.currentTimeMillis()) }
+            .distinctUntilChanged()
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    init {
+        // One visit to the list: the card's clock starts on the first and retires it after enough of them.
+        WhatsNew.latest?.let { latest ->
+            viewModelScope.launch { settings.noteWhatsNewOpen(latest.id, System.currentTimeMillis()) }
+        }
+    }
+
+    /** The card's close button, and its "See what's new" before the route opens: either way it is read. */
+    fun dismissWhatsNew() {
+        WhatsNew.latest?.let { latest -> viewModelScope.launch { settings.markWhatsNewSeen(latest.id) } }
+    }
 
     /**
      * Fills each drawn row's unread badge from one indexed count per thread: ordinary messages newer than
