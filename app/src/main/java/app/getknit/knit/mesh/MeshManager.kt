@@ -2,10 +2,10 @@ package app.getknit.knit.mesh
 
 import android.util.Log
 import app.getknit.knit.TextLimits
-import app.getknit.knit.clampToUtf16
 import app.getknit.knit.call.CallSignals
 import app.getknit.knit.call.TurnServer
 import app.getknit.knit.call.TurnSource
+import app.getknit.knit.clampToUtf16
 import app.getknit.knit.data.AttachmentIdentities
 import app.getknit.knit.data.AttachmentStore
 import app.getknit.knit.data.BlobRepository
