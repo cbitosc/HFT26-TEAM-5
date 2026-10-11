@@ -114,6 +114,9 @@ import app.getknit.knit.ui.signout.SignOutDialog
 import app.getknit.knit.ui.theme.KnitMotion
 import app.getknit.knit.ui.util.compactTimeAgo
 import app.getknit.knit.ui.util.rememberCurrentTimeMillis
+import app.getknit.knit.ui.whatsnew.WhatsNew
+import app.getknit.knit.ui.whatsnew.WhatsNewCard
+import app.getknit.knit.ui.whatsnew.WhatsNewEntry
 import kotlinx.coroutines.launch
 import org.koin.androidx.compose.koinViewModel
 
@@ -128,9 +131,11 @@ fun ChatListScreen(
     onOpenMessageRequests: () -> Unit,
     onOpenDonate: () -> Unit,
     onOpenAddContact: () -> Unit,
+    onOpenWhatsNew: () -> Unit = {},
     viewModel: ChatListViewModel = koinViewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val whatsNew by viewModel.whatsNew.collectAsStateWithLifecycle()
     var showShareApp by remember { mutableStateOf(false) }
     // The clone banner's "Sign out here": one confirmation, then the wipe (ui/signout/SignOut).
     var showSignOut by remember { mutableStateOf(false) }
@@ -163,6 +168,12 @@ fun ChatListScreen(
         onResumeMesh = viewModel::resumeMesh,
         onStartMesh = viewModel::startMesh,
         onDeleteConversation = viewModel::deleteConversation,
+        whatsNew = whatsNew,
+        onOpenWhatsNew = {
+            viewModel.dismissWhatsNew()
+            onOpenWhatsNew()
+        },
+        onDismissWhatsNew = viewModel::dismissWhatsNew,
     )
 
     if (showSignOut) {
@@ -241,6 +252,11 @@ internal fun ChatListScreenContent(
     onResumeMesh: () -> Unit,
     onStartMesh: () -> Unit,
     onDeleteConversation: (conversationId: String) -> Unit,
+    // The announcement card ([WhatsNewCard]), or null; defaulted so the previews and tests that predate it
+    // read as a list with nothing to announce.
+    whatsNew: WhatsNewEntry? = null,
+    onOpenWhatsNew: () -> Unit = {},
+    onDismissWhatsNew: () -> Unit = {},
 ) {
     var menuOpen by remember { mutableStateOf(false) }
 
@@ -427,6 +443,18 @@ internal fun ChatListScreenContent(
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(vertical = 4.dp),
                     ) {
+                        // At the top, where a long list cannot bury it; never beside the getting-started card,
+                        // which is the only news a phone with nothing on it needs.
+                        if (whatsNew != null && !state.showGettingStarted) {
+                            item(key = "whats_new") {
+                                WhatsNewCard(
+                                    entry = whatsNew,
+                                    onOpen = onOpenWhatsNew,
+                                    onDismiss = onDismissWhatsNew,
+                                    modifier = Modifier.animateItem(placementSpec = KnitMotion.spatial()),
+                                )
+                            }
+                        }
                         items(state.conversations, key = { it.id }) { row ->
                             ConversationListItem(
                                 row = row,
@@ -1189,5 +1217,38 @@ fun ChatListScreenQuietPreview() =
             onResumeMesh = {},
             onStartMesh = {},
             onDeleteConversation = {},
+        )
+    }
+
+@Preview(showBackground = true)
+@Composable
+fun ChatListScreenWhatsNewPreview() =
+    KnitPreview {
+        ChatListScreenContent(
+            state =
+                ChatListUiState(
+                    conversations = previewConversations(),
+                    neighborCount = 3,
+                    transportHealth = TransportHealth.Healthy,
+                ),
+            now = PREVIEW_NOW,
+            onOpenConversation = {},
+            onSearch = {},
+            onNewMessage = {},
+            onOpenSettings = {},
+            onOpenYourMesh = {},
+            onOpenDiagnostics = {},
+            onOpenMessageRequests = {},
+            onOpenDonate = {},
+            onOpenAddContact = {},
+            onShareApp = {},
+            onOpenRadioSettings = {},
+            onDismissRadioWarning = {},
+            onSignOut = {},
+            onDismissClone = {},
+            onResumeMesh = {},
+            onStartMesh = {},
+            onDeleteConversation = {},
+            whatsNew = WhatsNew.entries.first(),
         )
     }

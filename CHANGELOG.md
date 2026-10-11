@@ -22,6 +22,8 @@ document:
 
 ### Added
 
+- When a release adds features worth knowing about, a card at the top of your chats now says what they are. It
+  goes away when you close it or after a week, and Settings' menu keeps every past note under What's new.
 - Diagnostics now lists people whose messages reach you through another nearby phone under Reachable
   indirectly, along with the phone that passed them on. Their profile says Reachable indirectly too, where it
   used to say Offline.

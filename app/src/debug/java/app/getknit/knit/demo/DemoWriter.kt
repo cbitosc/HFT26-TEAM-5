@@ -28,6 +28,7 @@ import app.getknit.knit.mesh.protocol.FrameType
 import app.getknit.knit.mesh.protocol.LinkPreviewBlob
 import app.getknit.knit.mesh.protocol.Mention
 import app.getknit.knit.mesh.protocol.ReplyRef
+import app.getknit.knit.ui.whatsnew.WhatsNew
 import kotlinx.coroutines.flow.first
 import org.koin.core.Koin
 import java.security.MessageDigest
@@ -105,6 +106,8 @@ class DemoWriter(
         // real user clears once and never sees again, so leaving it up puts a transient state across the top
         // of every capture of the room — and it is the one shot where the messages are the subject.
         settings.dismissRelayRoomNotice()
+        // What's New, already read, for the same reason: a store capture of the chat list is about the chats.
+        WhatsNew.latest?.let { settings.markWhatsNewSeen(it.id) }
     }
 
     /** Writes the full Nearby history + a read watermark leaving the latest message unread (a "1" badge). */

@@ -417,4 +417,20 @@ class SettingsStoreTest {
             store.setDebugBleLinkCap(null)
             assertNull(store.debugBleLinkCap.first())
         }
+
+    @Test
+    fun `what's new visits stamp once, count, and stop once read`() =
+        runTest {
+            val store = newStore()
+            assertEquals(WhatsNewRecord(), store.whatsNewRecord.first())
+            store.noteWhatsNewOpen("a", now = 100L)
+            store.noteWhatsNewOpen("a", now = 200L)
+            assertEquals(WhatsNewRecord(shownId = "a", shownAt = 100L, opens = 2), store.whatsNewRecord.first())
+            // A newer announcement restarts the card's clock.
+            store.noteWhatsNewOpen("b", now = 300L)
+            assertEquals(WhatsNewRecord(shownId = "b", shownAt = 300L, opens = 1), store.whatsNewRecord.first())
+            store.markWhatsNewSeen("b")
+            store.noteWhatsNewOpen("b", now = 400L)
+            assertEquals(WhatsNewRecord("b", "b", 300L, 1), store.whatsNewRecord.first())
+        }
 }

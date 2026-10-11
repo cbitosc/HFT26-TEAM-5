@@ -9,6 +9,7 @@ import app.getknit.knit.ui.chatlist.ChatListScreenLoadingPreview
 import app.getknit.knit.ui.chatlist.ChatListScreenPopulatedPreview
 import app.getknit.knit.ui.chatlist.ChatListScreenQuietPreview
 import app.getknit.knit.ui.chatlist.ChatListScreenRadioWarningPreview
+import app.getknit.knit.ui.chatlist.ChatListScreenWhatsNewPreview
 import app.getknit.knit.ui.chatlist.CloneBannerPreview
 import app.getknit.knit.ui.chatlist.ConversationListItemDeliveredPreview
 import app.getknit.knit.ui.chatlist.ConversationListItemDmPreview
@@ -92,6 +93,11 @@ fun ChatListScreenFirstRun() = ChatListScreenFirstRunPreview()
 @ScreenShots
 @Composable
 fun ChatListScreenQuiet() = ChatListScreenQuietPreview()
+
+@PreviewTest
+@ScreenShots
+@Composable
+fun ChatListScreenWhatsNew() = ChatListScreenWhatsNewPreview()
 
 @PreviewTest
 @ComponentShots

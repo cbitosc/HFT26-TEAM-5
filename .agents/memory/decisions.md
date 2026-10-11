@@ -236,3 +236,4 @@ carries; never renumber an old one.
 | [2026-10.wtyc](decisions/2026-10-wtyc-a-cut-attachment-resumes-from-the-bytes-the-receiver-kept.md) | A cut attachment resumes from the bytes the receiver kept | mesh, attachments, wire, blob-exchange |
 | [2026-10.y9qh](decisions/2026-10-y9qh-a-receiver-shows-how-far-an-incoming-attachment-has-got.md) | A receiver shows how far an incoming attachment has got | mesh, attachments, wire, ui |
 | [2026-10.yvn6](decisions/2026-10-yvn6-ble-links-step-down-to-the-coded-phy-at-range.md) | BLE links step down to the Coded PHY at range | ble, mesh, power |
+| [2026-10.zeja](decisions/2026-10-zeja-what-s-new.md) | What's New: a chat-list card, bundled announcements | ui, onboarding |

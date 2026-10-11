@@ -21,6 +21,7 @@ import app.getknit.knit.mesh.TransportHealth
 import app.getknit.knit.mesh.pausedUntilLabel
 import app.getknit.knit.ui.chat.DeliveryStatus
 import app.getknit.knit.ui.theme.KnitTheme
+import app.getknit.knit.ui.whatsnew.WhatsNew
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -591,5 +592,65 @@ class ChatListScreenContentTest {
         compose.onNodeWithText("Clear Nearby messages?").assertIsDisplayed()
         compose.onNodeWithText("Delete").performClick()
         assertEquals(Conversations.NEARBY, deleted)
+    }
+
+    private fun setWhatsNew(
+        state: ChatListUiState,
+        onOpen: () -> Unit = {},
+        onDismiss: () -> Unit = {},
+    ) = compose.setContent {
+        KnitTheme {
+            ChatListScreenContent(
+                state = state,
+                now = now,
+                onOpenConversation = {},
+                onSearch = {},
+                onNewMessage = {},
+                onOpenSettings = {},
+                onOpenYourMesh = {},
+                onOpenDiagnostics = {},
+                onOpenMessageRequests = {},
+                onOpenDonate = {},
+                onOpenAddContact = {},
+                onShareApp = {},
+                onOpenRadioSettings = {},
+                onDismissRadioWarning = {},
+                onSignOut = {},
+                onDismissClone = {},
+                onResumeMesh = {},
+                onStartMesh = {},
+                onDeleteConversation = {},
+                whatsNew = WhatsNew.entries.first(),
+                onOpenWhatsNew = onOpen,
+                onDismissWhatsNew = onDismiss,
+            )
+        }
+    }
+
+    /** The announcement leads the list, and both its buttons reach the screen's callbacks. */
+    @Test
+    fun theWhatsNewCardLeadsTheListAndRoutesBothButtons() {
+        var opened = 0
+        var dismissed = 0
+        setWhatsNew(
+            ChatListUiState(conversations = listOf(row("nearby", "Nearby", isRoom = true), row("dm-1", "Ada"))),
+            onOpen = { opened++ },
+            onDismiss = { dismissed++ },
+        )
+        compose.onNodeWithTag("chatlist_whats_new").assertIsDisplayed()
+        compose.onNodeWithTag("chatlist_whats_new_open").performClick()
+        compose.onNodeWithTag("chatlist_whats_new_dismiss").performClick()
+        assertEquals(1, opened)
+        assertEquals(1, dismissed)
+    }
+
+    /** A phone with nothing on it gets the getting-started card alone. */
+    @Test
+    fun theWhatsNewCardStepsAsideForGettingStarted() {
+        setWhatsNew(
+            ChatListUiState(conversations = listOf(row("nearby", "Nearby", isRoom = true)), showGettingStarted = true),
+        )
+        compose.onNodeWithTag("chatlist_hint").assertIsDisplayed()
+        compose.onNodeWithTag("chatlist_whats_new").assertDoesNotExist()
     }
 }
