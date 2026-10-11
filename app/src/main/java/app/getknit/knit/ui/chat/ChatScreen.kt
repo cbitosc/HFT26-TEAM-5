@@ -3462,9 +3462,10 @@ private fun TypingIndicatorRow(
  * The text is composed here rather than stored, so a notice is localized per device, costs no wire
  * bytes, and re-renders against live state. [ChatRow.senderName] is the resolved peer label, so a
  * colliding name arrives already disambiguated as "Alice (JoyfulFerret)" with no work here. A peer rename
- * is the one line that prefers its own snapshot: it stores both names ([PeerRename]) so a second rename
- * reads as a progression ("Old is now Mid", then "Mid is now New") instead of two lines that both end in
- * the newest name; only a row from before the new name was stored still ends in the live label.
+ * and a peer's photo change are the lines that prefer their own snapshot: a rename stores both names
+ * ([PeerRename]) so a second rename reads as a progression ("Old is now Mid", then "Mid is now New") instead
+ * of two lines that both end in the newest name, and a photo line stores the name the peer had then, so it
+ * agrees with the rename lines around it; only a row from before the snapshot was stored uses the live label.
  *
  * A kind this build doesn't know falls through to null and draws as a bubble. That is the deliberate
  * degradation: a row written by a newer build shows up looking odd rather than disappearing, which is
@@ -3489,8 +3490,10 @@ private fun statusNoticeText(row: ChatRow): String? =
             stringResource(R.string.chat_notice_peer_renamed, rename.from, rename.to ?: row.senderName)
         }
 
+        // body is the name the peer went by when they changed it, so the line agrees with the rename lines
+        // around it; an older row (or a blank name) falls back to the live label.
         MessageEntity.KIND_PEER_AVATAR -> {
-            stringResource(R.string.chat_notice_peer_avatar, row.senderName)
+            stringResource(R.string.chat_notice_peer_avatar, row.body.ifBlank { row.senderName })
         }
 
         // body is the NEW group name — the old one is gone from live state by the time this renders.

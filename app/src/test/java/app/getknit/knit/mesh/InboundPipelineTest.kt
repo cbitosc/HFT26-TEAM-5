@@ -1186,7 +1186,8 @@ class InboundPipelineTest {
 
             val notice = rig.msgMap.values.single { it.kind == MessageEntity.KIND_PEER_AVATAR }
             assertEquals(alice.nodeId, notice.conversationId)
-            assertEquals("", notice.body)
+            // The name the profile carried, so a later rename cannot rewrite who this line says changed it.
+            assertEquals("Peer", notice.body)
         }
 
     @Test

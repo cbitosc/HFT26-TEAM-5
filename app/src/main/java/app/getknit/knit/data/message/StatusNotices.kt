@@ -96,8 +96,13 @@ object StatusNotices {
         )
 
     /**
-     * [MessageEntity.KIND_PEER_AVATAR] — [peerId] changed their avatar to [avatarHash], as of profile
-     * [version].
+     * [MessageEntity.KIND_PEER_AVATAR] — [peerId], then called [name], changed their avatar to [avatarHash],
+     * as of profile [version].
+     *
+     * The body stores [name] — the one the same profile carried — for the reason [peerRenamed] stores both of
+     * its names: drawn from the live label, every photo line before a rename read as the newest name while the
+     * rename line between them still said the old one. A blank [name], and a row written before the name was
+     * stored, render the live label.
      *
      * Keyed on the **hash**, as [groupPhotoChanged] is, and written first-write-wins. A hash is only
      * adopted once its blob has landed, so "the stored hash differs from the advertised one" stays true
@@ -113,6 +118,7 @@ object StatusNotices {
      */
     fun peerAvatarChanged(
         peerId: String,
+        name: String,
         avatarHash: String,
         version: Long,
     ): MessageEntity =
@@ -122,6 +128,7 @@ object StatusNotices {
             conversationId = peerId,
             sentAt = version,
             kind = MessageEntity.KIND_PEER_AVATAR,
+            body = name,
         )
 
     /**
