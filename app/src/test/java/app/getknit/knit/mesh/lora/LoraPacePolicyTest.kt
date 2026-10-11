@@ -523,4 +523,118 @@ class LoraPacePolicyTest {
         assertEquals("fits", pace.take(now = 0L)?.label)
         assertEquals(0, pace.evictOversize(1))
     }
+
+    /** ADR 2026-10.a4pm: the re-offer lifts the bridge's queued copy of a frame onto LIVE, in place. */
+    @Test
+    fun anUnstartedCopyOnAnotherBucketIsUpgradedInPlace() {
+        val pace = LoraPacePolicy(minGapMs = 0)
+        pace.onQueueStatus(free = 16)
+        pace.enqueue(frame("room"))
+        pace.enqueue(OutboundFrame(listOf(byteArrayOf(1)), "bridge:x", FrameClass.DM, AirBucket.BRIDGE, supersedes = "frame:x"))
+        pace.enqueue(frame("room 2"))
+        val lifted = OutboundFrame(listOf(byteArrayOf(1)), "reoffer:x", FrameClass.DM, AirBucket.LIVE, supersedes = "frame:x")
+        assertTrue(pace.upgradeQueued(lifted))
+        assertEquals(3, pace.pending)
+        assertFalse("already on LIVE", pace.upgradeQueued(lifted))
+        assertFalse(
+            "never a downgrade",
+            pace.upgradeQueued(OutboundFrame(listOf(byteArrayOf(1)), "relayed", FrameClass.DM, AirBucket.BRIDGE, supersedes = "frame:x")),
+        )
+        assertFalse("nothing queued under that key", pace.upgradeQueued(OutboundFrame(listOf(byteArrayOf(1)), "y", supersedes = "frame:y")))
+        assertEquals("DM class drains first, as the copy it replaced would have", listOf("reoffer:x", "room", "room 2"), drain(pace))
+    }
+
+    /** feb2d5a4: a frame the board has taken part of finishes as it is — neither upgraded nor superseded. */
+    @Test
+    fun aPartSentCopyIsNeitherUpgradedNorSuperseded() {
+        val pace = LoraPacePolicy(minGapMs = 0)
+        pace.onQueueStatus(free = 16)
+        val started =
+            OutboundFrame(listOf(byteArrayOf(1), byteArrayOf(2)), "bridge:x", FrameClass.DM, AirBucket.BRIDGE, supersedes = "frame:x")
+        started.onPartSent()
+        pace.enqueue(started)
+        assertFalse(
+            pace.upgradeQueued(OutboundFrame(listOf(byteArrayOf(1)), "reoffer:x", FrameClass.DM, AirBucket.LIVE, supersedes = "frame:x")),
+        )
+        pace.enqueue(OutboundFrame(listOf(byteArrayOf(1)), "newer:x", FrameClass.DM, supersedes = "frame:x"))
+        assertEquals("the part-sent copy stayed", 0, pace.lastSuperseded)
+        assertEquals(2, pace.pending)
+    }
+
+    /** xdm2: a frame put back after a busy board is the one that was here, not a newer snapshot — it supersedes nothing. */
+    @Test
+    fun aRequeuedFrameSupersedesNothing() {
+        val pace = LoraPacePolicy(minGapMs = 0)
+        pace.onQueueStatus(free = 16)
+        pace.enqueue(frame("alice:v1", FrameClass.BOOTSTRAP, supersedes = "profile:alice"))
+        val taken = checkNotNull(pace.take(1_000_000L))
+        pace.enqueue(frame("alice:v2", FrameClass.BOOTSTRAP, supersedes = "profile:alice"))
+        assertEquals(LoraPacePolicy.Admission.ACCEPTED, pace.requeue(taken))
+        assertEquals("the newer profile survived the older one coming back", 0, pace.lastSuperseded)
+        assertEquals(setOf("alice:v1", "alice:v2"), drain(pace).toSet())
+    }
+
+    @Test
+    fun hasQueuedSeesAWaitingCopyByKey() {
+        val pace = LoraPacePolicy(minGapMs = 0)
+        assertFalse(pace.hasQueued("frame:x"))
+        pace.enqueue(frame("probe", FrameClass.DM, supersedes = "frame:x"))
+        assertTrue(pace.hasQueued("frame:x"))
+        assertFalse(pace.hasQueued("frame:y"))
+    }
+
+    /** A frame being written is off the queue but not gone: it still counts as queued until the pacer hears its end. */
+    @Test
+    fun anInFlightFrameStillCountsAsQueued() {
+        val pace = LoraPacePolicy(minGapMs = 0)
+        pace.onQueueStatus(free = 16)
+        pace.enqueue(OutboundFrame(listOf(byteArrayOf(1)), "probe", FrameClass.DM, supersedes = "frame:x"))
+        val taken = checkNotNull(pace.take(1_000_000L))
+        assertTrue("in flight", pace.hasQueued("frame:x"))
+        assertFalse(
+            "and not upgraded under the writer",
+            pace.upgradeQueued(OutboundFrame(listOf(byteArrayOf(1)), "r", FrameClass.DM, AirBucket.BRIDGE, supersedes = "frame:x")),
+        )
+        pace.requeue(taken) // the board was busy: back in the queue, still one copy
+        assertTrue(pace.hasQueued("frame:x"))
+        val again = checkNotNull(pace.take(2_000_000L))
+        pace.done(again)
+        assertFalse("sent: gone", pace.hasQueued("frame:x"))
+    }
+
+    @Test
+    fun aShedFrameIsHandedBackForTheCallerToAbandon() {
+        val pace = LoraPacePolicy(minGapMs = 0, queueCap = 1)
+        val room = frame("room")
+        pace.enqueue(room)
+        pace.enqueue(frame("dm", FrameClass.DM))
+        assertEquals(listOf(room), pace.drainShed())
+        assertTrue(pace.drainShed().isEmpty())
+    }
+
+    /** A queued copy that holds a probe window is never swapped out: the replacement would not carry the claim. */
+    @Test
+    fun aQueuedProbeIsNeverSwappedOut() {
+        val pace = LoraPacePolicy(minGapMs = 0)
+        val claim = checkNotNull(LoraDmProbe().claim("bob", now = 0))
+        pace.enqueue(
+            OutboundFrame(listOf(byteArrayOf(1)), "probe", FrameClass.DM, AirBucket.BRIDGE, supersedes = "frame:x", probe = claim),
+        )
+        assertFalse(
+            pace.upgradeQueued(OutboundFrame(listOf(byteArrayOf(1)), "reoffer:x", FrameClass.DM, AirBucket.LIVE, supersedes = "frame:x")),
+        )
+    }
+
+    /** A refused newcomer — enqueued or requeued — is handed back like a shed frame, so its caller can abandon it. */
+    @Test
+    fun aRefusedFrameIsHandedBackToo() {
+        val pace = LoraPacePolicy(minGapMs = 0, queueCap = 1)
+        pace.enqueue(frame("dm", FrameClass.DM))
+        val tick = frame("tick", FrameClass.TICK)
+        assertEquals(LoraPacePolicy.Admission.REFUSED, pace.enqueue(tick))
+        assertEquals(listOf(tick), pace.drainShed())
+        val requeued = frame("tick 2", FrameClass.TICK)
+        assertEquals(LoraPacePolicy.Admission.REFUSED, pace.requeue(requeued))
+        assertEquals(listOf(requeued), pace.drainShed())
+    }
 }

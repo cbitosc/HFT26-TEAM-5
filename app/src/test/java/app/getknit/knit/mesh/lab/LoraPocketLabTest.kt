@@ -2,9 +2,11 @@ package app.getknit.knit.mesh.lab
 
 import app.getknit.knit.data.message.Conversations
 import app.getknit.knit.data.message.DeliveryPlane
+import app.getknit.knit.mesh.PRESENCE_FRESH_MS
 import app.getknit.knit.mesh.StoreDigest
 import app.getknit.knit.mesh.lora.FakeMeshtasticAir
 import app.getknit.knit.mesh.lora.LoraGatewayPolicy.Role
+import app.getknit.knit.mesh.lora.LoraMeshTransport
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -233,14 +235,222 @@ class LoraPocketLabTest {
             val farBefore = alice.loraTx("far:chat")
             assertTrue(alice.sendDm(bob, "while your board was off"))
             val dm = alice.ownMessageId(alice.dmWith(bob), "while your board was off")
-            // As the empty-sky post above: an OFFER Bob's board aired before the loss can have the bridge air it instead.
+            // Live as the probe if Bob's board had gone quiet on Alice's (ADR 2026-10.a4pm), live as an ordinary DM if
+            // its hearing still lingers — or, as the empty-sky post above, from the bridge after an OFFER Bob's board
+            // aired before the loss. Into the empty sky whichever it was.
             assertTrue("the DM never left: ${alice.loraLog}", lab.tryAwait(1) { alice.loraAired(dm, "far:chat", farBefore) })
             air.lossy = { _, _ -> false }
 
-            assertTrue("the bridge never carried it", lab.tryAwait(3) { bob.decrypted(bob.dmWith(alice)).size })
+            // It lands: through the bridge's backfill, or through the re-offer once Alice hears Bob's board again.
+            assertTrue("the DM never landed", lab.tryAwait(3) { bob.decrypted(bob.dmWith(alice)).size })
             lab.assertConverged(listOf(alice, bob), atLeast = 3) { it.dmWith(if (it === alice) bob else alice) }
         }
 
+    /**
+     * The reach-gate scenarios' limits: a ✓✓ that comes back in a second rather than after DmAckCoalescer's 45 s,
+     * and no bridge, so the held DMs can only come by the first-hearing re-offer — the path under test.
+     */
+    private val reach = quick.copy(dmAckHoldMs = 1_000L, loraBridge = false, loraLingerSweepMs = 500L)
+
+    /**
+     * Alice and Bob, each with a board, meet over a link and exchange a DM each way, then go quiet for longer
+     * than the plane remembers a hearing (`REACHABLE_LINGER_MS`, 45 min — the calendar moves, as the field's
+     * afternoon would) and split. The unlink is what re-reads the heard set, so each is unheard on the other's
+     * board from that moment: the shape of two friends whose boards have not spoken all day.
+     */
+    private suspend fun quietPair(
+        air: FakeMeshtasticAir,
+        limits: LabLimits,
+    ): Pair<LabNode, LabNode> {
+        val alice = lab.node("alice", limits, air = air).apply { setDisplayName("Alice") }
+        val bob = lab.node("bob", limits, air = air).apply { setDisplayName("Bob") }
+        lab.link(alice, bob)
+        lab.awaitAcquainted(alice, bob)
+        assertTrue(alice.sendDm(bob, "hello"))
+        lab.await(1) { bob.decrypted(bob.dmWith(alice)).size }
+        assertTrue(bob.sendDm(alice, "hi"))
+        lab.assertConverged(listOf(alice, bob), atLeast = 2) { it.dmWith(if (it === alice) bob else alice) }
+        lab.awaitCustodyParity(alice, bob)
+        // Split first, then move the calendar: a relay copy still in its 0–150 ms jitter lands inside the router's
+        // 10-min SeenSet and is deduplicated, where landing after the jump it would be a re-delivery that mints a
+        // fresh ✓✓. The shortened linger sweep then has each board forget the other inside the await.
+        lab.unlink(alice, bob)
+        lab.clock.advance(LoraMeshTransport.REACHABLE_LINGER_MS + MINUTE)
+        lab.await(1) { if (alice.loraHears(bob) || bob.loraHears(alice)) 0 else 1 }
+        return alice to bob
+    }
+
+    /**
+     * ADR 2026-10.a4pm, end to end: a DM to a peer the board has not heard rides only as the window's one probe.
+     * Alice texts a quiet Bob three times. The first goes out as `far:chat`; the others wait in custody. Bob's
+     * board hears the probe, so Alice is heard there and his ✓✓ rides back; that makes Bob heard on Alice's
+     * board, and her first hearing of him re-offers what she held. The bridge is off ([reach]), so nothing else
+     * can carry it.
+     */
+    @Test
+    fun aDmToAQuietFarPeerProbesOnceAndTheRestLandOnItsTick() =
+        runBlocking {
+            val air = FakeMeshtasticAir()
+            val (alice, bob) = quietPair(air, reach)
+            val farBefore = alice.loraTx("far:chat")
+            val probesBefore = alice.metrics.lora().loraDmProbes
+            val heldBefore = alice.metrics.lora().loraUnheardHeld
+            val reofferedBefore = alice.metrics.lora().loraReoffered
+
+            listOf("are you up there", "it is windy", "bring a coat").forEach { assertTrue(alice.sendDm(bob, it)) }
+
+            lab.assertConverged(listOf(alice, bob), atLeast = 5) { it.dmWith(if (it === alice) bob else alice) }
+            val probes = alice.metrics.lora().loraDmProbes - probesBefore
+            val held = alice.metrics.lora().loraUnheardHeld - heldBefore
+            val live = alice.loraTx("far:chat") - farBefore
+            val reoffered = alice.metrics.lora().loraReoffered - reofferedBefore
+            assertEquals("exactly one probe: ${alice.loraLog}", 1L, probes)
+            // Each DM aired once, live or re-offered: held behind the probe, or live because Bob's ✓✓ had already
+            // made him heard when it was sent — and a DM held while that first hearing's re-offer was reading
+            // custody is re-offered by it all the same. Which, the interleaving picks; the sum it cannot.
+            assertEquals("each DM aired once: live=$live reoffered=$reoffered", 3L, live + reoffered)
+            assertTrue("the probe is the first thing aired: ${alice.loraLog}", live >= 1)
+            assertTrue("a held DM is never left behind: held=$held reoffered=$reoffered", held <= reoffered)
+        }
+
+    /**
+     * The cost side of the same rule: Bob's board is off (the air loses everything), and Alice texts him
+     * anyway. One probe per window reaches the air, not one per DM. Once the window has ended and Bob's board
+     * is back, the next DM probes again, his ✓✓ makes him heard, and the re-offer carries the backlog.
+     */
+    @Test
+    fun aDmToAnAbsentPeerSpendsOneProbePerWindow() =
+        runBlocking {
+            val air = FakeMeshtasticAir()
+            val (alice, bob) = quietPair(air, reach)
+            val farBefore = alice.loraTx("far:chat")
+            val probesBefore = alice.metrics.lora().loraDmProbes
+            val reofferedBefore = alice.metrics.lora().loraReoffered
+
+            val heldBefore = alice.metrics.lora().loraUnheardHeld
+            air.lossy = { _, _ -> true }
+            listOf("one", "two", "three").forEach { assertTrue(alice.sendDm(bob, it)) }
+            lab.await(2) { (alice.metrics.lora().loraUnheardHeld - heldBefore).toInt() }
+            assertTrue("the probe never left: ${alice.loraLog}", lab.tryAwait(1) { alice.loraTx("far:chat") - farBefore })
+            assertEquals("one probe for three DMs", 1L, alice.metrics.lora().loraDmProbes - probesBefore)
+
+            lab.clock.advance(LoraMeshTransport.DM_PROBE_WINDOW_MS)
+            air.lossy = { _, _ -> false }
+            assertTrue(alice.sendDm(bob, "four"))
+
+            lab.assertConverged(listOf(alice, bob), atLeast = 6) { it.dmWith(if (it === alice) bob else alice) }
+            assertEquals("the window reopened once: ${alice.loraLog}", 2L, alice.metrics.lora().loraDmProbes - probesBefore)
+            // The first probe, lost to the dark board, comes back too: its dedup slot lapsed inside the window.
+            assertEquals("the backlog came by the re-offer", 3L, alice.metrics.lora().loraReoffered - reofferedBefore)
+        }
+
+    /**
+     * The same three DMs with the bridge on, as the field runs it. Bob's OFFER can have Alice's bridge serve the
+     * held DMs before his ✓✓ makes him heard, onto a BRIDGE share that carries about three one-packet frames a
+     * window at the lab's preset; the re-offer then lifts a copy still waiting there onto LIVE rather than being
+     * turned away by the dedup slot it took. Converging inside the await — no calendar jump — is the proof that
+     * nothing sat out a window on BRIDGE. Which path carried which DM, the interleaving picks.
+     */
+    @Test
+    fun aDmToAQuietFarPeerLandsWithTheBridgeOnWithoutWaitingOutTheBridgeShare() =
+        runBlocking {
+            val air = FakeMeshtasticAir()
+            val (alice, bob) = quietPair(air, quick.copy(dmAckHoldMs = 1_000L, loraLingerSweepMs = 500L))
+            val probesBefore = alice.metrics.lora().loraDmProbes
+            val farBefore = alice.loraTx("far:chat")
+            val bodies = listOf("are you up there", "it is windy", "bring a coat")
+            bodies.forEach { assertTrue(alice.sendDm(bob, it)) }
+
+            lab.assertConverged(listOf(alice, bob), atLeast = 5) { it.dmWith(if (it === alice) bob else alice) }
+            // At most one probe, and not always the first DM's: an OFFER of Bob's landing in the gap between a DM's
+            // custody and its fan-out has the bridge serve it first and take its slot, so the next DM probes — and
+            // if the bridge's serves make Bob's ✓✓ come back before any fan-out, none does.
+            assertTrue("one probe at most: ${alice.loraLog}", alice.metrics.lora().loraDmProbes - probesBefore in 0L..1L)
+            // Each of the three left the board once: by id as `reoffer:` or `bridge:`, or live as `far:chat`.
+            val ids = bodies.map { alice.ownMessageId(alice.dmWith(bob), it) }
+            val byId = ids.count { id -> alice.loraTx("reoffer:$id") + alice.loraTx("bridge:$id") > 0 }
+            val live = alice.loraTx("far:chat") - farBefore
+            assertTrue("every DM left the board: byId=$byId live=$live ${alice.loraLog}", byId + live >= 3)
+        }
+
+    /**
+     * The gateway half (ADR 2026-10.a4pm): Bob has no board and rides Alice's; Carol's board is far and quiet. A DM
+     * of Bob's reaches Alice's board relayed and unhinted, so it may take the probe because Alice holds a live
+     * link to its author; Carol's ✓✓ then makes her heard, and Alice's first hearing re-offers Bob's held DMs. The
+     * bridge is off, so only the probe and the re-offer can carry them — within one probe window, no clock jump.
+     */
+    @Test
+    fun aBoardLessPocketMatesDmsToAQuietFarPeerProbeThroughTheGateway() =
+        runBlocking {
+            val air = FakeMeshtasticAir()
+            val alice = lab.node("alice", reach, air = air).apply { setDisplayName("Alice") }
+            val bob = lab.node("bob", reach).apply { setDisplayName("Bob") }
+            val carol = lab.node("carol", reach, air = air).apply { setDisplayName("Carol") }
+            lab.linkAll(alice to bob, alice to carol, bob to carol)
+            lab.awaitAcquainted(alice, bob, carol)
+            assertTrue(bob.sendDm(carol, "hello"))
+            lab.assertConverged(listOf(bob, carol), atLeast = 1) { it.dmWith(if (it === bob) carol else bob) }
+            lab.awaitCustodyParity(alice, bob, carol)
+            // Cut Carol first, then move the calendar, as quietPair does and for its reason.
+            lab.unlink(alice, carol)
+            lab.unlink(bob, carol)
+            lab.clock.advance(LoraMeshTransport.REACHABLE_LINGER_MS + MINUTE)
+            lab.await(1) { if (alice.loraHears(carol) || carol.loraHears(alice)) 0 else 1 }
+            val probesBefore = alice.metrics.lora().loraDmProbes
+
+            listOf("are you up there", "it is windy", "bring a coat").forEach { assertTrue(bob.sendDm(carol, it)) }
+
+            // Custody across all three: Alice carries the pocket's frames, and everything either side sent crossed the
+            // hop — the DMs by probe and re-offer, Carol's ✓✓s ungated.
+            lab.assertConverged(listOf(bob, carol), atLeast = 4, carriers = listOf(alice)) { it.dmWith(if (it === bob) carol else bob) }
+            assertEquals(
+                "the gateway probed once for its pocket-mate: ${alice.loraLog}",
+                1L,
+                alice.metrics.lora().loraDmProbes - probesBefore,
+            )
+            assertEquals("bob has no board", 0L, bob.metrics.lora().loraSent)
+        }
+
+    /**
+     * The absent peer comes back long after: Bob's board was dark while Alice texted, and returns more than
+     * `PRESENCE_FRESH_MS` later with a post in the room — the first fresh frame of his Alice's board hears. Alice
+     * writes nothing new. (Not a profile edit: Bob's first-hearing beacon can take the 5-min floor ahead of the edit,
+     * and the edited profile then waits out the floor — a residual of ADR 038 §6, not this scenario's.) Her first hearing
+     * re-offers the old DMs — too old to make *her* heard on Bob's board — so Bob's ✓✓s ride only because our own
+     * ticks are not gated (ADR 2026-10.a4pm); gated, Alice would show one tick until radio contact.
+     */
+    @Test
+    fun anAbsentPeerThatReturnsLongAfterTicksEveryDmWithoutANewOne() =
+        runBlocking {
+            val air = FakeMeshtasticAir()
+            val (alice, bob) = quietPair(air, reach)
+            air.lossy = { _, _ -> true }
+            listOf("one", "two").forEach { assertTrue(alice.sendDm(bob, it)) }
+            assertTrue(
+                "the probe never left: ${alice.loraLog}",
+                lab.tryAwait(1) {
+                    alice.metrics
+                        .lora()
+                        .loraDmProbes
+                        .toInt()
+                },
+            )
+
+            lab.clock.advance(PRESENCE_FRESH_MS + MINUTE)
+            air.lossy = { _, _ -> false }
+            assertTrue(bob.sendRoom("back in range")) // live traffic: his board is heard again
+
+            lab.assertConverged(listOf(alice, bob), atLeast = 4) { it.dmWith(if (it === alice) bob else alice) }
+        }
+
+    /** Whether this node's board has heard [peer] within the linger — the reach the DM gate reads. */
+    private fun LabNode.loraHears(peer: LabNode): Boolean =
+        checkNotNull(lora) { "$name has no board" }.reachable.value.any { it.nodeId == peer.nodeId }
+
     /** The board's gateway role, the field its plane transmits by (`LoraMeshTransport.gatewayRole`), not its status. */
     private fun LabNode.loraRole(): Role = checkNotNull(lora) { "$name has no board" }.gatewayRole
+
+    private companion object {
+        const val MINUTE = 60_000L
+    }
 }

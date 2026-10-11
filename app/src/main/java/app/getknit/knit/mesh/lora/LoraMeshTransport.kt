@@ -66,7 +66,10 @@ import java.util.concurrent.atomic.AtomicLong
  *   where a frame has been, not where its author is. The Internet plane keys presence off the same rule.
  *
  * On first hearing a peer the transport also re-offers the carried DM-form frames addressed to it
- * ([reofferTo]) — the plane's only backfill, since custody's digest sync needs a data path.
+ * ([reofferTo]) — the plane's only backfill, since custody's digest sync needs a data path. Since ADR
+ * 2026-10.a4pm that is also how most DMs to a quiet peer reach the air: a DM-form fan-out rides only to a
+ * recipient in [reachable], except one plain DM per recipient per [DM_PROBE_WINDOW_MS] ([dmProbeAt]), whose
+ * ✓✓ is what makes a present recipient heard.
  *
  * Key bootstrap over LoRa (the far side has never seen the author's profile) rides two paths: the mesh's
  * existing `watchReachable` reflood, plus a self-profile beacon this transport sends on session-up (under a
@@ -123,6 +126,11 @@ internal class LoraMeshTransport(
     private val pace: LoraPacePolicy = LoraPacePolicy(airtime = LoraAirtime(dedicatedUnlocksDuty = BuildConfig.DEBUG)),
     private val gateway: LoraGatewayPolicy = LoraGatewayPolicy(),
     private val gossip: LoraGossipPolicy = LoraGossipPolicy(),
+    /**
+     * How often [lingerSweepLoop] re-reads the heard set. The field value always; the mesh-in-a-box lab shortens it,
+     * because a scenario that moves the calendar past the linger needs the sweep to notice inside an await.
+     */
+    private val lingerSweepMs: Long = LINGER_SWEEP_MS,
 ) : MeshTransport,
     LoraPlaneStatus,
     PublicChannelSink {
@@ -171,6 +179,21 @@ internal class LoraMeshTransport(
      * for a minute must not earn anybody a second reply.
      */
     private val autoReply = DmAutoReplyPolicy(clock = clock)
+
+    /**
+     * When a DM last went out as a probe to each recipient this plane had not heard (ADR 2026-10.a4pm): the
+     * reach gate's one exception per [DM_PROBE_WINDOW_MS]. Persisted with the other limiters and, like
+     * [autoReply], not cleared by [quiesce] — see [LoraDmProbe].
+     */
+    private val dmProbeAt = LoraDmProbe()
+
+    /**
+     * The DM-form frames the first-hearing re-offer put on the air within the last [REOFFER_MEMORY_MS], by frame
+     * id (ADR 2026-10.a4pm): one frame is re-aired at most once an hour across first hearings, so a recipient
+     * heard only now and then does not have the same backlog re-aired every linger cycle. A limiter, so it is
+     * persisted with the others and not cleared by [quiesce].
+     */
+    private val reofferedAt = SeenSet(ttlMillis = REOFFER_MEMORY_MS, clock = clock)
     private val fragSeq = AtomicInteger()
     private val reassembler = FragReassembler<UInt>(now = clock, capacity = FRAG_CAP, timeoutMs = FRAG_TIMEOUT_MS)
 
@@ -496,10 +519,13 @@ internal class LoraMeshTransport(
         }
         profileSeen.restore(snapshot.profileSeen.map { it.id to shift.toMono(it.atWall) })
         autoReply.restore(snapshot.autoReplied.map { it.id to shift.toMono(it.atWall) })
+        dmProbeAt.restore(snapshot.dmProbes.map { it.id to shift.toMono(it.atWall) }, now)
+        reofferedAt.restore(snapshot.reoffered.map { it.id to shift.toMono(it.atWall) })
         val air = pace.airtime.snapshot(now)
         log(
             "lora state restored: air=${air.totalUsedMs}/${air.liveBudgetMs}ms " +
-                "serve=${snapshot.serve.size} profiles=${snapshot.profileSeen.size} autoReplied=${snapshot.autoReplied.size}",
+                "serve=${snapshot.serve.size} profiles=${snapshot.profileSeen.size} autoReplied=${snapshot.autoReplied.size} " +
+                "probes=${snapshot.dmProbes.size} reoffered=${snapshot.reoffered.size}",
         )
     }
 
@@ -521,6 +547,11 @@ internal class LoraMeshTransport(
             // The DM auto-reply's once-a-day memory: the board replays its queue on reconnect, and a restart
             // that forgot who was answered would answer the same message again.
             autoReplied = autoReply.stamps().takeLast(STATE_AUTO_REPLY_CAP).map { SeenStamp(it.first, shift.toWall(it.second)) },
+            // The reach gate's probe window (ADR 2026-10.a4pm): forgotten on launch, every restart would buy each
+            // unheard recipient another DM's worth of air.
+            dmProbes = dmProbeAt.stamps(now).takeLast(STATE_DM_PROBE_CAP).map { SeenStamp(it.first, shift.toWall(it.second)) },
+            // And the re-offer's per-frame hour: forgotten, every restart would re-air the backlog on first hearing.
+            reoffered = reofferedAt.stamps().takeLast(STATE_REOFFER_CAP).map { SeenStamp(it.first, shift.toWall(it.second)) },
         )
     }
 
@@ -617,7 +648,97 @@ internal class LoraMeshTransport(
             metrics.onLoraSuppressed() // a custody re-serve of an old frame — custody's business, not a live plane's
             return
         }
-        val parts = encodeOrNull(wire, "$label:${env.type}") ?: return
+        // The reach gate (ADR 2026-10.a4pm), before the dedup slot like the covers: a DM-form frame to someone
+        // this plane has not heard is held in custody, and their first hearing re-offers it — except one plain
+        // DM per recipient per window, which goes out as the probe whose ✓✓ makes them heard.
+        when (val reach = reachGate(env, hint)) {
+            Reach.Held -> metrics.onLoraUnheardHeld()
+            Reach.Exempt -> admitFanout(wire, env, label, hint, reachGated = false, probe = null)
+            Reach.Heard -> admitFanout(wire, env, label, hint, reachGated = true, probe = null)
+            is Reach.Probe -> admitFanout(wire, env, label, hint, reachGated = false, probe = reach.claim)
+        }
+    }
+
+    /** What [reachGate] decided for a fanned frame. */
+    private sealed interface Reach {
+        /** Not a frame the gate asks about: not DM-form, our own frame other than a DM, or our id unknown ([reachGate]). */
+        data object Exempt : Reach
+
+        /** DM-form and gated, and its addressee is heard: it rides, and is re-asked at send ([RideGate.reachGated]). */
+        data object Heard : Reach
+
+        /** DM-form to an unheard addressee, and no probe to spend on it: custody keeps it for the re-offer. */
+        data object Held : Reach
+
+        /** Our own DM to an unheard addressee, riding as the window's probe on [claim]. */
+        class Probe(
+            val claim: LoraDmProbe.Claim,
+        ) : Reach
+    }
+
+    /**
+     * The reach gate's verdict for a fanned frame (ADR 2026-10.a4pm), keyed on the originator's [hint] because
+     * the plane cannot read a sealed frame:
+     *
+     * - our own DM ([FanoutHint.CHAT]) is gated, and may probe — it is the one frame that draws a ✓✓ back;
+     * - any other frame of our own is **not** gated. Our ✓✓ ([FanoutHint.TICK]) exists only because its author's
+     *   DM just reached us, so it is evidence-driven by construction, about one packet, and nothing would re-offer
+     *   it if held (it has no message row) — held, the author would show one tick until radio or spool contact. Our
+     *   sealed ctls ([FanoutHint.CONTENT]: a reaction, a session reset, a seed or key reply, the post-reset re-seal)
+     *   are in the same position: no row to re-offer from, no ✓✓ to probe with;
+     * - a relayed DM-form frame is opaque and gated, re-offered from custody on a first hearing. It may take the
+     *   probe only when its author is a pocket-mate we hold a live link to ([mayProbe]);
+     * - until our own id is known nothing is gated: ours cannot be told from a stranger's, and the send-time
+     *   re-ask still refuses a frame addressed to us once the pacer has the id (#141).
+     *
+     * Never a probe before the last process's stamps are back either: claimed against an empty window, a DM sent
+     * in the launch's first moments would buy the recipient a second probe inside the one it spent.
+     */
+    private fun reachGate(
+        env: RelayEnvelope,
+        hint: FanoutHint,
+    ): Reach {
+        if (!LoraFramePolicy.isDmForm(env)) return Reach.Exempt
+        // Not knowing who we are, we cannot tell our own ctl from a stranger's DM: let it through as it always went,
+        // and the send-time re-ask (the pacer waits for the id) still refuses one addressed to us (#141).
+        val self = selfIdCached ?: return Reach.Exempt
+        val own = env.senderId == self
+        if (own && hint != FanoutHint.CHAT) return Reach.Exempt
+        val to = unheardRecipient(env) ?: return Reach.Heard
+        if (!mayProbe(env, own) || !restored.value) return Reach.Held
+        return dmProbeAt.claim(to, clock())?.let(Reach::Probe) ?: Reach.Held
+    }
+
+    /**
+     * Whether a gated frame may spend the probe: our own DM, or — as the gateway — a DM-form frame from a
+     * pocket-mate we hold a live link to. A board-less pocket-mate's DM reaches the air only through us, and
+     * relayed it carries no hint, so without this its DMs to a quiet far peer would wait for a hearing nothing
+     * provokes. The gateway cannot tell that pocket-mate's DM from their tick or ctl: a probe spent on one buys
+     * no ✓✓, and the next window probes again (ADR 2026-10.a4pm's residual).
+     */
+    private fun mayProbe(
+        env: RelayEnvelope,
+        own: Boolean,
+    ): Boolean = own || env.senderId in linkedPeers // only a CHAT DM of ours reaches here
+
+    /**
+     * The fan-out past its gates: encode, the profile and signature dedup, and the queue. [probe] is the window
+     * the reach gate claimed for this frame, handed back if it never reaches the queue — a frame that cannot be
+     * encoded, was deduplicated or was refused must not spend it.
+     */
+    private fun admitFanout(
+        wire: WireEnvelope,
+        env: RelayEnvelope,
+        label: String,
+        hint: FanoutHint,
+        reachGated: Boolean,
+        probe: LoraDmProbe.Claim?,
+    ) {
+        val parts = encodeOrNull(wire, "$label:${env.type}")
+        if (parts == null) {
+            probe?.let(dmProbeAt::release)
+            return
+        }
         // Checked before [sigSeen] deliberately: a profile held back here must leave the signature slot free,
         // because the bridge's digest-driven backfill is the path that repairs a lost one and it takes that
         // slot for itself (serveOne). Both come after encodeOrNull for the same reason — a frame that cannot
@@ -631,35 +752,84 @@ internal class LoraMeshTransport(
             // has just taken is worth persisting rather than leaving to the send that follows.
             stateWake.trySend(Unit)
         }
-        if (!sigSeen.add(dedupKey(wire, env))) {
+        val key = dedupKey(wire, env)
+        if (!sigSeen.add(key)) {
+            probe?.let(dmProbeAt::release)
             metrics.onLoraSuppressed() // already sent/received over LoRa within the window
             return
         }
-        enqueue(
-            parts,
-            "$label:${env.type}",
-            classOf(env, hint),
-            supersedes = supersedeKeyFor(env),
-            // All three gates above are answered about the mesh as it is *now*; the frame may not fly for a
-            // whole window. Carried so [staleReason] can ask them again on the way out.
-            gate =
-                RideGate(
-                    recipientId = env.recipientId?.takeIf { LoraFramePolicy.isDmForm(env) },
-                    freshUntil = freshUntilFor(env),
-                    roleGated = true,
-                ),
-        )
+        val dmForm = LoraFramePolicy.isDmForm(env)
+        val accepted =
+            enqueue(
+                parts,
+                "$label:${env.type}",
+                classOf(env, hint),
+                supersedes = supersedeKeyFor(env),
+                // All the gates above are answered about the mesh as it is *now*; the frame may not fly for a
+                // whole window. Carried so [staleReason] can ask them again on the way out — the reach gate
+                // only of a frame that passed it, never of the probe, which flew because the answer was no.
+                gate =
+                    RideGate(
+                        recipientId = env.recipientId?.takeIf { dmForm },
+                        freshUntil = freshUntilFor(env),
+                        roleGated = true,
+                        reachGated = reachGated,
+                    ),
+                sigKey = key,
+                probe = probe,
+            )
+        probe?.let { settleProbe(it, accepted, "$label:${env.type}") }
     }
+
+    /** Books a probe that reached the queue; one the queue refused was given back by [abandon]. */
+    private fun settleProbe(
+        probe: LoraDmProbe.Claim,
+        accepted: Boolean,
+        label: String,
+    ) {
+        if (!accepted) return // refused: the pacer handed it back and [abandon] already released the window
+        metrics.onLoraDmProbe()
+        stateWake.trySend(Unit) // a limiter that outlives the process; persist what it just spent
+        log("lora probe $label -> ${probe.recipientId}")
+    }
+
+    /**
+     * The addressee of a DM-form [env] this plane has not heard within the linger, or null when [env] is not
+     * DM-form or its addressee is in [reachable] (ADR 2026-10.a4pm). Author-keyed reach, as everywhere on this
+     * plane: a recipient we hear only through a far gateway's airing, or through a Meshtastic repeater, is
+     * heard — that airing is the route the frame would take back.
+     */
+    private fun unheardRecipient(env: RelayEnvelope): String? {
+        if (!LoraFramePolicy.isDmForm(env)) return null
+        val to = env.recipientId ?: return null
+        return to.takeUnless { heard(it) }
+    }
+
+    private fun heard(nodeId: String): Boolean = _reachable.value.any { it.nodeId == nodeId }
 
     /**
      * The [OutboundFrame.supersedes] key for a fanned frame, or null for one that is an event rather than a
      * state.
      *
-     * Only a profile qualifies today: it is a snapshot of its author's current keys and the far side takes
-     * newest-wins, so an older copy still queued is the wrong answer waiting to be sent first. That is the
-     * path the lab backlog came down — 28 of them, ahead of every OFFER, forever.
+     * A profile is a snapshot of its author's current keys and the far side takes newest-wins, so an older copy
+     * still queued is the wrong answer waiting to be sent first. That is the path the lab backlog came down —
+     * 28 of them, ahead of every OFFER, forever. A DM-form frame gets its own [frameKey], so that every copy
+     * of it in the queue is one copy (ADR 2026-10.a4pm).
      */
-    private fun supersedeKeyFor(env: RelayEnvelope): String? = if (env.type == FrameType.PROFILE) profileKey(env.senderId) else null
+    private fun supersedeKeyFor(env: RelayEnvelope): String? =
+        when {
+            env.type == FrameType.PROFILE -> profileKey(env.senderId)
+            LoraFramePolicy.isDmForm(env) -> frameKey(env)
+            else -> null
+        }
+
+    /**
+     * One key for every copy of one DM-form frame the plane might queue — the fan-out's, the bridge's serve
+     * and the first-hearing re-offer — so a re-offer can lift a copy still waiting in the queue onto its own
+     * bucket ([LoraPacePolicy.upgradeQueued], ADR 2026-10.a4pm) instead of being turned away by the dedup slot
+     * that copy took. Room posts keep none: nothing re-offers them.
+     */
+    private fun frameKey(env: RelayEnvelope): String = "frame:${env.id}"
 
     override fun fastSend(
         wire: WireEnvelope,
@@ -753,14 +923,24 @@ internal class LoraMeshTransport(
         supersedes: String? = null,
         gate: RideGate = RideGate(),
         to: UInt = MeshtasticProto.BROADCAST,
-    ) {
-        if (pace.enqueue(OutboundFrame(parts, label, klass, bucket, destination, to, supersedes, gate)) !=
-            LoraPacePolicy.Admission.ACCEPTED
-        ) {
-            metrics.onLoraDroppedQueue()
-        }
-        if (pace.lastSuperseded > 0) log("lora $label superseded ${pace.lastSuperseded} still queued")
+        sigKey: String? = null,
+        probe: LoraDmProbe.Claim? = null,
+    ): Boolean =
+        enqueue(
+            OutboundFrame(parts, label, klass, bucket, destination, to, supersedes, gate, probe = probe, sigKey = sigKey),
+        )
+
+    /**
+     * Queues [frame] and says whether it is in the queue now. [LoraPacePolicy.Admission.DROPPED_OLDEST] is in:
+     * it shed an older frame to make room (counted `loraDroppedQueue`, as ever), and the newcomer waits.
+     */
+    private fun enqueue(frame: OutboundFrame): Boolean {
+        val admission = pace.enqueue(frame)
+        if (admission != LoraPacePolicy.Admission.ACCEPTED) metrics.onLoraDroppedQueue()
+        abandonShed() // the frame this one displaced, if it shed one
+        if (pace.lastSuperseded > 0) log("lora ${frame.label} superseded ${pace.lastSuperseded} still queued")
         wake.trySend(Unit)
+        return admission != LoraPacePolicy.Admission.REFUSED
     }
 
     /**
@@ -820,9 +1000,10 @@ internal class LoraMeshTransport(
     /**
      * Re-offers the carried DM-form frames addressed to [peer] — pulled through [farFrames] (custody, via
      * [app.getknit.knit.mesh.FarPeerFrameSource]) — on first hearing it (ADR 039): this plane has no custody
-     * sync, so a DM sent while the peer's board was off is otherwise lost to it until radio contact. Bounded by
-     * the source (the newest few), the sig-keyed dedup (a frame fanned inside the window is skipped) and the
-     * 45-min linger (a peer is "first heard" at most once per window). Skipped for a peer another plane already
+     * sync, so a DM sent while the peer's board was off — or held by the reach gate because it was not heard
+     * (ADR 2026-10.a4pm) — is otherwise lost to it until radio contact. Bounded by the source (our newest few
+     * unacked DMs and a few relayed frames), the sig-keyed dedup (a frame fanned inside the window is skipped)
+     * and the 45-min linger (a peer is "first heard" at most once per window). Skipped for a peer another plane already
      * carries — it gets custody's real digest sync there.
      */
     private suspend fun reofferTo(peer: Peer) {
@@ -838,24 +1019,52 @@ internal class LoraMeshTransport(
         farFrames(peer.nodeId).forEach { wire -> reofferOne(wire, peer.nodeId) }
     }
 
-    /** Enqueues one re-offered frame if it is a DM-form chat addressed to [to] and not fanned inside the dedup window. */
+    /**
+     * Enqueues one re-offered frame if it is a DM-form chat addressed to [to], not re-offered within the hour
+     * ([reofferedAt]) and not fanned inside the dedup window — or, if a copy the bridge queued holds that window
+     * and waits on another bucket, lifts that copy onto this one ([LoraPacePolicy.upgradeQueued]).
+     */
     private fun reofferOne(
         wire: WireEnvelope,
         to: String,
     ) {
         val env = WireCodec.decodeEnvelope(wire.signed) ?: return
         if (!LoraFramePolicy.isDmForm(env) || env.recipientId != to) return
-        val parts = encodeOrNull(wire, "reoffer:${env.id}") ?: return
-        if (!sigSeen.add(dedupKey(wire, env))) return
-        // DM class so a room post can never evict it, BRIDGE bucket so it is metered as the backfill it is.
-        // [reofferTo] gated on both the role and this peer's link, so both are worth re-asking.
-        enqueue(
-            parts,
-            "reoffer:${env.id}",
-            FrameClass.DM,
-            AirBucket.BRIDGE,
-            gate = RideGate(recipientId = to, roleGated = true),
-        )
+        // Once an hour per frame across first hearings (ADR 2026-10.a4pm): a recipient that hears us but that we
+        // hear only now and then is "first heard" every linger cycle, and would have the same backlog re-aired
+        // every 45 minutes.
+        if (reofferedAt.contains(env.id)) return
+        val label = "reoffer:${env.id}"
+        val parts = encodeOrNull(wire, label) ?: return
+        val key = dedupKey(wire, env)
+        // DM class so a room post can never evict it. LIVE for a frame that was a live send held back by the reach
+        // gate (ADR 2026-10.a4pm): our own, or a board-less pocket-mate's we were the gateway for. Anything else
+        // stays on BRIDGE, metered as the backfill it is. [reofferTo] asked the role, this peer's link and — by
+        // running on a first hearing — its reach, so all three are re-asked.
+        val live = env.senderId == selfIdCached || env.senderId in linkedPeers
+        val frame =
+            OutboundFrame(
+                parts,
+                label,
+                FrameClass.DM,
+                if (live) AirBucket.LIVE else AirBucket.BRIDGE,
+                supersedes = frameKey(env),
+                gate = RideGate(recipientId = to, roleGated = true, reachGated = true),
+                reofferId = env.id,
+                sigKey = key,
+            )
+        if (sigSeen.add(key)) {
+            if (!enqueue(frame)) return
+        } else if (pace.upgradeQueued(frame)) {
+            // The bridge served it first, onto a share it may have spent: the slot is that copy's, so the
+            // re-offer takes its place instead (never a part-sent one — the pacer refuses).
+            log("lora $label lifted a queued copy onto ${frame.bucket}")
+            wake.trySend(Unit)
+        } else {
+            return // in flight, already aired inside the window, or already queued on this bucket
+        }
+        reofferedAt.add(env.id)
+        stateWake.trySend(Unit)
         metrics.onLoraReoffered()
     }
 
@@ -974,6 +1183,8 @@ internal class LoraMeshTransport(
             return StaleAtSend.LINKED
         }
         if (gate.recipientId != null && gate.recipientId in internetPeers) return StaleAtSend.INTERNET
+        // Only of a frame that passed the reach gate: the probe flew because its recipient was unheard.
+        if (gate.reachGated && gate.recipientId != null && !heard(gate.recipientId)) return StaleAtSend.UNHEARD
         if (gate.freshUntil != null && wallClock() > gate.freshUntil) return StaleAtSend.STALE
         if (gate.roleGated && role != LoraGatewayPolicy.Role.ACTIVE) return StaleAtSend.PASSIVE
         return null
@@ -1243,6 +1454,9 @@ internal class LoraMeshTransport(
     private fun serveOne(wire: WireEnvelope): Serve {
         val env = WireCodec.decodeEnvelope(wire.signed) ?: return Serve.SKIPPED
         if (skipCovered(env)) return Serve.SKIPPED // the far pocket would only ever carry a frame its addressee already holds
+        // A copy already waits — the probe, a re-offer on LIVE: queueing ours would supersede it onto BRIDGE, a share
+        // that may be spent, when it is going anyway (ADR 2026-10.a4pm).
+        supersedeKeyFor(env)?.takeIf { LoraFramePolicy.isDmForm(env) }?.let { if (pace.hasQueued(it)) return Serve.SKIPPED }
         val label = "bridge:${env.id}"
         val parts = encodeOrNull(wire, label) ?: return Serve.SKIPPED
         // Its natural class, so a room post still cannot evict a DM in the queue, but the BRIDGE bucket, so
@@ -1281,18 +1495,24 @@ internal class LoraMeshTransport(
         }
         sigSeen.add(dedupKey(wire, env)) // recorded for the fan-out's benefit, never consulted here — see the kdoc
         // No freshness: backfill is history by definition, and [isFresh] was never asked of it.
-        enqueue(
-            parts,
-            label,
-            klass,
-            AirBucket.BRIDGE,
-            gate =
-                RideGate(
-                    recipientId = env.recipientId?.takeIf { LoraFramePolicy.isDmForm(env) },
-                    roleGated = true,
-                ),
-        )
-        return Serve.SENT
+        val admitted =
+            enqueue(
+                parts,
+                label,
+                klass,
+                AirBucket.BRIDGE,
+                // The re-offer's handle on this copy while it waits (ADR 2026-10.a4pm), and the slot to hand back
+                // if it is refused at send.
+                supersedes = supersedeKeyFor(env),
+                gate =
+                    RideGate(
+                        recipientId = env.recipientId?.takeIf { LoraFramePolicy.isDmForm(env) },
+                        roleGated = true,
+                    ),
+                sigKey = dedupKey(wire, env),
+            )
+        // A refused serve was handed back by the pacer ([abandon] reopened its slot) and spent nothing of the round.
+        return if (admitted) Serve.SENT else Serve.SKIPPED
     }
 
     /** Whether [minGapMs] has elapsed since the last self-profile; overflow-safe against the [NEVER] sentinel. */
@@ -1335,7 +1555,15 @@ internal class LoraMeshTransport(
                     // on a wake that took nothing re-reports the previous wake's holds.
                     pace.lastAirtimeHolds.forEach { hold -> metrics.onLoraAirtimeHeld(hold.name) }
                 }
-            if (frame == null) waitForNextSend() else sendFrame(frame)
+            if (frame == null) {
+                waitForNextSend()
+            } else {
+                try {
+                    sendFrame(frame)
+                } finally {
+                    pace.done(frame)
+                }
+            }
         }
     }
 
@@ -1384,13 +1612,19 @@ internal class LoraMeshTransport(
             staleReason(frame)?.let { reason ->
                 metrics.onLoraStaleAtSend(reason.name)
                 log("lora stale at send ${frame.label}: ${reason.name.lowercase()}")
+                abandon(frame)
                 return
             }
         }
-        val ch = currentConfig?.channelIndex ?: return
+        val ch = currentConfig?.channelIndex
+        if (ch == null) {
+            abandon(frame)
+            return
+        }
         if (!boundSlotIsKnit(ready.channels, ch)) {
             metrics.onLoraSuppressed()
             log("lora send skipped: slot $ch is not the Knit channel — set this board up")
+            abandon(frame)
             return
         }
         // Resume where the board left off. A frame refused part-way is requeued whole, and re-sending the
@@ -1458,6 +1692,7 @@ internal class LoraMeshTransport(
                 metrics.onLoraNak(result.reason.name)
                 log("lora nak id=${result.id} reason=${result.reason} label=${frame.label}")
                 pace.onNak(result.reason, clock())
+                abandon(frame) // a no-op once a fragment has flown
                 false
             }
 
@@ -1468,12 +1703,37 @@ internal class LoraMeshTransport(
 
             else -> {
                 log("lora tx ${frame.label} gave up: $result")
+                abandon(frame)
                 false
             }
         }
 
     private fun requeue(frame: OutboundFrame) {
-        if (pace.enqueue(frame) != LoraPacePolicy.Admission.ACCEPTED) metrics.onLoraDroppedQueue()
+        // Put back, never re-admitted: a requeue runs no supersede, or an older profile put back here would delete
+        // the newer one queued while it was out (ADR 2026-09.xdm2).
+        if (pace.requeue(frame) != LoraPacePolicy.Admission.ACCEPTED) metrics.onLoraDroppedQueue()
+        abandonShed()
+    }
+
+    /**
+     * Hands back what a frame that never flew was holding (ADR 2026-10.a4pm): its dedup slot, which records a
+     * transmission that did not happen and would turn the next re-offer or backfill away; a probe's window,
+     * since a probe that never flew told nobody anything; a re-offer's hour. A no-op once a fragment has gone —
+     * that frame did fly, in part. `SeenSet.reopen` gives one more copy per id per window, so a frame abandoned
+     * twice inside ten minutes keeps its slot the second time. Called from every path that drops an unsent frame:
+     * the send-time re-ask, a NAK or give-up on the first fragment, a missing config or a slot that is not Knit's,
+     * and the pacer's shed and oversize evictions ([abandonShed]).
+     */
+    private fun abandon(frame: OutboundFrame) {
+        if (frame.sentParts > 0) return
+        frame.sigKey?.let(sigSeen::reopen)
+        frame.probe?.let(dmProbeAt::release)
+        frame.reofferId?.let(reofferedAt::reopen)
+    }
+
+    /** [abandon]s whatever the pacer dropped unsent since the last look. */
+    private fun abandonShed() {
+        pace.drainShed().forEach(::abandon)
     }
 
     private fun onNak(outcome: PacketOutcome) {
@@ -1746,7 +2006,7 @@ internal class LoraMeshTransport(
             // [quiesce] has already emptied everything this would sweep, so an unconfigured pass could only
             // re-run the election over an empty heard set — once a minute, on most installs, forever.
             awaitConfigured()
-            delay(LINGER_SWEEP_MS)
+            delay(lingerSweepMs)
             recomputeReachable(clock())
             // Also re-run the election on a timer. Both its event triggers can go quiet at once — a passive
             // board stops offering, and if the gateway it stood down for goes silent too, nothing would ever
@@ -1779,6 +2039,7 @@ internal class LoraMeshTransport(
         if (state is LinkState.Ready) {
             maxPayload = (state.mtu - TORADIO_OVERHEAD).coerceIn(LoraFrameCodec.MIN_PAYLOAD, MeshtasticProto.MAX_PAYLOAD)
             val evicted = pace.evictOversize(maxPayload)
+            abandonShed()
             if (evicted > 0) {
                 repeat(evicted) { metrics.onLoraTooBig() }
                 log("lora ready: evicted $evicted queued frame(s) chunked past the negotiated cap $maxPayload")
@@ -1914,6 +2175,12 @@ internal class LoraMeshTransport(
         const val FRAG_TIMEOUT_MS = 60_000L // LoRa parts are seconds apart; the NAN 5 s default would drop them
         const val FRAG_ID_MASK = 0xFFFF
         const val REACHABLE_LINGER_MS = 45 * 60_000L
+
+        /**
+         * How often a DM may go out as a probe to a recipient this plane has not heard (ADR 2026-10.a4pm): one
+         * airtime window, so an absent recipient costs at most one DM's air per window.
+         */
+        const val DM_PROBE_WINDOW_MS = 15 * 60_000L
         const val LINGER_SWEEP_MS = 60_000L
         const val PROFILE_FLOOR_MS = 5 * 60_000L
 
@@ -1953,6 +2220,21 @@ internal class LoraMeshTransport(
 
         /** The most answered DM senders carried across a restart — [DmAutoReplyPolicy.MAX_SENDERS], all of them. */
         const val STATE_AUTO_REPLY_CAP = DmAutoReplyPolicy.MAX_SENDERS
+
+        /**
+         * The most probe stamps carried across a restart, newest kept. One per recipient a DM went to unheard
+         * inside the last [DM_PROBE_WINDOW_MS] — a handful — so this is slack, not a limit.
+         */
+        const val STATE_DM_PROBE_CAP = 64
+
+        /**
+         * How long one frame stays re-offered (ADR 2026-10.a4pm): an hour, longer than the 45-min linger, so the
+         * same backlog is not re-aired on every first hearing of a peer heard only now and then.
+         */
+        const val REOFFER_MEMORY_MS = 60 * 60_000L
+
+        /** The most re-offered frame ids carried across a restart, newest kept — a few sightings' worth. */
+        const val STATE_REOFFER_CAP = 64
 
         // The bridge (ADR 044).
         const val BACKFILL_LIMIT = 4 // frames per offer heard

@@ -38,6 +38,9 @@ document:
 
 ### Changed
 
+- Private messages over LoRa to someone your board hasn't heard from lately now wait, apart from one every 15
+  minutes. Once that one is answered the rest follow, so texting a friend whose board is switched off no
+  longer uses up your airtime.
 - Knit no longer blocks what you send in direct messages, groups or the commons, only in the Nearby and
   Meshtastic rooms. Whoever receives it decides: with Content filtering on, flagged text and pictures stay
   hidden until tapped, and the notification just says "Message hidden".

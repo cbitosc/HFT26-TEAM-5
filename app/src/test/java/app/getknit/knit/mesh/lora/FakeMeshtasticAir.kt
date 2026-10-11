@@ -86,6 +86,9 @@ internal class FakeMeshtasticLink(
      * default: most tests want a board that always has room.
      */
     var queueFills = false
+
+    /** When set, the next send is refused with this NAK — the board's duty-cycle or rate refusal — and it clears. */
+    var nakNext: RoutingError? = null
     private var nextId = 1u
     val sent = mutableListOf<ByteArray>()
 
@@ -115,6 +118,10 @@ internal class FakeMeshtasticLink(
         to: UInt,
     ): SendResult {
         if (free == 0) return SendResult.Busy
+        nakNext?.let { reason ->
+            nakNext = null
+            return SendResult.Nak(nextId++, reason)
+        }
         sent += payload
         sentHopLimits += hopLimit
         sentChannels += channelIndex

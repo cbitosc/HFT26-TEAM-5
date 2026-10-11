@@ -23,6 +23,20 @@ ADR 2026-09.2ajk), and the field log's `FieldEvent.Lora` (ADR 2026-10.a239). The
   and DM-form chat — never group-form chat, `typing`, `blobreq` or `keyreq`. DM-form rides `longRangeFanout`, a seam
   of its own: never widen `shouldFastFanout` for it. Not a wire change: `sig`/`signed` pass byte-exact. The flag is on
   everywhere since 2.5.0, `loraEnabled` still defaults false.
+  **Before touching the DM reach gate — `reachGate`, `unheardRecipient`, `FanoutHint.CHAT`, `dmProbeAt` /
+  `LoraDmProbe`, `DM_PROBE_WINDOW_MS`, `frameKey` / `LoraPacePolicy.upgradeQueued`, `reofferedAt` /
+  `REOFFER_MEMORY_MS`, `reofferOne`'s bucket, `MeshManager.framesFor`, `FAR_REOFFER_OWN_LIMIT` /
+  `FAR_REOFFER_RELAYED_LIMIT`, or `ForwardStore.liveFramesByIds` / `liveFramesToFromOthers`:** READ ADR 2026-10.a4pm
+  (it amends ADR 039 §7). A DM-form fan-out to a recipient not in `reachable` is held before its dedup slot, keyed on
+  the originator's hint: our own `CHAT` DM may probe (one per recipient per 15 min), as may a relayed frame from a
+  linked pocket-mate (the gateway's case); other relayed frames are held and never probe; our own `TICK`s, our
+  `CONTENT` ctls and the post-reset re-seal are not gated, nor is anything before our id is known. A frame dropped
+  before its first fragment, on any path, is `abandon`ed: its dedup slot, probe window and re-offer hour come back. The
+  bridge never queues a second copy (`hasQueued`, which counts the frame in flight), and a requeue
+  (`LoraPacePolicy.requeue`) supersedes nothing. The re-offer returns our unacked DMs by id (≤ 6, `LIVE`)
+  then relayed frames (≤ 4, `BRIDGE`, `LIVE` for a linked pocket-mate's), each frame at most once an hour, and lifts a
+  bridge copy still queued onto its bucket — never a part-sent one. The probe window and the re-offer memory are
+  persisted limiters, not cleared by `quiesce`. The room, `profile`, `fastSend` and the bridge backfill are not gated.
   **Before touching `start()`'s loops, `awaitConfigured`, `quiesce`, or what runs with no board bound:** READ ADR
   2026-09.5bqu — nothing ticks, transcodes or queues until a board is configured, and losing the board quiesces
   exactly as `stop()` does.
@@ -45,12 +59,15 @@ ADR 2026-09.2ajk), and the field log's `FieldEvent.Lora` (ADR 2026-10.a239). The
   refused holds everything ranked behind it. A newer snapshot of a queued profile or OFFER replaces it in place. Every
   entry point of the pacer, the ledger and the gossip policy is `@Synchronized`, and the pacer's monitor is taken
   outside the ledger's.
-- **When touching `coveredByLink`, `coveredByInternet` on this plane, `RideGate`, `staleReason` / `StaleAtSend`,
-  `sendFrame`, or `selfIdKnown`:** READ ADR 054 and ADR 2026-09.5dt2 (and ADR 2026-09.y5f3 for the Internet cover).
+- **When touching `coveredByLink`, `coveredByInternet` on this plane, `RideGate` (`reachGated`), `staleReason` /
+  `StaleAtSend` (`UNHEARD`), `OutboundFrame.sigKey`, `sendFrame`, or `selfIdKnown`:** READ ADR 054 and ADR
+  2026-09.5dt2 (and ADR 2026-09.y5f3 for the Internet cover, ADR 2026-10.a4pm for the reach gate).
   A DM-form frame to us, or to a peer a short-range plane holds a **live link** to (links, never sightings), is skipped
   before its dedup slot is spent; the queue is a time-delayed commitment, so each frame carries the gates its own path
   asked and `sendFrame` re-asks them before the first fragment — only those, so `fastSend` is never role-gated. The
-  pacer parks until the self id is known (#141).
+  pacer parks until the self id is known (#141). `UNHEARD` is asked only of a frame that passed the reach gate (never
+  the probe). Any refusal at send hands back the dedup slot the fan-out, serve or re-offer took (`OutboundFrame.sigKey`):
+  the frame never flew, and the slot would turn the next re-offer or backfill away.
 - **When touching `noteReachable`, `isPresenceEvidence` (`mesh/FramePresence.kt`), `boardsHeard` / `boardsHeardAt`,
   `RxQuality`, or the gateway's `suppressDataPath` / `pocketKeys`:** READ ADR 2026-09.2ajk and the boxed notes under
   "Shape" in `lora-bridge.md`. `reachable` here is author-keyed **reach**, never proximity, fed only by fresh frames
@@ -72,7 +89,8 @@ ADR 2026-09.2ajk), and the field log's `FieldEvent.Lora` (ADR 2026-10.a239). The
   evidence the far side lacks the frame, and "we transmitted" is not "someone heard".
 - **When touching `LoraPlaneState`, `LoraPlaneStateStore`, `WallShift`, `awaitRestored`, `LoraAirtime.bookings` /
   `restore`, or what `stop()` saves:** READ ADR 2026-09.7svb and "Limiters that outlive the process" in
-  `lora-bridge.md`. The ledger, beacon floor, serve caps, `profileSeen` and the auto-reply memory survive a restart,
+  `lora-bridge.md`. The ledger, beacon floor, serve caps, `profileSeen`, the auto-reply memory, the DM probe window and
+  the re-offer's per-frame hour (`dmProbes`, `reoffered`, ADR 2026-10.a4pm) survive a restart,
   stamped on the wall clock; nothing transmits until they are back (5 s bound). The Trickle interval, `sigSeen` and
   `lastHeardAt` are **not** persisted, on purpose. The blob is user data: a renamed or retyped field drops a ledger.
 - **When touching board setup — `provisionKnitChannel`, `BoardQuiet`, `ProvisionMode`, `BoardName`, `LoraSlot`,

@@ -217,6 +217,7 @@ carries; never renumber an old one.
 | [2026-10.9rh6](decisions/2026-10-9rh6-block-on-send-only-in-the-public-rooms.md) | Block on send only in the public rooms | moderation, privacy |
 | [2026-10.9utz](decisions/2026-10-9utz-the-ble-presence-set-is-enabled-again-after-every-connection.md) | The BLE presence set is enabled again after every connection | ble, mesh |
 | [2026-10.a239](decisions/2026-10-a239-the-field-log-is-kept-on-the-phone-and-handed-over-only-by-the-user.md) | The field log is kept on the phone and handed over only by the user | privacy, diagnostics, bluetooth |
+| [2026-10.a4pm](decisions/2026-10-a4pm-a-lora-dm-waits-for-its-recipient-to-be-heard.md) | A LoRa DM waits for its recipient to be heard | lora, dm |
 | [2026-10.b8yf](decisions/2026-10-b8yf-a-bluetooth-link-s-acl-is-armed-to-idle-out-when-its-channel-closes.md) | A Bluetooth link's ACL is armed to idle out when its channel closes | ble, transport |
 | [2026-10.d62w](decisions/2026-10-d62w-identity-slurs-are-blocked-by-a-word-list-in-every-conversation.md) | Identity slurs are blocked by a word list in every conversation, not only the Nearby room | moderation, privacy |
 | [2026-10.f7gg](decisions/2026-10-f7gg-a-blob-is-asked-of-the-likeliest-holder-first.md) | A blob is asked of the likeliest holder first, then of every neighbour | mesh, attachments, blob-exchange, wifi-aware |

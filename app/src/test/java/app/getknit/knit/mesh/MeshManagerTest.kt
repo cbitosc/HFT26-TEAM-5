@@ -996,7 +996,7 @@ class MeshManagerTest {
     }
 
     @Test
-    fun farPeerFramesAreTheNewestCarriedDmsToThePeerMinusOurAckedOnes() =
+    fun farPeerFramesAreOurUnackedDmsFirstThenTheRelayedOnes() =
         runTest(UnconfinedTestDispatcher()) {
             val rig = Rig(backgroundScope)
             rig.pin(rig.bob)
@@ -1013,13 +1013,97 @@ class MeshManagerTest {
 
             val ids = rig.manager.framesFor(rig.bob.nodeId).map { WireCodec.decodeEnvelope(it.signed)!!.id }
 
-            // Newest first; our acked DM and our row-less (ctl) frame are dropped, a relayed frame is always offered.
-            assertEquals(listOf("relayed", unacked.id), ids)
+            // Ours first (ADR 2026-10.a4pm: they are held live sends); our acked DM and our row-less (ctl) frame are
+            // dropped, and a relayed frame is always offered.
+            assertEquals(listOf(unacked.id, "relayed"), ids)
             assertFalse(acked.id in ids)
         }
 
+    /**
+     * The latent bug the split fixed: the old read took the newest four custody frames to the peer and only then
+     * dropped our acked DMs and our own sealed ctls, so a ✓✓ or a reaction we sent could take every slot an
+     * unacked DM needed. Our half is now chosen by id off the unacked rows, up to its own cap.
+     */
     @Test
-    fun farPeerFramesAreCappedAtTheReofferLimit() =
+    fun ourUnackedDmsAreNotCrowdedOutByNewerAckedFramesOrOwnCtls() =
+        runTest(UnconfinedTestDispatcher()) {
+            val rig = Rig(backgroundScope)
+            rig.pin(rig.bob)
+            val ownLimit = 6 // MeshManager.FAR_REOFFER_OWN_LIMIT (the companion is private)
+            repeat(ownLimit + 2) { i ->
+                assertTrue(rig.manager.sendChat("unacked $i", recipientId = rig.bob.nodeId))
+                rig.clockNow += 1_000
+            }
+            advanceUntilIdle()
+            val unacked = rig.saved.toList()
+            // Newer than every DM: our own sealed ctls to bob, which have no message row of their own.
+            repeat(6) { i ->
+                rig.forwardStore.store(
+                    carried("own-ctl-$i", rig.me.nodeId, rig.bob.nodeId, rig.now + 60_000 + i),
+                    ForwardStore.ORIGIN_SELF,
+                    rig.now,
+                )
+            }
+            coEvery { rig.messages.unackedDmsTo(rig.bob.nodeId, rig.me.nodeId, any()) } returns unacked
+
+            val ids = rig.manager.framesFor(rig.bob.nodeId).map { WireCodec.decodeEnvelope(it.signed)!!.id }
+
+            val newest = unacked.sortedByDescending { it.sentAt }.take(ownLimit).map { it.id }
+            assertEquals("our newest unacked DMs, newest first, up to the own cap", newest, ids)
+            assertTrue("no ctl took a slot", ids.none { it.startsWith("own-ctl") })
+        }
+
+    /** An unacked DM whose custody row is gone takes no slot: the over-fetch leaves it to an older one still held. */
+    @Test
+    fun anUnackedDmCustodyNoLongerHoldsLeavesItsSlotToAnOlderOne() =
+        runTest(UnconfinedTestDispatcher()) {
+            val rig = Rig(backgroundScope)
+            rig.pin(rig.bob)
+            repeat(7) { i ->
+                assertTrue(rig.manager.sendChat("unacked $i", recipientId = rig.bob.nodeId))
+                rig.clockNow += 1_000
+            }
+            advanceUntilIdle()
+            val unacked = rig.saved.toList()
+            val newest = unacked.maxBy { it.sentAt }
+            rig.forwardStore.remove(newest.id) // evicted, or past its TTL
+            coEvery { rig.messages.unackedDmsTo(rig.bob.nodeId, rig.me.nodeId, any()) } returns unacked
+
+            val ids = rig.manager.framesFor(rig.bob.nodeId).map { WireCodec.decodeEnvelope(it.signed)!!.id }
+
+            val held = unacked.filter { it.id != newest.id }.sortedByDescending { it.sentAt }.map { it.id }
+            assertEquals("the six still held, the oldest included", held, ids)
+        }
+
+    /**
+     * ADR 2026-10.a4pm's hint: a DM that never flew (parked on its key, sealed now) is the user's message and may
+     * probe; the post-reset re-seal is not, because custody keeps the first-stored seal of that id, so a held
+     * re-seal would be re-offered as bytes the reset peer cannot open.
+     */
+    @Test
+    fun thePendingFlushHintsChatAndThePostResetResealHintsContent() =
+        runTest(UnconfinedTestDispatcher()) {
+            val rig = Rig(backgroundScope)
+            rig.pin(rig.bob)
+            assertTrue(rig.manager.sendChat("hello", recipientId = rig.bob.nodeId))
+            advanceUntilIdle()
+            val row = rig.saved.single()
+            rig.transport.longRangeHints.clear()
+
+            coEvery { rig.messages.pendingForRecipient(rig.bob.nodeId) } returns listOf(row)
+            rig.manager.flushPendingFor(rig.bob.nodeId)
+            advanceUntilIdle()
+            assertEquals(listOf(FanoutHint.CHAT), rig.transport.longRangeHints)
+
+            rig.transport.longRangeHints.clear()
+            coEvery { rig.messages.unackedDmsTo(rig.bob.nodeId, rig.me.nodeId, any()) } returns listOf(row)
+            rig.manager.resealRecentDmsTo(rig.bob.nodeId)
+            advanceUntilIdle()
+            assertEquals(listOf(FanoutHint.CONTENT), rig.transport.longRangeHints)
+        }
+
+    @Test
+    fun relayedFarPeerFramesAreCappedAtTheirOwnLimit() =
         runTest(UnconfinedTestDispatcher()) {
             val rig = Rig(backgroundScope)
             val carol = party()
@@ -1027,7 +1111,7 @@ class MeshManagerTest {
                 rig.forwardStore.store(carried("r$i", carol.nodeId, rig.bob.nodeId, rig.now + i), ForwardStore.ORIGIN_RELAY, rig.now)
             }
             val ids = rig.manager.framesFor(rig.bob.nodeId).map { WireCodec.decodeEnvelope(it.signed)!!.id }
-            assertEquals(listOf("r5", "r4", "r3", "r2"), ids)
+            assertEquals("the newest four (MeshManager.FAR_REOFFER_RELAYED_LIMIT)", listOf("r5", "r4", "r3", "r2"), ids)
         }
 
     // --- DM: deferred (pendingKey) when the recipient's key is not yet known ---
@@ -1568,7 +1652,7 @@ class MeshManagerTest {
                     .isEmpty(),
             )
             assertEquals(2L, rig.metrics.receipts().receiptsCoalesced)
-            assertEquals("a reply is content, never a tick", listOf(FanoutHint.CONTENT, FanoutHint.CONTENT), rig.transport.longRangeHints)
+            assertEquals("a reply is our own DM, never a tick", listOf(FanoutHint.CHAT, FanoutHint.CHAT), rig.transport.longRangeHints)
 
             val carol = party()
             rig.pinWithCaps(carol, RatchetCrypto.generateKeyPair().pub, Protocol.LOCAL_CAPABILITIES and Protocol.CAP_INLINE_ACK.inv())

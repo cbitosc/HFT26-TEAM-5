@@ -489,7 +489,12 @@ hop (fixed in `MeshRouter.countOverheard`, pinned by `MeshRouterTest`).
   collecting `inbound` — a `SharedFlow` with no replay drops what is emitted before that, and a link brought
   up too early would lose the profile push. Bring a multi-hop topology up with `linkAll` so no relay fires in
   the gap between two links. Boot costs ~1 s per node (Tink keygen + Room + DataStore); the scenarios
-  themselves run in a few hundred ms.
+  themselves run in a few hundred ms. **A calendar jump past the router's 10-min `SeenSet` with a relay still in
+  flight** (a copy in its 0–150 ms jitter when `awaitCustodyParity` returned) turns that copy into a re-delivery,
+  and a re-delivered DM mints a fresh ✓✓ — an extra frame the scenario never sent, aired or held after the split.
+  Cut the link (`lab.unlink`, which drains inbound) *before* `lab.clock.advance`, so a late copy lands inside the
+  window and is deduplicated; the LoRa pocket scenarios then shorten `LabLimits.loraLingerSweepMs` so the boards
+  re-read their heard sets after the jump (2026-10-10, seeds 630240221/630240248).
 - **A failed `awaitAcquainted` prints every node's router counters** (`originated / delivered / relayed /
   deduped / suppressed / drops`) — read `suppressed` first; that is how the same-neighbor overhear bug showed.
 - **CI runs the package three times in a row in its own job** (`mesh-lab` in `.github/workflows/ci.yml`,

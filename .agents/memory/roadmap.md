@@ -273,7 +273,11 @@ doc). **Don't start a deferred item without explicit direction.**
   metadata-exposure control). Group chat/meta, typing and files stay refused. **Still owed:** the
   **two-phone device trial** (pair both boards, verify a Nearby post + ✓✓ + reaction cross, then a DM + its
   ✓✓ + a reply, and a DM sent while the far board was off landing via the re-offer once it returns — all
-  with the phones out of BLE/NAN range) — the GATT layer has no host test. **Knit-provisioned channel
+  with the phones out of BLE/NAN range) — the GATT layer has no host test. **A DM waits for its recipient to be
+  heard** (2026-10-10, ADR 2026-10.a4pm, proposed): a DM-form fan-out rides only to a peer in `reachable`, except
+  one probe DM per recipient per 15 min; the re-offer (own unacked ≤ 6 on `LIVE`, relayed ≤ 4 on `BRIDGE`) delivers
+  the rest on the recipient's first hearing. **Still owed:** its two-phone trial in `context/lora-bridge.md`
+  (`loraDmProbes 1`, `loraUnheardHeld 2`, then `loraReoffered ≥ 2` and three ✓✓). **Knit-provisioned channel
   SHIPPED** (2026-08-24): "Set up Knit channel" (or `…debug.LORAPROV`) writes the derived `KnitChannel` as a
   secondary channel over the Meshtastic admin API — the user no longer hand-configures the boards;
   region/modem-preset still set once at flash. **Board setup REWORKED** (2026-08-26, ADR 045): a single

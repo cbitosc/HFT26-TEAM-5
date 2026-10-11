@@ -870,6 +870,20 @@ data class LabLimits(
      */
     val dmAckHoldMs: Long = DmAckCoalescer.HOLD_MS,
     /**
+     * Whether the boards run the ADR 044 bridge (`LoraConfig.bridge`, the "Bridge pockets" switch, on in the
+     * field). A scenario about the live fan-out and the first-hearing re-offer turns it off, because a far
+     * board's OFFER can have the bridge serve the same frames first, out of a share that carries about three
+     * one-packet frames a window at the lab's fallback preset — and a served frame takes the dedup slot the
+     * re-offer would use.
+     */
+    val loraBridge: Boolean = true,
+    /**
+     * How often the board's linger sweep re-reads its heard set (`LoraMeshTransport.LINGER_SWEEP_MS`, a minute in the
+     * field). A scenario that moves the calendar past `REACHABLE_LINGER_MS` shortens it, so the boards forget each
+     * other inside an await — the jump moves the decision, never the `delay` that asks it.
+     */
+    val loraLingerSweepMs: Long = LoraMeshTransport.LINGER_SWEEP_MS,
+    /**
      * The Internet plane's timed round and attachment re-look ([ScopeSync.TICK_INTERVAL_MS],
      * [ScopeSync.ATTACHMENT_RETRY_MS]). The field values by default, so every spool scenario still converges on
      * the events and a lost wake shows as a slow scenario (`scripts/lab-chaos.sh` names those). Only a scenario
@@ -1097,7 +1111,7 @@ class LabNode internal constructor(
                 LoraMeshTransport(
                     selfId = { nodeId },
                     link = FakeMeshtasticLink(loraNodeNum(), air),
-                    config = MutableStateFlow(LoraConfig("AA:$name", 0)),
+                    config = MutableStateFlow(LoraConfig("AA:$name", 0, bridge = limits.loraBridge)),
                     selfProfile = { manager.signedProfile() },
                     farFrames = { manager.framesFor(it) },
                     offerPrefixes = { manager.offerPrefixes(it) },
@@ -1116,6 +1130,7 @@ class LabNode internal constructor(
                             maxIntervalMs = limits.loraGossipMaxMs,
                             random = { 0 },
                         ),
+                    lingerSweepMs = limits.loraLingerSweepMs,
                 )
             }
         composite = lora?.let { CompositeMeshTransport(listOf(transport, it), scope) }
@@ -1816,7 +1831,8 @@ class LabNode internal constructor(
                 .joinToString("\n         ")
         return "\n    lora: sent=${s.loraSent} received=${s.loraReceived} suppressed=${s.loraSuppressed} passive=${s.loraPassive} " +
             "offers=${s.loraOfferSent}/${s.loraOfferReceived} bridged=${s.loraBridged} nak=${s.loraNak} dropped=${s.loraDroppedQueue} " +
-            "stale=${s.loraStaleAtSendByReason} tickDeferred=${s.loraTickDeferred} reassembled=${s.loraReassembled} " +
+            "stale=${s.loraStaleAtSendByReason} unheard=${s.loraUnheardHeld} probes=${s.loraDmProbes} " +
+            "reoffered=${s.loraReoffered} tickDeferred=${s.loraTickDeferred} reassembled=${s.loraReassembled} " +
             "frag=${s.loraFragSent}\n    rx/tx: $lines"
     }
 

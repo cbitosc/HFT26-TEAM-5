@@ -15,8 +15,17 @@ import java.io.File
  * not guess.
  */
 enum class FanoutHint {
-    /** A message, or anything we cannot classify — worth its airslot. */
+    /**
+     * Anything we cannot classify — a relayed frame, or one of our own sealed ctls (a reaction, a session
+     * reset, a seed or key reply) — worth its airslot.
+     */
     CONTENT,
+
+    /**
+     * One of our own 1:1 messages — a DM the user wrote, sent or re-sealed. The one kind that draws a ✓✓ back,
+     * so the one a plane that waits for its recipient to be heard may probe with (ADR 2026-10.a4pm).
+     */
+    CHAT,
 
     /** Our own delivery receipt: feedback, not content. A scarce medium sheds it first and never spends its last air on it. */
     TICK,
@@ -572,8 +581,9 @@ interface MeshTransport {
      * with a data path (Bluetooth, Wi-Fi Aware) and the fakes ignore it.
      *
      * [hint] is what the originator knows and the plane cannot read off a sealed frame: a [FanoutHint.TICK]
-     * is our own delivery receipt, which a scarce medium may shed before content (ADR 054). A relayed frame
-     * is opaque and stays [FanoutHint.CONTENT].
+     * is our own delivery receipt, which a scarce medium may shed before content (ADR 054), and a
+     * [FanoutHint.CHAT] our own DM, the one frame whose ✓✓ can tell the plane its recipient is there (ADR
+     * 2026-10.a4pm). A relayed frame is opaque and stays [FanoutHint.CONTENT].
      */
     fun longRangeFanout(
         wire: WireEnvelope,

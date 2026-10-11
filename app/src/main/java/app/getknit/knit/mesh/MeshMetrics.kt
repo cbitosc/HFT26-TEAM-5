@@ -325,6 +325,8 @@ class MeshMetrics {
     private val loraPassive = AtomicLong()
     private val loraSkippedLinked = AtomicLong()
     private val loraSkippedInternet = AtomicLong()
+    private val loraUnheardHeld = AtomicLong()
+    private val loraDmProbes = AtomicLong()
     private val loraStaleAtSend = AtomicLong()
     private val loraStaleAtSendByReason = ConcurrentHashMap<String, AtomicLong>()
     private val loraTickDeferred = AtomicLong()
@@ -1077,6 +1079,26 @@ class MeshMetrics {
     }
 
     /**
+     * A DM-form frame kept off LoRa because its recipient has not been heard on this plane within the linger
+     * and its probe window was already spent (ADR 2026-10.a4pm) — it stays in custody, and the recipient's
+     * first hearing re-offers it. Climbing while a far peer is switched off is airtime saved; climbing while
+     * that peer is in range and talking means `reachable` is not being fed.
+     */
+    fun onLoraUnheardHeld() {
+        loraUnheardHeld.incrementAndGet()
+    }
+
+    /**
+     * A DM put on the air to a recipient this plane has not heard, as the one probe of its window
+     * (ADR 2026-10.a4pm): if the recipient is there, its ✓✓ makes it heard and the DMs held behind the probe
+     * follow through the re-offer. At most one per recipient per window; against [onLoraUnheardHeld] it
+     * says how much the gate kept back.
+     */
+    fun onLoraDmProbe() {
+        loraDmProbes.incrementAndGet()
+    }
+
+    /**
      * A queued frame was refused at the moment it reached the air, because an enqueue-time gate had since
      * changed its answer (`StaleAtSend`: the addressee linked on a better plane, the frame aged past the
      * freshness window, or we stood down to a co-pocket gateway).
@@ -1366,6 +1388,8 @@ class MeshMetrics {
             loraPassive = loraPassive.get(),
             loraSkippedLinked = loraSkippedLinked.get(),
             loraSkippedInternet = loraSkippedInternet.get(),
+            loraUnheardHeld = loraUnheardHeld.get(),
+            loraDmProbes = loraDmProbes.get(),
             loraStaleAtSend = loraStaleAtSend.get(),
             loraStaleAtSendByReason = loraStaleAtSendByReason.mapValues { it.value.get() },
             loraTickDeferred = loraTickDeferred.get(),
@@ -1602,6 +1626,8 @@ class MeshMetrics {
             val loraPassive: Long = 0,
             val loraSkippedLinked: Long = 0,
             val loraSkippedInternet: Long = 0,
+            val loraUnheardHeld: Long = 0,
+            val loraDmProbes: Long = 0,
             val loraStaleAtSend: Long = 0,
             val loraStaleAtSendByReason: Map<String, Long> = emptyMap(),
             val loraTickDeferred: Long = 0,

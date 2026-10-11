@@ -116,8 +116,11 @@ object FieldCounters {
                 put("loraSessionUps", loraSessionUps)
                 put("loraDmSent", loraDmSent)
                 put("loraDmReceived", loraDmReceived)
+                put("loraReoffered", loraReoffered)
                 put("loraSkippedLinked", loraSkippedLinked)
                 put("loraSkippedInternet", loraSkippedInternet)
+                put("loraUnheardHeld", loraUnheardHeld)
+                put("loraDmProbes", loraDmProbes)
                 put("loraStaleAtSend", loraStaleAtSend)
                 put("loraTickDeferred", loraTickDeferred)
             }

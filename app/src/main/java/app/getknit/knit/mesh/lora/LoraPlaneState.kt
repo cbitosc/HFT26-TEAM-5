@@ -69,6 +69,13 @@ internal data class LoraPlaneSnapshot(
     val profileSeen: List<SeenStamp> = emptyList(),
     /** The Meshtastic nodes the DM auto-reply has answered inside its window, by `!hex` id ([DmAutoReplyPolicy]). */
     val autoReplied: List<SeenStamp> = emptyList(),
+    /**
+     * The recipients a DM was last put on the air to as a probe, inside the probe window, by node id
+     * ([LoraDmProbe], ADR 2026-10.a4pm). Defaulted, so a blob an older build wrote loads with no probes spent.
+     */
+    val dmProbes: List<SeenStamp> = emptyList(),
+    /** The DM-form frames the first-hearing re-offer aired within its hour, by frame id (ADR 2026-10.a4pm). Defaulted. */
+    val reoffered: List<SeenStamp> = emptyList(),
 )
 
 /** One packet already booked against the rolling window: what it cost, when, and out of whose share. */
@@ -88,7 +95,7 @@ internal data class ServeWindow(
     val spent: Int,
 )
 
-/** One entry of a `SeenSet` that outlives the process — the profile re-fan gate's 12-hour memory. */
+/** One stamped id that outlives the process — the profile re-fan gate's 12-hour memory, the auto-reply's, a probe's. */
 @Serializable
 internal data class SeenStamp(
     val id: String,

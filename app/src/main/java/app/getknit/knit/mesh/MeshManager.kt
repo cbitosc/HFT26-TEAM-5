@@ -1216,9 +1216,20 @@ class MeshManager(
                     attachmentHash = sealedAttachment?.hash,
                 ),
             ),
+            chatHint(recipientId, group),
         )
         return true
     }
+
+    /**
+     * A DM the user wrote is [FanoutHint.CHAT]: the one DM-form frame that draws a ✓✓, so the LoRa reach gate may
+     * probe with it (ADR 2026-10.a4pm). A group or room frame never rides the long-range plane, so it keeps the
+     * default.
+     */
+    private fun chatHint(
+        recipientId: String?,
+        group: GroupInfo?,
+    ): FanoutHint = if (recipientId != null && group == null) FanoutHint.CHAT else FanoutHint.CONTENT
 
     /** Builds a [FrameType.CHAT] routing envelope wrapping the given [content] payload. */
     private fun chatEnvelope(
@@ -3171,21 +3182,42 @@ class MeshManager(
 
     /**
      * [FarPeerFrameSource]: the carried DM-form frames worth re-offering to [nodeId] when a long-range plane
-     * first hears it (ADR 039) — the newest [FAR_REOFFER_LIMIT] live custody frames addressed to it, minus our
-     * own frames the peer has already acked (an own frame with no unacked message row is either delivered or a
-     * sealed ctl, neither worth an airslot; a relayed frame's fate is unknowable, so it is offered). Verbatim
-     * custody bytes re-wrapped like a custody re-serve: the receiver's SeenSet / exists-gate make a duplicate
-     * harmless, and a re-delivered DM re-draws its receipt — which is how a tick lost over LoRa heals.
+     * first hears it (ADR 039, split by ADR 2026-10.a4pm), own first, then relayed:
+     *
+     * - **Own:** our newest [FAR_REOFFER_OWN_LIMIT] DMs to the peer it has not acked, chosen by id off
+     *   `unackedDmsTo` and read back from custody. Since the LoRa reach gate holds a DM to an unheard peer for
+     *   exactly this moment, this is how those DMs reach the air, so the cap is the larger one. Chosen by id
+     *   rather than filtered after a newest-N custody read, because that read let acked DMs and our own sealed
+     *   ctls (a ✓✓, a reaction — no unacked row) take the slots an unacked DM needed.
+     * - **Relayed:** the newest [FAR_REOFFER_RELAYED_LIMIT] live custody frames to the peer written by anyone
+     *   else; their fate is unknowable, so they are offered.
+     *
+     * Verbatim custody bytes re-wrapped like a custody re-serve: the receiver's SeenSet / exists-gate make a
+     * duplicate harmless, and a re-delivered DM re-draws its receipt — which is how a tick lost over LoRa heals.
+     * The transport enqueues them in this order, FIFO within the DM class.
      */
     override suspend fun framesFor(nodeId: String): List<WireEnvelope> {
         val now = clock()
-        val carried = forwardStore.liveFramesTo(nodeId, now, FAR_REOFFER_LIMIT)
-        if (carried.isEmpty()) return emptyList()
         val me = identity.nodeId()
-        val ownUnacked = messages.unackedDmsTo(nodeId, me, since = now - RESEAL_WINDOW_MS).mapTo(HashSet()) { it.id }
-        return carried
-            .filter { it.envelope.senderId != me || it.envelope.id in ownUnacked }
-            .map { WireEnvelope(sig = it.sig, signed = it.signed) }
+        // Over-fetched, then capped after the custody read: an unacked row whose frame custody no longer holds
+        // (evicted, or past its TTL) must not take a slot from an older one it still does.
+        val ownIds =
+            messages
+                .unackedDmsTo(nodeId, me, since = now - RESEAL_WINDOW_MS)
+                .sortedByDescending { it.sentAt }
+                .take(FAR_REOFFER_OWN_LIMIT * 2)
+                .map { it.id }
+        val own =
+            if (ownIds.isEmpty()) {
+                emptyList()
+            } else {
+                forwardStore
+                    .liveFramesByIds(ownIds, now)
+                    .filter { it.envelope.recipientId == nodeId && it.envelope.senderId == me }
+                    .take(FAR_REOFFER_OWN_LIMIT)
+            }
+        val relayed = forwardStore.liveFramesToFromOthers(nodeId, me, now, FAR_REOFFER_RELAYED_LIMIT)
+        return (own + relayed).map { WireEnvelope(sig = it.sig, signed = it.signed) }
     }
 
     /**
@@ -3291,11 +3323,12 @@ class MeshManager(
      * by [sendChat]). Now that [handleProfile] has pinned the key, each is re-sealed and flooded (and
      * captured for carry via [originate]); a still-unresolvable or now-blocked recipient is left pending.
      */
-    private suspend fun flushPendingFor(recipientId: String) {
+    internal suspend fun flushPendingFor(recipientId: String) {
         if (recipientId in settings.blockedNodeIds.first()) return
         val me = identity.nodeId()
         messages.pendingForRecipient(recipientId).forEach { row ->
-            if (resealAndFlood(row, recipientId, me)) messages.clearPending(row.id)
+            // This DM never flew, and custody takes these fresh bytes: the user's message, probe-eligible (ADR 2026-10.a4pm).
+            if (resealAndFlood(row, recipientId, me, FanoutHint.CHAT)) messages.clearPending(row.id)
         }
     }
 
@@ -3306,12 +3339,16 @@ class MeshManager(
      * replacement session puts recoverable copies back on the mesh. Receiver-side idempotency (the
      * exists-gate + upsert) makes duplicates harmless.
      */
-    private suspend fun resealRecentDmsTo(recipientId: String) {
+    internal suspend fun resealRecentDmsTo(recipientId: String) {
         if (recipientId in settings.blockedNodeIds.first()) return
         val me = identity.nodeId()
         messages
             .unackedDmsTo(recipientId, me, since = clock() - RESEAL_WINDOW_MS)
-            .forEach { row -> resealAndFlood(row, recipientId, me) }
+            // CONTENT, not CHAT: custody keeps the first-stored seal of this id (`ForwardSync.onSeen` returns early on
+            // `has(id)`), so a re-seal the LoRa reach gate held would later be re-offered as the old bytes the reset
+            // peer cannot open. Exempt, the fresh seal flies now (ADR 2026-10.a4pm) — and, sharing the frame's key, it
+            // replaces an old-seal copy still queued, which is the copy worth losing.
+            .forEach { row -> resealAndFlood(row, recipientId, me, FanoutHint.CONTENT) }
     }
 
     /**
@@ -3324,6 +3361,7 @@ class MeshManager(
         row: MessageEntity,
         recipientId: String,
         me: String,
+        hint: FanoutHint,
     ): Boolean {
         val content =
             MessageContent(
@@ -3351,6 +3389,7 @@ class MeshManager(
                     attachmentHash = row.attachmentHash,
                 ),
             ),
+            hint, // the caller's: see flushPendingFor and resealRecentDmsTo (ADR 2026-10.a4pm)
         )
         return true
     }
@@ -3429,8 +3468,17 @@ class MeshManager(
 
         const val RESEAL_WINDOW_MS = 24 * 60 * 60_000L
 
-        /** How many carried DM-form frames a long-range plane re-offers per first hearing of a peer (≤ 3 packets each). */
-        const val FAR_REOFFER_LIMIT = 4
+        /**
+         * How many of our own unacked DMs a long-range plane re-offers per first hearing of a peer (≤ 3 packets
+         * each, ADR 2026-10.a4pm). Six two-packet DMs are ~30 s, two thirds of a LongFast window on `LIVE`, which
+         * holds room posts and ticks behind it; with [FAR_REOFFER_RELAYED_LIMIT] one sighting adds at most 10
+         * frames to the pacer's 32-frame queue. A longer backlog has waited longer than a LoRa hop should carry
+         * and waits for a radio or spool contact (ADR 039 §7).
+         */
+        const val FAR_REOFFER_OWN_LIMIT = 6
+
+        /** How many relayed DM-form frames a long-range plane re-offers per first hearing of a peer (ADR 039). */
+        const val FAR_REOFFER_RELAYED_LIMIT = 4
 
         /** Per-(group, member) floor on proactive/responder seed re-sends (docs/GROUP_FORWARD_SECRECY.md #10). */
         const val SEED_RESEND_FLOOR_MS = 15 * 60_000L

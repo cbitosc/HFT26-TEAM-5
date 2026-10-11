@@ -45,19 +45,33 @@ interface ForwardStore {
     suspend fun liveIds(now: Long): List<String>
 
     /**
-     * The newest (by frame-global `sentAt`) non-expired carried **chat** frames addressed to [recipientId], at
-     * most [limit] — what a plane with no custody sync re-offers to that peer when it first hears it (ADR 039).
-     * The default derives it from [liveFrames]; the Room implementation queries the indexed column.
+     * The newest non-expired carried **chat** frames addressed to [recipientId] and written by anyone but [me],
+     * at most [limit] — the relayed half of the long-range re-offer (ADR 039, ADR 2026-10.a4pm). The default
+     * derives it from [liveFrames]; the Room implementation queries the indexed column.
      */
-    suspend fun liveFramesTo(
+    suspend fun liveFramesToFromOthers(
         recipientId: String,
+        me: String,
         now: Long,
         limit: Int,
     ): List<CarriedFrame> =
         liveFrames(now)
-            .filter { it.envelope.recipientId == recipientId && it.envelope.type == FrameType.CHAT }
-            .sortedByDescending { it.envelope.sentAt }
+            .filter { it.envelope.recipientId == recipientId && it.envelope.type == FrameType.CHAT && it.envelope.senderId != me }
+            .sortedWith(NEWEST_FIRST)
             .take(limit)
+
+    /**
+     * The non-expired carried frames among [ids] (at [now]), newest first by `sentAt` — the own half of the
+     * long-range re-offer, chosen by id from our unacked DMs (ADR 2026-10.a4pm). The default derives it from
+     * [liveFrames]; the Room implementation reads the rows by key.
+     */
+    suspend fun liveFramesByIds(
+        ids: Collection<String>,
+        now: Long,
+    ): List<CarriedFrame> {
+        val wanted = ids.toHashSet()
+        return liveFrames(now).filter { it.envelope.id in wanted }.sortedWith(NEWEST_FIRST)
+    }
 
     /**
      * The non-expired carried **group chat** frames (at [now]) authored by anyone but [excludingSender] — what the
@@ -115,6 +129,10 @@ interface ForwardStore {
 
         /** [store] origin: a frame this device authored — kept longest. */
         const val ORIGIN_SELF = 1
+
+        /** `sentAt DESC, id DESC` — the Room queries' order, so a default and the database agree on a tie. */
+        private val NEWEST_FIRST: Comparator<CarriedFrame> =
+            compareByDescending<CarriedFrame> { it.envelope.sentAt }.thenByDescending { it.envelope.id }
     }
 }
 

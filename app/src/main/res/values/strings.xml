@@ -749,6 +749,8 @@
     <string name="diagnostics_metric_lora_dm_sent">LoRa private messages sent</string>
     <string name="diagnostics_metric_lora_dm_received">LoRa private messages received</string>
     <string name="diagnostics_metric_lora_reoffered">LoRa private messages re-offered</string>
+    <string name="diagnostics_metric_lora_dm_probes">LoRa private messages sent as a probe</string>
+    <string name="diagnostics_metric_lora_unheard_held">LoRa private messages held for an unheard contact</string>
     <string name="diagnostics_metric_spool_bridged">Messages received via Internet relays</string>
     <string name="diagnostics_metric_spool_invalid">Relay blobs quarantined</string>
     <string name="diagnostics_metric_spool_errors">Relay errors</string>

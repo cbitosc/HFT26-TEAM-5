@@ -84,6 +84,7 @@ Decisions worth not relitigating:
 10. **Not a wire change; custody untouched.** `sig`/`signed` still pass through `FastFrameCodec` byte-exact;
     no new frame type, field, ctl code or capability bit. Nothing new is stored and no custody rule changes,
     so the content digest's inputs are identical on every node as before (ADR 006).
+   <!-- doc-lint: allow liveFramesTo — retired by ADR 2026-10.a4pm (see the amendment below) -->
 
 Counters: `loraDmSent`/`loraDmReceived` (DM-form, sealed ctl included — the transport cannot tell),
 `loraReoffered`, and `loraSuppressed` now actually counts (dedup-window and stale suppressions).
@@ -99,3 +100,15 @@ spool path exists (`blobreq` never rides LoRa); sealed group machinery crosses o
 does not; and airtime is roughly SMS pace — ~2 packets per DM plus ~2 per receipt at ~2.5 s each, ~1–2
 DMs/min sustained under the EU 868 duty cycle (the board's DUTY_CYCLE NAK already backs the pacer off).
 Scheme + device bring-up: `context/lora-bridge.md`.
+
+## Amendment 2026-10-10 — a DM waits for its recipient to be heard (ADR 2026-10.a4pm)
+
+§7's re-offer is now the delivery path for most DMs to a quiet peer. A DM-form fan-out rides only to a recipient
+in `reachable`, keyed on the originator's `FanoutHint`: our own DM (`CHAT`) may go out as the one probe per
+recipient per 15 min, as may a linked pocket-mate's relayed frame at the gateway; other relayed frames are held;
+our own ✓✓ (`TICK`) and sealed ctls (`CONTENT`, the post-reset re-seal included) are not gated, since nothing could
+re-offer them. The recipient's ✓✓ makes it heard, and the first hearing re-offers what
+was held. §7's "newest 4, minus our acked" is split: our own unacked DMs, chosen by id off `unackedDmsTo`, up to 6
+and spent from `LIVE`; then relayed frames, up to 4, on `BRIDGE` (`LIVE` for a linked pocket-mate's). One frame is
+re-offered at most once an hour, and a re-offer lifts a copy the bridge still has queued onto its own bucket. The
+old single read let our acked DMs and own sealed ctls take the slots before the filter ran.

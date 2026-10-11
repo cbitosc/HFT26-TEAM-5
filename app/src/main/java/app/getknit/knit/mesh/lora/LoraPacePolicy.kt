@@ -68,19 +68,98 @@ internal class LoraPacePolicy(
         // cool-down.
         airtimeBlockedUntil = 0L
         // A snapshot replaces its own older copy before anything else is decided, so a superseded frame can
-        // never cost the newcomer a queue slot or make the queue look fuller than it is.
-        lastSuperseded = frame.supersedes?.let { key -> queue.removeAllReturningCount { it.supersedes == key } } ?: 0
+        // never cost the newcomer a queue slot or make the queue look fuller than it is. Never a part-sent copy:
+        // the board already holds its first fragments, and dropping the rest strands them on the air (feb2d5a4).
+        lastSuperseded =
+            frame.supersedes?.let { key -> queue.removeAllReturningCount { it.supersedes == key && it.sentParts == 0 } } ?: 0
+        return admit(frame)
+    }
+
+    /**
+     * Puts back a frame the pacer took and could not send — the board busy, or the link gone between the take
+     * and the write. Unlike [enqueue] it supersedes nothing: the frame is not a newer snapshot, it is the one
+     * that was already here, and running the supersede would let a requeued older profile delete a newer one
+     * queued meanwhile (ADR 2026-09.xdm2 read the other way round).
+     */
+    @Synchronized
+    fun requeue(frame: OutboundFrame): Admission {
+        if (inFlight === frame) inFlight = null
+        airtimeBlockedUntil = 0L
+        lastSuperseded = 0
+        return admit(frame)
+    }
+
+    /** Whether a frame queued under [key] is waiting — the bridge's check before it would queue a second copy. */
+    @Synchronized
+    fun hasQueued(key: String): Boolean = inFlight?.supersedes == key || queue.any { it.supersedes == key }
+
+    private fun admit(frame: OutboundFrame): Admission {
         if (queue.size < queueCap) {
             queue.addLast(frame)
             return Admission.ACCEPTED
         }
         // Full: shed from the lowest class present, newcomer included (enum order = priority, highest first).
-        val shed = maxOf(queue.maxOf { it.klass }, frame.klass)
-        val victim = queue.indexOfFirst { it.klass == shed }
-        if (victim < 0) return Admission.REFUSED // the newcomer alone is the lowest class: it yields
-        queue.removeAt(victim)
+        val lowest = maxOf(queue.maxOf { it.klass }, frame.klass)
+        val victim = queue.indexOfFirst { it.klass == lowest }
+        if (victim < 0) {
+            // The newcomer alone is the lowest class: it yields — and, never queued, it is handed back like any shed
+            // frame, so whatever it held (dedup slot, probe window, re-offer hour) is given back by the caller.
+            shed += frame
+            return Admission.REFUSED
+        }
+        shed += queue.removeAt(victim)
         queue.addLast(frame)
         return Admission.DROPPED_OLDEST
+    }
+
+    // Frames this pacer dropped without sending — shed for a newcomer, a refused newcomer or requeue, or evicted as
+    // oversize — waiting for the
+    // transport to hand back what they held (their dedup slot, a probe window, a re-offer's hour; ADR 2026-10.a4pm).
+    private val shed = ArrayList<OutboundFrame>()
+
+    /** Takes the frames dropped unsent since the last call; the caller abandons each ([drainShed] is race-safe). */
+    @Synchronized
+    fun drainShed(): List<OutboundFrame> {
+        if (shed.isEmpty()) return emptyList()
+        return shed.toList().also { shed.clear() }
+    }
+
+    /**
+     * The frame [take] handed out and the pacer has not yet heard the end of ([done] or [requeue]). Off the
+     * queue while its first fragment is written, it must still count as queued to [hasQueued] and
+     * [upgradeQueued], or a serve queues a second copy beside it and a `Busy` requeue then lets both fly.
+     */
+    private var inFlight: OutboundFrame? = null
+
+    /** The pacer is done with [frame]: sent, dropped or abandoned. */
+    @Synchronized
+    fun done(frame: OutboundFrame) {
+        if (inFlight === frame) inFlight = null
+    }
+
+    /**
+     * Puts [frame] in the place of a queued, not-yet-started copy of itself (same [OutboundFrame.supersedes]
+     * key) that waits on a different bucket, and says whether it did. The first-hearing re-offer's way past a
+     * copy the bridge queued on `BRIDGE` (ADR 2026-10.a4pm): that copy took the dedup slot, so the re-offer
+     * cannot simply queue its own, and a share the bridge has spent can hold it for a window while `LIVE` has
+     * air. In place, so it keeps its turn. Only ever a lift from `BRIDGE` to `LIVE`: false when there is no such
+     * copy, when the swap would not be that lift, when the queued copy holds a probe window, or when the board has
+     * taken part of it — a part-sent frame finishes as it is (feb2d5a4).
+     */
+    @Synchronized
+    fun upgradeQueued(frame: OutboundFrame): Boolean {
+        val key = frame.supersedes ?: return false
+        if (inFlight?.supersedes == key) return false // it is on its way now, on whichever bucket it took
+        val i = queue.indexOfFirst { it.supersedes == key }
+        if (i < 0) return false
+        val queued = queue[i]
+        // Lift only: BRIDGE to LIVE. Anything else could push a live copy down, and a queued probe holds a window
+        // the replacement does not carry (ADR 2026-10.a4pm).
+        if (queued.sentParts > 0 || queued.bucket != AirBucket.BRIDGE || frame.bucket != AirBucket.LIVE) return false
+        if (queued.probe != null) return false
+        queue[i] = frame
+        airtimeBlockedUntil = 0L // it may spend a bucket the queue was not asking for
+        return true
     }
 
     /**
@@ -92,7 +171,7 @@ internal class LoraPacePolicy(
     @Synchronized
     fun evictOversize(cap: Int): Int {
         val before = queue.size
-        queue.removeAll { frame -> frame.remaining.any { it.size > cap } }
+        queue.removeAll { frame -> frame.remaining.any { it.size > cap }.also { if (it) shed += frame } }
         return before - queue.size
     }
 
@@ -155,7 +234,7 @@ internal class LoraPacePolicy(
         }
         airtimeBlockedUntil = 0L
         lastSentAt = now
-        return queue.removeAt(best)
+        return queue.removeAt(best).also { inFlight = it }
     }
 
     private fun ArrayDeque<OutboundFrame>.removeAllReturningCount(predicate: (OutboundFrame) -> Boolean): Int {
@@ -345,13 +424,21 @@ internal data class RideGate(
     val freshUntil: Long? = null,
     /** Whether the enqueuing path stood down to a co-pocket gateway, and so must stand down here too. */
     val roleGated: Boolean = false,
+    /**
+     * Whether the enqueuing path let this DM-form frame through only because [recipientId] was heard on this
+     * plane (ADR 2026-10.a4pm), and so must drop it if the recipient lingers out while it waits. False on the
+     * probe, which flew precisely because the recipient was *not* heard, on our own sealed ctls (never gated),
+     * on the bridge backfill (gated on a far OFFER instead) and on everything not DM-form.
+     */
+    val reachGated: Boolean = false,
 )
 
 /**
  * Why a queued frame was refused at the moment it reached the air rather than sent. One per [RideGate]
  * question, because "the queue held it until the answer changed" is only actionable if it says *which*
- * answer: [LINKED] and [INTERNET] mean the plane is doing its job, [STALE] means the queue is running deeper
- * than the freshness window, and [PASSIVE] means a co-pocket board took the role mid-flight.
+ * answer: [LINKED] and [INTERNET] mean the plane is doing its job, [UNHEARD] that the addressee went quiet,
+ * [STALE] means the queue is running deeper than the freshness window, and [PASSIVE] means a co-pocket board
+ * took the role mid-flight.
  */
 internal enum class StaleAtSend {
     /** A better plane linked to the addressee while this waited; the link has carried it. */
@@ -359,6 +446,12 @@ internal enum class StaleAtSend {
 
     /** The addressee turned up on a connected spool while this waited; the spool carries it (ADR 2026-09.y5f3). */
     INTERNET,
+
+    /**
+     * The addressee lingered out of this plane's reach while this waited (ADR 2026-10.a4pm); custody keeps it
+     * for the re-offer on its next first hearing.
+     */
+    UNHEARD,
 
     /** It aged past [LoraFramePolicy.FRESH_MS] in the queue; it is custody's business now, not a live plane's. */
     STALE,
@@ -402,6 +495,20 @@ internal class OutboundFrame(
     val supersedes: String? = null,
     /** The enqueue-time gates worth asking again on the way out; see [RideGate]. */
     val gate: RideGate = RideGate(),
+    /**
+     * The probe window this frame spent, if it is a probe (ADR 2026-10.a4pm): given back if the frame is refused
+     * at send, since a probe that never flew told nobody anything.
+     */
+    val probe: LoraDmProbe.Claim? = null,
+    /** The frame id a first-hearing re-offer stamped in its hourly memory, cleared again if refused at send. */
+    val reofferId: String? = null,
+    /**
+     * The sig-dedup slot the enqueuing path took for this frame (the fan-out, the bridge's serve, the re-offer),
+     * or null where it took none. Reopened when the frame is refused at send, for any [StaleAtSend] reason: it
+     * never flew, and the slot would turn the next re-offer or backfill away. `SeenSet.reopen` lets one more copy
+     * through per id per window, so a frame refused twice inside ten minutes keeps its slot the second time.
+     */
+    val sigKey: String? = null,
 ) {
     /**
      * How many of [messages] the board has already taken. A board that runs out of queue part-way through a

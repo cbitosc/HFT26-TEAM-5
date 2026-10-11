@@ -1393,8 +1393,12 @@ class DebugBridgeReceiver :
             .put("loraPassive", snap.lora.loraPassive)
             .put("loraSkippedLinked", snap.lora.loraSkippedLinked)
             .put("loraSkippedInternet", snap.lora.loraSkippedInternet)
+            // A DM-form frame to a recipient this plane has not heard: held in custody for the first-hearing
+            // re-offer, except the one probe per recipient per window (ADR 2026-10.a4pm).
+            .put("loraUnheardHeld", snap.lora.loraUnheardHeld)
+            .put("loraDmProbes", snap.lora.loraDmProbes)
             // The same gates as `loraSkippedLinked`, asked again at the moment of sending: how much air the
-            // queue would have spent on frames whose answer changed while they waited (LINKED/STALE/PASSIVE).
+            // queue would have spent on frames whose answer changed while they waited (LINKED/INTERNET/UNHEARD/STALE/PASSIVE).
             .put("loraStaleAtSend", snap.lora.loraStaleAtSend)
             .put("loraStaleAtSendByReason", JSONObject(snap.lora.loraStaleAtSendByReason))
             .put("loraTickDeferred", snap.lora.loraTickDeferred)

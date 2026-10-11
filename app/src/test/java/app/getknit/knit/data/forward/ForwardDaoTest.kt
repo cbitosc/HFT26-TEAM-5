@@ -34,18 +34,27 @@ class ForwardDaoTest : RoomDbTest() {
         }
 
     @Test
-    fun `liveRowsTo returns the newest live chat frames addressed to one recipient`() =
+    fun `liveRowsToFromOthers leaves out our own frames to that recipient`() =
         runTest {
-            dao.insert(fwd("old", recipientId = "bob", sentAt = 1L))
-            dao.insert(fwd("mid", recipientId = "bob", sentAt = 5L))
-            dao.insert(fwd("new", recipientId = "bob", sentAt = 9L))
-            dao.insert(fwd("expired", recipientId = "bob", sentAt = 10L, expiresAt = 50L))
-            dao.insert(fwd("other", recipientId = "carol", sentAt = 11L))
-            dao.insert(fwd("room", recipientId = null, sentAt = 12L))
-            dao.insert(fwd("receipt", recipientId = "bob", sentAt = 13L).copy(type = "receipt"))
-            assertEquals(listOf("new", "mid"), dao.liveRowsTo("bob", now = 100L, limit = 2).map { it.id })
-            assertEquals(listOf("new", "mid", "old"), dao.liveRowsTo("bob", now = 100L, limit = 10).map { it.id })
-            assertTrue(dao.liveRowsTo("nobody", now = 100L, limit = 10).isEmpty())
+            dao.insert(fwd("mine", senderId = "me", recipientId = "bob", sentAt = 9L))
+            dao.insert(fwd("carols", senderId = "carol", recipientId = "bob", sentAt = 5L))
+            dao.insert(fwd("daves", senderId = "dave", recipientId = "bob", sentAt = 7L))
+            dao.insert(fwd("expired", senderId = "carol", recipientId = "bob", sentAt = 8L, expiresAt = 50L))
+            dao.insert(fwd("to-erin", senderId = "carol", recipientId = "erin", sentAt = 6L))
+            dao.insert(fwd("receipt", senderId = "carol", recipientId = "bob", sentAt = 10L).copy(type = "receipt"))
+            dao.insert(fwd("room", senderId = "carol", recipientId = null, sentAt = 11L))
+            assertEquals(listOf("daves", "carols"), dao.liveRowsToFromOthers("bob", me = "me", now = 100L, limit = 10).map { it.id })
+            assertEquals(listOf("daves"), dao.liveRowsToFromOthers("bob", me = "me", now = 100L, limit = 1).map { it.id })
+        }
+
+    @Test
+    fun `liveRowsByIds returns the live rows among the ids, newest first`() =
+        runTest {
+            dao.insert(fwd("a", sentAt = 1L))
+            dao.insert(fwd("b", sentAt = 5L))
+            dao.insert(fwd("expired", sentAt = 9L, expiresAt = 50L))
+            dao.insert(fwd("unasked", sentAt = 7L))
+            assertEquals(listOf("b", "a"), dao.liveRowsByIds(listOf("a", "b", "expired", "missing"), now = 100L).map { it.id })
         }
 
     @Test

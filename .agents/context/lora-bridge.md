@@ -413,6 +413,10 @@ each was heard "first" again. The duty cycle is law rather than politeness (ADR 
 only thing enforcing it, so a crash loop, a force-stop or a lab reinstall cycle spent air nothing accounted
 for.
 
+- **The DM probe window and the re-offer's per-frame hour joined them** (ADR 2026-10.a4pm,
+  `LoraPlaneSnapshot.dmProbes` / `reoffered`): forgotten on launch, every restart would buy each unheard recipient
+  another probe and re-air the backlog on the next first hearing. Not cleared by `quiesce` — the restore runs once
+  per instance, so a clear on `stop()` would reopen every window for an in-process restart.
 - **Stamps are wall-clock, converted at each end** (`WallShift`). `clock` is `elapsedRealtime`, which
   restarts at zero every boot: persisted directly it reads as the far future and ages nothing out. A
   snapshot stamped *ahead* of the wall clock is refused whole — the clock moved backwards, and one fresh
@@ -471,13 +475,55 @@ of three; AckSync's `relay = false` tick for a room or group post crosses **unsi
 transcoded, ~218 B on `0x03`; at the MTU-255 ESP32 boards the latter needs the measured cap, `TORADIO_OVERHEAD` 27 → 228-B payloads, pinned by `CoordinationPlaneSizeBudgetTest`; verified on the
 lab Pixel 9's MTU-255 ESP32 board 2026-08-29 — `lora ready … mtu=255 maxPayload=228`, fragmented 228-B writes accepted).
 
-**Re-offer on first hearing.** The plane has no custody sync, so a DM sent while the peer's board was off
-would be lost to it. On first hearing a peer (once per 45-min linger), after the beacon, the transport pulls
-`FarPeerFrameSource.framesFor(peer)` (`MeshManager`: the newest 4 live custody frames addressed to the peer
-via `ForwardStore.liveFramesTo`, minus our own frames it already acked via `MessageDao.unackedDmsTo`),
-re-wraps them verbatim and enqueues them class DM through a private path (`reofferTo`). Skipped for a peer
-another plane carries (`foreignReachable`) — custody syncs to it for real there. Bounded: ≤ 4 frames × ≤ 3
-packets per sighting; a frame fanned inside the sig window is skipped. Counted as `loraReoffered`.
+**A DM waits for its recipient to be heard (ADR 2026-10.a4pm).** A DM-form fan-out to a recipient not in
+`reachable` (author-keyed reach: a peer heard through a far gateway's airing counts, a co-pocket board's airing
+does not) is held, counted `loraUnheardHeld`, left in custody with its dedup slot free — the check sits after the
+covers and the freshness gate and **before** the slot. The plane cannot read a sealed frame, so the originator's
+`FanoutHint` decides what is gated: our own DM (`CHAT`, from `sendChat` and the pending-key flush only) is gated and
+may probe; our own ✓✓ (`TICK`) is **not** gated — it answers a DM that just reached us, is about one packet, and
+held it would be stranded (no message row to re-offer from, and a re-offered old DM does not make its author heard
+here); our own sealed ctls (`CONTENT` — reactions, resets, seeds, key replies, and the post-reset re-seal, whose
+custody copy is the old seal) are **not** gated either, because they have no message row for the re-offer to find
+(or would be re-offered unopenable) and draw no ✓✓; a relayed DM-form
+frame is gated, and may probe only when its author is a pocket-mate we hold a link to — the gateway's way to put
+a board-less pocket-mate's DMs to a quiet far peer on the air, at the price of sometimes spending the probe on
+that pocket-mate's tick. Until our own id is known nothing is gated (the send-time re-ask covers a DM to us). The first `CHAT` DM to an unheard recipient in each
+`DM_PROBE_WINDOW_MS` (15 min) rides anyway as the **probe** (`loraDmProbes`, `lora probe <label> -> <id>`): if the
+recipient is there, the probe makes us heard on their board, their sealed ✓✓ rides back and makes them heard on
+ours, and that first hearing re-offers what was held. A DM rather than a profile beacon on purpose: a recipient
+that already hears us (our room posts, our last beacon) never takes a beacon as a first hearing and never beacons
+back. The window is persisted with the other limiters (`LoraPlaneSnapshot.dmProbes`) and not cleared by
+`quiesce`. A queued frame that passed the gate carries `RideGate.reachGated` and is dropped `StaleAtSend.UNHEARD`
+if its recipient lingers out before it airs; the probe is never dropped for that. **Any** frame refused at send
+— and every frame dropped before its first fragment (a NAK or give-up on it, a missing config or a slot that is not
+Knit's, a frame the pacer sheds, refuses or evicts unqueued) — hands back the dedup slot it took (`abandon`; `OutboundFrame.sigKey`,
+the fan-out, serve and re-offer paths; once per id per window, which is what `SeenSet.reopen` gives): it never flew,
+and that slot would turn the next re-offer or backfill away. A probe gives back its window, a re-offer its hour. What it costs: if B hears A but A
+cannot hear B, A gets one DM per window through instead of every one; and **a recipient with LoRa DMs switched off
+never sends a ✓✓ back**, so (unless its room posts or beacon make it heard) only probes reach it. The room,
+`profile`, `fastSend` and the bridge backfill are not gated.
+
+**Re-offer on first hearing.** The plane has no custody sync, so a DM sent while the peer's board was off — or
+held by the reach gate above — would be lost to it. On first hearing a peer (once per 45-min linger), after the
+beacon, the transport pulls `FarPeerFrameSource.framesFor(peer)` and enqueues each verbatim, class DM, through
+a private path (`reofferTo`). `MeshManager` answers our own unacked DMs first — chosen by id off
+`MessageDao.unackedDmsTo`, newest first, over-fetched and capped at `FAR_REOFFER_OWN_LIMIT` (6) after
+`ForwardStore.liveFramesByIds`, so a row custody no longer holds takes no slot — then the newest live custody
+frames to the peer that others wrote, up to `FAR_REOFFER_RELAYED_LIMIT` (4, `liveFramesToFromOthers`; shared with
+relayed ✓✓s and ctls). Ours, and a linked board-less pocket-mate's, spend `LIVE` (live sends, held back); other
+relayed ones `BRIDGE`. One frame is re-offered at most once an hour across first hearings (`reofferedAt`,
+persisted as `LoraPlaneSnapshot.reoffered`), so a peer heard only now and then does not have the same backlog
+re-aired every linger cycle. Every copy of a DM-form frame — fan-out, serve, re-offer — is queued under one
+`supersedes` key (`frameKey`): when the bridge already queued a copy (taking the dedup slot) on a share it has
+spent, the re-offer lifts that copy from `BRIDGE` onto `LIVE` in place — that lift only, and never a copy holding a
+probe window (`LoraPacePolicy.upgradeQueued`, `lora
+reoffer:<id> lifted a queued copy onto LIVE`) — never a part-sent one; and the bridge skips a DM-form frame the
+pacer already holds (`LoraPacePolicy.hasQueued`) — the frame being written counts, until `done` or `requeue` — so
+it never pushes a queued probe down to `BRIDGE`. A frame put
+back after a busy board or a lost link goes through `LoraPacePolicy.requeue`, which supersedes nothing. Skipped for a peer another plane links
+(`linkedPeers`) or a spool covers — custody syncs to it for real there. Bounded: ≤ 10 frames × ≤ 3 packets per
+sighting on the 32-frame queue. Counted as `loraReoffered`. A six-DM batch is ~30 s of a 45 s window on `LIVE`, and
+DM ranks above the room and ticks, so a sighting's backlog can hold those for most of a window.
 
 **What still doesn't cross:** group chat (group-form frames are refused; sealed group *machinery* — seeds,
 key req/ack, escalated ticks — crosses opaquely and is bounded by the group logic), `typing`, attachment
@@ -921,8 +967,12 @@ where no other Knit board is listening. Set the Meshtastic app's device to **Non
 - DM (ADR 039): `…debug.SEND --es conv <peerId> --es text …` on A → appears on B within ~10 s; A's tick
   flips ✓✓ (the sealed receipt crossed back); `loraDmSent`/`loraDmReceived` climb on both, `loraTooBig == 0`.
   Reply from B (turnaround epoch) and a DM reaction cross; a 500-char DM counts `loraTooBig` and lands later
-  over BLE. Power B's board off, send two DMs from A, power it on → B beacons, A logs `reoffer` ×2, both land,
-  ✓✓ returns, `loraReoffered == 2`. `…debug.LORA --ez dms false` on A → a new DM stays LoRa-silent
+  over BLE. Power B's board off, send two DMs from A, power it on → B beacons, A logs `reoffer` ×1 or ×2 (the
+  first DM may have gone out as the probe and still hold its dedup slot), both land, ✓✓ returns.
+  The reach gate (ADR 2026-10.a4pm): two phones with boards, no short-range link, quiet past the 45-min linger →
+  three DMs A→B read `loraDmProbes 1`, `loraUnheardHeld 2` on A, then `loraReoffered ≥ 2` and three ✓✓ once B's
+  tick lands; B's board off, two more DMs → one more `lora probe` and nothing else of them on air for 15 min.
+  `…debug.LORA --ez dms false` on A → a new DM stays LoRa-silent
   (`loraDmSent` flat) while a room post crosses. Rejoin a BLE clique after an hour of history:
   `loraSuppressed` climbs, `loraDroppedQueue` stays 0.
 
