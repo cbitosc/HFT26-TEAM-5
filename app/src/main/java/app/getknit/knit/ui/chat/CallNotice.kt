@@ -46,6 +46,10 @@ fun callNoticeText(record: CallRecord): Int =
             completedText(record)
         }
 
+        CallOutcome.Dropped -> {
+            R.string.chat_call_record_dropped
+        }
+
         CallOutcome.Missed -> {
             if (record.walkie) R.string.chat_call_record_missed_mesh else R.string.chat_call_record_missed
         }
@@ -155,7 +159,7 @@ fun CallNotice(
 private fun callIcon(record: CallRecord): ImageVector =
     when (record.outcome) {
         CallOutcome.Missed -> Icons.AutoMirrored.Filled.CallMissed
-        CallOutcome.Failed -> Icons.Filled.PhoneDisabled
+        CallOutcome.Failed, CallOutcome.Dropped -> Icons.Filled.PhoneDisabled
         else -> if (record.outgoing) Icons.AutoMirrored.Filled.CallMade else Icons.AutoMirrored.Filled.CallReceived
     }
 
@@ -166,6 +170,10 @@ fun CallNoticePreview() {
         Column {
             CallNotice(
                 CallRecord(id = "a", outgoing = true, reason = CallPayload.REASON_USER, connectedAt = 0L, endedAt = 222_000L),
+                sentAt = PREVIEW_AT,
+            )
+            CallNotice(
+                CallRecord(id = "d", outgoing = true, reason = CallPayload.REASON_NO_ROUTE, connectedAt = 0L, endedAt = 95_000L),
                 sentAt = PREVIEW_AT,
             )
             CallNotice(CallRecord(id = "b", outgoing = false, missed = true), sentAt = PREVIEW_AT)

@@ -123,3 +123,32 @@ line in its DM thread (`docs/VOICE_CALLS.md` §3.12). Choices:
 
 Guards: `CallRecordTest`, the record cases in `CallManagerTest`, `CallLogTest`, `CallDurationTest`, the call line in
 `ChatScreenContentTest`, `ChatListTransferPreviewTest`'s call case, and `MessageKindTest` (the new value is distinct).
+
+## Amendment (2026-10-12): a dropped call reconnects by ICE restart, and only the caller restarts
+
+The first amendment ended a call 10 s after its path was lost. A connected call now reconnects (`docs/VOICE_CALLS.md`
+§3.8) under the same call id, the restart §3.8 always described. Choices:
+
+- **One mechanism.** A path lost mid-call is won back by ICE restart and by nothing else: no redial under a new id,
+  and §3.11's drop to a walkie stays parked. A redial would ring again or need auto-answer rules, glare with the
+  user's own redial and leave two records for one conversation. A restart keeps the call's id, its DTLS session and
+  its record. A dead peer, a reset ratchet session and a dead network then end the same way: the window runs out.
+- **The caller alone restarts.** The callee only answers, so two restarts never cross and need no glare rule. A
+  callee-side network change costs the seconds until the caller's ICE notices. A callee offline when the restart goes
+  out pulls it from the spool when it comes back, inside the window.
+- **20 s, two restarts.** `CallPhase.Reconnecting` lasts `CallTimings.reconnectWindowMs` from the loss. The caller
+  restarts after 2 s (a blip ICE heals on its own costs no frame) and once more 8 s later; each restart is a ratchet
+  step, a spool blob and a flood, the cost C-3.6 counts. A Failed while reconnecting ends nothing.
+- **Fresh ICE servers per restart.** A long call's TURN credential may have run out, so the restart fetches again
+  and the session takes them through `setConfiguration`.
+- **A dropped call is its own outcome.** `CallOutcome.Dropped` is derived from the record (connected, then
+  `no_route`), so no field is added. The call screen of a dropped call offers Call back; the thread line does not yet.
+- **Not built:** a CANDS for a restart (it carries what 1.5 s of gathering found, and the second restart is the
+  second chance), raising a lost Wi-Fi Direct group again, and a route-change trigger.
+
+No wire change: `CallPayload.gen` was always there, and an older build ignores a `gen > 0` OFFER, so its call ends at
+the window as before.
+
+Guards: the reconnect cases in `CallManagerTest` (a restart answered under the same call, a blip that costs no frame,
+two restarts then Dropped, the callee's window and its renewal, a restart that does not fit, a superseded answer,
+relay-only), `CallRecordTest`'s Dropped case and the Dropped line in `ChatCallLineTest`.

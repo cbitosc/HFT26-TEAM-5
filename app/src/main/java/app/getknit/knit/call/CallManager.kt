@@ -22,8 +22,11 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlin.math.abs
 
-/** Where one call stands. [Calling]/[Ringing] are the caller's; [Alerting] the callee's; the rest both sides'. */
-enum class CallPhase { Calling, Ringing, Alerting, Connecting, Connected, Ended }
+/**
+ * Where one call stands. [Calling]/[Ringing] are the caller's; [Alerting] the callee's; the rest both sides'.
+ * [Reconnecting] is a connected call whose path was lost, inside its reconnect window (§3.8).
+ */
+enum class CallPhase { Calling, Ringing, Alerting, Connecting, Connected, Reconnecting, Ended }
 
 /** The one call this phone is in (or last was), as the call surfaces draw it. */
 data class CallState(
@@ -84,8 +87,13 @@ data class CallTimings(
     val alertMs: Long = 50_000L,
     // C-3.3-3: Connecting that has not reached ICE connected by now ends with END no_route.
     val connectMs: Long = 20_000L,
-    // How long a connected call rides out a Disconnected path before it ends (no ICE restart is built, §3.8).
-    val disconnectGraceMs: Long = 10_000L,
+    // §3.8: how long a connected call whose path was lost has to come back before it ends no_route. The caller's
+    // window runs from the loss; the callee's restarts with each restart it answers.
+    val reconnectWindowMs: Long = 20_000L,
+    // §3.8: the caller's first ICE restart waits this long after the loss, so a blip ICE heals on its own costs no frame.
+    val restartDelayMs: Long = 2_000L,
+    // §3.8: the caller's second and last restart, this long after the first, while the call is still lost.
+    val restartRetryMs: Long = 8_000L,
     // C-3.4-1: an OFFER whose signed sentAt is further than this from now never alerts.
     val staleOfferMs: Long = 60_000L,
     // §3.10: a callee's "joining" older than this on arrival is not acted on — custody can hand the caller a RINGING
@@ -120,6 +128,11 @@ data class CallTimings(
  * came) drops to one instead of ending — when both sides said they can, by the walkie bit on the OFFER and the ANSWER.
  * That drop is parked behind [dropToWalkie] (off): a peer off every radio got a session that could carry nothing, so
  * a lost live call ends no_route, and neither OFFER nor ANSWER carries the bit.
+ *
+ * **A connected call whose path is lost reconnects by ICE restart** (§3.8): it is [CallPhase.Reconnecting] for
+ * [CallTimings.reconnectWindowMs], in which the caller — only the caller, so two restarts never cross — sends
+ * `OFFER gen+1` twice at most, and the callee answers each under the same call id without ringing. A dead peer, a
+ * reset session and a dead network all end the same way: the window runs out and the call ends no_route.
  */
 @Suppress("LargeClass") // one call's whole state machine, its direct leg's four decisions included; pure and two-sided tested
 class CallManager(
@@ -152,8 +165,11 @@ class CallManager(
         var speaker = false
         var reason: Int? = null
 
-        // The one phase timer — ring-out, alert, connect or the disconnect grace; arming one replaces the last.
+        // The one phase timer — ring-out, alert, connect or the reconnect window; arming one replaces the last.
         var timer: Job? = null
+
+        // §3.8: the negotiation generation held — the caller's last restart, the callee's last answered one.
+        var gen = 0
 
         // The callee's TURN prefetch, started when the offer alerts so answering does not wait for it.
         var servers: Deferred<List<TurnServer>>? = null
@@ -390,7 +406,7 @@ class CallManager(
         sentAt: Long,
         me: String,
     ): List<Send> {
-        if (p.gen != 0) return emptyList() // an ICE restart (§3.8) is not built: the call rides on or ends by its timers
+        if (p.gen != 0) return onRestartOffer(sender, p, sentAt)
         val now = clock()
         if (neverRings(sender, p, sentAt, now)) return emptyList()
         val sdp = p.sdp
@@ -564,7 +580,8 @@ class CallManager(
         sentAt: Long,
     ): List<Send> {
         val l = live?.takeIf { it.id == p.id && it.peerId == sender && it.outgoing } ?: return emptyList()
-        if (p.gen != 0 || (l.phase != CallPhase.Calling && l.phase != CallPhase.Ringing)) return emptyList()
+        if (p.gen != 0) return onRestartAnswer(l, p)
+        if (l.phase != CallPhase.Calling && l.phase != CallPhase.Ringing) return emptyList()
         l.peerCastTicketed = p.ct
         if (l.walkie) {
             if (p.m and CallPayload.MEDIA_WALKIE == 0) return finish(l, CallPayload.REASON_MEDIA, CallPayload.PHASE_END)
@@ -582,6 +599,54 @@ class CallManager(
         publish()
         log("call ${l.id}: answered")
         setup(l) { applyAnswer(l, sdp) }
+        return emptyList()
+    }
+
+    /**
+     * §3.8: the caller's ICE restart of the call we are in. Taken only for that call, from its caller, newer than the
+     * last one answered and inside the reconnect window by its signed `sentAt`; anything else changes nothing — a
+     * restart never rings and is never declined. A callee still connected answers without leaving [CallPhase.Connected]
+     * (its media may never report the loss its caller saw); one already reconnecting gets a fresh window.
+     */
+    private fun onRestartOffer(
+        sender: String,
+        p: CallPayload,
+        sentAt: Long,
+    ): List<Send> {
+        val l = live?.takeIf { it.takesRestart(sender, p, sentAt) }
+        val sdp = p.sdp?.takeIf { SdpGuard.accepts(it) }
+        if (l == null || sdp == null) {
+            log("call ${p.id}: restart ${p.gen} not taken")
+            return emptyList()
+        }
+        l.gen = p.gen
+        if (l.phase == CallPhase.Reconnecting) reconnect(l)
+        log("call ${l.id}: restart ${p.gen} from the caller")
+        setup(l) { reanswer(l, p.gen, sdp) }
+        return emptyList()
+    }
+
+    /** C-3.8-4: [p] restarts this callee's own call, from its caller, newer than the last answered and fresh. */
+    private fun Live.takesRestart(
+        sender: String,
+        p: CallPayload,
+        sentAt: Long,
+    ): Boolean =
+        id == p.id && peerId == sender && !outgoing && !walkie && reconnectable() && p.gen > gen &&
+            abs(clock() - sentAt) <= timings.reconnectWindowMs
+
+    /** §3.8: the callee's answer to our restart — only the latest one: an answer to a superseded restart is ignored. */
+    private fun onRestartAnswer(
+        l: Live,
+        p: CallPayload,
+    ): List<Send> {
+        val sdp = p.sdp?.takeIf { p.gen == l.gen && !l.walkie && l.reconnectable() && SdpGuard.accepts(it) } ?: return emptyList()
+        log("call ${l.id}: restart ${p.gen} answered")
+        setup(l) {
+            val session = mutex.withLock { l.session?.takeIf { current(l) } } ?: return@setup
+            // A refused answer ends nothing: the window does, unless the next restart gets through.
+            if (!session.accept(sdp)) log("call ${l.id}: restart ${p.gen}'s answer refused")
+        }
         return emptyList()
     }
 
@@ -627,9 +692,11 @@ class CallManager(
     /** One event off a call's lane (§3.10): a signal goes the mesh's way in, candidates straight to the media. */
     private suspend fun onLane(event: LaneEvent) {
         when (event) {
-            // An OFFER never rides a lane: the lane exists only once an offer was answered.
+            // A call's first OFFER never rides a lane: the lane exists only once an offer was answered. A restart can.
             is LaneEvent.Signal -> {
-                if (event.payload.ph != CallPayload.PHASE_OFFER) onSignal(event.peerId, event.payload, clock())
+                if (event.payload.ph != CallPayload.PHASE_OFFER || event.payload.gen != 0) {
+                    onSignal(event.peerId, event.payload, clock())
+                }
             }
 
             is LaneEvent.Candidates -> {
@@ -830,6 +897,50 @@ class CallManager(
         return session.takeIf { kept }
     }
 
+    /**
+     * §3.8: one ICE restart of [l] — the ICE servers fetched again (a long call's TURN credential may have run out),
+     * fresh ICE credentials, `OFFER gen+1`. One that yields no offer is skipped; the window goes on. Once made, the offer
+     * goes out even if ICE healed meanwhile: its answer is what brings the connection back to stable.
+     */
+    private suspend fun restart(l: Live) {
+        val session = mutex.withLock { l.session?.takeIf { current(l) && l.phase == CallPhase.Reconnecting } } ?: return
+        val servers = servers(l.peerId)
+        val sdp = session.restart(servers)?.let { if (l.relay) SdpGuard.stripToRelay(it) else it }
+        val offer =
+            mutex.withLock {
+                if (!current(l) || l.session !== session) return
+                if (sdp == null || !SdpGuard.accepts(sdp)) {
+                    log("call ${l.id}: restart made no offer")
+                    return
+                }
+                l.gen += 1
+                CallPayload(id = l.id, ph = CallPayload.PHASE_OFFER, gen = l.gen, sdp = sdp)
+            }
+        log("call ${l.id}: restarting ICE (gen ${offer.gen}, ${servers.size} ICE server(s))")
+        deliver(listOf(Send(l.peerId, offer)))
+    }
+
+    /** §3.8: the callee's answer to the caller's restart [gen], unless a newer one overtook it meanwhile. */
+    private suspend fun reanswer(
+        l: Live,
+        gen: Int,
+        remoteOffer: String,
+    ) {
+        val session = mutex.withLock { l.session?.takeIf { current(l) } } ?: return
+        val servers = servers(l.peerId)
+        val sdp = session.reanswer(remoteOffer, servers)?.let { if (l.relay) SdpGuard.stripToRelay(it) else it }
+        val answer =
+            mutex.withLock {
+                if (!current(l) || l.session !== session || l.gen != gen) return
+                if (sdp == null || !SdpGuard.accepts(sdp)) {
+                    log("call ${l.id}: restart $gen could not be answered")
+                    return
+                }
+                CallPayload(id = l.id, ph = CallPayload.PHASE_ANSWER, gen = gen, sdp = sdp)
+            }
+        deliver(listOf(Send(l.peerId, answer)))
+    }
+
     /** Our description is out: the late candidates that waited for it may follow now. */
     private suspend fun described(l: Live) {
         val sends =
@@ -855,6 +966,10 @@ class CallManager(
                             l.connectedAt = clock()
                             log("call ${l.id}: connected")
                         }
+                        if (l.phase == CallPhase.Reconnecting) {
+                            l.phase = CallPhase.Connected
+                            log("call ${l.id}: reconnected")
+                        }
                         if (l.phase == CallPhase.Connected) {
                             l.timer?.cancel()
                             l.timer = null
@@ -864,20 +979,11 @@ class CallManager(
                     }
 
                     MediaEvent.Disconnected -> {
-                        if (l.phase == CallPhase.Connected) {
-                            armTimer(l, timings.disconnectGraceMs) { fallback(it) }
-                        }
-                        emptyList()
+                        onPathLost(l, failed = false)
                     }
 
                     MediaEvent.Failed -> {
-                        if (l.phase == CallPhase.Connecting && direct.pending(l.id)) {
-                            // With no other route ICE gives up before the group is there; its candidates revive it.
-                            log("call ${l.id}: ICE failed while the direct leg comes up; waiting for it")
-                            emptyList()
-                        } else {
-                            fallback(l)
-                        }
+                        onPathLost(l, failed = true)
                     }
 
                     is MediaEvent.LateCandidates -> {
@@ -895,7 +1001,40 @@ class CallManager(
 
     // ---- under [mutex] ----
 
+    /**
+     * [l]'s media lost its path — for good when [failed] (ICE gave up). A connected call reconnects (§3.8), and while
+     * it does only its window ends it, since a restart revives a failed connection. Before connecting, a failure ends
+     * the call (or waits for a direct leg on its way); a mere disconnect does nothing.
+     */
+    private fun onPathLost(
+        l: Live,
+        failed: Boolean,
+    ): List<Send> =
+        when {
+            l.phase == CallPhase.Connected -> {
+                reconnect(l)
+                emptyList()
+            }
+
+            l.phase == CallPhase.Reconnecting || !failed -> {
+                emptyList()
+            }
+
+            l.phase == CallPhase.Connecting && direct.pending(l.id) -> {
+                // With no other route ICE gives up before the group is there; its candidates revive it.
+                log("call ${l.id}: ICE failed while the direct leg comes up; waiting for it")
+                emptyList()
+            }
+
+            else -> {
+                fallback(l)
+            }
+        }
+
     private fun current(l: Live): Boolean = live === l && l.phase != CallPhase.Ended
+
+    /** [l] connected once and is still up, its path held or being won back (§3.8). */
+    private fun Live.reconnectable(): Boolean = phase == CallPhase.Connected || phase == CallPhase.Reconnecting
 
     /** [l] is current and still has media to hear from: a session the walkie closed may report on its way out (§3.11). */
     private fun mediaLive(l: Live): Boolean = current(l) && !l.walkie
@@ -967,6 +1106,43 @@ class CallManager(
         l.phase = CallPhase.Connected
         if (l.connectedAt == null) l.connectedAt = clock()
         publish()
+    }
+
+    /**
+     * §3.8: [l] lost its path (or, on a reconnecting callee, the caller restarted it): [CallPhase.Reconnecting], and
+     * one job in the timer slot runs the drop. The caller restarts ICE after [CallTimings.restartDelayMs] and, still
+     * lost, once more [CallTimings.restartRetryMs] later; either side falls back ([fallback]: no_route) when
+     * [CallTimings.reconnectWindowMs] runs out. A Connected cancels the job with the rest of the phase timers.
+     */
+    private fun reconnect(l: Live) {
+        l.phase = CallPhase.Reconnecting
+        publish()
+        log("call ${l.id}: path lost; reconnecting")
+        l.timer?.cancel()
+        l.timer =
+            scope.launch {
+                if (l.outgoing) {
+                    delay(timings.restartDelayMs)
+                    restartIfLost(l)
+                    delay(timings.restartRetryMs)
+                    restartIfLost(l)
+                    delay((timings.reconnectWindowMs - timings.restartDelayMs - timings.restartRetryMs).coerceAtLeast(0L))
+                } else {
+                    delay(timings.reconnectWindowMs)
+                }
+                val sends =
+                    mutex.withLock {
+                        if (!current(l) || l.phase != CallPhase.Reconnecting) return@launch
+                        l.timer = null
+                        fallback(l)
+                    }
+                deliver(sends)
+            }
+    }
+
+    /** One of the caller's restarts, on its own coroutine so the window's job never waits on a TURN fetch. */
+    private suspend fun restartIfLost(l: Live) {
+        if (mutex.withLock { current(l) && l.phase == CallPhase.Reconnecting }) setup(l) { restart(l) }
     }
 
     /** Replaces [l]'s phase timer. The fire clears the slot first, so [finish] never cancels the coroutine it runs on. */

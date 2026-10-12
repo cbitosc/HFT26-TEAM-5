@@ -381,7 +381,7 @@ CallPayload {
 
 | `ph` | Name      | Sender | Meaning                                                                    |
 |------|-----------|--------|----------------------------------------------------------------------------|
-| 1    | `OFFER`   | caller | Start a call (`gen = 0`) or restart ICE (`gen > 0`)                        |
+| 1    | `OFFER`   | caller | Start a call (`gen = 0`) or restart ICE (`gen > 0`, §3.8)                  |
 | 2    | `RINGING` | callee | The offer reached a device that is alerting. The caller UI moves from "Calling" to "Ringing" |
 | 3    | `ANSWER`  | callee | Accept, carrying the answer SDP for this `gen`                             |
 | 4    | `DECLINE` | callee | Refuse, with `rsn`                                                         |
@@ -400,6 +400,8 @@ caller: Idle ─OFFER→ Calling ─RINGING→ Ringing ─ANSWER→ Connecting �
                         └──────────────┴── 45 s / user ─CANCEL→ Ended
 callee: Idle ─OFFER (fresh)→ Alerting ─user─ANSWER→ Connecting ─ICE ok→ Connected ─END→ Ended
                                  └──user / busy─DECLINE→ Ended
+both:   Connected ─path lost→ Reconnecting ─ICE ok→ Connected
+                                   └── 20 s ─END no_route→ Ended   (§3.8)
 ```
 
 | ID          | Requirement                                                                                                                                                            |
@@ -463,13 +465,40 @@ Each side sends an `OFFER` to the other before seeing the other's offer.
 > holds the matching key. A TURN server, a spool or a network attacker can drop or delay a call, but
 > cannot read or join it. Fresh ECDHE per call gives forward secrecy independently of the ratchet.
 
-### 3.8 Network changes
+### 3.8 Network changes: reconnecting by ICE restart
 
-A move from Wi-Fi to cellular kills the selected candidate pair. The side that notices sends `OFFER`
-with `gen + 1` and fresh ICE credentials (an ICE restart), and the peer answers with the same `gen`.
-The DTLS session and the call `id` survive. A ratchet session reset during a call is not recovered,
-because ctl frames are never re-sealed (ADR 2026-10.gcrd's lesson for `CTL_TRANSFER`). An established
-call keeps running, and only a later restart would fail.
+A move from Wi-Fi to cellular, a lost Wi-Fi Direct group or a dead TURN allocation kills the selected candidate pair.
+The call does not end there. It is **Reconnecting** for a window, and the caller restarts ICE under the same call id
+with `gen + 1` and fresh ICE credentials. The DTLS session and the call `id` survive. ADR 2026-10.3tee's third
+amendment records why this is the one recovery mechanism, with no redial under a new id.
+
+| ID          | Requirement                                                                                                                                                                                                          |
+|-------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **C-3.8-1** | A connected call whose media reports the path lost (ICE `disconnected` or `failed`) is Reconnecting. ICE reaching `connected` again makes it Connected, and its connect time is unchanged.                           |
+| **C-3.8-2** | Only the **caller** restarts. It sends an `OFFER` with `gen` one above its last, carrying an ICE restart's SDP gathered as C-3.6-1 says, from ICE servers fetched again. The callee never sends a restart, so two never cross. |
+| **C-3.8-3** | The caller restarts 2 s after the loss, unless ICE healed meanwhile, and once more 8 s later while still Reconnecting. It sends no more than two per loss.                                                           |
+| **C-3.8-4** | A callee answers a restart `OFFER` only for the call it is in, from that call's caller, while connected or reconnecting, with a `gen` above the last it answered and a signed `sentAt` within 20 s of now. It never alerts for a restart and never declines one; it drops any other. |
+| **C-3.8-5** | The caller applies only the `ANSWER` for its latest `gen`. It applies that one even if ICE healed while the answer was in flight.                                                                                   |
+| **C-3.8-6** | A call still Reconnecting 20 s after the loss ends with `END rsn=no_route`, and ICE `failed` meanwhile ends nothing. A callee's window starts again with each restart it answers while reconnecting. A callee still connected answers without entering Reconnecting. |
+| **C-3.8-7** | No `CANDS` follows a restart. Its description carries what gathering found, and the second restart is the second chance.                                                                                            |
+
+| Timer | Value | Why |
+|---|---|---|
+| first restart | 2 s | a blip ICE heals on its own costs no frame |
+| second restart | 8 s after the first | a network still coming up at the first has settled |
+| reconnect window | 20 s | long enough for both restarts to connect, short enough that a dead call is not held open |
+
+> **Why the caller alone.** Either side could notice a loss first, and two restarters would need a glare rule over
+> store-and-forward signaling. With one, a callee-side change costs only the seconds the caller's ICE takes to see it.
+> A callee that was offline when the restart went out pulls it from the spool once its network returns, inside the
+> window.
+>
+> **Why no redial.** A dead peer, a session reset mid-call (ctl frames are never re-sealed, ADR 2026-10.gcrd) and a
+> dead network all end the same way: the window runs out. A redial under a new id would ring again, glare with the
+> user's own redial and leave two records for one conversation. A call that ends this way is recorded as dropped
+> (§3.12), and its call screen offers Call back.
+
+An older build ignores a `gen > 0` `OFFER`, so its restart goes unanswered and the call ends at the window.
 
 ### 3.9 Ringing
 
@@ -521,7 +550,7 @@ DirectInvite {           // CallPayload.dw — every field optional, so a broken
   before the group exists) and C-3.3-3's connect window is 30 s, not 20.
 - **C-3.10-9** Whatever ends the call ends the leg once: the terminal frame down the lane first (≤ 300 ms), then the
   lane closes and the radio goes back to the mesh. A lost group is not raised again; the call rides on whatever
-  other pair ICE holds, or ends after the disconnect grace (§3.8 is not built).
+  other pair ICE holds, or reconnects by restart on the networks that remain (§3.8).
 
 | Timer | Value | Why |
 |---|---|---|
@@ -562,7 +591,7 @@ an experiment behind `BuildConfig.WALKIE` (`-Pwalkie=`, on in debug and off in r
   session instead:
   - the connect window,
   - ICE failed,
-  - a lost path past its grace.
+  - a lost path past its reconnect window (§3.8).
 
   The drop closes the media and ends any direct leg, and sends nothing. The other side's ICE sees the media go and
   drops on its own timer. Without both bits, the call ends as before.
@@ -638,7 +667,7 @@ direct transfer's card already uses. ADR 2026-10.3tee's second amendment records
 | ID           | Requirement                                                                                                                                                                                                                                                      |
 |--------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | **C-3.12-1** | A record is written once, when the call ends on this phone (`CallManager.logged`), and never sent. Each side keeps its own record of the same call under the same id (`call:<id>`), so a second write for one call replaces the row.                           |
-| **C-3.12-2** | A record holds facts, not a sentence: who placed the call, its reason, whether the peer's terminal phase ended it, the manager's missed verdict (C-3.4-2), and when it connected and ended. The line's wording (`CallRecord.outcome`) is derived when it is drawn. |
+| **C-3.12-2** | A record holds facts, not a sentence: who placed the call, its reason, whether the peer's terminal phase ended it, the manager's missed verdict (C-3.4-2), and when it connected and ended. The line's wording (`CallRecord.outcome`) is derived when it is drawn: a call that connected and then ended `no_route` reads "Call dropped" (§3.8). |
 | **C-3.12-3** | An offer that never rang (C-3.4-1) and was not withdrawn by hand is recorded as missed under its own call id, at its `sentAt` or now, whichever is earlier. A busy DECLINE (C-3.3-2) and a glare loser's dropped offer (C-3.5-1) leave no record.              |
 | **C-3.12-4** | The signaling hook never writes the record. The manager hands it over on a channel and `call/CallLog` saves it on the app scope, so a closed or refusing database (ADR 2026-10.47rw) costs that one line and never delays `onSignal`.                          |
 | **C-3.12-5** | A record never carries an SDP, a candidate, a Wi-Fi Direct credential or a TURN credential.                                                                                                                                                                       |
@@ -663,6 +692,9 @@ what. A missed call is notified on its own (`debug/call/CallController`), so the
     (`InboundPipelineTest`); the `ct` flag in `CallManagerTest`; and `WalkieTalkLabTest`'s burst cast between two
     phones with no radio path.
   - A `CallPayload` golden vector (with `dw`/`dx`).
+  - Reconnecting (§3.8): the restart cases in `CallManagerTest` — answered under the same call, a blip that costs no
+    frame, two restarts then dropped, the callee's window and its renewal, a restart that does not fit, a superseded
+    answer, relay-only.
   - Call records (§3.12): `CallRecordTest` for the outcome table and the row, the record cases in `CallManagerTest`,
     `CallLogTest`, and the call line in `ChatScreenContentTest` and `ChatListTransferPreviewTest`.
   - Stale `OFFER` → missed call; `CANCEL` before `OFFER` → no alert.

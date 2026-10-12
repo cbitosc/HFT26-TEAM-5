@@ -48,6 +48,21 @@ class CallManagerTest {
 
         override suspend fun answer(remoteOffer: String): String? = sdp().also { answeredOffer = remoteOffer }
 
+        // §3.8: each restart's (or restart answer's) ICE servers, and the restart offers this side answered.
+        val restarts = Collections.synchronizedList(mutableListOf<List<TurnServer>>())
+        val reanswered = Collections.synchronizedList(mutableListOf<String>())
+
+        override suspend fun restart(servers: List<TurnServer>): String? = sdp().also { restarts += servers }
+
+        override suspend fun reanswer(
+            remoteOffer: String,
+            servers: List<TurnServer>,
+        ): String? =
+            sdp().also {
+                restarts += servers
+                reanswered += remoteOffer
+            }
+
         override suspend fun accept(remoteAnswer: String): Boolean {
             accepted = remoteAnswer
             accepts += 1
@@ -610,28 +625,245 @@ class CallManagerTest {
             assertTrue(alice.media.last.closed && bob.media.last.closed)
         }
 
-    @Test
-    fun aLostPathEndsTheCallAfterItsGraceButARecoveredOneDoesNot() =
-        runTest {
-            val (_, alice, bob) = connecting()
+    /** Alice calls Bob, Bob answers and both media connect. */
+    private suspend fun TestScope.connected(): Triple<Net, Side, Side> =
+        connecting().also { (_, alice, bob) ->
             alice.media.last.events(MediaEvent.Connected)
             bob.media.last.events(MediaEvent.Connected)
             runCurrent()
+        }
+
+    /** The ICE restarts (§3.8) [this] side sent: OFFERs with a generation. */
+    private fun Side.restarts(): List<CallPayload> = synchronized(sent) { sent.filter { it.ph == CallPayload.PHASE_OFFER && it.gen > 0 } }
+
+    @Test
+    fun aLostPathIsWonBackByTheCallersRestartUnderTheSameCall() =
+        runTest {
+            val (_, alice, bob) = connected()
+            val connectedAt = alice.state!!.connectedAt
+            val credential = TurnServer(urls = listOf("turn:turn.example:3478"), user = "9999999999:a", pass = "p")
+            alice.turn = { listOf(credential) }
+
+            // The callee notices first: it reconnects too, but never restarts.
+            bob.media.last.events(MediaEvent.Disconnected)
             alice.media.last.events(MediaEvent.Disconnected)
             runCurrent()
-            advanceTimeBy(TIMINGS.disconnectGraceMs / 2)
-            alice.media.last.events(MediaEvent.Connected)
+            assertEquals(CallPhase.Reconnecting, alice.state!!.phase)
+            assertEquals(CallPhase.Reconnecting, bob.state!!.phase)
+            advanceTimeBy(TIMINGS.restartDelayMs - 1)
             runCurrent()
-            advanceTimeBy(TIMINGS.disconnectGraceMs)
+            assertTrue(alice.restarts().isEmpty())
+
+            advanceTimeBy(2)
+            runCurrent()
+            val restart = alice.restarts().single()
+            assertEquals(1, restart.gen)
+            assertEquals(alice.state!!.id, restart.id)
+            assertTrue(bob.restarts().isEmpty())
+            // Fresh ICE servers for the restart: the TURN credential is fetched again.
+            assertEquals(2, alice.turnAsks.size)
+            assertEquals(
+                listOf(credential),
+                alice.media.last.restarts
+                    .single()
+                    .filter { it.user.isNotEmpty() },
+            )
+            // Bob answers it on the call's own session, without ringing; Alice applies the answer.
+            assertEquals(listOf(SDP), bob.media.last.reanswered)
+            assertEquals(1, bob.lastOf(CallPayload.PHASE_ANSWER).gen)
+            assertEquals(2, alice.media.last.accepts)
+            assertEquals(CallPhase.Reconnecting, bob.state!!.phase)
+            assertTrue(bob.missed.isEmpty())
+
+            alice.media.last.events(MediaEvent.Connected)
+            bob.media.last.events(MediaEvent.Connected)
             runCurrent()
             assertEquals(CallPhase.Connected, alice.state!!.phase)
+            assertEquals(CallPhase.Connected, bob.state!!.phase)
+            assertEquals(connectedAt, alice.state!!.connectedAt)
+            advanceTimeBy(TIMINGS.reconnectWindowMs * 2)
+            runCurrent()
+            assertEquals(CallPhase.Connected, alice.state!!.phase)
+            assertEquals(1, alice.restarts().size)
+            assertEquals(1, alice.media.sessions.size)
+            assertEquals(1, bob.media.sessions.size)
+        }
 
+    @Test
+    fun aBlipIceHealsOnItsOwnCostsNoFrame() =
+        runTest {
+            val (_, alice, _) = connected()
             alice.media.last.events(MediaEvent.Disconnected)
             runCurrent()
-            advanceTimeBy(TIMINGS.disconnectGraceMs + 1)
+            advanceTimeBy(TIMINGS.restartDelayMs / 2)
+            alice.media.last.events(MediaEvent.Connected)
             runCurrent()
+            advanceTimeBy(TIMINGS.reconnectWindowMs * 2)
+            runCurrent()
+            assertEquals(CallPhase.Connected, alice.state!!.phase)
+            assertTrue(alice.restarts().isEmpty())
+        }
+
+    @Test
+    fun aPathThatDoesNotComeBackEndsDroppedAfterTwoRestarts() =
+        runTest {
+            val (net, alice, bob) = connected()
+            net.drop = { _, p -> p.gen > 0 }
+            // A Failed starts the window as a Disconnected does, and while reconnecting ends nothing.
+            alice.media.last.events(MediaEvent.Failed)
+            runCurrent()
+            assertEquals(CallPhase.Reconnecting, alice.state!!.phase)
+            advanceTimeBy(TIMINGS.restartDelayMs + 1)
+            alice.media.last.events(MediaEvent.Failed)
+            runCurrent()
+            assertEquals(listOf(1), alice.restarts().map { it.gen })
+            advanceTimeBy(TIMINGS.restartRetryMs)
+            runCurrent()
+            assertEquals(listOf(1, 2), alice.restarts().map { it.gen })
+            assertEquals(CallPhase.Reconnecting, alice.state!!.phase)
+
+            advanceTimeBy(TIMINGS.reconnectWindowMs - TIMINGS.restartDelayMs - TIMINGS.restartRetryMs - 2)
+            runCurrent()
+            assertEquals(CallPhase.Reconnecting, alice.state!!.phase)
+            advanceTimeBy(2)
+            runCurrent()
+            assertEquals(CallPhase.Ended, alice.state!!.phase)
             assertEquals(CallPayload.REASON_NO_ROUTE, alice.state!!.reason)
+            assertEquals(CallPayload.REASON_NO_ROUTE, bob.state!!.reason)
+            assertEquals(2, alice.restarts().size)
+            assertEquals(CallOutcome.Dropped, alice.onlyOutcome())
+            assertEquals(CallOutcome.Dropped, bob.onlyOutcome())
+        }
+
+    @Test
+    fun aCalleeAloneEndsAtItsWindowAndEachRestartItAnswersRenewsIt() =
+        runTest {
+            val (_, alice, bob) = connected()
+            bob.media.last.events(MediaEvent.Disconnected)
+            runCurrent()
+            // Alice's media notices later; her restart reaches Bob inside his window and buys him a fresh one.
+            advanceTimeBy(TIMINGS.reconnectWindowMs / 2)
+            alice.media.last.events(MediaEvent.Disconnected)
+            runCurrent()
+            advanceTimeBy(TIMINGS.restartDelayMs + 1)
+            runCurrent()
+            assertEquals(1, bob.media.last.reanswered.size)
+            advanceTimeBy(TIMINGS.reconnectWindowMs / 2)
+            runCurrent()
+            assertEquals(CallPhase.Reconnecting, bob.state!!.phase)
+
+            // Nothing connects: Alice's own window ends the call, and her END ends Bob's.
+            advanceTimeBy(TIMINGS.reconnectWindowMs)
+            runCurrent()
+            assertEquals(CallPhase.Ended, alice.state!!.phase)
             assertEquals(CallPhase.Ended, bob.state!!.phase)
+            assertEquals(CallPayload.PHASE_END, alice.lastOf(CallPayload.PHASE_END).ph)
+        }
+
+    @Test
+    fun aCalleeWhoseCallerNeverRestartsEndsAtItsOwnWindow() =
+        runTest {
+            val (_, alice, bob) = connected()
+            bob.media.last.events(MediaEvent.Disconnected)
+            runCurrent()
+            advanceTimeBy(TIMINGS.reconnectWindowMs - 1)
+            runCurrent()
+            assertEquals(CallPhase.Reconnecting, bob.state!!.phase)
+            advanceTimeBy(2)
+            runCurrent()
+            assertEquals(CallPayload.REASON_NO_ROUTE, bob.state!!.reason)
+            assertEquals(CallPhase.Ended, alice.state!!.phase)
+            assertTrue(bob.restarts().isEmpty())
+        }
+
+    @Test
+    fun aRestartOfferThatDoesNotFitChangesNothingAndNeverRings() =
+        runTest {
+            val (_, alice, bob) = pair()
+            val now = { testScheduler.currentTime }
+            // No call at all: a restart of an unknown one is not an offer to ring for.
+            bob.manager.onSignal(ALICE, CallPayload(id = "x", ph = CallPayload.PHASE_OFFER, gen = 1, sdp = SDP), now())
+            runCurrent()
+            assertNull(bob.state)
+            assertTrue(bob.sent.isEmpty() && bob.missed.isEmpty())
+
+            assertNull(alice.manager.start(BOB))
+            runCurrent()
+            val id = alice.state!!.id
+            // Ringing, not yet connected: a restart has nothing to restart.
+            bob.manager.onSignal(ALICE, CallPayload(id = id, ph = CallPayload.PHASE_OFFER, gen = 1, sdp = SDP), now())
+            runCurrent()
+            assertEquals(CallPhase.Alerting, bob.state!!.phase)
+            assertTrue(bob.manager.answer(id))
+            runCurrent()
+            alice.media.last.events(MediaEvent.Connected)
+            bob.media.last.events(MediaEvent.Connected)
+            runCurrent()
+
+            fun restart(gen: Int) = CallPayload(id = id, ph = CallPayload.PHASE_OFFER, gen = gen, sdp = SDP)
+            // From someone else; stale by its signed sentAt; to the caller, who only ever restarts.
+            bob.manager.onSignal(CAROL, restart(2), now())
+            bob.manager.onSignal(ALICE, restart(3), now() - TIMINGS.reconnectWindowMs - 1)
+            alice.manager.onSignal(BOB, restart(4), now())
+            runCurrent()
+            assertTrue(
+                bob.media.last.reanswered
+                    .isEmpty() &&
+                    alice.media.last.reanswered
+                        .isEmpty(),
+            )
+
+            // A fitting one is answered once, however often it arrives; an older one after it is not.
+            bob.manager.onSignal(ALICE, restart(6), now())
+            bob.manager.onSignal(ALICE, restart(6), now())
+            bob.manager.onSignal(ALICE, restart(5), now())
+            runCurrent()
+            assertEquals(1, bob.media.last.reanswered.size)
+            val answered = synchronized(bob.sent) { bob.sent.filter { it.ph == CallPayload.PHASE_ANSWER && it.gen > 0 } }
+            assertEquals(listOf(6), answered.map { it.gen })
+            // Still connected: the callee's own media saw no loss, so it has no window to run.
+            assertEquals(CallPhase.Connected, bob.state!!.phase)
+            assertTrue(bob.missed.isEmpty())
+        }
+
+    @Test
+    fun anAnswerToASupersededRestartIsIgnored() =
+        runTest {
+            val (net, alice, bob) = connected()
+            var held: CallPayload? = null
+            net.drop = { from, p ->
+                (from == BOB && p.ph == CallPayload.PHASE_ANSWER && p.gen == 1).also { if (it) held = p }
+            }
+            alice.media.last.events(MediaEvent.Disconnected)
+            runCurrent()
+            advanceTimeBy(TIMINGS.restartDelayMs + TIMINGS.restartRetryMs + 1)
+            runCurrent()
+            assertEquals(listOf(1, 2), alice.restarts().map { it.gen })
+            // The gen-2 answer was applied; the gen-1 one, arriving after it, is not.
+            assertEquals(2, alice.media.last.accepts)
+            alice.manager.onSignal(BOB, checkNotNull(held), testScheduler.currentTime)
+            runCurrent()
+            assertEquals(2, alice.media.last.accepts)
+        }
+
+    @Test
+    fun aRelayOnlyRestartCarriesRelayCandidatesAlone() =
+        runTest {
+            val (_, alice, bob) = pair()
+            alice.manager.relayOnly = true
+            assertNull(alice.manager.start(BOB))
+            runCurrent()
+            assertTrue(bob.manager.answer(bob.state!!.id))
+            runCurrent()
+            alice.media.last.events(MediaEvent.Connected)
+            runCurrent()
+            alice.media.last.events(MediaEvent.Disconnected)
+            runCurrent()
+            advanceTimeBy(TIMINGS.restartDelayMs + 1)
+            runCurrent()
+            val sdp = checkNotNull(alice.restarts().single().sdp)
+            assertFalse("typ host" in sdp)
+            assertTrue("typ relay" in sdp)
         }
 
     @Test
@@ -1226,7 +1458,7 @@ class CallManagerTest {
             assertEquals(CallPayload.MEDIA_WALKIE, bob.lastOf(CallPayload.PHASE_ANSWER).m)
 
             // No connect timer and no grace: it stays up until somebody hangs up.
-            advanceTimeBy(TIMINGS.directConnectMs + TIMINGS.disconnectGraceMs)
+            advanceTimeBy(TIMINGS.directConnectMs + TIMINGS.reconnectWindowMs)
             runCurrent()
             assertEquals(CallPhase.Connected, alice.state!!.phase)
             bob.manager.hangUp()
@@ -1294,7 +1526,7 @@ class CallManagerTest {
     @Test
     fun aLostPathDropsToAWalkieAndTheOtherSideFollowsWhenItsMediaSeesItGo() =
         runTest {
-            val (_, alice, bob) = walkies(live = true)
+            val (net, alice, bob) = walkies(live = true)
             alice.manager.start(BOB)
             runCurrent()
             bob.manager.answer(bob.state!!.id)
@@ -1304,7 +1536,12 @@ class CallManagerTest {
             runCurrent()
             val connectedAt = alice.state!!.connectedAt
 
+            // The restarts go unanswered: the drop waits out the reconnect window (§3.8) first.
+            net.drop = { _, p -> p.gen > 0 }
             alice.media.last.events(MediaEvent.Failed)
+            runCurrent()
+            assertEquals(CallPhase.Reconnecting, alice.state!!.phase)
+            advanceTimeBy(TIMINGS.reconnectWindowMs + 1)
             runCurrent()
             assertTrue(alice.state!!.walkie && alice.state!!.degraded)
             assertEquals(connectedAt, alice.state!!.connectedAt)
@@ -1314,10 +1551,10 @@ class CallManagerTest {
             runCurrent()
             assertTrue(alice.state!!.walkie)
 
-            // Bob's media sees the path go; past its grace he is in the walkie too.
+            // Bob's media sees the path go; past his own window he is in the walkie too.
             bob.media.last.events(MediaEvent.Disconnected)
             runCurrent()
-            advanceTimeBy(TIMINGS.disconnectGraceMs + 1)
+            advanceTimeBy(TIMINGS.reconnectWindowMs + 1)
             runCurrent()
             assertTrue(bob.state!!.walkie && bob.state!!.degraded)
             assertEquals(CallPhase.Connected, bob.state!!.phase)

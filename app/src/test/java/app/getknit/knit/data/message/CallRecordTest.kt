@@ -47,10 +47,22 @@ class CallRecordTest {
     fun aConnectedCallIsCompletedWithItsLengthWhoeverEndedIt() {
         assertEquals(CallOutcome.Completed, record.outcome)
         assertEquals(222_500L, record.durationMs)
-        assertEquals(CallOutcome.Completed, record.copy(outgoing = false, byPeer = true, reason = CallPayload.REASON_NO_ROUTE).outcome)
+        assertEquals(CallOutcome.Completed, record.copy(outgoing = false, byPeer = true, reason = CallPayload.REASON_ERROR).outcome)
         // A connected call whose end was never seen has no length to show.
         assertNull(record.copy(endedAt = null).durationMs)
         assertNull(record.copy(connectedAt = null).durationMs)
+    }
+
+    @Test
+    fun aConnectedCallWhosePathWasLostIsDroppedOnBothSidesButAWalkieIsNot() {
+        // §3.8: the reconnect window ran out. The side whose window did it and the side its END reached alike.
+        val lost = record.copy(reason = CallPayload.REASON_NO_ROUTE)
+        assertEquals(CallOutcome.Dropped, lost.outcome)
+        assertEquals(CallOutcome.Dropped, lost.copy(outgoing = false, byPeer = true).outcome)
+        assertEquals(222_500L, lost.durationMs)
+        assertEquals(CallOutcome.Completed, lost.copy(walkie = true).outcome)
+        // One that never connected is a failure, not a drop.
+        assertEquals(CallOutcome.Failed, lost.copy(connectedAt = null).outcome)
     }
 
     @Test

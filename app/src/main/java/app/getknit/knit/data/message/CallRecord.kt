@@ -12,6 +12,9 @@ enum class CallOutcome {
     /** It connected; the line carries how long it lasted. */
     Completed,
 
+    /** It connected, then its path was lost and did not come back within the reconnect window (§3.8). */
+    Dropped,
+
     /** Ours, and the peer was in another call. */
     Busy,
 
@@ -60,6 +63,7 @@ data class CallRecord(
     val outcome: CallOutcome
         get() =
             when {
+                connectedAt != null && reason == CallPayload.REASON_NO_ROUTE && !walkie -> CallOutcome.Dropped
                 connectedAt != null -> CallOutcome.Completed
                 missed -> CallOutcome.Missed
                 !outgoing && !byPeer && reason == CallPayload.REASON_USER -> CallOutcome.DeclinedByUs

@@ -43,6 +43,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.CallEnd
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.outlined.Cloud
@@ -97,6 +98,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import app.getknit.knit.MainActivity
 import app.getknit.knit.R
+import app.getknit.knit.call.CallKind
 import app.getknit.knit.call.CallManager
 import app.getknit.knit.call.CallPhase
 import app.getknit.knit.call.CallState
@@ -118,6 +120,7 @@ import app.getknit.knit.ui.theme.KnitTheme
 import app.getknit.knit.ui.theme.LocalReduceMotion
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
@@ -165,7 +168,8 @@ class CallActivity :
         enableEdgeToEdge()
         handle(intent)
         lifecycleScope.launch {
-            calls.state.collect { state ->
+            // Latest: a Call back from a dropped call's screen is a new call, and it must cut that screen's linger short.
+            calls.state.collectLatest { state ->
                 // A walkie's bursts play on the media stream (TalkPlayer), so the volume keys turn that one.
                 volumeControlStream = if (state?.walkie == true) AudioManager.STREAM_MUSIC else AudioManager.USE_DEFAULT_STREAM_TYPE
                 when {
@@ -174,7 +178,9 @@ class CallActivity :
                     }
 
                     state.phase == CallPhase.Ended -> {
-                        delay(ENDED_LINGER_MS)
+                        // The service stops with the call; a Call back starts it again.
+                        serviceStarted = false
+                        delay(if (state.dropped) DROPPED_LINGER_MS else ENDED_LINGER_MS)
                         finish()
                     }
 
@@ -213,7 +219,7 @@ class CallActivity :
         val hideFlagged by settings.contentFilteringEnabled.collectAsState(initial = true)
         // The selected candidate pair and the media's stats, read while the media is up: the pair can move (a relay
         // pair first, a direct one later), and the stats are the diagnostics card's.
-        val mediaUp = state?.walkie != true && (state?.phase == CallPhase.Connecting || state?.phase == CallPhase.Connected)
+        val mediaUp = state?.walkie != true && state?.phase in MEDIA_UP
         var route by remember { mutableStateOf<String?>(null) }
         var stats by remember { mutableStateOf<CallStats?>(null) }
         // One judge per call: its hysteresis spans the call's readings, never two calls'.
@@ -252,6 +258,8 @@ class CallActivity :
             onAnswer = { state?.id?.let(::answer) },
             onDecline = { state?.id?.let { id -> lifecycleScope.launch { calls.decline(id) } } },
             onHangUp = { lifecycleScope.launch { calls.hangUp() } },
+            onCallBack = { peerId?.let { peer -> lifecycleScope.launch { calls.start(peer, CallKind.LIVE) } } },
+            onClose = ::finish,
             onMute = { on -> lifecycleScope.launch { calls.setMuted(on) } },
             onSpeaker = { on -> lifecycleScope.launch { calls.setSpeaker(on) } },
             talk = talk,
@@ -304,6 +312,9 @@ class CallActivity :
         const val ACTION_ANSWER = "app.getknit.knit.call.ANSWER"
         private const val EXTRA_ID = "call_id"
         private const val ENDED_LINGER_MS = 1_500L
+
+        // A dropped call's screen offers Call back, so it stays up long enough to be read and tapped.
+        private const val DROPPED_LINGER_MS = 60_000L
         private const val POLL_MS = 1_000L
 
         fun intent(
@@ -335,7 +346,11 @@ private const val RING_ALPHA = 0.28f
 private const val ENDED_ALPHA = 0.5f
 private const val MOVED_NOTE_MS = 4_000L
 private val RINGING = setOf(CallPhase.Calling, CallPhase.Ringing, CallPhase.Alerting, CallPhase.Connecting)
-private val MEDIA_UP = setOf(CallPhase.Connecting, CallPhase.Connected)
+private val MEDIA_UP = setOf(CallPhase.Connecting, CallPhase.Connected, CallPhase.Reconnecting)
+
+/** A call that connected, then lost its path past the reconnect window (§3.8): the one ended call offered Call back. */
+private val CallState.dropped: Boolean
+    get() = phase == CallPhase.Ended && reason == CallPayload.REASON_NO_ROUTE && connectedAt != null && !walkie
 
 /**
  * The call screen proper: the peer's face and name, where the call stands, the controls its phase offers and, between
@@ -355,6 +370,8 @@ internal fun CallScreen(
     onMute: (Boolean) -> Unit,
     onSpeaker: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
+    onCallBack: () -> Unit = {},
+    onClose: () -> Unit = {},
     clock: () -> Long = System::currentTimeMillis,
     talk: Talk = Talk.Idle(),
     link: TalkLink? = null,
@@ -410,7 +427,7 @@ internal fun CallScreen(
                 if (walkieUp) {
                     WalkieControls(state, name, talk, link, onHangUp, onTalk, onTalkSend, onTalkCancel)
                 } else {
-                    Controls(state, onAnswer, onDecline, onHangUp, onMute, onSpeaker)
+                    Controls(state, onAnswer, onDecline, onHangUp, onMute, onSpeaker, onCallBack, onClose)
                 }
             }
         }
@@ -477,7 +494,7 @@ private fun StackedFace(
         // One slot for the reason or the route, held empty otherwise so the face doesn't jump as the call moves on.
         Box(Modifier.heightIn(min = 48.dp), contentAlignment = Alignment.Center) {
             if (phase == CallPhase.Ended) {
-                reasonOf(state.reason)?.let {
+                (if (state.dropped) "The connection was lost" else reasonOf(state.reason))?.let {
                     Text(
                         it,
                         style = MaterialTheme.typography.bodyMedium,
@@ -610,9 +627,18 @@ private fun Controls(
     onHangUp: () -> Unit,
     onMute: (Boolean) -> Unit,
     onSpeaker: (Boolean) -> Unit,
+    onCallBack: () -> Unit,
+    onClose: () -> Unit,
 ) {
     // A fixed band, so the face and name above don't jump when the controls change or go.
     Box(Modifier.fillMaxWidth().heightIn(min = 112.dp), contentAlignment = Alignment.BottomCenter) {
+        if (state?.dropped == true) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                CallAction("Close", Icons.Filled.Close, MaterialTheme.colorScheme.secondary, onClose)
+                CallAction("Call back", Icons.Filled.Call, AnswerGreen, onCallBack)
+            }
+            return@Box
+        }
         if (state == null || state.phase == CallPhase.Ended) return@Box
         if (state.phase == CallPhase.Alerting) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
@@ -1055,7 +1081,8 @@ internal fun statusOf(
         CallPhase.Alerting -> if (state.walkie) "Incoming walkie-talkie" else "Incoming voice call"
         CallPhase.Connecting -> "Connecting…"
         CallPhase.Connected -> "Connected"
-        CallPhase.Ended -> "Call ended"
+        CallPhase.Reconnecting -> "Reconnecting…"
+        CallPhase.Ended -> if (state.dropped) "Call dropped" else "Call ended"
     }
 }
 
@@ -1091,6 +1118,7 @@ private fun PreviewCall(
     caller: CallerContext? = null,
     locked: Boolean = false,
     statsShown: Boolean = stats != null || walkieStats != null,
+    connected: Boolean = phase == CallPhase.Connected || phase == CallPhase.Reconnecting,
 ) = KnitPreview {
     CallScreen(
         state =
@@ -1100,7 +1128,7 @@ private fun PreviewCall(
                 outgoing = outgoing,
                 phase = phase,
                 startedAt = PREVIEW_NOW - 90_000,
-                connectedAt = (PREVIEW_NOW - 83_000).takeIf { phase == CallPhase.Connected },
+                connectedAt = (PREVIEW_NOW - 83_000).takeIf { connected },
                 muted = muted,
                 speaker = speaker,
                 reason = reason,
@@ -1269,6 +1297,14 @@ fun CallScreenDiagnosticsPreview() =
 @Preview(name = "Ended", widthDp = 411, heightDp = 891)
 @Composable
 fun CallScreenEndedPreview() = PreviewCall(CallPhase.Ended, reason = CallPayload.REASON_TIMEOUT)
+
+@Preview(name = "Reconnecting", widthDp = 411, heightDp = 891)
+@Composable
+fun CallScreenReconnectingPreview() = PreviewCall(CallPhase.Reconnecting, route = "relay/srflx", caller = PREVIEW_CALLER)
+
+@Preview(name = "Dropped", widthDp = 411, heightDp = 891)
+@Composable
+fun CallScreenDroppedPreview() = PreviewCall(CallPhase.Ended, reason = CallPayload.REASON_NO_ROUTE, connected = true)
 
 @Preview(name = "Walkie, degraded", widthDp = 411, heightDp = 891)
 @Preview(name = "Walkie, degraded, dark", widthDp = 411, heightDp = 891, uiMode = Configuration.UI_MODE_NIGHT_YES)

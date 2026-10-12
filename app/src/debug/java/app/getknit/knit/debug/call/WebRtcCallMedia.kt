@@ -208,18 +208,8 @@ private class WebRtcSession(
 
     init {
         val tlsUnchecked = WebRtcCallMedia.turnTlsUnchecked
-        val ice =
-            servers.map {
-                val builder = PeerConnection.IceServer.builder(it.urls)
-                // A STUN-only fallback carries no credential (CallManager.servers).
-                if (it.user.isNotEmpty()) builder.setUsername(it.user).setPassword(it.pass)
-                if (tlsUnchecked && it.urls.any { url -> url.startsWith("turns:") }) {
-                    builder.setTlsCertPolicy(PeerConnection.TlsCertPolicy.TLS_CERT_POLICY_INSECURE_NO_CHECK)
-                }
-                builder.createIceServer()
-            }
         config =
-            PeerConnection.RTCConfiguration(ice).apply {
+            PeerConnection.RTCConfiguration(iceServers(servers)).apply {
                 sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
                 bundlePolicy = PeerConnection.BundlePolicy.MAXBUNDLE
                 rtcpMuxPolicy = PeerConnection.RtcpMuxPolicy.REQUIRE
@@ -267,6 +257,49 @@ private class WebRtcSession(
         val description = create { pc.createAnswer(it, MediaConstraints()) } ?: return null
         if (!apply { pc.setLocalDescription(it, description) }) return null
         return gatheredDescription("answer")
+    }
+
+    override suspend fun restart(servers: List<TurnServer>): String? {
+        if (!useServers(servers)) return null
+        pc.restartIce()
+        val description = create { pc.createOffer(it, MediaConstraints()) } ?: return null
+        if (!apply { pc.setLocalDescription(it, description) }) return null
+        return restartedDescription("restart offer")
+    }
+
+    override suspend fun reanswer(
+        remoteOffer: String,
+        servers: List<TurnServer>,
+    ): String? {
+        if (!useServers(servers)) return null
+        if (!apply { pc.setRemoteDescription(it, SessionDescription(SessionDescription.Type.OFFER, remoteOffer)) }) return null
+        val description = create { pc.createAnswer(it, MediaConstraints()) } ?: return null
+        if (!apply { pc.setLocalDescription(it, description) }) return null
+        return restartedDescription("restart answer")
+    }
+
+    /**
+     * A restart's ICE servers (§3.8): what the call layer just fetched, so a long call's TURN credential is a live one.
+     * False once closed. A refused configuration keeps the old servers and the restart goes on with them.
+     */
+    private fun useServers(servers: List<TurnServer>): Boolean =
+        synchronized(lock) {
+            if (closed) return false
+            config.iceServers = iceServers(servers)
+            if (!pc.setConfiguration(config)) log("webrtc: restart's ICE servers refused; keeping the old ones")
+            true
+        }
+
+    /**
+     * A restart's description, after C-3.6-1's gathering window on the fresh ICE credentials. Gathering is continual
+     * and the first candidate long came, so this waits the window alone; no CANDS follows a restart (§3.8).
+     */
+    private suspend fun restartedDescription(kind: String): String? {
+        delay(GATHER_MS)
+        if (synchronized(lock) { closed }) return null
+        val sdp = pc.localDescription?.description
+        log("webrtc: $kind carries ${summary(sdp.orEmpty().lines().filter { it.startsWith("a=candidate:") })}")
+        return sdp
     }
 
     override suspend fun accept(remoteAnswer: String): Boolean =
@@ -366,6 +399,19 @@ private class WebRtcSession(
             reportLate()
         }
         return sdp
+    }
+
+    private fun iceServers(servers: List<TurnServer>): List<PeerConnection.IceServer> {
+        val tlsUnchecked = WebRtcCallMedia.turnTlsUnchecked
+        return servers.map {
+            val builder = PeerConnection.IceServer.builder(it.urls)
+            // A STUN-only fallback carries no credential (CallManager.servers).
+            if (it.user.isNotEmpty()) builder.setUsername(it.user).setPassword(it.pass)
+            if (tlsUnchecked && it.urls.any { url -> url.startsWith("turns:") }) {
+                builder.setTlsCertPolicy(PeerConnection.TlsCertPolicy.TLS_CERT_POLICY_INSECURE_NO_CHECK)
+            }
+            builder.createIceServer()
+        }
     }
 
     /** Whether [line]'s address sits on the call's Wi-Fi Direct group. */

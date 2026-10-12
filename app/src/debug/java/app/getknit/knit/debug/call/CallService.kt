@@ -139,6 +139,7 @@ class CallService :
             CallPhase.Ringing -> "Ringing…"
             CallPhase.Connecting -> "Connecting…"
             CallPhase.Connected -> connectedText(state)
+            CallPhase.Reconnecting -> "Reconnecting…"
             else -> "Knit call"
         }
 

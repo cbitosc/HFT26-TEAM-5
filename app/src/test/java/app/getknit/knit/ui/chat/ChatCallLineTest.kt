@@ -9,6 +9,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import app.getknit.knit.data.message.CallRecord
 import app.getknit.knit.data.message.MessageEntity
+import app.getknit.knit.mesh.protocol.CallPayload
 import app.getknit.knit.ui.theme.KnitTheme
 import org.junit.Rule
 import org.junit.Test
@@ -47,6 +48,7 @@ class ChatCallLineTest {
             listOf(
                 callRow(CallRecord(id = "c1", outgoing = true, connectedAt = 0L, endedAt = 222_000L)),
                 callRow(CallRecord(id = "c2", outgoing = false, missed = true)),
+                callRow(CallRecord(id = "c3", outgoing = true, reason = CallPayload.REASON_NO_ROUTE, connectedAt = 0L, endedAt = 95_000L)),
             )
         compose.setContent {
             KnitTheme {
@@ -80,6 +82,7 @@ class ChatCallLineTest {
 
         compose.onNodeWithText("Outgoing call · 3:42 · ", substring = true).assertIsDisplayed()
         compose.onNodeWithText("Missed call · ", substring = true).assertIsDisplayed()
+        compose.onNodeWithText("Call dropped · 1:35 · ", substring = true).assertIsDisplayed()
         compose.onAllNodesWithText("\"id\"", substring = true).assertCountEquals(0)
     }
 }

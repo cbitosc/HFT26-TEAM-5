@@ -31,6 +31,19 @@ interface CallSession {
     /** Applies the callee's answer; false when it was refused. */
     suspend fun accept(remoteAnswer: String): Boolean
 
+    /**
+     * The caller's ICE restart (§3.8): gathers from [servers] from now on, with fresh ICE credentials, and returns the
+     * new offer with what gathering found in C-3.6-1's window (no CANDS follows it), or null when it failed. The
+     * peer's answer goes through [accept].
+     */
+    suspend fun restart(servers: List<TurnServer>): String?
+
+    /** The callee's answer to the caller's restart offer [remoteOffer] (§3.8), gathered from [servers] like [restart]. */
+    suspend fun reanswer(
+        remoteOffer: String,
+        servers: List<TurnServer>,
+    ): String?
+
     /** The peer's late `candidate:` lines (one CANDS, C-3.6-2). Only after [answer] or [accept] has applied its SDP. */
     fun addCandidates(lines: List<String>)
 

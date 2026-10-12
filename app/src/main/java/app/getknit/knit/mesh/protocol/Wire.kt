@@ -824,7 +824,7 @@ data class TransferPayload(
 /**
  * The sealed `CTL_CALL` payload — the signaling of one 1:1 voice call (`call/CallManager`, docs/VOICE_CALLS.md
  * §3.2). Experimental, and spoken only by builds that advertise `Protocol.CAP_CALL`. [id] names one call attempt in
- * both directions; [ph] is its phase; [gen] the negotiation generation (> 0 would be an ICE restart, not built).
+ * both directions; [ph] is its phase; [gen] the negotiation generation (> 0 is the caller's ICE restart, §3.8).
  * [sdp] rides the OFFER and the ANSWER with the gathered candidates folded in, [cand] carries the late ones in a
  * single CANDS (an empty list ends them), and [rsn] says why a DECLINE, CANCEL or END happened. [m] is the media
  * bitmask (1 audio; 2 video is reserved). Every field but [id]/[ph] is nullable or defaulted, per
