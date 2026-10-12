@@ -305,6 +305,15 @@ class BluetoothMeshTransport(
     private val aclArms = AtomicInteger()
     private val aclArmsAttached = AtomicInteger()
 
+    // Addresses whose unlinked channel's arm is settling ([armUnlinked], #150): one settle per address, so a dialer that
+    // opens and closes channels many times a second spawns one sleeping coroutine, not one per channel. Each holds the
+    // latest node id a channel's end on the address named, so a named end during a HELLO-less settle is not lost.
+    private val unlinkedSettling = ConcurrentHashMap<String, UnlinkedSettle>()
+
+    private class UnlinkedSettle(
+        @Volatile var nodeId: String?,
+    )
+
     // Which frames already crossed which link, either way: the router's flood copy and the fast path's link
     // copy are the same frame twice for the same stream, and a relayed frame's fast copy would go straight
     // back over the link it arrived on. One write per link per frame; the far end's SeenSet would have
@@ -1376,19 +1385,22 @@ class BluetoothMeshTransport(
      * `…debug.LINKTUNE close` cannot take it over; it ends by itself.
      *
      * [isLive] is checked just before `connectGatt`, which on a gone ACL would dial instead. A `false` from
-     * `LinkTuneDiag.aclArm` (the debug A/B switch) arms nothing. Only an [AclArm.ARM] tells [orphans] how it fared (the
-     * record's `armed`); a release logs as `bt acl release`, so `bt acl arm` lines and `arms=` count arms alone.
+     * `LinkTuneDiag.aclArm` (the debug A/B switch) arms nothing. An [AclArm.ARM] (link-up) begins in [orphans] here; an
+     * [AclArm.UNLINKED] (through `tryArm`) and an [AclArm.RELEASE] (through `check`) began there already and bring their
+     * [token]. Each tells [orphans] how it fared by that token (the record's `armed`, and the slots of #150); a stop's arm
+     * is outside it. A release logs as `bt acl release`, so `bt acl arm` lines and `arms=` count arms alone.
      */
     private fun armAcl(
         device: BluetoothDevice,
         nodeId: String,
         isLive: () -> Boolean,
         kind: AclArm = AclArm.ARM,
+        token: Long? = null,
     ) {
         if (!LinkTuneDiag.aclArm) return
         val address = device.address
         if (kind != AclArm.RELEASE) aclArms.incrementAndGet()
-        if (kind == AclArm.ARM) orphans.onArming(address)
+        val flight = if (kind == AclArm.ARM) orphans.onArming(address, elapsed()) else token
         BleLinkTuner(
             context = appContext,
             device = device,
@@ -1398,8 +1410,10 @@ class BluetoothMeshTransport(
             now = SystemClock::elapsedRealtime,
             onEnded = { attached ->
                 if (kind != AclArm.RELEASE && attached) aclArmsAttached.incrementAndGet()
-                if (kind == AclArm.ARM) orphans.onArmed(address, attached)
+                flight?.let { orphans.onArmed(it, attached, elapsed()) }
             },
+            // A flight that never made a client frees its slot at once (#150); a stop's arm has none to free.
+            onNeverRegistered = flight?.let { { orphans.onNeverRegistered(it) } },
             label = if (kind == AclArm.RELEASE) "bt acl release" else "bt acl arm",
         ).apply {
             start()
@@ -1426,7 +1440,7 @@ class BluetoothMeshTransport(
                     )
                     val address = action.address
                     // Read again at the attach, not only at the tick: a dial of ours may have started on it since.
-                    armAcl(action.device, action.nodeId, isLive = { releasable(address) }, AclArm.RELEASE)
+                    armAcl(action.device, action.nodeId, isLive = { releasable(address) }, AclArm.RELEASE, action.token)
                 }
 
                 is OrphanAclPolicy.Report -> {
@@ -1467,20 +1481,89 @@ class BluetoothMeshTransport(
      * that came up on the address meanwhile (a cross-dial over the same ACL) takes it over. A cross-dial that starts
      * after the arm stays safe: the arm only arms the idle timer, and when it fires `l2c_link_timeout` disconnects only
      * while the link holds no channel (`if (!p_lcb->ccb_queue.p_first_ccb)`, android12 and android16 alike).
+     *
+     * Bounded (#150, the ADR's amendment): each arm is a GATT client registration, of 32 per device.
+     * - A channel's end on an address already settling returns at once, leaving its node id for the settle to use.
+     * - An ACL whose edges say it is gone, or that a link or dial of ours uses, begins nothing.
+     * - `OrphanAclPolicy.tryArm` refuses an arm pending or attached on the address (that ACL is covered), one failed too
+     *   recently, and one past the in-flight cap. On the last two the settle waits, on the elapsed clock, as long as
+     *   `msUntilOpen` says and asks again, at most [UNLINKED_RETRIES] times: a refused lonely dial's ACL must not fall
+     *   through to the minute's net, whose wait stretches. A HELLO-less channel's arm holds at most two of the three
+     *   slots, and one whose ACL was gone at the attach frees its slot at once (`BleLinkTuner`'s `onNeverRegistered`).
+     * - Refused for good, a HELLO-less channel is watched under "(no hello)" (a named one already is), so the minute's
+     *   net still releases its ACL.
+     * - No log line per refusal (a flood would flood logcat): `skipped=` on the debug `bt state` line counts them.
      */
     private fun armUnlinked(
         device: BluetoothDevice,
         nodeId: String?,
     ) {
         val address = device.address
+        val mine = UnlinkedSettle(nodeId)
+        val held = unlinkedSettling.compute(address) { _, old -> old?.also { if (nodeId != null) it.nodeId = nodeId } ?: mine }
+        if (held !== mine) return
         val endedAt = elapsed()
-        scope.launch(Dispatchers.IO) {
-            elapsedWait.sleep(UNLINKED_SETTLE_MS)
-            if (address in linkAddresses.values) return@launch
-            if (nodeId != null) orphans.onLinkEnded(address, nodeId, device, endedAt, linked = false)
-            armAcl(device, nodeId ?: "(no hello)", isLive = { releasable(address) })
+        scope
+            .launch(Dispatchers.IO) {
+                try {
+                    settleUnlinked(device, mine, endedAt)
+                } finally {
+                    unlinkedSettling.remove(address, mine)
+                }
+            }.invokeOnCompletion { unlinkedSettling.remove(address, mine) } // a launch cancelled before it ran
+    }
+
+    private suspend fun settleUnlinked(
+        device: BluetoothDevice,
+        settle: UnlinkedSettle,
+        endedAt: Long,
+    ) {
+        val address = device.address
+        elapsedWait.sleep(UNLINKED_SETTLE_MS)
+        if (address in linkAddresses.values) return
+        val nodeId = settle.nodeId
+        if (nodeId != null) orphans.onLinkEnded(address, nodeId, device, endedAt, linked = false)
+        val gate = gateUnlinked(address, settle)
+        // Out of the map before the last read of its node id: an end after this starts a settle of its own.
+        unlinkedSettling.remove(address, settle)
+        if (gate == null) return
+        val named = settle.nodeId
+        if (nodeId == null && named != null) orphans.onLinkEnded(address, named, device, endedAt, linked = false) // named meanwhile
+        if (gate is OrphanAclPolicy.ArmGate.Open) {
+            armAcl(device, named ?: NO_HELLO, isLive = { releasable(address) }, AclArm.UNLINKED, gate.token)
+        } else if (named == null && gate.passesLater) {
+            orphans.onLinkEnded(address, NO_HELLO, device, endedAt, linked = false, named = false) // no arm stands on it
         }
     }
+
+    /**
+     * Asks `tryArm` for an unlinked arm on [address], waiting out a retry or a full set of slots on the elapsed clock at
+     * most [UNLINKED_RETRIES] times. Null when nothing may arm it any more: the switch is off, or the ACL is gone or ours
+     * (read again after every wait).
+     */
+    private suspend fun gateUnlinked(
+        address: String,
+        settle: UnlinkedSettle,
+    ): OrphanAclPolicy.ArmGate? {
+        if (!armable(address)) return null
+        // A HELLO-less channel's arm finds one slot kept for releases and named arms; a name may arrive while it waits.
+        var gate = orphans.tryArm(address, elapsed(), named = settle.nodeId != null)
+        var retries = 0
+        while (gate.passesLater && retries < UNLINKED_RETRIES) {
+            retries++
+            // Null: an arm began on the address meanwhile, and it covers the ACL.
+            val wait =
+                orphans.msUntilOpen(address, elapsed(), named = settle.nodeId != null)
+                    ?: return OrphanAclPolicy.ArmGate.Pending
+            elapsedWait.sleep(wait)
+            if (!armable(address)) return null
+            gate = orphans.tryArm(address, elapsed(), named = settle.nodeId != null)
+        }
+        return gate
+    }
+
+    // Whether an unlinked arm may attach to [address] now: the A/B switch is on, and nothing to arm means nothing to dial.
+    private fun armable(address: String): Boolean = LinkTuneDiag.aclArm && releasable(address)
 
     /** Gives [link] a PHY handle if the experiment runs, its peer was heard on Coded, and it has none yet. */
     private fun ensurePhyControl(link: FramedLink) {
@@ -2379,7 +2462,7 @@ class BluetoothMeshTransport(
                     isLive = { links[nodeId] === framed },
                     onRang = { rings.incrementAndGet() },
                     now = SystemClock::elapsedRealtime,
-                    onAttached = { orphans.onArmed(device.address, attached = true) },
+                    onAttached = { orphans.onDoorbellAttached(device.address, elapsed()) },
                 ).also { it.start() }
         } else if (device != null) {
             // An iPhone's doorbell lookup above attaches and so arms its ACL already (it reports that attach to [orphans]).
@@ -2816,7 +2899,7 @@ class BluetoothMeshTransport(
                 "alone=${aloneForMs()}ms psm=$currentPsm advert=$presenceAdvert " +
                 "doorbells=${doorbells.size} rings=${rings.get()}" +
                 (if (tuners.isNotEmpty()) " tuners=${tuners.size}" else "") +
-                " arms=${aclArmsAttached.get()}/${aclArms.get()} orphans=${orphans.watching} " +
+                " arms=${aclArmsAttached.get()}/${aclArms.get()} orphans=${orphans.watching} skipped=${orphans.armsSkipped} " +
                 "released=${orphans.released} reported=${orphans.reported}" +
                 (
                     if (boosts.isNotEmpty()) {
@@ -2839,8 +2922,11 @@ class BluetoothMeshTransport(
         " gattPayloads=${gattPayloads.payloadCount} gattReads=${gattReads.get()} " +
             "gattBudget=${gattPayloads.budgetUsed(elapsed())}/${gattPayloads.configuration.budgetReads}"
 
-    /** Why [armAcl] attaches: an arm [orphans] records, the stop's last arm, or an orphan's release. */
-    private enum class AclArm { ARM, STOP, RELEASE }
+    /**
+     * Why [armAcl] attaches: a link-up arm, an unlinked channel's arm `OrphanAclPolicy.tryArm` let begin (both recorded
+     * by [orphans]), the stop's last arm, or an orphan's release.
+     */
+    private enum class AclArm { ARM, UNLINKED, STOP, RELEASE }
 
     companion object {
         const val TAG = "BluetoothMeshTransport"
@@ -2897,6 +2983,12 @@ class BluetoothMeshTransport(
         // How long a channel that never became a link waits before its ACL is armed and watched ([armUnlinked]): the
         // ACL's connect edge comes from the Bluetooth app's process and can trail the channel.
         private const val UNLINKED_SETTLE_MS = 2_000L
+
+        // The node id an unlinked arm and its watch go by when the channel closed before its HELLO came.
+        private const val NO_HELLO = "(no hello)"
+
+        // How many times an unlinked arm refused for a recent failure or a full set of slots waits and asks again.
+        private const val UNLINKED_RETRIES = 2
         private const val CODED_DARK_INTERNAL = "dark ${AdvertisingSetCallback.ADVERTISE_FAILED_INTERNAL_ERROR}"
         private const val CODED_RETRYING = "retrying"
 

@@ -231,3 +231,94 @@ Cell 3's extra cases:
 - (e) A cross-dial: force a dial to an address within 1 s of its `bt acl release` or unlinked `bt acl arm`. Pass:
   the CoC opens and holds, with no `bt_fail`.
 - (f) An iPhone link closed in range: no `bt_orphan`, or one with `armed=true` (the doorbell's attach is its arm).
+
+## Amendment, 2026-10-11: arms are bounded (#150)
+
+Status: Proposed. JVM-tested (`OrphanAclPolicyTest`); the device trial below is owed. No wire change, no field-log
+schema change, Android only.
+
+**The hole.** Every channel that closed without becoming a link armed its ACL 2 s later, and each arm is a fresh
+`BleLinkTuner`: one GATT client registration, of the 32 a device shares with the doorbell, the payload reader, a
+Meshtastic board, the watch fallback and every other app. Nothing deduplicated by address or capped arms in flight, so a
+dialer that opens and closes CoCs over one ACL many times a second turned each close into a registration. Worse,
+`onLinkEnded` and `onLinkUp` erased the address's arm state, and `armUnlinked` called `onLinkEnded` before the arm, so
+each new channel wiped the `PENDING` mark a dedup would read.
+
+**What changed.** #150's options 1 and 2; admission is untouched.
+
+1. **One settle per address.** `armUnlinked` keeps the addresses waiting out the 2 s settle, each with the latest node
+   id a channel's end there named; a channel's end on an address already settling returns at once (its node id kept,
+   so a named refusal during a HELLO-less settle still watches the ACL by name), so a flood spawns one sleeping
+   coroutine, not one per channel. The entry goes in a `finally` inside the coroutine and again on completion (a launch
+   cancelled before it ran); it leaves the map right after the gate, before the node id is read the last time, so an
+   end after that starts a settle of its own rather than writing into one nobody reads. An ACL whose edges say it is gone, or that a link or dial of ours uses, begins nothing (it
+   used to begin an arm whose tuner then returned at its `isLive` check, which is how `arms=` came to count skipped arms,
+   above: it no longer does), and neither does the A/B switch off.
+2. **Flights and slots.** Every arm and every release is a flight named by the token its begin returns, and its end is
+   reported by that token (`onArmed`). A flight holds one of `MAX_ARMS_IN_FLIGHT` (3) slots from its begin until it
+   attaches, or, when it never attached, for `SECOND_CLOSE_MS` (5 s) more, its late registration's second close. A
+   flight that never made a client (its ACL was gone at the attach, or `connectGatt` refused) has nothing that could
+   register late: `BleLinkTuner` reports it through `onNeverRegistered` instead of `onEnded` (only where the caller asks;
+   the boost's tuners are unchanged), and the policy frees its slot at once and puts its address's row back as it was
+   (no retry window). When the arm it replaced was pending (a cross-dial's link-up arm over an unlinked arm), the row
+   goes back to that arm while its flight is still pending (its own end or lapse then settles it), takes its failure if
+   it failed meanwhile, and says no arm if its flight is gone, so the address is never pinned pending. Otherwise a dialer from three rotating addresses that drops each ACL as its channel closes would
+   pin every slot with no registration behind them. HELLO-less channels' arms hold at most `MAX_UNNAMED_ARMS` (2)
+   slots, so one stays for releases and named arms (a real peer's refused dial). One that never reports back lapses to
+   failed after `ARM_LAPSE_MS` (30 s). An end reported after `clear()` or `stop()`,
+   or after its lapse, is ignored, so a tuner that ends just after an adapter toggle leaves nothing behind. The
+   minute's `check()` emits a release only into a free slot, the fewest tries first; one that finds none waits for the
+   next round with its tries intact.
+3. **The arm row outlives a channel.** `OrphanAclPolicy` keeps each address's latest arm (its token, state and end)
+   across its channels' ends; `onLinkEnded` copies it into the watched entry and neither it nor `onLinkUp` erases it.
+   An end is read against the row's token: a superseded arm's failure (an unlinked arm, then a cross-dial's link-up arm
+   on the same ACL, the first standing down at its `isLive` check) leaves the row alone, any attach marks it attached,
+   and attached is never downgraded. The doorbell's lookup reports its attach without a flight (`onDoorbellAttached`).
+   An attached row goes with the ACL's disconnect edge (the idle timeout it set lives on that ACL, so Android 12's
+   accept-list re-dial, a new ACL, is armed again) and with a connect edge more than `EDGE_TRAIL_MS` (2 s) after its
+   attach (a connect edge is always a new ACL; one that close may be the attach's own ACL, its edge trailing). A
+   pending or failed row survives a disconnect edge. `clear()` (adapter off or on) and `stop()` forget every row and
+   flight, and the 64-row trim takes the oldest.
+4. **`tryArm` gates the unlinked arm** and refuses it when (1) an arm is pending on the address, (2) an arm attached
+   to the ACL, (3) an arm failed less than `ARM_RETRY_MS` (10 s: the 2 s attach, the 5 s second close, margin) ago, or
+   (4) every slot is held. Refusals (3) and (4) are lifted by time alone: the settle asks `msUntilOpen` (the retry
+   window's end, else the soonest slot: a failed flight's second close, a pending one guessed done at its 2 s attach and
+   never sooner than 0.5 s), waits that long on the elapsed clock, reads the link, dial and edge state again, and asks
+   once more, at most twice. A refused lonely dial's ACL is therefore armed within seconds, not left to the 15 s grace
+   and the minute's net, whose wait stretches while the CPU sleeps.
+5. **Link-up arms are never refused.** `registerLink`'s arm (`onArming`) and the doorbell's attach keep b8yf's rule
+   that every link is armed; links are few, and their arms take slots. A stop's arm stays outside (the stop forgets
+   everything).
+6. **The net under a refusal, and a flood's watch.** A channel with a node id is watched before the gate, as before.
+   A HELLO-less channel (watched by nobody until now) is watched under `(no hello)` when it is still refused for a
+   recent failure or the slots after the retries, since no arm stands on its ACL; a pending or attached arm already
+   covers it. Such a watch never replaces a named entry on the address (which would reset its grace and lose
+   `linked=true`), at most `MAX_UNNAMED` (4) of them are watched, and the 16-entry trim takes them first, so a flood
+   from many addresses cannot push a peer's orphan out.
+7. **Oracle.** No log line per refusal (a flood would flood logcat). `skipped=<n>` on the debug `bt state` line, after
+   `orphans=`, counts gate refusals since the transport was made (`armsSkipped`): one per `tryArm` that refused, so a
+   settle that waited and asked again adds one per ask, channels merged into a settle add nothing, and a settle that
+   found an arm begun meanwhile adds nothing. It counts refusals, not channels: never size a flood from it.
+
+**Device trial owed.** A harness dialer (Bumble on an nRF52840, `scripts/hci-bridge.py`'s stack) opens and closes about
+20 CoCs a second for 60 s against the P8 (Android 17) and the Pixel 3 (Android 12), with a garbage HELLO and without,
+from one address and from a few. Pass: at most one `bt acl arm … (<addr>)` in flight per address and none after its
+`attached` until the ACL's `ACL_DISCONNECTED`; `skipped=` rising on `bt state`; at most three arms in flight overall; a
+bonded board or the payload reader (`bt gatt read … →`) staying attached throughout; `bt acl release` lines never more than
+three at once on the minute; and, with the flood from four or more addresses, a named peer's orphan still watched and
+released (`bt acl orphan <id> … release try=1`). Regression: b8yf's refused lonely
+dial on the P3 still logs `bt acl arm … attached` about 2 s after the refusal (and within about 12 s while a flood
+holds the slots, screen off)
+
+Two more cells:
+
+- **Starvation.** Three or more rotating harness addresses whose ACL drops right after each channel closes, against
+  the P8 and the P3, while a real peer's link is closed in range and a real peer is refused. Pass: the real orphan's
+  `bt acl orphan … release try=` still fires within two minute rounds, and a real `bt refused client` is still
+  followed by `bt acl arm … attached` within about 12 s.
+- **A cross-dial that never registered.** Force a dial onto an address within 1 s of its unlinked `bt acl arm`, and
+  tear that link down at once. Pass: a later refused channel on that address still logs `bt acl arm … attached`
+  within about 12 s, never `skipped=` rising with no arm until the ACL drops.
+- **A real lonely dial into the flooded phone.** A real peer, alone past 180 s, lonely-dials the phone under the flood.
+  Pass: no `bt_orphan` for it, or one with `armed=true`., and its ACL drops (no `bt_orphan`, or one
+`cleared`).

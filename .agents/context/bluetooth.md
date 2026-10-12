@@ -105,7 +105,7 @@ Bluetooth-adjacent routing that stays in `AGENTS.md`, because another subsystem 
   on the hidden `onConnectionUpdated` or a 2 s settle check, at most twice a lookup (the put-back amendment).
 - **When touching `OrphanAclPolicy`, `BluetoothMeshTransport.armAcl` / `armUnlinked` / `checkOrphans` / `releasable` /
   `disarmAtStop`, the ACL edge receiver's `EXTRA_DEVICE` read, a refusal or failure path in `superviseAccepted` /
-  `initiateTo`, `BleLinkTuner`'s `label` / `released` / `closeAgainLater`, `BleDoorbell`'s `onAttached`,
+  `initiateTo`, `BleLinkTuner`'s `label` / `released` / `closeAgainLater` / `onNeverRegistered`, `BleDoorbell`'s `onAttached`,
   `LinkTuneDiag.aclArm` (`…debug.LINKTUNE --ez arm`), `FieldEvent.BtOrphan`, or `leLinkCount`:** READ ADR 2026-10.b8yf
   (#142). An LE ACL can outlive Knit's CoC: Android 12's ATT channel never idles out unless a local GATT client held it
   and left, and on Android 16/17 the side that dialed never gets the no-app idle timeout (`gatt_set_idle_timeout …
@@ -119,7 +119,18 @@ Bluetooth-adjacent routing that stays in `AGENTS.md`, because another subsystem 
   registered): an ended channel's address is watched only while its connect edge was seen and no disconnect followed, is
   released on `diagLoop`'s minute at most twice past a 15 s grace (once after an Android 12 accept-list re-dial; a
   disconnect counts only after 15 s down), re-checked for our own dials at the attach, and is recorded once
-  (`bt_orphan`); `stop()` arms and records what is still up and unarmed. Tests: `OrphanAclPolicyTest`.
+  (`bt_orphan`); `stop()` arms and records what is still up and unarmed. The arms are bounded (#150, the ADR's
+  amendment): one settle per address in `armUnlinked` (keeping the latest node id), and every arm and release is a
+  token-named flight holding one of `MAX_ARMS_IN_FLIGHT` (3) slots until it attaches, or `SECOND_CLOSE_MS` past a
+  failure, and none once `BleLinkTuner`'s `onNeverRegistered` says it made no client; HELLO-less arms hold at most
+  `MAX_UNNAMED_ARMS` (2), and `check()` releases only into a free slot. `OrphanAclPolicy.tryArm` refuses an unlinked
+  arm while one is pending or attached on the address, for `ARM_RETRY_MS` after one failed, and while the slots are full; the last two
+  are waited out on the elapsed clock (`msUntilOpen`, twice at most), and a HELLO-less channel still refused is watched
+  (never over a named entry, at most `MAX_UNNAMED`). A link-up arm is never refused. The address's arm row outlives a
+  channel's end, a superseded arm's failure never downgrades it, and an attached row goes with the disconnect edge, a
+  connect edge past `EDGE_TRAIL_MS`, `clear()` and `stop()`; `skipped=` on `bt state` counts gate refusals (retries
+  included), not channels. Tests:
+  `OrphanAclPolicyTest`.
 - **When touching `mesh/bluetooth/GattPayloads`, `BleGattPayloadReader`, `BleAdvertPayload.FLAG_DIALS_GATT_PEERS`,
   `BuildConfig.BLE_GATT_PEERS`, `BleScanner`'s UUID filter, or `BluetoothMeshTransport.onScanResult` / `sight`:**
   READ ADR 2026-09.kwq2 (companion change A3; knit-ios ADR 2026-09.xzpt) and its section in

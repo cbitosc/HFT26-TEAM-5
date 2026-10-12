@@ -42,6 +42,9 @@ internal class BleLinkTuner(
     // Every update the link reports, whoever asked (binder thread), and the loop's end: whether it had attached.
     private val onParams: (LinkParams, ok: Boolean) -> Unit = { _, _ -> },
     private val onEnded: (attached: Boolean) -> Unit = {},
+    // When set, called instead of [onEnded] for a loop that ended without making a client (the link was gone, or
+    // `connectGatt` refused): nothing can register late, so an arm's slot is free at once (#150). Unset, [onEnded] hears it.
+    private val onNeverRegistered: (() -> Unit)? = null,
     // What its log lines begin with: `bt tune` for the boost's and the bridge's tuners (the drain trial reads those
     // lines), `bt acl arm` for the transport's link-up arm (#142), which asks nothing and must not read as a tuner.
     private val label: String = "bt tune",
@@ -167,6 +170,7 @@ internal class BleLinkTuner(
                 ask.done.complete(Unit)
             }
         } finally {
+            val registered = gatt != null
             attached = false
             asks.close()
             while (true) {
@@ -184,7 +188,9 @@ internal class BleLinkTuner(
                 if (!everAttached) closeAgainLater(it)
             }
             gatt = null
-            if (!closed) onEnded(everAttached)
+            if (!closed) {
+                if (!registered && onNeverRegistered != null) onNeverRegistered.invoke() else onEnded(everAttached)
+            }
         }
     }
 
