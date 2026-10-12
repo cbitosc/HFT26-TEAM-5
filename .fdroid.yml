@@ -129,7 +129,7 @@ Builds:
 
   - versionName: 2.9.0
     versionCode: 27
-    commit: v2.9.0
+    commit: 3286edd803650db1fc0f3cee7d940c134617efe3
     subdir: app
     gradle:
       - yes
