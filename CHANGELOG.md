@@ -9,7 +9,7 @@ product:
   platforms: [android]
   category: Communication
 document:
-  updated: 2026-10-03T03:55:42Z
+  updated: 2026-10-12T23:11:38Z
   coverage: partial
   canonical: https://whatsnew.fyi/product/knit
   locale: en
@@ -18,25 +18,30 @@ document:
 
 # Knit changelog
 
-## Unreleased
+## [2.9.0](https://github.com/getknit/knit/releases/tag/v2.9.0) — 2026-10-12T23:11:38Z
+
+> Bluetooth that reaches farther, and photos and files that cross the mesh faster
 
 ### Added
 
+- Phones now find each other over Bluetooth from farther apart, and a connection drifting out of range
+  switches to Bluetooth's long-range mode to stay up. Both phones need that mode, so iPhones and phones
+  without it connect as before.
+- A photo, voice message or file on its way from a nearby phone now shows how much has arrived, with a ring
+  that fills as the rest comes in. On a slow Bluetooth connection, you can tell a transfer that's still moving
+  from one that's stuck.
 - When a release adds features worth knowing about, a card at the top of your chats now says what they are. It
   goes away when you close it or after a week, and Settings' menu keeps every past note under What's new.
 - Diagnostics now lists people whose messages reach you through another nearby phone under Reachable
   indirectly, along with the phone that passed them on. Their profile says Reachable indirectly too, where it
   used to say Offline.
-- A photo, voice message or file on its way from a nearby phone now shows how much has arrived, with a ring
-  that fills as the rest comes in. On a slow Bluetooth connection, you can tell a transfer that's still moving
-  from one that's stuck.
 - When a file you sent directly doesn't get through, its card now has a Retry button that offers the same file
   again without the file picker. The button shows only while Knit can still open the file.
 - You can turn on a field log in Diagnostics: three days of how your phone's radios behaved, with no names,
   messages or ids in it. Share it as a file to help tune Knit; it never leaves your phone unless you do.
-- Phones now find each other over Bluetooth from farther apart, and a connection drifting out of range
-  switches to Bluetooth's long-range mode to stay up. Both phones need that mode, so iPhones and phones
-  without it connect as before.
+- When Android closes Knit because it stopped responding, Knit now saves a report under Diagnostics' crash
+  reports at its next start, as it already does for a crash. The report stays on your phone until you share
+  it.
 
 ### Changed
 
@@ -56,6 +61,8 @@ document:
 - A photo sent to someone nearby over Bluetooth no longer crawls when other phones are around. Phones that
   only pass the message along now wait instead of downloading the photo at the same moment, so its recipient
   gets it first.
+- A person you mention while writing a message now shows as a single chip, and backspace removes the whole
+  name at once instead of one letter at a time.
 
 ### Fixed
 
@@ -107,6 +114,10 @@ document:
 - Adding an iPhone contact from their code left "Waiting to reach…" on their profile for good, and some
   messages said an update would bring an iPhone contact files, direct transfers or forward secrecy. Neither
   happens now, since Knit for iPhone doesn't offer those.
+- Tapping Paste in Add contact crashed Knit if the last thing you copied was a picture or a file. Paste now
+  handles whatever you copied without crashing.
+- After a contact renamed themselves, the "changed their photo" lines from before the rename showed the new
+  name. Each line now shows the name they used at the time, so it agrees with the rename line next to it.
 
 ## [2.8.0](https://github.com/getknit/knit/releases/tag/v2.8.0) — 2026-10-03T03:55:42Z
 
