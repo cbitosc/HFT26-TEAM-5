@@ -100,3 +100,26 @@ Guards: `CallManagerTest` (two managers over a fake signal net: ringing, decline
 cancel-before-offer, duplicates, glare, connect timeout, relay-only, a non-blocking `onSignal`), `SdpGuardTest`,
 `SpoolTurnRecordsTest` (the daemon's own hex), the TURN cases in `SpoolConnectionTest` and `ScopeSyncTest`, and the
 `CTL_CALL` cases in `MeshManagerTest` and `InboundPipelineTest`.
+
+## Amendment (2026-10-12): call records in the thread, without a schema change
+
+The first amendment left call history unbuilt: a missed call was a notification and nothing else. A call now leaves a
+line in its DM thread (`docs/VOICE_CALLS.md` §3.12). Choices:
+
+- **A notice kind, not a table.** The `messages` table already has a `kind` column for rows this phone writes about a
+  thread, and a direct transfer stores its card as a JSON body under `KIND_FILE_TRANSFER`. A call is `KIND_CALL`
+  (10) with a `CallRecord` body, so there is no migration, no new backup class and nothing new for the GC. An older
+  build draws an unknown kind as a bubble rather than dropping it.
+- **Facts stored, words derived.** The record keeps the reason, who ended it, the missed verdict and the two
+  timestamps. `CallRecord.outcome` turns those into "Missed", "Declined", "No answer" and the rest when the line is
+  drawn, so the wording can change without rewriting rows.
+- **Written off the inbound path.** `CallManager` emits on `logged` from `finish` and from the stale-offer branch;
+  `call/CallLog`, the one collector, saves the row on the app scope and resolves the repository lazily. A failed
+  save loses that line only.
+- **The chat list shows it, the badge does not.** A record speaks for its row, as a transfer does, but it never adds
+  to the unread count: a missed call already raises a notification, and an answered one needs nothing.
+- **Not built:** a tap on the line to call back (it would need the call button's microphone gate), and a record for
+  an offer refused busy.
+
+Guards: `CallRecordTest`, the record cases in `CallManagerTest`, `CallLogTest`, `CallDurationTest`, the call line in
+`ChatScreenContentTest`, `ChatListTransferPreviewTest`'s call case, and `MessageKindTest` (the new value is distinct).

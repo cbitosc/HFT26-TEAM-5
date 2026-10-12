@@ -4,6 +4,7 @@ import android.os.Build
 import android.util.Log
 import androidx.compose.runtime.Composable
 import app.getknit.knit.BuildConfig
+import app.getknit.knit.call.CallLog
 import app.getknit.knit.call.CallManager
 import app.getknit.knit.call.CallMedia
 import app.getknit.knit.call.CallSignals
@@ -12,6 +13,7 @@ import app.getknit.knit.call.CallWalkie
 import app.getknit.knit.call.DirectCallPath
 import app.getknit.knit.call.TalkLink
 import app.getknit.knit.call.TurnSource
+import app.getknit.knit.data.MessageRepository
 import app.getknit.knit.data.PeerRepository
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.debug.call.CallAudio
@@ -125,6 +127,16 @@ fun callModule(): Module? =
                 )
             }
         }
+        // §3.12: each call's line in its thread. The repository is resolved at the first record, not here.
+        single {
+            CallLog(
+                calls = get(),
+                messages = { get<MessageRepository>() },
+                selfId = { get<Identity>().nodeId() },
+                scope = get<CoroutineScope>(),
+                log = { Log.i(TAG, it) },
+            )
+        }
         single { CallFaces(androidContext(), peers = { get() }, blobs = { get() }, theme = { get() }) }
         single {
             CallController(
@@ -212,6 +224,7 @@ private fun Scope.talkLinks(): TalkLinks =
 fun startCallsIfWired(koin: Koin) {
     CoroutineScope(SupervisorJob() + Dispatchers.Default).launch {
         runCatching { koin.get<CallController>().start() }.onFailure { Log.w(TAG, "calls not started", it) }
+        runCatching { koin.get<CallLog>().start() }.onFailure { Log.w(TAG, "call records not started", it) }
         if (WALKIE_WIRED) runCatching { koin.get<WalkieTalk>().start() }.onFailure { Log.w(TAG, "walkie not started", it) }
     }
 }

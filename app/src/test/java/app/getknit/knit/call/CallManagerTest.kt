@@ -1,5 +1,6 @@
 package app.getknit.knit.call
 
+import app.getknit.knit.data.message.CallOutcome
 import app.getknit.knit.mesh.protocol.CallPayload
 import app.getknit.knit.mesh.protocol.DirectInvite
 import kotlinx.coroutines.CompletableDeferred
@@ -213,6 +214,7 @@ class CallManagerTest {
         val media: FakeMedia,
         val sent: MutableList<CallPayload>,
         val missed: MutableList<MissedCall>,
+        val logged: MutableList<CallLogged>,
         val turnAsks: MutableList<String>,
         val direct: FakeDirect,
         val walkie: FakeWalkie,
@@ -235,6 +237,7 @@ class CallManagerTest {
     ): Side {
         val sent = Collections.synchronizedList(mutableListOf<CallPayload>())
         val missed = Collections.synchronizedList(mutableListOf<MissedCall>())
+        val logged = Collections.synchronizedList(mutableListOf<CallLogged>())
         val turnAsks = Collections.synchronizedList(mutableListOf<String>())
         val media = FakeMedia()
         val direct = FakeDirect(name, backgroundScope)
@@ -267,9 +270,10 @@ class CallManagerTest {
                 walkie = walkie,
                 dropToWalkie = dropToWalkie,
             )
-        side = Side(name, manager, media, sent, missed, turnAsks, direct, walkie)
+        side = Side(name, manager, media, sent, missed, logged, turnAsks, direct, walkie)
         net.nodes[name] = manager
         backgroundScope.launch { manager.missed.collect { missed += it } }
+        backgroundScope.launch { manager.logged.collect { logged += it } }
         return side
     }
 
@@ -434,6 +438,113 @@ class CallManagerTest {
             assertNull(bob.state)
             assertEquals(1, bob.missed.size)
             assertTrue(bob.sent.isEmpty())
+        }
+
+    /** The one record [this] side logged, as its outcome — the line its thread shows (§3.12). */
+    private fun Side.onlyOutcome(): CallOutcome = synchronized(logged) { logged.single().record.outcome }
+
+    @Test
+    fun aConnectedCallIsRecordedOnBothSidesUnderOneIdWithItsLength() =
+        runTest {
+            val (_, alice, bob) = connecting()
+            alice.media.last.events(MediaEvent.Connected)
+            bob.media.last.events(MediaEvent.Connected)
+            runCurrent()
+            advanceTimeBy(222_000L)
+            bob.manager.hangUp()
+            runCurrent()
+            val ours = alice.logged.single()
+            val theirs = bob.logged.single()
+            assertEquals(BOB, ours.peerId)
+            assertEquals(ALICE, theirs.peerId)
+            assertEquals(ours.record.id, theirs.record.id)
+            assertTrue(ours.record.outgoing)
+            assertFalse(theirs.record.outgoing)
+            assertEquals(CallOutcome.Completed, ours.record.outcome)
+            assertEquals(CallOutcome.Completed, theirs.record.outcome)
+            assertTrue(ours.record.byPeer)
+            assertFalse(theirs.record.byPeer)
+            assertEquals(222_000L, theirs.record.durationMs)
+            // Nothing about the record went on the wire: the same four phases as a call without one.
+            assertEquals(listOf(CallPayload.PHASE_OFFER), alice.phases())
+            assertEquals(listOf(CallPayload.PHASE_RINGING, CallPayload.PHASE_ANSWER, CallPayload.PHASE_END), bob.phases())
+        }
+
+    @Test
+    fun aDeclinedCallIsRecordedAsDeclinedFromEachSide() =
+        runTest {
+            val (_, alice, bob) = pair()
+            alice.manager.start(BOB)
+            runCurrent()
+            bob.manager.decline(bob.state!!.id)
+            runCurrent()
+            assertEquals(CallOutcome.Declined, alice.onlyOutcome())
+            assertEquals(CallOutcome.DeclinedByUs, bob.onlyOutcome())
+        }
+
+    @Test
+    fun aCallThatRingsOutIsNoAnswerHereAndMissedThere() =
+        runTest {
+            val (_, alice, bob) = pair()
+            alice.manager.start(BOB)
+            runCurrent()
+            advanceTimeBy(TIMINGS.ringOutMs + 1)
+            runCurrent()
+            assertEquals(CallOutcome.NoAnswer, alice.onlyOutcome())
+            assertEquals(CallOutcome.Missed, bob.onlyOutcome())
+            // The ring stopped on the caller's CANCEL; the callee's own alert timer fires nothing more.
+            advanceTimeBy(TIMINGS.alertMs)
+            runCurrent()
+            assertEquals(1, bob.logged.size)
+        }
+
+    @Test
+    fun aCallWithdrawnByHandIsCancelledHereAndMissedThere() =
+        runTest {
+            val (_, alice, bob) = pair()
+            alice.manager.start(BOB)
+            runCurrent()
+            alice.manager.hangUp()
+            runCurrent()
+            assertEquals(CallOutcome.Cancelled, alice.onlyOutcome())
+            assertEquals(CallOutcome.Missed, bob.onlyOutcome())
+            assertEquals(1, bob.missed.size)
+        }
+
+    @Test
+    fun aBusyCalleeIsRecordedOnTheCallerOnly() =
+        runTest {
+            val (net, alice, bob) = pair()
+            val carol = side(CAROL, net)
+            carol.manager.start(BOB)
+            runCurrent()
+            alice.manager.start(BOB)
+            runCurrent()
+            assertEquals(CallOutcome.Busy, alice.onlyOutcome())
+            // Bob is still ringing for Carol, and his busy DECLINE made no line of its own.
+            assertTrue(bob.logged.isEmpty())
+            assertTrue(carol.logged.isEmpty())
+        }
+
+    @Test
+    fun aStaleOfferIsRecordedMissedOnceUnderItsOwnId() =
+        runTest {
+            val (_, _, bob) = pair()
+            val sentAt = testScheduler.currentTime - TIMINGS.staleOfferMs - 1
+            bob.manager.onSignal(ALICE, CallPayload(id = "c1", ph = CallPayload.PHASE_OFFER, sdp = SDP), sentAt)
+            bob.manager.onSignal(ALICE, CallPayload(id = "c1", ph = CallPayload.PHASE_CANCEL, rsn = CallPayload.REASON_TIMEOUT), 0L)
+            runCurrent()
+            val entry = bob.logged.single()
+            assertEquals("c1", entry.record.id)
+            assertEquals(ALICE, entry.peerId)
+            assertEquals(sentAt, entry.startedAt)
+            assertEquals(CallOutcome.Missed, entry.record.outcome)
+            // A hand-withdrawn call whose CANCEL beat its offer is no record at all (C-3.4-2).
+            val now = testScheduler.currentTime
+            bob.manager.onSignal(ALICE, CallPayload(id = "c2", ph = CallPayload.PHASE_CANCEL, rsn = CallPayload.REASON_USER), now)
+            bob.manager.onSignal(ALICE, CallPayload(id = "c2", ph = CallPayload.PHASE_OFFER, sdp = SDP), now)
+            runCurrent()
+            assertEquals(1, bob.logged.size)
         }
 
     @Test

@@ -3,6 +3,7 @@ package app.getknit.knit.screenshot
 import android.content.res.Configuration
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.tooling.preview.Preview
+import app.getknit.knit.ui.chat.CallNoticePreview
 import app.getknit.knit.ui.chat.ChatFullscreenImageViewerPreview
 import app.getknit.knit.ui.chat.ChatScreenDmPreview
 import app.getknit.knit.ui.chat.ChatScreenGroupTypingPreview
@@ -45,6 +46,11 @@ import app.getknit.knit.ui.chat.VideoEncodingTilePreview
 import com.android.tools.screenshot.PreviewTest
 
 // Screenshot tests over the previews in `ui.chat`.
+
+@PreviewTest
+@ComponentShots
+@Composable
+fun CallNotice() = CallNoticePreview()
 
 @PreviewTest
 @ComponentShots

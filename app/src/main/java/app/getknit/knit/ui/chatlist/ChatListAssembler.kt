@@ -12,6 +12,7 @@ import app.getknit.knit.data.message.receivedPlane
 import app.getknit.knit.ui.ConversationTitle
 import app.getknit.knit.ui.MeshRoomInputs
 import app.getknit.knit.ui.chat.DeliveryStatus
+import app.getknit.knit.ui.chat.callPreview
 import app.getknit.knit.ui.chat.messagePreview
 import app.getknit.knit.ui.chat.transferPreview
 import app.getknit.knit.ui.isPending
@@ -88,7 +89,8 @@ internal class ChatListAssembler(
      * exception, and both halves of that reasoning are why: its sender really is the author (whoever
      * offered the file), and an offer or a gigabyte arriving is not a footnote about the thread — it is
      * the thread. It still earns no delivery tick and no unread count: nothing was sent anywhere on the
-     * mesh, and the card in the thread is the thing that wants answering.
+     * mesh, and the card in the thread is the thing that wants answering. A call's record is the same
+     * exception for the same reasons (docs/VOICE_CALLS.md §3.12); a missed one is notified on its own.
      */
     private fun rowFor(thread: ConversationTitle): ConversationRow {
         val last = table.heads[thread.id]
@@ -106,6 +108,7 @@ internal class ChatListAssembler(
         // never sent anywhere, so it can never grow one either.
         val mineLast = last?.takeIf { it.senderId == me && it.originNode == null && !it.isStatusNotice }
         val transferLine = transferLineFor(last)
+        val callLine = last?.takeIf { it.kind == MessageEntity.KIND_CALL }?.let { callPreview(context, it) }
         val isGroup = thread.kind == ConversationKind.GROUP
         val row =
             ConversationRow(
@@ -115,7 +118,7 @@ internal class ChatListAssembler(
                 isRoom = thread.isRoom,
                 isGroup = isGroup,
                 faces = thread.faces,
-                lastPreview = previewLineFor(last, transferLine, isDm = thread.kind == ConversationKind.DM),
+                lastPreview = previewLineFor(last, transferLine ?: callLine, isDm = thread.kind == ConversationKind.DM),
                 previewIsTransfer = transferLine != null,
                 lastMessageAt = last?.sentAt,
                 draft = draft,
@@ -137,14 +140,14 @@ internal class ChatListAssembler(
         } + activeGroups.count { isPending(it.groupId) }
 
     /**
-     * The row's preview line: the transfer's own sentence when [transferLine] resolved one, else the
+     * The row's preview line: a transfer's or a call's own sentence when [ownLine] resolved one, else the
      * "Sender: body" form.
      */
     private fun previewLineFor(
         last: MessageEntity?,
-        transferLine: String?,
+        ownLine: String?,
         isDm: Boolean,
-    ): String? = transferLine ?: last?.let { previewFor(it, isDm) }
+    ): String? = ownLine ?: last?.let { previewFor(it, isDm) }
 
     /**
      * The transfer line for [last], or null when it is not a transfer row this build can read. Resolved

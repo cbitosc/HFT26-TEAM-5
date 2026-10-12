@@ -278,6 +278,21 @@
     <string name="chat_call_mic_denied">Knit needs the microphone to call</string>
     <string name="chat_mesh_call">Mesh call</string>
     <string name="chat_mesh_call_peer_too_old">They need a build of Knit with mesh calls to take one</string>
+    <!-- A call's line in its thread and its chat-list preview (call/CallLog, docs/VOICE_CALLS.md §3.12) -->
+    <string name="chat_call_record_outgoing">Outgoing call</string>
+    <string name="chat_call_record_incoming">Incoming call</string>
+    <string name="chat_call_record_outgoing_mesh">Outgoing mesh call</string>
+    <string name="chat_call_record_incoming_mesh">Incoming mesh call</string>
+    <string name="chat_call_record_missed">Missed call</string>
+    <string name="chat_call_record_missed_mesh">Missed mesh call</string>
+    <string name="chat_call_record_busy">They were in another call</string>
+    <string name="chat_call_record_declined">They declined your call</string>
+    <string name="chat_call_record_no_answer">No answer</string>
+    <string name="chat_call_record_cancelled">Cancelled call</string>
+    <string name="chat_call_record_declined_by_you">You declined a call</string>
+    <string name="chat_call_record_failed">Call failed</string>
+    <!-- A call's sentence, then a detail: its length, or the time it was placed. -->
+    <string name="chat_call_record_with_detail">%1$s · %2$s</string>
 
     <!-- Direct file transfer (transfer/): a large file over a one-shot Wi-Fi Direct link, never through the mesh -->
     <string name="chat_send_large_file">Direct file send</string>

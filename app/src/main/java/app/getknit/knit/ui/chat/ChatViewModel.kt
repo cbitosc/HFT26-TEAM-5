@@ -32,6 +32,7 @@ import app.getknit.knit.data.emoji.RecentReactions
 import app.getknit.knit.data.group.GroupEntity
 import app.getknit.knit.data.group.GroupMembersStore
 import app.getknit.knit.data.group.toGroupInfo
+import app.getknit.knit.data.message.CallRecord
 import app.getknit.knit.data.message.ConversationKind
 import app.getknit.knit.data.message.Conversations
 import app.getknit.knit.data.message.DeliveryPlane
@@ -296,6 +297,9 @@ data class ChatRow(
     // A direct-transfer record ([MessageEntity.KIND_FILE_TRANSFER]) as its card draws it — the row's facts
     // overlaid with live progress. Null on every other row; a row carrying one is a card, never a bubble.
     val transfer: TransferView? = null,
+    // A call's record ([MessageEntity.KIND_CALL], §3.12), decoded. Null on every other row; a row carrying one is a
+    // call line, never a bubble.
+    val call: CallRecord? = null,
 )
 
 /**
@@ -1193,6 +1197,7 @@ class ChatViewModel(
                             } else {
                                 null
                             },
+                        call = if (m.kind == MessageEntity.KIND_CALL) CallRecord.decode(m.body) else null,
                     )
                 }
             // Autocomplete candidates: everyone we've received a message from, plus a group's roster (so

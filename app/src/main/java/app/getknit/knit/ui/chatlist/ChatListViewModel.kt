@@ -454,9 +454,9 @@ class ChatListViewModel(
     private companion object {
         /**
          * The rows that may stand as a thread's last one — its preview line, its time, its place in the
-         * list. Status notices may not; a direct-transfer row is the exception, for the reasons
-         * `ChatListAssembler.rowFor` sets out.
+         * list. Status notices may not; a direct-transfer row and a call's record are the exceptions, for the
+         * reasons `ChatListAssembler.rowFor` sets out.
          */
-        val CHAT_LIST_KINDS = setOf(MessageEntity.KIND_NORMAL, MessageEntity.KIND_FILE_TRANSFER)
+        val CHAT_LIST_KINDS = setOf(MessageEntity.KIND_NORMAL, MessageEntity.KIND_FILE_TRANSFER, MessageEntity.KIND_CALL)
     }
 }

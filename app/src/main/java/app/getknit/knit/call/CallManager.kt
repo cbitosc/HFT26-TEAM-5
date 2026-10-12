@@ -1,5 +1,6 @@
 package app.getknit.knit.call
 
+import app.getknit.knit.data.message.CallRecord
 import app.getknit.knit.mesh.protocol.CallPayload
 import app.getknit.knit.mesh.protocol.DirectInvite
 import app.getknit.knit.mesh.protocol.FrameId
@@ -63,6 +64,16 @@ enum class CallRefusal { BUSY, SELF }
 class MissedCall(
     val peerId: String,
     val at: Long,
+)
+
+/**
+ * One call's record for the thread (§3.12), emitted once when the call ends on this phone — or, for an offer that
+ * never rang, when it is recorded as missed. [startedAt] is this phone's clock when the call began here.
+ */
+class CallLogged(
+    val peerId: String,
+    val startedAt: Long,
+    val record: CallRecord,
 )
 
 /** Every timer a call runs on (docs/VOICE_CALLS.md §3.3–3.4); injectable so tests run them in virtual time. */
@@ -197,6 +208,11 @@ class CallManager(
 
     /** Calls this phone missed, for the one collector that notifies them; buffered so none is lost before it subscribes. */
     val missed: Flow<MissedCall> = missedCalls.receiveAsFlow()
+
+    private val loggedCalls = Channel<CallLogged>(LOGGED_BUFFER, BufferOverflow.DROP_OLDEST)
+
+    /** Every call as it ends here, for the one collector that writes its row in the thread (§3.12, `call/CallLog`). */
+    val logged: Flow<CallLogged> = loggedCalls.receiveAsFlow()
 
     private val talkIn = Channel<TalkIn>(TALK_BUFFER, BufferOverflow.DROP_OLDEST)
 
@@ -393,10 +409,7 @@ class CallManager(
             l.invite = directInviteOf(p)
             l.servers = scope.async { servers(sender) }
         }
-        armTimer(l, timings.alertMs) {
-            missedCalls.trySend(MissedCall(it.peerId, it.startedAt))
-            finish(it, CallPayload.REASON_TIMEOUT)
-        }
+        armTimer(l, timings.alertMs) { finish(it, CallPayload.REASON_TIMEOUT, missed = true) }
         // §3.10: join the caller's group while this rings, so an answer connects over it at once. The RINGING that
         // says so leaves before the join takes the radio from the mesh (the leg waits out a grace first).
         val joining = directMode == DirectMode.PREWARM && commitJoin(l, prewarm = true)
@@ -479,7 +492,9 @@ class CallManager(
         val tomb = tombstones[p.id]
         if (tomb == null && abs(sentAt - now) <= timings.staleOfferMs) return false
         if (tomb == null || (tomb.ph == CallPayload.PHASE_CANCEL && tomb.rsn != CallPayload.REASON_USER)) {
-            missedCalls.trySend(MissedCall(sender, minOf(sentAt, now)))
+            val at = minOf(sentAt, now)
+            missedCalls.trySend(MissedCall(sender, at))
+            loggedCalls.trySend(CallLogged(sender, at, CallRecord(id = p.id, outgoing = false, walkie = isWalkieOnly(p), missed = true)))
         }
         if (tomb == null) tombstones[p.id] = Tomb(CallPayload.PHASE_OFFER, null)
         log("call ${p.id} from $sender: ${if (tomb == null) "stale offer" else "offer after its end"}")
@@ -577,10 +592,8 @@ class CallManager(
         val l = live
         if (l != null && l.id == p.id && l.peerId == sender) {
             if (l.phase == CallPhase.Ended) return emptyList()
-            if (!l.outgoing && l.phase == CallPhase.Alerting && p.ph == CallPayload.PHASE_CANCEL) {
-                missedCalls.trySend(MissedCall(l.peerId, l.startedAt))
-            }
-            return finish(l, p.rsn ?: CallPayload.REASON_USER)
+            val missed = !l.outgoing && l.phase == CallPhase.Alerting && p.ph == CallPayload.PHASE_CANCEL
+            return finish(l, p.rsn ?: CallPayload.REASON_USER, byPeer = true, missed = missed)
         }
         // A call we never saw, or one already replaced: remembered, so its late offer never rings (C-3.4-3).
         if (p.id !in tombstones) tombstones[p.id] = Tomb(p.ph, p.rsn)
@@ -978,18 +991,34 @@ class CallManager(
 
     /**
      * Ends [l] here; returns the frame that tells the peer when [tellPhase] is given. Its id is remembered, so a late
-     * copy of any of its frames changes nothing.
+     * copy of any of its frames changes nothing. [byPeer]: the peer's own terminal phase ended it. [missed]: an
+     * incoming call that stopped ringing unanswered (C-3.4-2). Either way the call's record goes out (§3.12).
      */
     private fun finish(
         l: Live,
         reason: Int,
         tellPhase: Int? = null,
+        byPeer: Boolean = false,
+        missed: Boolean = false,
     ): List<Send> {
         val tell = tellPhase?.let { CallPayload(id = l.id, ph = it, rsn = reason) }
         drop(l, tell)
         l.phase = CallPhase.Ended
         l.reason = reason
         publish()
+        if (missed) missedCalls.trySend(MissedCall(l.peerId, l.startedAt))
+        val record =
+            CallRecord(
+                id = l.id,
+                outgoing = l.outgoing,
+                walkie = l.walkie,
+                reason = reason,
+                byPeer = byPeer,
+                missed = missed,
+                connectedAt = l.connectedAt,
+                endedAt = clock(),
+            )
+        loggedCalls.trySend(CallLogged(l.peerId, l.startedAt, record))
         log("call ${l.id}: ended ($reason${tellPhase?.let { ", telling the peer with $it" }.orEmpty()})")
         return tell?.let { listOf(Send(l.peerId, it)) }.orEmpty()
     }
@@ -1053,6 +1082,7 @@ class CallManager(
         const val MAX_EARLY_CANDS = 64
 
         const val MISSED_BUFFER = 16
+        const val LOGGED_BUFFER = 32
 
         // Chunks waiting on the player: a minute of a burst at the chunk length, so a busy player drops none.
         const val TALK_BUFFER = 256

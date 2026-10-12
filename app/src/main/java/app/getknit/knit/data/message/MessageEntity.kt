@@ -358,6 +358,13 @@ data class MessageEntity(
          * the mirror of [KIND_MEMBER_LEFT]), shown as a centered line.
          */
         const val KIND_MEMBER_REJOINED = 9
+
+        /**
+         * [kind]: a voice or walkie call with this contact — how it ended (docs/VOICE_CALLS.md §3.12). [body] holds a
+         * [CallRecord]; [senderId] is whoever placed the call. Written by this phone when the call ends here, never
+         * carried on the wire, so each side keeps its own. Drawn as a line with the call's time (`ui/chat/CallNotice`).
+         */
+        const val KIND_CALL = 10
     }
 }
 

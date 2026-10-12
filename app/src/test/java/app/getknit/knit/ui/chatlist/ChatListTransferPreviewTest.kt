@@ -10,6 +10,7 @@ import app.getknit.knit.data.PeerRepository
 import app.getknit.knit.data.draft.DraftEntity
 import app.getknit.knit.data.draft.DraftRepository
 import app.getknit.knit.data.group.GroupEntity
+import app.getknit.knit.data.message.CallRecord
 import app.getknit.knit.data.message.TransferPhase
 import app.getknit.knit.data.message.TransferRecord
 import app.getknit.knit.data.peer.PeerEntity
@@ -47,8 +48,9 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * A direct-transfer row is the one `kind` the conversation list shows: it speaks for its thread, carries the
- * row's time, and reads a different sentence in each state the transfer can be in. Its own class rather than
+ * A direct-transfer row is a `kind` the conversation list shows: it speaks for its thread, carries the
+ * row's time, and reads a different sentence in each state the transfer can be in. A call's record is the other,
+ * and the last case here (docs/VOICE_CALLS.md §3.12). Its own class rather than
  * more of [ChatListViewModelTest], which is at detekt's size ceiling.
  *
  * Robolectric-hosted for the same reason that one is: the preview lines come out of `context.getString`.
@@ -191,6 +193,40 @@ class ChatListTransferPreviewTest {
                     .first { it.id == "bob" }
                     .previewIsTransfer,
             )
+        }
+
+    /** A call's record speaks for its row as a transfer's does: its own sentence, no tick, no unread count. */
+    @Test
+    fun aCallsRecordSpeaksForTheRowWithoutEarningATickOrAnUnreadCount() =
+        runTest {
+            val vm = vm()
+            backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.state.collect {} }
+            peersFlow.value = listOf(peer("bob", "Bob", verified = true))
+            store.set(
+                msg(senderId = "bob", sentAt = 50, conversationId = "bob", body = "call me"),
+                CallRecord(id = "c1", outgoing = false, missed = true).toEntity(peerId = "bob", selfId = "me", startedAt = 100L),
+            )
+            advanceUntilIdle()
+            val row =
+                vm.state.value.conversations
+                    .first { it.id == "bob" }
+            assertEquals("Missed call", row.lastPreview)
+            assertFalse(row.previewIsTransfer)
+            assertEquals(100L, row.lastMessageAt)
+            assertNull(row.lastStatus)
+            assertEquals("only the real message counts", 1, row.unreadCount)
+
+            // Our own connected call: no "You: " in front, and its length after the sentence.
+            store.add(
+                CallRecord(id = "c2", outgoing = true, connectedAt = 300L, endedAt = 222_300L)
+                    .toEntity(peerId = "bob", selfId = "me", startedAt = 200L),
+            )
+            advanceUntilIdle()
+            val after =
+                vm.state.value.conversations
+                    .first { it.id == "bob" }
+            assertEquals("Outgoing call · 3:42", after.lastPreview)
+            assertNull(after.lastStatus)
         }
 
     /** A record no live state stands behind is one a process death left hanging, whatever phase it froze at. */

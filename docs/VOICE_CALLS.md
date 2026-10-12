@@ -3,7 +3,7 @@
 | | |
 |--------------------|-------------------------------------------------------------------------------------------------------------------------------|
 | Status             | **Draft sketch, not normative.** Nothing here is on the wire                                                                  |
-| Decision           | ADR 2026-10.3tee (Proposed); §3.10, a call between neighbours over Wi-Fi Direct, is ADR 2026-10.kxnw; §3.11, the walkie-talkie, is ADR 2026-10.79yb |
+| Decision           | ADR 2026-10.3tee (Proposed); §3.10, a call between neighbours over Wi-Fi Direct, is ADR 2026-10.kxnw; §3.11, the walkie-talkie, is ADR 2026-10.79yb; §3.12, call records, is 3tee's second amendment |
 | Spool side         | §2.1–§2.6 are written to drop into `docs/SPOOL_PROTOCOL.md` as §7.6, and §2.7 as §7.7, each with §10.1 bullets, once accepted |
 | Client side        | §3 is app protocol: a new `MessageContent.ctl` value, invisible to spools and relays                                          |
 
@@ -628,6 +628,26 @@ an experiment behind `BuildConfig.WALKIE` (`-Pwalkie=`, on in debug and off in r
 
   With neither a link nor a relay that would cast, nothing is sealed, and the burst says it did not go.
 
+### 3.12 Call records in the thread
+
+Every call leaves a line in its DM thread: "Outgoing call · 3:42 · 2:02 PM", "Missed call · 9:15 AM", "They were in
+another call". The line is a record this phone writes for itself, so it costs no wire field and no schema change. It is
+a `messages` row of `kind = 10` (`MessageEntity.KIND_CALL`) whose body is a small JSON `CallRecord`, the convention a
+direct transfer's card already uses. ADR 2026-10.3tee's second amendment records the choice.
+
+| ID           | Requirement                                                                                                                                                                                                                                                      |
+|--------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **C-3.12-1** | A record is written once, when the call ends on this phone (`CallManager.logged`), and never sent. Each side keeps its own record of the same call under the same id (`call:<id>`), so a second write for one call replaces the row.                           |
+| **C-3.12-2** | A record holds facts, not a sentence: who placed the call, its reason, whether the peer's terminal phase ended it, the manager's missed verdict (C-3.4-2), and when it connected and ended. The line's wording (`CallRecord.outcome`) is derived when it is drawn. |
+| **C-3.12-3** | An offer that never rang (C-3.4-1) and was not withdrawn by hand is recorded as missed under its own call id, at its `sentAt` or now, whichever is earlier. A busy DECLINE (C-3.3-2) and a glare loser's dropped offer (C-3.5-1) leave no record.              |
+| **C-3.12-4** | The signaling hook never writes the record. The manager hands it over on a channel and `call/CallLog` saves it on the app scope, so a closed or refusing database (ADR 2026-10.47rw) costs that one line and never delays `onSignal`.                          |
+| **C-3.12-5** | A record never carries an SDP, a candidate, a Wi-Fi Direct credential or a TURN credential.                                                                                                                                                                       |
+
+A record is a status notice in every list that filters on `kind`: it gets no delivery tick and no unread count, and
+search never finds it. The chat list is the exception, as it is for a transfer. A record speaks for its thread there, as
+the same sentence without the time, and with no "You: " in front of it, because the sentence already says who did
+what. A missed call is notified on its own (`debug/call/CallController`), so the badge does not count it twice.
+
 ## 4. Tests this would add
 
 - **knit-spool:**
@@ -643,6 +663,8 @@ an experiment behind `BuildConfig.WALKIE` (`-Pwalkie=`, on in debug and off in r
     (`InboundPipelineTest`); the `ct` flag in `CallManagerTest`; and `WalkieTalkLabTest`'s burst cast between two
     phones with no radio path.
   - A `CallPayload` golden vector (with `dw`/`dx`).
+  - Call records (§3.12): `CallRecordTest` for the outcome table and the row, the record cases in `CallManagerTest`,
+    `CallLogTest`, and the call line in `ChatScreenContentTest` and `ChatListTransferPreviewTest`.
   - Stale `OFFER` → missed call; `CANCEL` before `OFFER` → no alert.
   - Glare resolution; idempotent duplicates.
   - Relay-only SDP stripping, and fingerprint mismatch → call refused.

@@ -1375,6 +1375,7 @@ internal fun ChatScreenContent(
                                 contentType = { row ->
                                     when {
                                         row.transfer != null -> "transfer"
+                                        row.call != null -> "call"
                                         row.kind == MessageEntity.KIND_NORMAL -> "bubble"
                                         else -> "notice"
                                     }
@@ -1393,7 +1394,10 @@ internal fun ChatScreenContent(
                                     )
                                 val notice = statusNoticeText(row)
                                 val transfer = row.transfer
-                                if (transfer != null) {
+                                val call = row.call
+                                if (call != null) {
+                                    CallNotice(record = call, sentAt = row.sentAt, modifier = itemMotion)
+                                } else if (transfer != null) {
                                     TransferCard(
                                         view = transfer,
                                         mine = row.mine,
