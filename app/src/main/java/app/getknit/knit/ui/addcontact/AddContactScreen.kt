@@ -1,6 +1,7 @@
 package app.getknit.knit.ui.addcontact
 
 import android.content.ClipData
+import android.content.Context
 import android.os.Build
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -63,7 +64,9 @@ import app.getknit.knit.ui.relay.RelayInviteSheet
 import app.getknit.knit.ui.scan.QrScanner
 import app.getknit.knit.ui.shareText
 import app.getknit.knit.ui.verify.EncryptionSection
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.koin.androidx.compose.koinViewModel
 
 /**
@@ -178,7 +181,8 @@ fun AddContactScreen(
             onInputChange = viewModel::setInput,
             onPaste = {
                 scope.launch {
-                    val text = clipboard.getClipEntry()?.clipData?.let { clip -> clipText(clip) }
+                    val clip = clipboard.getClipEntry()?.clipData
+                    val text = clip?.let { withContext(Dispatchers.IO) { clipText(it, context) } }
                     if (!text.isNullOrBlank()) {
                         viewModel.setInput(text)
                         viewModel.lookup()
@@ -195,10 +199,18 @@ fun AddContactScreen(
     }
 }
 
-private fun clipText(clip: ClipData): String? =
+/**
+ * The first non-blank text the clip holds. `coerceToText` needs a real [Context]: an item carrying a URI
+ * (a copied image or file) is read through the content resolver, which a null context crashes on — and
+ * that read is a stream open, so the caller runs this off the main thread.
+ */
+internal fun clipText(
+    clip: ClipData,
+    context: Context,
+): String? =
     (0 until clip.itemCount)
         .asSequence()
-        .mapNotNull { clip.getItemAt(it).coerceToText(null)?.toString() }
+        .mapNotNull { clip.getItemAt(it).coerceToText(context)?.toString() }
         .firstOrNull { it.isNotBlank() }
 
 @OptIn(ExperimentalMaterial3Api::class)
