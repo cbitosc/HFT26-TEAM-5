@@ -263,7 +263,8 @@ sig = Ed25519(issuer key, "knit/spool/v1/ticket" ‖ tk)
 > issuer's operator hands a customer a relay invite (`docs/RELAY_INVITE.md` §2) that carries, beside the relay, the
 > issuer's origin `i` and a customer key `k` (`kak1_…`). Accepting it holds the key for the relay's host name, and
 > the client trades it at `POST <i>/api/v1/ticket` with `Authorization: Bearer <k>` and no body (knit-spool-coordinator
-> ADR 2026-10.ukvm). The answers are 200 `{ ticket, aud, nbf, exp, flags: { turn, files, cast }, endsAt }`, 401
+> ADR 2026-10.ukvm, as amended by knit-spool-coordinator ADR 2026-10.mrnm). The answers are 200
+> `{ ticket, aud, nbf, exp, flags: { turn, files, cast }, endsAt }`, 401
 > `{ error: "unknown-key" }` and 403 `{ error: "ended", endsAt }`, all `no-store`. The client acts on the claims
 > inside `ticket`, never the JSON copies, and puts it through the same import door as a pasted one, so a ticket
 > whose `aud` is not that relay's host is never held; the connection then presents it at once (C-7.6-19). A phone

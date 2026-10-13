@@ -11,8 +11,8 @@ topics: [calls, spool, tickets, attachments]
 Status: Accepted (2026-10-13). Amends ADR 2026-10.xkp4 ("on an `ent` spool a `turnreq` needs a ticket"). The client
 half of knit-spool ADR 2026-10.h6pt (tickets gate verbs per connection, and only an uploader's ticket pays for
 attachments), specified in `docs/VOICE_CALLS.md` §2.6 (C-7.6-24 revised, C-7.6-30) and `docs/SPOOL_PROTOCOL.md`
-§7.2 and §7.3. The issuer's half is knit-spool-coordinator ADR 2026-10.ukvm as amended for files: its 200 names
-`flags: { turn, files, cast }`, and new accounts get files by default.
+§7.2 and §7.3. The issuer's half is knit-spool-coordinator ADR 2026-10.ukvm, as amended by knit-spool-coordinator
+ADR 2026-10.mrnm: its 200 names `flags: { turn, files, cast }`, and new accounts get files by default.
 
 **What was observed.** knit-spool's `exp/turn` (`17a6b84` to `d0ae0a3`) gates `aput` behind a files ticket (`fl` bit 1,
 `FL_FILES = 2`) when the operator lists `files` in `SPOOL_TICKET_GATES`, and says which verbs it gates in a new HELLO
