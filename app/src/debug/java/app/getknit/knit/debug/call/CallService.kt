@@ -12,26 +12,34 @@ import androidx.core.graphics.drawable.IconCompat
 import androidx.lifecycle.LifecycleService
 import androidx.lifecycle.lifecycleScope
 import app.getknit.knit.R
+import app.getknit.knit.call.CallAudioPolicy
+import app.getknit.knit.call.CallAudioRoute
 import app.getknit.knit.call.CallManager
 import app.getknit.knit.call.CallPhase
+import app.getknit.knit.call.CallRouting
 import app.getknit.knit.call.CallState
+import app.getknit.knit.call.SystemCallSync
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
 
 /**
  * Keeps the microphone while a call is live and Knit is not on screen (experimental, debug only): a foreground
- * service of type `microphone`, started by [CallActivity] while it is in the foreground — the only place Android 14+
- * lets a microphone service start — and only once RECORD_AUDIO is granted. Stops itself when the call ends.
+ * service of types `microphone` and `phoneCall` (the call is a Telecom one, §3.13), started by [CallActivity] while it
+ * is in the foreground — the only place Android 14+ lets a microphone service start — and only once RECORD_AUDIO is
+ * granted. Stops itself when the call ends.
  *
  * Its notification is the way back to a call the user left: the ongoing CallStyle with the peer's face, where the call
- * stands (the timer once connected), Hang up, and Mute and Speaker, each naming what a tap will do. It is posted
- * again on every change of [CallManager.state], so those two always show the call as it is.
+ * stands (the timer once connected), Hang up, Mute (a live call's only) and one route action — onto the loudspeaker,
+ * or off it to the headset or the earpiece ([CallAudioPolicy.notificationTarget]) — each naming what a tap will do. It
+ * is posted again on every change of [CallManager.state] and of the route, so those always show the call as it is.
  */
 class CallService :
     LifecycleService(),
     KoinComponent {
     private val calls: CallManager by inject()
+    private val system: SystemCallSync by inject()
     private val faces: CallFaces by inject()
     private var watching = false
 
@@ -42,16 +50,16 @@ class CallService :
     ): Int {
         super.onStartCommand(intent, flags, startId)
         // First, always: a started foreground service that stops before claiming the state is a crash.
-        claim(calls.state.value, null)
+        claim(calls.state.value, null, system.routing.value)
         if (!watching) {
             watching = true
             lifecycleScope.launch {
-                calls.state.collect { state ->
+                combine(calls.state, system.routing, ::Pair).collect { (state, routing) ->
                     if (state == null || state.phase == CallPhase.Ended) {
                         ServiceCompat.stopForeground(this@CallService, ServiceCompat.STOP_FOREGROUND_REMOVE)
                         stopSelf()
                     } else {
-                        claim(state, faces.of(state.peerId))
+                        claim(state, faces.of(state.peerId), routing)
                     }
                 }
             }
@@ -62,6 +70,7 @@ class CallService :
     private fun claim(
         state: CallState?,
         face: CallFace?,
+        routing: CallRouting?,
     ) {
         val id = state?.id.orEmpty()
         val person = face?.person ?: Person.Builder().setName(UNNAMED).build()
@@ -89,7 +98,7 @@ class CallService :
                         setShowWhen(true)
                         setUsesChronometer(true)
                     }
-                    // A walkie session has no live microphone or speaker path to switch (§3.11).
+                    // A walkie session has no live microphone to mute (§3.11); its audio has a route as a call's does.
                     if (state != null && !state.walkie) {
                         addAction(
                             action(
@@ -100,18 +109,15 @@ class CallService :
                                 !state.muted,
                             ),
                         )
-                        addAction(
-                            action(
-                                if (state.speaker) R.drawable.ic_call_earpiece else R.drawable.ic_call_speaker,
-                                if (state.speaker) "Earpiece" else "Speaker",
-                                CallActionReceiver.ACTION_SPEAKER,
-                                id,
-                                !state.speaker,
-                            ),
-                        )
                     }
+                    routing?.let(CallAudioPolicy::notificationTarget)?.let { addAction(routeAction(it, id)) }
                 }.build()
-        val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0
+        val type =
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL
+            } else {
+                0
+            }
         try {
             ServiceCompat.startForeground(this, CallNotifications.ID + 1, notification, type)
         } catch (e: SecurityException) {
@@ -132,6 +138,27 @@ class CallService :
         NotificationCompat.Action
             .Builder(IconCompat.createWithResource(this, icon), label, CallActionReceiver.pending(this, kind, id, on))
             .build()
+
+    // Named and drawn by where it leads, and carrying that route's key, so a stale notification cannot send the call
+    // anywhere the user did not see.
+    private fun routeAction(
+        target: CallAudioRoute,
+        id: String,
+    ): NotificationCompat.Action {
+        val icon =
+            when (target.kind) {
+                CallAudioRoute.Kind.SPEAKER -> R.drawable.ic_call_speaker
+                CallAudioRoute.Kind.EARPIECE -> R.drawable.ic_call_earpiece
+                CallAudioRoute.Kind.BLUETOOTH -> R.drawable.ic_call_bluetooth
+                CallAudioRoute.Kind.WIRED, CallAudioRoute.Kind.OTHER -> R.drawable.ic_call_headset
+            }
+        return NotificationCompat.Action
+            .Builder(
+                IconCompat.createWithResource(this, icon),
+                routeLabel(target),
+                CallActionReceiver.pending(this, CallActionReceiver.ACTION_ROUTE, id, route = target.key),
+            ).build()
+    }
 
     private fun textOf(state: CallState?): String =
         when (state?.phase) {

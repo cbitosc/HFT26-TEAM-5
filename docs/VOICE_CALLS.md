@@ -3,7 +3,7 @@
 | | |
 |--------------------|-------------------------------------------------------------------------------------------------------------------------------|
 | Status             | **Draft sketch, not normative.** Nothing here is on the wire                                                                  |
-| Decision           | ADR 2026-10.3tee (Proposed); §3.10, a call between neighbours over Wi-Fi Direct, is ADR 2026-10.kxnw; §3.11, the walkie-talkie, is ADR 2026-10.79yb; §3.12, call records, is 3tee's second amendment |
+| Decision           | ADR 2026-10.3tee (Proposed); §3.10, a call between neighbours over Wi-Fi Direct, is ADR 2026-10.kxnw; §3.11, the walkie-talkie, is ADR 2026-10.79yb; §3.12, call records, is 3tee's second amendment; §3.13, the audio route, is ADR 2026-10.wbua |
 | Spool side         | §2.1–§2.6 are written to drop into `docs/SPOOL_PROTOCOL.md` as §7.6, and §2.7 as §7.7, each with §10.1 bullets, once accepted |
 | Client side        | §3 is app protocol: a new `MessageContent.ctl` value, invisible to spools and relays                                          |
 
@@ -634,8 +634,8 @@ an experiment behind `BuildConfig.WALKIE` (`-Pwalkie=`, on in debug and off in r
   - A burst ends on its `e` chunk, or after 4 s with nothing held and nothing new.
   - A chunk of a burst that ended, or one behind the play position, is dropped.
 
-  Talking holds playback: what arrives meanwhile plays after the release. Bursts play from the loudspeaker, unless a
-  headset is connected. The session hangs up after 10 min with no burst either way.
+  Talking holds playback: what arrives meanwhile plays after the release. Bursts play on the call's audio route, which
+  starts on the loudspeaker (§3.13). The session hangs up after 10 min with no burst either way.
 - **C-3.11-8** From the ring to the hang-up, a walkie call holds a Wi-Fi Aware link to its peer
   (`MeshTransport.holdLink`), renewing the hold every 10 s; a hold lapses 25 s after its last renewal.
   - **No link yet.** The hold raises one through the hint an attachment fetch gives
@@ -677,6 +677,30 @@ search never finds it. The chat list is the exception, as it is for a transfer. 
 the same sentence without the time, and with no "You: " in front of it, because the sentence already says who did
 what. A missed call is notified on its own (`debug/call/CallController`), so the badge does not count it twice.
 
+### 3.13 The audio route
+
+Every call, live or walkie, is registered with the phone as a self-managed Telecom call (Jetpack core-telecom, debug
+builds only). Telecom owns where its audio goes: the earpiece, the loudspeaker, or a wired or Bluetooth headset, both
+ways. A headset's button, a watch or a car can answer the call and hang it up. ADR 2026-10.wbua records why.
+
+`call/SystemCallSync` keeps the system's call in step with `CallManager`'s. It follows the manager's state on the app
+scope, never on the inbound path. `debug/call/TelecomCalls` is the one importer of the library.
+
+| ID           | Requirement                                                                                                                                                                                                                                                                       |
+|--------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **C-3.13-1** | An outgoing call is registered as it dials and set active when it connects. An incoming one is registered as it alerts and answered when this phone answers it. If the system's own answer took it, the system is not answered a second time.                                    |
+| **C-3.13-2** | A call that ends is disconnected from the system with what ended it: missed, busy, an error (a lost path, the media, a failure), the peer's own ending (remote), an incoming call never answered (rejected, or missed when it rang out), else local. A call the system ended is not told back. |
+| **C-3.13-3** | Glare's surviving call (§3.5) keeps the system call of the call it replaced: same peer, new id.                                                                                                                                                                                  |
+| **C-3.13-4** | The system is offered no hold, so a phone call answered over ours ends it. A call the system refuses is declined `busy` while it alerts, else hung up. So is every call on a phone that would not register this app.                                                              |
+| **C-3.13-5** | A live call starts where Telecom puts it: a connected headset, else the earpiece. A walkie session starts on the loudspeaker unless a headset is connected, which takes it as it would a call.                                                                                   |
+| **C-3.13-6** | When a walkie session's route falls to the earpiece without the user picking it (a headset unplugged, a start not honoured), the session asks for the loudspeaker, once per fall. A live call that drops to a walkie is moved off the earpiece the same way.                        |
+| **C-3.13-7** | Nothing but Telecom sets the route while a call is up: no `setCommunicationDevice`, no `startBluetoothSco`, no preferred device on a track. Both kinds play on the voice-communication usage. A walkie burst is recorded from `VOICE_COMMUNICATION` while a headset has the call, else from the phone's microphone (`VOICE_RECOGNITION`, then `MIC`). |
+| **C-3.13-8** | The call screen's route control is the loudspeaker toggle while the earpiece and the loudspeaker are the only routes. With a third route it names the current one and lists them all. The notification's one route action goes onto the loudspeaker, or off it to a Bluetooth headset, then a wired one, then the earpiece. It carries that route's key, so a stale tap never moves the call anywhere unseen. |
+| **C-3.13-9** | A mute set from a car or a watch reaches the call. The first value the system reports is only where it starts, and is not acted on.                                                                                                                                             |
+
+The system shows the peer's label as the call's name, and `knit:<node id>` as its address. VoIP calls stay out of the
+system call log. A call's line in its thread is §3.12's.
+
 ## 4. Tests this would add
 
 - **knit-spool:**
@@ -697,6 +721,8 @@ what. A missed call is notified on its own (`debug/call/CallController`), so the
     answer, relay-only.
   - Call records (§3.12): `CallRecordTest` for the outcome table and the row, the record cases in `CallManagerTest`,
     `CallLogTest`, and the call line in `ChatScreenContentTest` and `ChatListTransferPreviewTest`.
+  - The audio route (§3.13): `SystemCallSyncTest` for the system call's lifecycle, glare, refusals, mute and the
+    walkie's correction; `CallAudioPolicyTest` for the start, the correction and the notification's target.
   - Stale `OFFER` → missed call; `CANCEL` before `OFFER` → no alert.
   - Glare resolution; idempotent duplicates.
   - Relay-only SDP stripping, and fingerprint mismatch → call refused.

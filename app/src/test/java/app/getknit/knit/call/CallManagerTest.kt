@@ -77,8 +77,6 @@ class CallManagerTest {
             micOff = muted
         }
 
-        override fun setSpeaker(on: Boolean) = Unit
-
         override suspend fun route(): String = "host/host"
 
         override fun close() {

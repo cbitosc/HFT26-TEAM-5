@@ -49,8 +49,6 @@ interface CallSession {
 
     fun setMuted(muted: Boolean)
 
-    fun setSpeaker(on: Boolean)
-
     /**
      * The selected candidate pair's types, `local/remote` (e.g. `relay/srflx`), with `/wifi-direct` after them when the
      * pair rides the call's Wi-Fi Direct group; null before ICE has chosen.

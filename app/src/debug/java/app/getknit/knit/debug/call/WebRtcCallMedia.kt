@@ -37,7 +37,9 @@ import kotlin.coroutines.resume
 /**
  * [CallMedia] over libwebrtc (experimental, debug only — the dependency is `debugImplementation`): one audio-only
  * Unified Plan peer connection per call, Opus over DTLS-SRTP, bundled and RTCP-muxed (C-3.7-4). The factory and its
- * audio device module are built on the first call and kept for the process.
+ * audio device module are built on the first call and kept for the process. Its audio goes where Telecom routes the
+ * call (§3.13, [TelecomCalls]): the module plays and records on the voice-communication usage, which follows the call's
+ * endpoint, so nothing here sets a route, a mode or focus.
  *
  * **Gathering is continual, and a description never leaves without a candidate.** libwebrtc's Android network monitor
  * starts with the first allocation and reports the phone's networks a few milliseconds later; gathering once, the
@@ -52,7 +54,6 @@ import kotlin.coroutines.resume
  */
 internal class WebRtcCallMedia(
     private val context: Context,
-    private val audio: CallAudio,
     private val scope: CoroutineScope,
     private val link: StateFlow<DirectLink?>,
     private val log: (String) -> Unit,
@@ -84,7 +85,7 @@ internal class WebRtcCallMedia(
         direct: Boolean,
         events: (MediaEvent) -> Unit,
     ): CallSession =
-        WebRtcSession(factory, servers, relayOnly, direct, link, events, audio, scope, log, path, onClosed = open::remove).also(open::add)
+        WebRtcSession(factory, servers, relayOnly, direct, link, events, scope, log, path, onClosed = open::remove).also(open::add)
 
     /** The newest open session's stats, for the call screen's diagnostics card; null with no session or no report. */
     suspend fun stats(): CallStats? = open.lastOrNull()?.stats()
@@ -111,7 +112,6 @@ private class WebRtcSession(
     private val direct: Boolean,
     private val link: StateFlow<DirectLink?>,
     private val events: (MediaEvent) -> Unit,
-    private val audio: CallAudio,
     private val scope: CoroutineScope,
     private val log: (String) -> Unit,
     private val path: DefaultPath,
@@ -237,7 +237,6 @@ private class WebRtcSession(
         }
         pc = checkNotNull(factory.createPeerConnection(config, observer)) { "no peer connection" }
         pc.addTrack(track, listOf("knit"))
-        audio.begin()
         log(
             "webrtc: opened (${servers.iceSummary()}, relay=$relayOnly, direct=$direct" +
                 (if (tlsUnchecked) ", turns unchecked" else "") +
@@ -316,8 +315,6 @@ private class WebRtcSession(
         if (synchronized(lock) { !closed }) track.setEnabled(!muted)
     }
 
-    override fun setSpeaker(on: Boolean) = audio.setSpeaker(on)
-
     override suspend fun route(): String? = selected
 
     /** One stats report, read: the first call's counters are the bitrates' baseline, so those come on the second. */
@@ -372,7 +369,6 @@ private class WebRtcSession(
         // dispose() closes the connection and its senders; the source is ours to free.
         pc.dispose()
         source.dispose()
-        audio.end()
         log("webrtc: closed")
     }
 

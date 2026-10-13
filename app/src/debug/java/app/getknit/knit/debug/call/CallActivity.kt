@@ -40,7 +40,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.Close
@@ -98,10 +97,13 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import app.getknit.knit.MainActivity
 import app.getknit.knit.R
+import app.getknit.knit.call.CallAudioRoute
 import app.getknit.knit.call.CallKind
 import app.getknit.knit.call.CallManager
 import app.getknit.knit.call.CallPhase
+import app.getknit.knit.call.CallRouting
 import app.getknit.knit.call.CallState
+import app.getknit.knit.call.SystemCallSync
 import app.getknit.knit.call.TalkLink
 import app.getknit.knit.call.WalkieStats
 import app.getknit.knit.data.GroupRepository
@@ -143,6 +145,7 @@ class CallActivity :
     private val settings: SettingsStore by inject()
     private val identity: Identity by inject()
     private val media: WebRtcCallMedia by inject()
+    private val system: SystemCallSync by inject()
 
     // Null in a build with the walkie off (`di/CallWiring.WALKIE_WIRED`): no call is ever a walkie there.
     private val walkie: WalkieTalk? = getKoin().getOrNull()
@@ -170,8 +173,8 @@ class CallActivity :
         lifecycleScope.launch {
             // Latest: a Call back from a dropped call's screen is a new call, and it must cut that screen's linger short.
             calls.state.collectLatest { state ->
-                // A walkie's bursts play on the media stream (TalkPlayer), so the volume keys turn that one.
-                volumeControlStream = if (state?.walkie == true) AudioManager.STREAM_MUSIC else AudioManager.USE_DEFAULT_STREAM_TYPE
+                // Both kinds play on the call's own stream (§3.13): the walkie's bursts too, on the route Telecom holds.
+                volumeControlStream = if (state != null) AudioManager.STREAM_VOICE_CALL else AudioManager.USE_DEFAULT_STREAM_TYPE
                 when {
                     state == null -> {
                         finish()
@@ -244,6 +247,7 @@ class CallActivity :
         }
         val talk by (walkie?.talk ?: NO_TALK).collectAsState()
         val link by (walkie?.link ?: NO_LINK).collectAsState()
+        val routing by system.routing.collectAsState()
         CallScreen(
             state = state,
             name = name,
@@ -261,7 +265,8 @@ class CallActivity :
             onCallBack = { peerId?.let { peer -> lifecycleScope.launch { calls.start(peer, CallKind.LIVE) } } },
             onClose = ::finish,
             onMute = { on -> lifecycleScope.launch { calls.setMuted(on) } },
-            onSpeaker = { on -> lifecycleScope.launch { calls.setSpeaker(on) } },
+            routing = routing,
+            onRoute = { route -> lifecycleScope.launch { system.request(route) } },
             talk = talk,
             link = link,
             onTalk = { lifecycleScope.launch { walkie?.press() } },
@@ -340,7 +345,7 @@ private val ActionSize = 72.dp
 private val TalkSize = 120.dp
 private val NO_TALK = MutableStateFlow<Talk>(Talk.Idle())
 private val NO_LINK = MutableStateFlow<TalkLink?>(null)
-private val ToggleSize = 64.dp
+internal val ToggleSize = 64.dp
 private const val RING_MS = 1_800
 private const val RING_ALPHA = 0.28f
 private const val ENDED_ALPHA = 0.5f
@@ -368,8 +373,9 @@ internal fun CallScreen(
     onDecline: () -> Unit,
     onHangUp: () -> Unit,
     onMute: (Boolean) -> Unit,
-    onSpeaker: (Boolean) -> Unit,
+    onRoute: (CallAudioRoute) -> Unit,
     modifier: Modifier = Modifier,
+    routing: CallRouting? = null,
     onCallBack: () -> Unit = {},
     onClose: () -> Unit = {},
     clock: () -> Long = System::currentTimeMillis,
@@ -425,9 +431,9 @@ internal fun CallScreen(
                     Spacer(Modifier.weight(1f))
                 }
                 if (walkieUp) {
-                    WalkieControls(state, name, talk, link, onHangUp, onTalk, onTalkSend, onTalkCancel)
+                    WalkieControls(state, name, talk, link, routing, onHangUp, onRoute, onTalk, onTalkSend, onTalkCancel)
                 } else {
-                    Controls(state, onAnswer, onDecline, onHangUp, onMute, onSpeaker, onCallBack, onClose)
+                    Controls(state, routing, onAnswer, onDecline, onHangUp, onMute, onRoute, onCallBack, onClose)
                 }
             }
         }
@@ -622,11 +628,12 @@ private fun RingingAvatar(
 @Composable
 private fun Controls(
     state: CallState?,
+    routing: CallRouting?,
     onAnswer: () -> Unit,
     onDecline: () -> Unit,
     onHangUp: () -> Unit,
     onMute: (Boolean) -> Unit,
-    onSpeaker: (Boolean) -> Unit,
+    onRoute: (CallAudioRoute) -> Unit,
     onCallBack: () -> Unit,
     onClose: () -> Unit,
 ) {
@@ -653,7 +660,7 @@ private fun Controls(
             ) {
                 CallToggle("Mute", if (state.muted) Icons.Filled.MicOff else Icons.Filled.Mic, state.muted, onMute)
                 CallAction("End", Icons.Filled.CallEnd, HangUpRed, onHangUp)
-                CallToggle("Speaker", Icons.AutoMirrored.Filled.VolumeUp, state.speaker, onSpeaker)
+                AudioRouteButton(routing, onRoute)
             }
         }
     }
@@ -661,7 +668,8 @@ private fun Controls(
 
 /**
  * A connected walkie session's controls (§3.11): whether a burst can reach the peer, where the last one stands, why
- * this is a walkie when a live call dropped to one, and the hold-to-talk button beside the hang-up.
+ * this is a walkie when a live call dropped to one, and the hold-to-talk button between the hang-up and where its
+ * audio goes (§3.13).
  */
 @Composable
 private fun WalkieControls(
@@ -669,7 +677,9 @@ private fun WalkieControls(
     name: String,
     talk: Talk,
     link: TalkLink?,
+    routing: CallRouting?,
     onHangUp: () -> Unit,
+    onRoute: (CallAudioRoute) -> Unit,
     onTalk: () -> Unit,
     onTalkSend: () -> Unit,
     onTalkCancel: () -> Unit,
@@ -698,7 +708,9 @@ private fun WalkieControls(
             Box(Modifier.weight(1f), contentAlignment = Alignment.BottomCenter) {
                 TalkButton(recording = talk is Talk.Recording, onTalk, onTalkSend, onTalkCancel)
             }
-            Spacer(Modifier.weight(1f))
+            Box(Modifier.weight(1f), contentAlignment = Alignment.BottomCenter) {
+                AudioRouteButton(routing, onRoute)
+            }
         }
     }
 }
@@ -854,17 +866,19 @@ private fun CallAction(
 }
 
 @Composable
-private fun CallToggle(
+internal fun CallToggle(
     label: String,
     icon: ImageVector,
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
+    enabled: Boolean = true,
 ) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         FilledTonalIconToggleButton(
             checked = checked,
             onCheckedChange = onCheckedChange,
             modifier = Modifier.size(ToggleSize),
+            enabled = enabled,
             shape = CircleShape,
         ) {
             Icon(icon, contentDescription = label, modifier = Modifier.size(28.dp))
@@ -875,7 +889,7 @@ private fun CallToggle(
 
 /** The word under a button: the button already carries it as its description, so it is not read twice. */
 @Composable
-private fun ButtonLabel(label: String) {
+internal fun ButtonLabel(label: String) {
     Text(
         label,
         style = MaterialTheme.typography.labelLarge,
@@ -1098,6 +1112,12 @@ private fun reasonOf(reason: Int?): String? =
     }
 
 private const val PREVIEW_PEER = "hzwyqdbj74hu6gkurmcyxomaca"
+private val PREVIEW_EARPIECE = CallAudioRoute(CallAudioRoute.Kind.EARPIECE, "Earpiece", "earpiece")
+private val PREVIEW_SPEAKER = CallAudioRoute(CallAudioRoute.Kind.SPEAKER, "Speaker", "speaker")
+private val PREVIEW_BUDS = CallAudioRoute(CallAudioRoute.Kind.BLUETOOTH, "Pixel Buds Pro", "buds")
+private val PREVIEW_ON_EARPIECE = CallRouting(PREVIEW_EARPIECE, listOf(PREVIEW_EARPIECE, PREVIEW_SPEAKER))
+private val PREVIEW_ON_SPEAKER = CallRouting(PREVIEW_SPEAKER, listOf(PREVIEW_EARPIECE, PREVIEW_SPEAKER))
+private val PREVIEW_ON_BUDS = CallRouting(PREVIEW_BUDS, listOf(PREVIEW_EARPIECE, PREVIEW_SPEAKER, PREVIEW_BUDS))
 
 @Composable
 private fun PreviewCall(
@@ -1107,9 +1127,9 @@ private fun PreviewCall(
     route: String? = null,
     stats: CallStats? = null,
     muted: Boolean = false,
-    speaker: Boolean = false,
     reason: Int? = null,
     walkie: Boolean = false,
+    routing: CallRouting? = if (walkie) PREVIEW_ON_SPEAKER else PREVIEW_ON_EARPIECE,
     degraded: Boolean = false,
     talk: Talk = Talk.Idle(),
     link: TalkLink? = null,
@@ -1130,7 +1150,6 @@ private fun PreviewCall(
                 startedAt = PREVIEW_NOW - 90_000,
                 connectedAt = (PREVIEW_NOW - 83_000).takeIf { connected },
                 muted = muted,
-                speaker = speaker,
                 reason = reason,
                 walkie = walkie,
                 degraded = degraded,
@@ -1143,7 +1162,8 @@ private fun PreviewCall(
         onDecline = {},
         onHangUp = {},
         onMute = {},
-        onSpeaker = {},
+        onRoute = {},
+        routing = routing,
         clock = { PREVIEW_NOW },
         talk = talk,
         link = link,
@@ -1206,6 +1226,11 @@ fun CallScreenRingingPreview() = PreviewCall(CallPhase.Ringing)
 @Preview(name = "Connected, dark", widthDp = 411, heightDp = 891, uiMode = Configuration.UI_MODE_NIGHT_YES)
 @Composable
 fun CallScreenConnectedPreview() = PreviewCall(CallPhase.Connected, route = "relay/srflx", muted = true, caller = PREVIEW_CALLER)
+
+@Preview(name = "Connected, on a headset", widthDp = 411, heightDp = 891)
+@Composable
+fun CallScreenHeadsetPreview() =
+    PreviewCall(CallPhase.Connected, route = "host/host/wifi-direct", routing = PREVIEW_ON_BUDS, caller = PREVIEW_CALLER)
 
 @Preview(name = "Connected, breaking up", widthDp = 411, heightDp = 891)
 @Preview(name = "Connected, breaking up, dark", widthDp = 411, heightDp = 891, uiMode = Configuration.UI_MODE_NIGHT_YES)

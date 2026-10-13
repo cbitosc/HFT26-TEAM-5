@@ -1069,6 +1069,8 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.tooling)
     // Experimental voice calls' media (docs/VOICE_CALLS.md): debug only, behind di/CallWiring.
     debugImplementation(libs.webrtc.android)
+    // …and the Telecom integration that owns a call's audio route (§3.13): debug only, behind di/CallWiring.
+    debugImplementation(libs.androidx.core.telecom)
     // Compose Preview Screenshot Testing: `@PreviewTest` plus the preview renderer's tooling, for the
     // `screenshotTest` source set only. See .agents/context/testing.md.
     screenshotTestImplementation(libs.compose.screenshot.validation.api)

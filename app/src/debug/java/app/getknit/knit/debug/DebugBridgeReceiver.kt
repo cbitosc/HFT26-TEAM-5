@@ -16,12 +16,14 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.core.graphics.createBitmap
 import app.getknit.knit.BuildConfig
+import app.getknit.knit.call.CallAudioRoute
 import app.getknit.knit.call.CallKind
 import app.getknit.knit.call.CallManager
 import app.getknit.knit.call.CallPhase
 import app.getknit.knit.call.DirectCallPath
 import app.getknit.knit.call.DirectMode
 import app.getknit.knit.call.StunServers
+import app.getknit.knit.call.SystemCallSync
 import app.getknit.knit.call.WalkieStats
 import app.getknit.knit.crash.ProcessExitReasons
 import app.getknit.knit.data.AttachmentIdentities
@@ -2066,6 +2068,10 @@ class DebugBridgeReceiver :
      * screen starts it). `state` adds `walkie`/`degraded` to the call and the `walkie` block: the talk button's state,
      * the bursts `sent` and `heard` (played to their end), the chunks `chunksOut`, `chunksIn` and `lost` (skipped as
      * never come), and `link`: DIRECT, MESH or NONE, the link a chunk to the peer would take (null outside a walkie).
+     *
+     * The audio route (§3.13): `audio [--es to speaker|earpiece|wired|bluetooth]` moves the call's audio to the first
+     * route of that kind the system offers (none named: just reports), and `state` carries `audio`: the route Telecom
+     * has the call on (`current`, null until it says) and every route it offers (`available`), each `kind`/`name`/`key`.
      */
     @Suppress("CyclomaticComplexMethod", "ReturnCount", "LongMethod") // a flat dispatch over the ops
     private suspend fun handleCall(
@@ -2178,6 +2184,18 @@ class DebugBridgeReceiver :
                 return reply("ok", "turns: certificates $what from the next call on")
             }
 
+            "audio" -> {
+                val system = getKoin().get<SystemCallSync>()
+                val routing = system.routing.value ?: return reply("error", "the system holds no call")
+                val to = intent.getStringExtra("to") ?: return reply("ok", "routes").put("audio", audioJson(system))
+                val kind =
+                    CallAudioRoute.Kind.entries.firstOrNull { it.name.equals(to, ignoreCase = true) }
+                        ?: return reply("error", "to must be speaker|earpiece|wired|bluetooth")
+                val route = routing.available.firstOrNull { it.kind == kind } ?: return reply("error", "no $to route now")
+                val moved = system.request(route)
+                return reply(if (moved) "ok" else "refused", "audio to ${route.name}").put("audio", audioJson(system))
+            }
+
             "dropgroup" -> {
                 val dropped = getKoin().get<DirectCallPath>().dropGroup()
                 return reply(if (dropped) "ok" else "error", if (dropped) "lane closed; the radio goes back" else "no live leg")
@@ -2214,7 +2232,7 @@ class DebugBridgeReceiver :
                         .put("startedAt", it.startedAt)
                         .put("connectedAt", it.connectedAt ?: JSONObject.NULL)
                         .put("muted", it.muted)
-                        .put("speaker", it.speaker)
+                        .put("audio", getKoin().getOrNull<SystemCallSync>()?.let(::audioJson) ?: JSONObject.NULL)
                         .put("reason", it.reason ?: JSONObject.NULL)
                         .put("route", calls.route() ?: JSONObject.NULL)
                         .put("walkie", it.walkie)
@@ -2236,6 +2254,16 @@ class DebugBridgeReceiver :
                         .put("stats", walkieStatsJson(it.stats()))
                 } ?: JSONObject.NULL,
             )
+    }
+
+    /** The call's audio route as Telecom holds it (§3.13), or null when the system holds no call. */
+    private fun audioJson(system: SystemCallSync): Any {
+        val routing = system.routing.value ?: return JSONObject.NULL
+
+        fun json(route: CallAudioRoute) = JSONObject().put("kind", route.kind.name).put("name", route.name).put("key", route.key)
+        return JSONObject()
+            .put("current", routing.current?.let(::json) ?: JSONObject.NULL)
+            .put("available", JSONArray().also { arr -> routing.available.forEach { arr.put(json(it)) } })
     }
 
     /** The walkie's diagnostics card as numbers (§3.11): what `CallActivity` draws, null where not yet measured. */

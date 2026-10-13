@@ -114,6 +114,8 @@ internal class WalkieTalk(
     private val clock: () -> Long = { System.currentTimeMillis() },
     private val log: (String) -> Unit = {},
     private val links: TalkLinks? = null,
+    // Whether a headset has the call's audio now (§3.13): a burst is then spoken into its microphone.
+    private val headset: () -> Boolean = { false },
 ) {
     private val _talk = MutableStateFlow<Talk>(Talk.Idle())
     val talk: StateFlow<Talk> = _talk.asStateFlow()
@@ -221,7 +223,7 @@ internal class WalkieTalk(
             // Half duplex: what plays waits for the release.
             player.hold(true)
             val bytes = Channel<ByteArray>(Channel.UNLIMITED)
-            if (!recorder.start { bytes.trySend(it) }) {
+            if (!recorder.start(headset()) { bytes.trySend(it) }) {
                 player.hold(false)
                 _talk.value = Talk.Idle(Talk.Note.NO_MIC)
                 return@withLock false

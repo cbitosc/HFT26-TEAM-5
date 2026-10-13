@@ -251,6 +251,19 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
       - `handMs`: a chunk's cut to the radio taking it, retries included.
       - `frameOut` and `frameIn`: the average frame's envelope bytes.
       - `failed`: chunks no radio took.
+  - **The audio route** (§3.13, ADR 2026-10.wbua). Every call of either kind is a self-managed Telecom call, which
+    owns where its audio goes.
+    - `state`: the call's `audio` holds `current`, the route Telecom has it on (null until Telecom says), and
+      `available`, every route it offers. Each route has a `kind` (`EARPIECE`, `SPEAKER`, `WIRED`, `BLUETOOTH` or
+      `OTHER`), a `name` and a `key`. `audio` is null while the system holds no call.
+    - `--es op audio --es to speaker|earpiece|wired|bluetooth`: moves the call to the first route of that kind and
+      replies with the new `audio`. With no `to`, it only reports.
+    - Logcat, under `KnitCall`:
+      - `call <id>: added to the system (…)` and `call <id>: disconnected from the system (<cause>)`;
+      - `telecom: …` for each refusal, or a verb Telecom left unanswered;
+      - `walkie in: source <n>, <device>` per burst spoken, and `walkie out: <device>` per burst heard: where the walkie
+        really recorded and played (`bluetooth sco` for a headset's call link);
+      - `dumpsys telecom` lists the call itself.
       - `path`: for example `Wi-Fi Aware · direct · held`, `Bluetooth Coded · direct`, `Through a neighbour · flooded`,
         `Through the relay · cast` or `No link`.
     - To see a live call degrade, set `relay --ez on true` with no TURN spool: ICE fails and both phones drop to

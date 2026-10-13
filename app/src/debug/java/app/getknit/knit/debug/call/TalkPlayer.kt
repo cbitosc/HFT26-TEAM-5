@@ -1,12 +1,9 @@
 package app.getknit.knit.debug.call
 
 import android.annotation.SuppressLint
-import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioDeviceInfo
-import android.media.AudioFocusRequest
 import android.media.AudioFormat
-import android.media.AudioManager
 import android.media.AudioTrack
 import android.media.MediaCodec
 import android.media.MediaFormat
@@ -18,24 +15,21 @@ import java.nio.ByteOrder
 
 /**
  * Plays the peer's walkie bursts as their chunks land (docs/VOICE_CALLS.md §3.11): the platform Opus decoder, configured
- * with the `OpusHead` an extractor would hand it and fed the bare packets, into a streaming [AudioTrack] on the media
- * usage, under transient focus while a burst plays. It plays from the loudspeaker, as a walkie-talkie does, whatever
- * mode the phone's audio is in; only a headset the user has on takes it instead ([output]).
+ * with the `OpusHead` an extractor would hand it and fed the bare packets, into a streaming [AudioTrack] on the
+ * voice-communication usage. That usage follows the call's route, which Telecom holds for the whole session along with
+ * its focus (§3.13): the loudspeaker a walkie starts on, the earpiece or a headset when the user picks one, and a
+ * headset that takes the call — a Bluetooth one over its call link, both ways.
  *
  * Driven by one coroutine (`WalkieTalk`'s player loop, on the IO dispatcher); only [hold] comes from another thread.
  * Writes never block: a full or held track is waited on with [delay], so the loop stays cancellable when the session
  * ends and [close] runs after it, never beside it.
  */
-internal class TalkPlayer(
-    context: Context,
-) {
-    private val manager = checkNotNull(context.getSystemService(AudioManager::class.java))
+internal class TalkPlayer {
     private val info = MediaCodec.BufferInfo()
     private val trackLock = Any()
 
     private var codec: MediaCodec? = null
     private var track: AudioTrack? = null
-    private var focus: AudioFocusRequest? = null
 
     // PCM frames written into [track], its frame size, and the next access unit's timestamp.
     private var written = 0L
@@ -76,21 +70,21 @@ internal class TalkPlayer(
         }
     }
 
-    /** Releases the decoder, the track and the focus; nothing if no burst is open. */
+    /** Releases the decoder and the track; nothing if no burst is open. */
     fun close() {
         runCatching { codec?.stop() }
         runCatching { codec?.release() }
         codec = null
         synchronized(trackLock) {
             track?.let {
+                // Where the burst played: the route is Telecom's, so this is the one place it shows (§3.13).
+                Log.i(TAG, "walkie out: ${it.routedDevice?.type?.let(::deviceName) ?: "unrouted"}")
                 runCatching { it.pause() }
                 runCatching { it.flush() }
                 runCatching { it.release() }
             }
             track = null
         }
-        focus?.let { runCatching { manager.abandonAudioFocusRequest(it) } }
-        focus = null
     }
 
     private fun open() {
@@ -110,10 +104,6 @@ internal class TalkPlayer(
             }.onFailure { Log.w(TAG, "walkie decoder failed: ${it.javaClass.simpleName}: ${it.message}") }.getOrNull() ?: return
         ptsUs = 0L
         newTrack(OPUS_RATE, 1)
-        val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT).setAudioAttributes(ATTRIBUTES).build()
-        // Refused or not, the burst plays: this is a call the user is in.
-        runCatching { manager.requestAudioFocus(request) }
-        focus = request
     }
 
     private fun newTrack(
@@ -136,9 +126,6 @@ internal class TalkPlayer(
                 ).setBufferSizeInBytes(maxOf(min, rate * channels * PCM_BYTES * BUFFER_MS / MS_PER_S))
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
-        val out = output()
-        t.setPreferredDevice(out)
-        Log.i(TAG, "walkie out: ${if (out != null) "speaker" else "media route"}")
         synchronized(trackLock) {
             track?.release()
             track = t
@@ -250,16 +237,6 @@ internal class TalkPlayer(
         }
     }
 
-    /**
-     * The built-in loudspeaker, or null (the media route, which a headset takes) while a headset is connected. Pinned
-     * rather than left to the media route, which follows the earpiece on a phone left in communication mode.
-     */
-    private fun output(): AudioDeviceInfo? {
-        val outputs = runCatching { manager.getDevices(AudioManager.GET_DEVICES_OUTPUTS) }.getOrNull().orEmpty()
-        if (outputs.any { it.type in HEADSETS }) return null
-        return outputs.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
-    }
-
     // The identification header an Ogg Opus stream opens with (RFC 7845 §5.1): version 1, mono, no pre-skip, 16 kHz in.
     private fun opusHead(): ByteArray =
         ByteBuffer
@@ -296,23 +273,31 @@ internal class TalkPlayer(
         const val WAIT_MS = 10L
         const val TAIL_SLACK_MS = 500L
 
-        // TYPE_BLE_HEADSET is API 31, but an inlined int: an older phone never reports it.
-        @SuppressLint("InlinedApi")
-        val HEADSETS =
-            setOf(
-                AudioDeviceInfo.TYPE_WIRED_HEADSET,
-                AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
-                AudioDeviceInfo.TYPE_USB_HEADSET,
-                AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
-                AudioDeviceInfo.TYPE_BLE_HEADSET,
-                AudioDeviceInfo.TYPE_HEARING_AID,
-            )
-
         val ATTRIBUTES: AudioAttributes =
             AudioAttributes
                 .Builder()
-                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
                 .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                 .build()
     }
 }
+
+/**
+ * An audio device's type as a walkie log line names it (`walkie in:` / `walkie out:`), for the device trials.
+ * `TYPE_BLE_HEADSET` is API 31, but an inlined int: an older phone never reports it.
+ */
+@SuppressLint("InlinedApi")
+internal fun deviceName(type: Int): String =
+    when (type) {
+        AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "speaker"
+        AudioDeviceInfo.TYPE_BUILTIN_EARPIECE -> "earpiece"
+        AudioDeviceInfo.TYPE_BUILTIN_MIC -> "phone mic"
+        AudioDeviceInfo.TYPE_WIRED_HEADSET -> "wired headset"
+        AudioDeviceInfo.TYPE_WIRED_HEADPHONES -> "wired headphones"
+        AudioDeviceInfo.TYPE_USB_HEADSET -> "usb headset"
+        AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> "bluetooth sco"
+        AudioDeviceInfo.TYPE_BLUETOOTH_A2DP -> "bluetooth a2dp"
+        AudioDeviceInfo.TYPE_BLE_HEADSET -> "bluetooth le"
+        AudioDeviceInfo.TYPE_HEARING_AID -> "hearing aid"
+        else -> "type $type"
+    }

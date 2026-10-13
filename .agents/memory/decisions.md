@@ -248,6 +248,7 @@ carries; never renumber an old one.
 | [2026-10.ryak](decisions/2026-10-ryak-the-ble-presence-advert-runs-at-full-power.md) | The BLE presence advert runs at full power | ble, mesh, power |
 | [2026-10.swst](decisions/2026-10-swst-art-s-whitespace-is-the-law-for-both-ports.md) | ART's whitespace is the law for both ports | text, interop, testing |
 | [2026-10.unqn](decisions/2026-10-unqn-a-clean-bounded-picture-is-stripped-not-re-encoded.md) | A clean, bounded picture is stripped, not re-encoded | attachments, privacy |
+| [2026-10.wbua](decisions/2026-10-wbua-calls-register-with-telecom-through-core-telecom.md) | Calls register with Telecom through core-telecom, which owns their audio route | calls, audio |
 | [2026-10.wtyc](decisions/2026-10-wtyc-a-cut-attachment-resumes-from-the-bytes-the-receiver-kept.md) | A cut attachment resumes from the bytes the receiver kept | mesh, attachments, wire, blob-exchange |
 | [2026-10.xgwj](decisions/2026-10-xgwj-a-forced-group-rekey-retires-the-send-chain.md) | A forced group rekey retires the send chain, never reuses its epoch | crypto, groups |
 | [2026-10.xkp4](decisions/2026-10-xkp4-a-ticket-goes-once-per-connection.md) | a ticket goes once per connection, only to its own host, and STUN rides hello | calls, spool, turn, tickets |

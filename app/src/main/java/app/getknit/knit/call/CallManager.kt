@@ -37,9 +37,12 @@ data class CallState(
     val startedAt: Long,
     val connectedAt: Long? = null,
     val muted: Boolean = false,
-    val speaker: Boolean = false,
     // Why it ended (a [CallPayload] REASON_*), once [phase] is [CallPhase.Ended].
     val reason: Int? = null,
+    // Once ended: the peer's own terminal phase ended it, and it was an incoming call that stopped ringing unanswered
+    // (C-3.4-2) — what the system is told it was (§3.13).
+    val endedByPeer: Boolean = false,
+    val missed: Boolean = false,
     // §3.11: a walkie-talkie session — no media; the user holds to talk and each burst streams over the mesh in chunks.
     val walkie: Boolean = false,
     // The walkie took over a live call whose path was lost or never came.
@@ -148,7 +151,7 @@ class CallManager(
     private val direct: CallDirect = CallDirect.None,
     private val walkie: CallWalkie = CallWalkie.None,
     private val dropToWalkie: Boolean = false,
-) {
+) : CallControl {
     private class Live(
         val id: String,
         val peerId: String,
@@ -162,8 +165,9 @@ class CallManager(
         var relay = false
         var connectedAt: Long? = null
         var muted = false
-        var speaker = false
         var reason: Int? = null
+        var byPeer = false
+        var missed = false
 
         // The one phase timer — ring-out, alert, connect or the reconnect window; arming one replaces the last.
         var timer: Job? = null
@@ -218,7 +222,7 @@ class CallManager(
     private val _state = MutableStateFlow<CallState?>(null)
 
     /** The current (or last) call, or null before the first. */
-    val state: StateFlow<CallState?> = _state.asStateFlow()
+    override val state: StateFlow<CallState?> = _state.asStateFlow()
 
     private val missedCalls = Channel<MissedCall>(MISSED_BUFFER, BufferOverflow.DROP_OLDEST)
 
@@ -298,7 +302,7 @@ class CallManager(
     suspend fun prefersWalkie(peerId: String): Boolean = walkie.enabled && walkie.capable(peerId) && !walkie.liveLikely(peerId)
 
     /** Answers the call [id] is alerting for; false when it no longer is. */
-    suspend fun answer(id: String): Boolean {
+    override suspend fun answer(id: String): Boolean {
         val l =
             mutex.withLock {
                 val l = live?.takeIf { it.id == id && !it.outgoing && it.phase == CallPhase.Alerting } ?: return false
@@ -315,18 +319,21 @@ class CallManager(
         return true
     }
 
-    /** Refuses the call [id] is alerting for. */
-    suspend fun decline(id: String) {
+    /** Refuses the call [id] is alerting for, telling the peer [reason] (busy when the system refused it, §3.13). */
+    override suspend fun decline(
+        id: String,
+        reason: Int,
+    ) {
         val sends =
             mutex.withLock {
                 val l = live?.takeIf { it.id == id && !it.outgoing && it.phase == CallPhase.Alerting } ?: return
-                finish(l, CallPayload.REASON_USER, CallPayload.PHASE_DECLINE)
+                finish(l, reason, CallPayload.PHASE_DECLINE)
             }
         deliver(sends)
     }
 
     /** Ends the current call, whatever its phase: a CANCEL before an answer, a DECLINE while alerting, else END. */
-    suspend fun hangUp() {
+    override suspend fun hangUp() {
         val sends =
             mutex.withLock {
                 val l = live?.takeIf { it.phase != CallPhase.Ended } ?: return
@@ -335,19 +342,11 @@ class CallManager(
         deliver(sends)
     }
 
-    suspend fun setMuted(muted: Boolean) =
+    override suspend fun setMuted(muted: Boolean) =
         mutex.withLock {
             val l = live?.takeIf { it.phase != CallPhase.Ended } ?: return@withLock
             l.muted = muted
             l.session?.setMuted(muted)
-            publish()
-        }
-
-    suspend fun setSpeaker(on: Boolean) =
-        mutex.withLock {
-            val l = live?.takeIf { it.phase != CallPhase.Ended } ?: return@withLock
-            l.speaker = on
-            l.session?.setSpeaker(on)
             publish()
         }
 
@@ -890,7 +889,6 @@ class CallManager(
                 l.session = session
                 l.relay = relay
                 session.setMuted(l.muted)
-                session.setSpeaker(l.speaker)
                 true
             }
         if (!kept) session.close()
@@ -1181,6 +1179,8 @@ class CallManager(
         drop(l, tell)
         l.phase = CallPhase.Ended
         l.reason = reason
+        l.byPeer = byPeer
+        l.missed = missed
         publish()
         if (missed) missedCalls.trySend(MissedCall(l.peerId, l.startedAt))
         val record =
@@ -1228,8 +1228,9 @@ class CallManager(
                     startedAt = it.startedAt,
                     connectedAt = it.connectedAt,
                     muted = it.muted,
-                    speaker = it.speaker,
                     reason = it.reason,
+                    endedByPeer = it.byPeer,
+                    missed = it.missed,
                     walkie = it.walkie,
                     degraded = it.degraded,
                     peerCastTicketed = it.peerCastTicketed,

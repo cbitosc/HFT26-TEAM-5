@@ -98,7 +98,14 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   `debugImplementation`, so every `org.webrtc` import stays in `src/debug` and release advertises no `CAP_CALL`.
   `CallManager.onSignal` runs on the inbound path — never make it wait on TURN or the media — and a TURN credential is
   never logged or put in a frame. A call's line in its thread (`data/message/CallRecord`, `MessageEntity.KIND_CALL`,
-  `call/CallLog`) is §3.12: a record this phone writes when the call ends, never sent, saved off the inbound path. **Before touching `CallPayload.dw` / `dx`, `call/CallDirect`, `DirectCallPath`,
+  `call/CallLog`) is §3.12: a record this phone writes when the call ends, never sent, saved off the inbound path.
+  **Before touching `call/SystemCalls` (`SystemCallSync`, `CallControl`), `call/CallAudioRoute` (`CallAudioPolicy`),
+  `debug/call/TelecomCalls`, `AudioRouteButton`, the call notification's route action, `TalkPlayer`'s usage or
+  `TalkRecorder`'s sources:** READ ADR 2026-10.wbua and `docs/VOICE_CALLS.md` §3.13. Every call, live or walkie, is
+  a self-managed Telecom call through core-telecom (`debugImplementation`, an RC by a recorded exception in
+  `context/toolchain.md`), and Telecom owns its route, mode and focus. Never set a route beside it
+  (`setCommunicationDevice`, `startBluetoothSco`, a track's preferred device). A walkie differs only in starting on
+  the loudspeaker. The sync follows `CallManager.state` and is never on the inbound path. **Before touching `CallPayload.dw` / `dx`, `call/CallDirect`, `DirectCallPath`,
   `CallLane`, `MediaEvent.DirectCandidates`, `debug/call/DirectNetworkDetector`, `transfer/DirectWifiLease` or
   `DirectWifi.join`'s `ipv4`:** READ ADR 2026-10.kxnw and `docs/VOICE_CALLS.md` §3.10 — a call to a mesh neighbour
   rides a Wi-Fi Direct group: the caller offers, the callee says it is joining (and joins while it rings, with an

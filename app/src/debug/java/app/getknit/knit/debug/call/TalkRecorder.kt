@@ -51,10 +51,16 @@ internal class TalkRecorder(
         return (p / MAX_AMPLITUDE).coerceIn(0f, 1f)
     }
 
-    /** Begins a burst, handing each Opus packet to [onPacket] on the capture thread; false when the microphone is busy. */
-    fun start(onPacket: (ByteArray) -> Unit): Boolean {
+    /**
+     * Begins a burst, handing each Opus packet to [onPacket] on the capture thread; false when the microphone is busy.
+     * [headset]: a headset has the call's audio (§3.13), so the burst is spoken into its microphone.
+     */
+    fun start(
+        headset: Boolean,
+        onPacket: (ByteArray) -> Unit,
+    ): Boolean {
         if (job != null) return false
-        val record = openRecord() ?: return false
+        val record = openRecord(headset) ?: return false
         val codec = openEncoder()
         if (codec == null) {
             record.release()
@@ -163,11 +169,15 @@ internal class TalkRecorder(
         }
     }
 
-    // VOICE_RECOGNITION first (no call-tuned AGC pumping on speech), MIC where the HAL refuses it.
+    /**
+     * The phone's own microphone through VOICE_RECOGNITION first (no call-tuned AGC pumping on speech), MIC where the HAL
+     * refuses it. With a [headset] on the call, VOICE_COMMUNICATION: the one source sure to follow the call's route
+     * (Telecom's, §3.13) to the headset's microphone, a Bluetooth one's over its call link.
+     */
     @SuppressLint("MissingPermission") // the call screen holds RECORD_AUDIO before a walkie session can connect
-    private fun openRecord(): AudioRecord? {
+    private fun openRecord(headset: Boolean): AudioRecord? {
         val min = AudioRecord.getMinBufferSize(WalkiePolicy.SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-        for (source in SOURCES) {
+        for (source in if (headset) HEADSET_SOURCES else SOURCES) {
             val record =
                 runCatching {
                     AudioRecord(
@@ -180,7 +190,10 @@ internal class TalkRecorder(
                 }.getOrNull() ?: continue
             if (record.state == AudioRecord.STATE_INITIALIZED) {
                 runCatching { record.startRecording() }
-                if (record.recordingState == AudioRecord.RECORDSTATE_RECORDING) return record
+                if (record.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                    Log.i(TAG, "walkie in: source $source, ${record.routedDevice?.type?.let(::deviceName) ?: "unrouted"}")
+                    return record
+                }
             }
             runCatching { record.release() }
         }
@@ -238,5 +251,6 @@ internal class TalkRecorder(
         const val BYTE_BITS = 8
 
         val SOURCES = listOf(MediaRecorder.AudioSource.VOICE_RECOGNITION, MediaRecorder.AudioSource.MIC)
+        val HEADSET_SOURCES = listOf(MediaRecorder.AudioSource.VOICE_COMMUNICATION, MediaRecorder.AudioSource.MIC)
     }
 }

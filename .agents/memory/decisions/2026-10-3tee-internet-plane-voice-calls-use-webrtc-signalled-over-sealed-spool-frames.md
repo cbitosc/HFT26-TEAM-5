@@ -152,3 +152,11 @@ the window as before.
 Guards: the reconnect cases in `CallManagerTest` (a restart answered under the same call, a blip that costs no frame,
 two restarts then Dropped, the callee's window and its renewal, a restart that does not fit, a superseded answer,
 relay-only), `CallRecordTest`'s Dropped case and the Dropped line in `ChatCallLineTest`.
+
+## Amendment (2026-10-12): calls register with Telecom
+
+The minimal build's "No Telecom yet" no longer holds. Every call is a self-managed Telecom call through Jetpack
+core-telecom, which owns its audio route: the earpiece, the loudspeaker, and a wired or Bluetooth headset, both ways.
+A headset, a watch or a car can answer the call and hang it up. Our own `CallActivity` and CallStyle notifications
+stay, because a self-managed call draws its own. ADR 2026-10.wbua records it, and `docs/VOICE_CALLS.md` §3.13
+specifies it. The system call log is still not used: a call's line in its thread is §3.12's.

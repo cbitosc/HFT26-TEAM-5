@@ -360,3 +360,19 @@ What it costs:
   - `CallManagerTest`'s two `ct` cases.
   - `WalkieStreamTest.aRelayIsThePeersLinkOnlyWhereTheMeshHasNone`.
   - `WalkieTalkLabTest`: a burst cast between two phones with no radio path, and a neighbour that is never cast.
+
+## Amendment 2026-10-12 (7): the loudspeaker is where the call's route starts
+
+The fourth amendment pinned a burst to the loudspeaker on the media usage, away from the communication mode. That is
+replaced. A walkie session is a Telecom call like a live one (ADR 2026-10.wbua, `docs/VOICE_CALLS.md` §3.13), and it
+starts on the loudspeaker where a live call would start on the earpiece.
+
+- **Playback.** `TalkPlayer` plays on the voice-communication usage. That usage follows the call's route, which the
+  user can move as on a call, so a headset takes the burst both ways.
+- **Capture.** While a headset has the call, `TalkRecorder` records from `VOICE_COMMUNICATION`, which reaches that
+  headset's microphone.
+- **Correction.** A route that falls to the earpiece without the user picking it goes back to the loudspeaker.
+- **Volume keys.** The call screen's volume keys turn the voice-call stream for both kinds.
+
+The cost is the Bluetooth controller: a headset's call link stays up for the whole session, on the controller that
+carries the chunks.

@@ -76,7 +76,7 @@ notes, the two linter/CI pins and the READMEs are the places to re-grep after an
   `kotlin.plugin.compose`, `kotlin.plugin.serialization`, and `ksp` plugins are applied.
 - Pin third-party versions in `gradle/libs.versions.toml` (version catalog); probe Maven before
   bumping anything that could pull in a newer Kotlin stdlib.
-- **Stable releases only**, with three standing exceptions: `detekt` 2.0.0-alpha.x, because the 1.23.x
+- **Stable releases only**, with four standing exceptions: `detekt` 2.0.0-alpha.x, because the 1.23.x
   stable line cannot run on Gradle 9 at all, and `datastore` 1.3.0-alpha11, because no stable line carries
   the fix for a `data` collector that subscribes mid-write and never sees the write (b/431787506, work item
   #97: `watchProfileChanges` missed a rename made while the mesh started) — 1.2.1 is newer and still has it.
@@ -87,7 +87,11 @@ notes, the two linter/CI pins and the READMEs are the places to re-grep after an
   Testing plugin (`com.android.compose.screenshot` + `screenshot-validation-api`, `composeScreenshot` in the
   catalog), which has never shipped a stable release: it is test-only (the `screenshotTest*` configurations —
   `releaseRuntimeClasspath` and the debug runtime are untouched) and the release APK is byte-identical with it
-  applied (ADR 2026-10.gtmm). Take its newest alpha. So `cameraX` stays on 1.6.2 (1.7.0 is
+  applied (ADR 2026-10.gtmm). Take its newest alpha. The fourth is `core-telecom` 1.1.0-rc01 (`coreTelecom`), which
+  owns the experimental calls' audio route (`docs/VOICE_CALLS.md` §3.13): it is `debugImplementation` like `webrtc`, so
+  `releaseRuntimeClasspath` is untouched, and 1.0.1, the newest stable, reverts a call switched to speaker during setup
+  (where a walkie starts) and can start an audio call on speaker on Android 14-16. Move it to 1.1.0 when that goes
+  stable. So `cameraX` stays on 1.6.2 (1.7.0 is
   alpha), `lifecycle` on 2.11.0 (2.12.0 is alpha), `activity-compose` on 1.13.0
   (1.14.0 is alpha), `kotlinx-serialization` on 1.11.0 (1.12.0 is an RC), and AGP on 9.4.1 (9.5.0 is
   alpha). `navigation-compose` was held at 2.9.8 by this rule until 2.10.0 went stable, `robolectric`

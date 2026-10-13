@@ -4,6 +4,7 @@ import android.os.Build
 import android.util.Log
 import androidx.compose.runtime.Composable
 import app.getknit.knit.BuildConfig
+import app.getknit.knit.call.CallControl
 import app.getknit.knit.call.CallLog
 import app.getknit.knit.call.CallManager
 import app.getknit.knit.call.CallMedia
@@ -11,12 +12,13 @@ import app.getknit.knit.call.CallSignals
 import app.getknit.knit.call.CallTimings
 import app.getknit.knit.call.CallWalkie
 import app.getknit.knit.call.DirectCallPath
+import app.getknit.knit.call.SystemCallSync
+import app.getknit.knit.call.SystemCalls
 import app.getknit.knit.call.TalkLink
 import app.getknit.knit.call.TurnSource
 import app.getknit.knit.data.MessageRepository
 import app.getknit.knit.data.PeerRepository
 import app.getknit.knit.data.settings.SettingsStore
-import app.getknit.knit.debug.call.CallAudio
 import app.getknit.knit.debug.call.CallBarHost
 import app.getknit.knit.debug.call.CallController
 import app.getknit.knit.debug.call.CallFaces
@@ -24,6 +26,7 @@ import app.getknit.knit.debug.call.TalkLinks
 import app.getknit.knit.debug.call.TalkPath
 import app.getknit.knit.debug.call.TalkPlayer
 import app.getknit.knit.debug.call.TalkRecorder
+import app.getknit.knit.debug.call.TelecomCalls
 import app.getknit.knit.debug.call.WalkieTalk
 import app.getknit.knit.debug.call.WebRtcCallMedia
 import app.getknit.knit.identity.Identity
@@ -73,7 +76,12 @@ const val WALKIE_WIRED: Boolean = BuildConfig.WALKIE
  */
 fun callModule(): Module? =
     module {
-        single { CallAudio(androidContext()) }
+        // §3.13: every call, live or walkie, is a self-managed Telecom call, which owns its audio route. The peers are
+        // late-bound, as the faces' are; the sync follows the manager's call from process start (startCallsIfWired).
+        single { TelecomCalls(androidContext(), peers = { get() }, scope = get<CoroutineScope>(), log = { Log.i(TAG, it) }) }
+        single<SystemCalls> { get<TelecomCalls>() }
+        single<CallControl> { get<CallManager>() }
+        single { SystemCallSync(calls = get(), system = get(), scope = get<CoroutineScope>(), log = { Log.i(TAG, it) }) }
         // §3.10 (ADR 2026-10.kxnw): a call between neighbours rides a Wi-Fi Direct group, on the radio the transfer
         // shares through one lease. "Directly linked" is the transfer's own gate, a mesh neighbour now.
         single {
@@ -91,7 +99,7 @@ fun callModule(): Module? =
             )
         }
         single {
-            WebRtcCallMedia(androidContext(), get(), get<CoroutineScope>(), link = get<DirectCallPath>().link, log = { Log.i(TAG, it) })
+            WebRtcCallMedia(androidContext(), get<CoroutineScope>(), link = get<DirectCallPath>().link, log = { Log.i(TAG, it) })
         }
         // The call screen reads the media's stats itself (its diagnostics card); the manager sees only the seam.
         single<CallMedia> { get<WebRtcCallMedia>() }
@@ -113,7 +121,7 @@ fun callModule(): Module? =
             )
         }
         if (WALKIE_WIRED) {
-            single { TalkPlayer(androidContext()) }
+            single { TalkPlayer() }
             single { TalkRecorder(get<CoroutineScope>()) }
             single {
                 WalkieTalk(
@@ -124,6 +132,13 @@ fun callModule(): Module? =
                     links = talkLinks(),
                     scope = get<CoroutineScope>(),
                     log = { Log.i(TAG, it) },
+                    // A burst is spoken into the headset that has the call (§3.13), else the phone's own microphone.
+                    headset = {
+                        get<SystemCallSync>()
+                            .routing.value
+                            ?.current
+                            ?.headset == true
+                    },
                 )
             }
         }
@@ -223,6 +238,8 @@ private fun Scope.talkLinks(): TalkLinks =
 /** Starts the call surfaces' collectors at process start, on a background thread — never on main. */
 fun startCallsIfWired(koin: Koin) {
     CoroutineScope(SupervisorJob() + Dispatchers.Default).launch {
+        // First: a call that rings before the system holds it has no route but the one the phone was left in.
+        runCatching { koin.get<SystemCallSync>().start() }.onFailure { Log.w(TAG, "system calls not started", it) }
         runCatching { koin.get<CallController>().start() }.onFailure { Log.w(TAG, "calls not started", it) }
         runCatching { koin.get<CallLog>().start() }.onFailure { Log.w(TAG, "call records not started", it) }
         if (WALKIE_WIRED) runCatching { koin.get<WalkieTalk>().start() }.onFailure { Log.w(TAG, "walkie not started", it) }
