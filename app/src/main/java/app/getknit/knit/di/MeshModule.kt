@@ -13,6 +13,7 @@ import app.getknit.knit.data.forward.ForwardRepository
 import app.getknit.knit.data.relay.RelayStatusRepository
 import app.getknit.knit.data.settings.LoraPlaneStateStore
 import app.getknit.knit.data.settings.SettingsStore
+import app.getknit.knit.data.settings.TicketKeyStore
 import app.getknit.knit.fieldlog.FIELD_LOG_SHARE_DIR
 import app.getknit.knit.fieldlog.FieldJournal
 import app.getknit.knit.fieldlog.FieldLog
@@ -60,9 +61,12 @@ import app.getknit.knit.mesh.power.PowerMonitor
 import app.getknit.knit.mesh.power.PowerStateSource
 import app.getknit.knit.mesh.protocol.Protocol
 import app.getknit.knit.mesh.spool.OkHttpSpoolDialer
+import app.getknit.knit.mesh.spool.OkHttpTicketIssuer
 import app.getknit.knit.mesh.spool.SpoolDialer
+import app.getknit.knit.mesh.spool.TicketIssuer
 import app.getknit.knit.mesh.wear.WearStatusSource
 import app.getknit.knit.mesh.wifiaware.WifiAwareTransport
+import app.getknit.knit.net.AndroidInternetGate
 import app.getknit.knit.net.InternetGate
 import app.getknit.knit.transfer.AndroidDirectWifi
 import app.getknit.knit.transfer.AndroidTransferFiles
@@ -308,6 +312,16 @@ val meshModule =
         single<SpoolDialer> {
             OkHttpSpoolDialer(allowCleartext = BuildConfig.DEBUG, clientFor = OkHttpSpoolDialer.clientFor(get<InternetGate>()::routeKind))
         }
+        // The ticket key swap (experimental, ADR 2026-10.3sk7): one POST to the issuer an invite named, bound to the
+        // validated default network as the link-preview fetch is. Resolved only where tickets are wired (CALLS_WIRED).
+        single<TicketIssuer> {
+            val gate = get<AndroidInternetGate>()
+            val base = OkHttpTicketIssuer.baseClient()
+            OkHttpTicketIssuer(
+                clientFor = { gate.currentNetwork()?.let { OkHttpTicketIssuer.bound(base, it) } },
+                allowCleartext = BuildConfig.DEBUG,
+            )
+        }
         // Constructor order: transport, messages, receipts, groups, reactions, peers, metPeers, identity,
         // settings, blobs, imageScreening, blobStore, partials, forwardStore, notifier, textModeration,
         // messageCrypto, ratchet, groupRatchet, groupRoots, scope, metrics, ledger, db, spoolDialer.
@@ -361,6 +375,10 @@ val meshModule =
                         .onFailure { Log.w("KnitCall", "walkie chunk dropped: ${it.javaClass.simpleName}") }
                 },
                 extraCapabilities = (if (CALLS_WIRED) Protocol.CAP_CALL else 0L) or (if (WALKIE_WIRED) Protocol.CAP_WALKIE else 0L),
+                // Tickets buy TURN and casts, which only a build with calls has: release holds no key and asks no issuer.
+                ticketKeys = if (CALLS_WIRED) get<TicketKeyStore>() else null,
+                ticketIssuer = if (CALLS_WIRED) get<TicketIssuer>() else null,
+                allowCleartext = BuildConfig.DEBUG,
                 identities = get(),
                 quotes = get(),
                 notificationLabels = { notificationLabels(androidContext()) },

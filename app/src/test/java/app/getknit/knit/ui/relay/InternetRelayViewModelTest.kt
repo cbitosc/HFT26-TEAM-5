@@ -11,6 +11,7 @@ import app.getknit.knit.mesh.MeshController
 import app.getknit.knit.mesh.spool.RelayInvite
 import app.getknit.knit.mesh.spool.ScopeSync
 import app.getknit.knit.mesh.spool.SpoolStatus
+import app.getknit.knit.mesh.spool.TicketKeyJournal
 import app.getknit.knit.net.InternetGate
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -225,6 +226,23 @@ class InternetRelayViewModelTest {
             gate.online.value = false
             advanceUntilIdle()
             assertTrue(vm.state.value.offline)
+        }
+
+    @Test
+    fun removingARelayForgetsItsKeyAndTicketUnlessAnotherRowSharesTheHost() =
+        runTest {
+            // C-7.6-29 (ADR 2026-10.3sk7): the key, its schedule and the held ticket go with the relay.
+            val keys = mockk<TicketKeyJournal>(relaxed = true)
+            every { settings.spoolUrls } returns flowOf(emptySet())
+            InternetRelayViewModel(settings, relayStatus, commons, mesh, ticketKeys = keys).removeRelay(TOKENED)
+            advanceUntilIdle()
+            coVerify { keys.forgetHost("home.example.org") }
+
+            val shared = mockk<TicketKeyJournal>(relaxed = true)
+            every { settings.spoolUrls } returns flowOf(setOf("wss://home.example.org:9470/spool/v1"))
+            InternetRelayViewModel(settings, relayStatus, commons, mesh, ticketKeys = shared).removeRelay(TOKENED)
+            advanceUntilIdle()
+            coVerify(exactly = 0) { shared.forgetHost(any()) }
         }
 
     private fun TestScope.collect(vm: InternetRelayViewModel): List<InternetRelayEvent> {

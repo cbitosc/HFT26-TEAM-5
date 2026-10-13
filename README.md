@@ -277,7 +277,7 @@ for Google Play once they do. To try it from source, see [Build](#-build).
 | Crypto | **Google Tink** — HPKE/X25519 key-wrap, AES-256-GCM, Ed25519 signatures |
 | Radios | **Wi-Fi Aware + Bluetooth LE** (framework APIs — no external transport dependency) |
 | On-device ML | LiteRT / TFLite (NSFW image + toxicity text classifiers) |
-| Networking (opt-in planes only) | OkHttp — WebSocket to relays you configure, and the sender-side link-preview fetch; confined to two files |
+| Networking (opt-in planes only) | OkHttp — WebSocket to relays you configure, the sender-side link-preview fetch, and (debug builds) the ticket key swap; confined to three files |
 | Images | Coil 3 |
 | Verification | ZXing (safety-number QR) |
 | App sharing | ARSCLib + apksig (on-device split-APK merge & re-sign) |

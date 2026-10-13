@@ -17,6 +17,7 @@ import com.google.crypto.tink.subtle.X25519
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
@@ -442,6 +443,44 @@ class ScopeSyncTest {
             assertTrue(lines.toString(), lines.any { "ticket accepted" in it } && lines.any { "ticket refused: signature" in it })
             assertTrue(lines.any { "TURN ask (ticketed): credential" in it })
             for (line in lines) assertFalse(line, SpoolTicketsTest.leaks(line) || "fake-pass" in line)
+        }
+
+    @Test
+    fun `a ticket the refresher fetches is presented at once and no line names the key or the ticket`() =
+        runTest {
+            // ADR 2026-10.3sk7: the key swap's ticket enters through the import door, so the live connection's store
+            // watch presents it with no adb line, and the refresher's lines join the plane's under the same guard.
+            val lab = FakeSpool(turn = true, ent = true)
+            val labUrl = "ws://lab.example:9480/spool/v1"
+            val ticketJournal = SpoolTicketsTest.MemoryJournal()
+            val tickets = SpoolTickets(ticketJournal) { now }
+            val keys = TicketRefresherTest.MemoryKeyJournal(ticketJournal)
+            val key = "kak1_FBsiKTA3PkVMU1phaG92fYSLkpmgp661vMPK0djf5u0"
+            keys.putKey("lab.example", HeldKey("https://anywhere.example.org", key))
+            val lines = mutableListOf<String>()
+            val member = member(lab, alice, bob, urls = listOf(labUrl), tickets = tickets, log = { lines += it })
+            member.sync.start(backgroundScope)
+            pump()
+            assertEquals(0, lab.ents.size)
+            val issuer =
+                object : TicketIssuer {
+                    override suspend fun swap(
+                        origin: String,
+                        key: String,
+                    ) = IssuerAnswer.Issued(SpoolTicketsTest.TEXT, now + 30L * 86_400_000L)
+                }
+            val refresher =
+                TicketRefresher(keys, tickets, issuer, MutableStateFlow(setOf(labUrl)), clock = { now }, log = { lines += it })
+            refresher.runOnce()
+            pump(2)
+            assertEquals(1, lab.ents.size)
+            member.sync.stop()
+
+            assertTrue(lines.toString(), lines.any { "ticket fetched" in it } && lines.any { "ticket presented" in it })
+            for (line in lines) {
+                assertFalse(line, SpoolTicketsTest.leaks(line))
+                assertFalse(line, key.removePrefix("kak1_").take(12) in line)
+            }
         }
 
     /**

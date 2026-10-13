@@ -20,6 +20,7 @@ import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import app.getknit.knit.data.relay.RelayInviteApplier
 import app.getknit.knit.mesh.spool.CommonsInvite
+import app.getknit.knit.mesh.spool.HeldKey
 import app.getknit.knit.ui.theme.KnitTheme
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -40,6 +41,9 @@ class InternetRelayScreenContentTest {
     private companion object {
         /** The §13 fixture invite — 32 bytes, unpadded base64url, the daemon's own grammar. */
         const val INVITE = "knit-commons:v1:ChEYHyYtNDtCSVBXXmVsc3qBiI-WnaSrsrnAx87V3OM"
+
+        /** A customer key's shape; the sheet must never show it. */
+        const val KEY = "kak1_FBsiKTA3PkVMU1phaG92fYSLkpmgp661vMPK0djf5u0"
     }
 
     @Suppress("DEPRECATION") // junit4.v2 rules swap in StandardTestDispatcher — a test-semantics migration, see roadmap.md
@@ -95,6 +99,7 @@ class InternetRelayScreenContentTest {
         planeOff: Boolean = false,
         consentNeeded: Boolean = false,
         room: RelayInviteApplier.Room? = null,
+        ticketKey: RelayInviteApplier.TicketKey? = null,
     ) = RelayInviteApplier.Preview(
         url = "wss://home.example.org/spool/v1?k=t0ken",
         host = "home.example.org",
@@ -105,6 +110,17 @@ class InternetRelayScreenContentTest {
         planeOff = planeOff,
         consentNeeded = consentNeeded,
         room = room,
+        ticketKey = ticketKey,
+    )
+
+    private fun ticketKey(
+        alreadyHeld: Boolean = false,
+        replacesKey: Boolean = false,
+    ) = RelayInviteApplier.TicketKey(
+        host = "home.example.org",
+        held = HeldKey("https://anywhere.example.org", KEY),
+        alreadyHeld = alreadyHeld,
+        replacesKey = replacesKey,
     )
 
     private fun room(
@@ -469,6 +485,40 @@ class InternetRelayScreenContentTest {
         render(InternetRelayUiState(enabled = true), invitePreview = preview(replaces = old))
         compose.onNodeWithTag("relay_invite_replaces").assertIsDisplayed()
         compose.onNodeWithTag("relay_invite_sees").assertIsDisplayed()
+    }
+
+    @Test
+    fun anInviteWithATicketKeyNamesTheIssuerAndWhatThePhoneWillAskIt() {
+        // ADR 2026-10.3sk7: the sheet names the issuer's host and the daily ask — never the key, a price or a product.
+        render(InternetRelayUiState(enabled = true), invitePreview = preview(ticketKey = ticketKey()))
+        compose.onNodeWithTag("relay_invite_key").assertIsDisplayed()
+        compose
+            .onNodeWithText("About once a day it will contact anywhere.example.org", substring = true)
+            .assertIsDisplayed()
+        compose.onAllNodesWithText(KEY, substring = true).assertCountEquals(0)
+        compose.onAllNodesWithText("https://", substring = true).assertCountEquals(0)
+        compose.onNodeWithTag("relay_invite_confirm").assertTextEquals("Add relay")
+    }
+
+    @Test
+    fun aDifferentKeyForAListedRelaySaysItReplacesTheHeldOneAndOnlySavesIt() {
+        render(
+            InternetRelayUiState(enabled = true),
+            invitePreview = preview(alreadyAdded = true, ticketKey = ticketKey(replacesKey = true)),
+        )
+        compose.onNodeWithTag("relay_invite_key_replaces").assertIsDisplayed()
+        compose.onNodeWithText("replacing the one this phone holds", substring = true).assertIsDisplayed()
+        compose.onNodeWithTag("relay_invite_confirm").assertTextEquals("Save key")
+    }
+
+    @Test
+    fun theSameKeyAgainIsANoOp() {
+        render(
+            InternetRelayUiState(enabled = true),
+            invitePreview = preview(alreadyAdded = true, ticketKey = ticketKey(alreadyHeld = true)),
+        )
+        compose.onNodeWithTag("relay_invite_key_held").assertIsDisplayed()
+        compose.onNodeWithTag("relay_invite_confirm").assertTextEquals("OK")
     }
 
     @Test

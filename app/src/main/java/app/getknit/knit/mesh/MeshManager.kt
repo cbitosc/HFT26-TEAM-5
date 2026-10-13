@@ -92,6 +92,9 @@ import app.getknit.knit.mesh.spool.ScopeSync
 import app.getknit.knit.mesh.spool.SpoolDialer
 import app.getknit.knit.mesh.spool.SpoolStatus
 import app.getknit.knit.mesh.spool.SpoolTickets
+import app.getknit.knit.mesh.spool.TicketIssuer
+import app.getknit.knit.mesh.spool.TicketKeyJournal
+import app.getknit.knit.mesh.spool.TicketRefresher
 import app.getknit.knit.moderation.ImageScreeningService
 import app.getknit.knit.moderation.ScopedTextModerator
 import app.getknit.knit.normalizeSingleLine
@@ -263,6 +266,12 @@ class MeshManager(
     // The field log (ADR 2026-10.a239): each session's start, stop, power and radio status, and the counters'
     // quarter-hourly movement. Null — every test — keeps none.
     private val fieldLog: FieldLog? = null,
+    // The ticket key swap (experimental, docs/VOICE_CALLS.md §2.6, ADR 2026-10.3sk7): the customer keys invites handed
+    // this phone and the issuer they are traded with. Both null in a build without tickets (release: di/CallWiring's
+    // `CALLS_WIRED`), and then nothing ever asks an issuer for anything.
+    private val ticketKeys: TicketKeyJournal? = null,
+    private val ticketIssuer: TicketIssuer? = null,
+    private val allowCleartext: Boolean = false,
 ) : MeshController,
     TransferSignals,
     CallSignals,
@@ -592,6 +601,30 @@ class MeshManager(
             clock = clock,
         )
 
+    private val spoolTickets = SpoolTickets(settings, clock)
+
+    /**
+     * Fetches each active relay's ticket from the issuer its invite named, before the held one runs low (C-7.6-27,
+     * ADR 2026-10.3sk7). Built only with the plane, a key store and an issuer; runs only while the session does, and
+     * asks nothing while [SettingsStore.activeSpoolUrls] is empty — the plane off, or every relay parked.
+     */
+    private val ticketRefresher: TicketRefresher? =
+        if (spoolDialer != null && ticketKeys != null && ticketIssuer != null) {
+            TicketRefresher(
+                keys = ticketKeys,
+                tickets = spoolTickets,
+                issuer = ticketIssuer,
+                urls = settings.activeSpoolUrls,
+                online = online,
+                routeChanges = routeChanges,
+                allowCleartext = allowCleartext,
+                clock = clock,
+                log = { Log.i(SPOOL_TAG, it) },
+            )
+        } else {
+            null
+        }
+
     /**
      * The Internet plane (`docs/SPOOL_PROTOCOL.md`) — a custody-plane sibling of [forwardSync], not a
      * third transport. Null when no dialer is injected (unit tests, and any build that ships without
@@ -639,8 +672,8 @@ class MeshManager(
                 tickIntervalMs = spoolTickMs,
                 attachmentRetryMs = spoolAttachmentRetryMs,
                 // Entitlement tickets (experimental, docs/VOICE_CALLS.md §2.6, ADR 2026-10.xkp4), held beside the relay
-                // list. Imported only through the debug bridge until a storefront hands them out.
-                tickets = SpoolTickets(settings, clock),
+                // list. Imported by [ticketRefresher] from an invite's issuer, or through the debug bridge.
+                tickets = spoolTickets,
                 log = { Log.i(SPOOL_TAG, it) },
             )
         }
@@ -793,6 +826,7 @@ class MeshManager(
             quotes.settleBacklog(identity.nodeId())
         }
         scopeSync?.start(session)
+        ticketRefresher?.start(session)
         watchRoute(session)
         watchScopeInputs(session)
     }
@@ -848,6 +882,7 @@ class MeshManager(
         if (!started) return
         started = false
         scopeSync?.stop()
+        ticketRefresher?.stop()
         transport.stop()
         // Clear this session's pending relays on the app scope (the session is about to die); capture
         // the instance so a fast restart reassigning `router` can't retarget the wrong one. Then tear

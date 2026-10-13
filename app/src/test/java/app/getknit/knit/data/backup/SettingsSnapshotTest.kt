@@ -45,6 +45,9 @@ class SettingsSnapshotTest {
                     booleanPreferencesKey("debug_nan_off") to true,
                     stringPreferencesKey("spool_ticket:relay.example") to "knit-ticket:v1:…",
                     stringPreferencesKey("spool_ticket_verdict:relay.example") to "retry:early",
+                    // ADR 2026-10.3sk7: the customer key rides, as the relay's token does; this phone's ask schedule does not.
+                    stringPreferencesKey("spool_key:relay.example") to "{\"i\":\"https://anywhere.example\",\"k\":\"kak1_…\"}",
+                    stringPreferencesKey("spool_key_state:relay.example") to "{\"a\":\"ok\",\"nb\":1}",
                     longPreferencesKey("lora_board_node") to 42L,
                     booleanPreferencesKey("lora_enabled") to true,
                 )
@@ -56,6 +59,7 @@ class SettingsSnapshotTest {
             assertEquals(7L, restored[version])
             assertEquals(setOf("wss://relay.example/spool/v1?k=token"), restored[spoolUrls])
             assertEquals(42L, restored[longPreferencesKey("lora_board_node")])
+            assertTrue(restored[stringPreferencesKey("spool_key:relay.example")]!!.contains("kak1_"))
             assertTrue(restored[booleanPreferencesKey("lora_enabled")]!!)
             for (dropped in listOf(
                 "aware_give_up_stamp",
@@ -72,6 +76,7 @@ class SettingsSnapshotTest {
                 "debug_nan_off",
                 "spool_ticket:relay.example",
                 "spool_ticket_verdict:relay.example",
+                "spool_key_state:relay.example",
             )) {
                 assertFalse(dropped, restored.asMap().keys.any { it.name == dropped })
             }

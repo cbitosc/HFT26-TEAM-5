@@ -51,6 +51,7 @@ import app.getknit.knit.data.message.quoteSnippet
 import app.getknit.knit.data.peer.PeerEntity
 import app.getknit.knit.data.settings.KnitBoardSetup
 import app.getknit.knit.data.settings.SettingsStore
+import app.getknit.knit.data.settings.TicketKeyStore
 import app.getknit.knit.data.webp.WebpTranscode
 import app.getknit.knit.debug.call.CallActivity
 import app.getknit.knit.debug.call.DefaultPath
@@ -90,10 +91,15 @@ import app.getknit.knit.mesh.power.AppVisibility
 import app.getknit.knit.mesh.protocol.ReplyRef
 import app.getknit.knit.mesh.sha256Hex
 import app.getknit.knit.mesh.spool.CommonsInvite
+import app.getknit.knit.mesh.spool.CustomerKey
+import app.getknit.knit.mesh.spool.HeldKey
+import app.getknit.knit.mesh.spool.IssuerOrigin
+import app.getknit.knit.mesh.spool.KeyState
 import app.getknit.knit.mesh.spool.SpoolStatus
 import app.getknit.knit.mesh.spool.SpoolTicketState
 import app.getknit.knit.mesh.spool.SpoolTickets
 import app.getknit.knit.mesh.spool.SpoolUrl
+import app.getknit.knit.mesh.spool.TicketRefreshPolicy
 import app.getknit.knit.mesh.wifiaware.NanFaultInjector
 import app.getknit.knit.mesh.wifiaware.NanMsgFault
 import app.getknit.knit.moderation.MlTextModerator
@@ -193,7 +199,9 @@ import java.nio.ByteBuffer
  * - [ACTION_SPOOL] — configures and inspects the Internet (spool) plane, which has no UI beyond a
  *   debug-only on/off switch: `--es url <ws(s)://…/spool/v1>` adds a spool, `--es drop <url>` removes one,
  *   `--ez on <bool>` flips the global opt-in, `--es url <url> --es ticket <knit-ticket:v1:…|clear>` holds or clears
- *   that relay's entitlement ticket (VOICE_CALLS.md §2.6), and no extras at all just dumps state. The per-scope
+ *   that relay's entitlement ticket (VOICE_CALLS.md §2.6), `--es url <url> --es issuer <origin> --es key
+ *   <kak1_…|clear>` holds or forgets that relay's customer key without an invite (ADR 2026-10.3sk7), and no extras at
+ *   all just dumps state. The per-scope
  *   `local` vs `spool` counts are the convergence oracle, the way `liveFingerprint` parity is for custody.
  * - [ACTION_RATCHET] — dumps the DM ratchet's per-peer state (X3DH inputs, session/confirmed, send epoch,
  *   the reset floor's anchor) and, with `--es reset <peerNodeId>`, forces a session reset past the
@@ -311,6 +319,7 @@ class DebugBridgeReceiver :
     private val startGate: MeshStartGate by inject()
     private val identity: Identity by inject()
     private val settings: SettingsStore by inject()
+    private val ticketKeys: TicketKeyStore by inject()
     private val contactCards: app.getknit.knit.contacts.ContactCards by inject()
     private val contactImporter: app.getknit.knit.contacts.ContactImporter by inject()
     private val commons: app.getknit.knit.data.commons.CommonsRepository by inject()
@@ -1580,12 +1589,22 @@ class DebugBridgeReceiver :
     private suspend fun handleSpool(intent: Intent): JSONObject {
         val tickets = SpoolTickets(settings)
         val ticketText = intent.getStringExtra(EXTRA_TICKET)?.takeIf { it.isNotBlank() }
-        // With `ticket`, `url` names the relay the ticket is for and is not added: the relay is configured already, and
-        // re-adding a URL typed without its `?k=` token would make a second, untokened row for the same host.
+        val keyText = intent.getStringExtra(EXTRA_KEY)?.takeIf { it.isNotBlank() }?.trim()
+        // With `ticket` or `key`, `url` names the relay they are for and is not added: the relay is configured already,
+        // and re-adding a URL typed without its `?k=` token would make a second, untokened row for the same host.
         val ticketNote = ticketText?.let { importTicket(tickets, intent.getStringExtra(EXTRA_URL)?.trim(), it) }
         if (ticketNote?.optString("status") == "error") return ticketNote
-        if (ticketText == null) intent.getStringExtra(EXTRA_URL)?.takeIf { it.isNotBlank() }?.let { settings.addSpoolUrl(it.trim()) }
-        intent.getStringExtra(EXTRA_DROP)?.takeIf { it.isNotBlank() }?.let { settings.removeSpoolUrl(it.trim()) }
+        val keyNote = keyText?.let { holdKey(intent.getStringExtra(EXTRA_URL)?.trim(), intent.getStringExtra(EXTRA_ISSUER)?.trim(), it) }
+        if (keyNote?.optString("status") == "error") return keyNote
+        if (ticketText == null && keyText == null) {
+            intent.getStringExtra(EXTRA_URL)?.takeIf { it.isNotBlank() }?.let { settings.addSpoolUrl(it.trim()) }
+        }
+        intent.getStringExtra(EXTRA_DROP)?.takeIf { it.isNotBlank() }?.let { dropped ->
+            settings.removeSpoolUrl(dropped.trim())
+            // As the relays screen's Remove does (C-7.6-29): the key and the ticket go unless another row shares the host.
+            val host = SpoolUrl.hostname(dropped.trim())
+            if (host != null && settings.spoolUrls.first().none { SpoolUrl.hostname(it) == host }) ticketKeys.forgetHost(host)
+        }
         intent.getStringExtra(EXTRA_PARK)?.takeIf { it.isNotBlank() }?.let { settings.setSpoolUrlEnabled(it.trim(), false) }
         intent.getStringExtra(EXTRA_UNPARK)?.takeIf { it.isNotBlank() }?.let { settings.setSpoolUrlEnabled(it.trim(), true) }
         if (intent.hasExtra(EXTRA_ON)) settings.setSpoolEnabled(intent.getBooleanExtra(EXTRA_ON, false))
@@ -1653,12 +1672,14 @@ class DebugBridgeReceiver :
                     // and where this connection and the store stand with a ticket. Never the ticket itself.
                     .put("ent", spool.ent)
                     .put("stun", spool.stun.size)
-                    .put("ticket", ticketJson(tickets, spool)),
+                    .put("ticket", ticketJson(tickets, spool))
+                    .put("ticketKey", ticketKeyJson(tickets, spool.url)),
             )
         }
         return JSONObject()
             .put("status", "ok")
             .put("ticketImport", ticketNote?.optString("message") ?: JSONObject.NULL)
+            .put("keyImport", keyNote?.optString("message") ?: JSONObject.NULL)
             .put("enabled", settings.spoolEnabled.first())
             .put("configured", JSONArray(settings.spoolUrls.first().toList()))
             .put("disabled", JSONArray(settings.disabledSpoolUrls.first().toList()))
@@ -1699,6 +1720,55 @@ class DebugBridgeReceiver :
                 reply("error", "the ticket is for ${result.aud}, not ${result.host}; never held")
             }
         }
+    }
+
+    /**
+     * `…debug.SPOOL --es url <spoolUrl> --es issuer <origin> --es key <kak1_…|clear>` (experimental, ADR 2026-10.3sk7):
+     * holds a customer key for the URL's host without an invite — the same store write the invite sheet makes, so a
+     * different key resets the refresher's state and the same one does not — or, with `clear`, forgets the key, its
+     * state and the host's ticket, as removing the relay does. The issuer must pass the invite's origin rule (`http://`
+     * is a debug build's). The reply names the host and the issuer, never the key.
+     */
+    private suspend fun holdKey(
+        url: String?,
+        issuer: String?,
+        key: String,
+    ): JSONObject {
+        if (url.isNullOrBlank()) return reply("error", "a key needs --es url <the relay it is for>")
+        val host = SpoolUrl.hostname(url) ?: return reply("error", "the url names no host")
+        if (key == "clear") {
+            ticketKeys.forgetHost(host)
+            return reply("ok", "key, its state and the ticket forgotten for $host")
+        }
+        if (issuer.isNullOrBlank() || !IssuerOrigin.isAcceptable(issuer, allowCleartext = true)) {
+            return reply("error", "a key needs --es issuer <https://host[:port]>, a bare origin")
+        }
+        if (!CustomerKey.isWellFormed(key)) return reply("error", "not a kak1_ customer key")
+        ticketKeys.putKey(host, HeldKey(issuer, key))
+        return reply("ok", "key held for $host, traded with ${IssuerOrigin.host(issuer)}")
+    }
+
+    /**
+     * What the refresher knows about [url]'s host (ADR 2026-10.3sk7): the issuer origin, whether a key is held, the last
+     * answer, the account's `endsAt` and the next ask — never the key or the ticket. `nextAskAt` is null for a parked
+     * (`unknown-key`) key; it is when the refresher would ask with the plane running and a route up.
+     */
+    private suspend fun ticketKeyJson(
+        tickets: SpoolTickets,
+        url: String,
+    ): JSONObject {
+        val host = SpoolUrl.hostname(url) ?: return JSONObject().put("held", false)
+        val key = ticketKeys.keys.first()[host] ?: return JSONObject().put("held", false)
+        val state = ticketKeys.keyStates.first()[host] ?: KeyState.FRESH
+        val next = TicketRefreshPolicy.dueAt(state, tickets.presentable(url)?.claims?.exp)
+        return JSONObject()
+            .put("held", true)
+            .put("issuer", key.issuer)
+            .put("answer", state.answer?.word ?: JSONObject.NULL)
+            .put("endsAt", state.endsAt ?: JSONObject.NULL)
+            .put("failures", state.failures)
+            .put("nextAskAt", next ?: JSONObject.NULL)
+            .put("nextAskInMs", next?.let { it - System.currentTimeMillis() } ?: JSONObject.NULL)
     }
 
     /** This connection's ticket state beside what the store holds for the host: claims and verdicts, never bytes. */
@@ -2990,6 +3060,8 @@ class DebugBridgeReceiver :
         const val EXTRA_PARK = "park"
         const val EXTRA_UNPARK = "unpark"
         const val EXTRA_TICKET = "ticket"
+        const val EXTRA_ISSUER = "issuer"
+        const val EXTRA_KEY = "key"
         const val EXTRA_RESET_PEER = "reset"
         const val EXTRA_PREFIX = "prefix"
         const val EXTRA_DRY = "dry"

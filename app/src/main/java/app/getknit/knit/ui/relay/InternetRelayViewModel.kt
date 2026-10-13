@@ -11,6 +11,7 @@ import app.getknit.knit.mesh.MeshController
 import app.getknit.knit.mesh.spool.CommonsInvite
 import app.getknit.knit.mesh.spool.RelayInvite
 import app.getknit.knit.mesh.spool.SpoolUrl
+import app.getknit.knit.mesh.spool.TicketKeyJournal
 import app.getknit.knit.net.InternetGate
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -113,6 +114,9 @@ class InternetRelayViewModel(
     // The phone's own route to the Internet, for the one line that is not about a relay. Null (the
     // screen tests' rig) reads as online, so every row keeps saying what the relay said.
     gate: InternetGate? = null,
+    // Where a relay's customer key, its ask state and its ticket live (ADR 2026-10.3sk7), so removing the relay
+    // forgets them (C-7.6-29). Null in the screen tests' rig, which removes the row alone.
+    private val ticketKeys: TicketKeyJournal? = null,
 ) : ViewModel() {
     val state: StateFlow<InternetRelayUiState> =
         combine(rows(relayStatus), gate?.online ?: MutableStateFlow(true)) { rows, online -> rows.copy(offline = !online) }
@@ -284,6 +288,10 @@ class InternetRelayViewModel(
     fun removeRelay(url: String) {
         viewModelScope.launch {
             settings.removeSpoolUrl(url)
+            // The key, its schedule and the held ticket go with the relay — unless another row still names the same
+            // host (two ports, one audience), which keeps using them.
+            val host = SpoolUrl.hostname(url)
+            if (host != null && settings.spoolUrls.first().none { SpoolUrl.hostname(it) == host }) ticketKeys?.forgetHost(host)
             // A room without its relay is nothing: the row, its key and its history go with the relay.
             commons?.leaveBoundTo(url)
             mesh?.refreshRelays()

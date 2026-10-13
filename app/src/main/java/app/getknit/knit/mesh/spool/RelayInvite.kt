@@ -26,6 +26,10 @@ import java.util.Base64
  * largest type on it. A field added to [Body] later is additive under `ignoreUnknownKeys`; [VERSION]
  * exists for the change that rule cannot absorb.
  *
+ * Two optional fields arrived later, additively ([Body.i] and [Body.k], ADR 2026-10.3sk7): the origin of a ticket issuer
+ * and a customer key it trades for this relay's daily tickets. They come as a pair or not at all, and only an issuer's
+ * operator or storefront writes them — [mint] has no way to, because a forwarded key lends out its holder's quota.
+ *
  * Text forms, both accepted by [parse]: the App Link `https://getknit.app/r#<invite>` (the invite rides
  * the fragment, which a browser never sends to the server — it carries a bearer token) and the scheme
  * link `knit://r/<invite>`. A link is found anywhere in pasted text. There is deliberately **no bare
@@ -47,7 +51,11 @@ object RelayInvite {
     /** A spool URL longer than this is not one anyone typed into a daemon's config. */
     const val MAX_URL_CHARS = 256
 
-    /** The invite: the relay, and the room it runs when the minter had joined one. */
+    /**
+     * The invite: the relay, the room it runs when the minter had joined one, and the ticket issuer's origin [i] with
+     * the customer key [k] it takes when the link came from an issuer's operator. Declared in wire order — the house
+     * CBOR writes keys as declared, so `i` and `k` follow `n` (docs/RELAY_INVITE.md §2).
+     */
     @Serializable
     @OptIn(ExperimentalSerializationApi::class) // @ByteString is an experimental kotlinx API
     private class Body(
@@ -55,21 +63,26 @@ object RelayInvite {
         val u: String,
         @ByteString val c: ByteArray? = null,
         val n: String? = null,
+        val i: String? = null,
+        val k: String? = null,
     )
 
     /** What [parse] yields. */
     sealed interface Parsed {
         /**
-         * A well-formed invite: the spool [url] exactly as it should be stored (token included), and the
-         * commons [secret] and [name] when the link carries a room. A plain class on purpose: a data class's
-         * `toString` would print the token and the secret into any log line that mentions the invite.
+         * A well-formed invite: the spool [url] exactly as it should be stored (token included), the commons
+         * [secret] and [name] when the link carries a room, and the ticket [issuer] with its customer [key] when it
+         * carries one (both or neither). A plain class on purpose: a data class's `toString` would print the token,
+         * the secret and the key into any log line that mentions the invite.
          */
         class Invite(
             val url: String,
             val secret: ByteArray?,
             val name: String?,
+            val issuer: String? = null,
+            val key: String? = null,
         ) : Parsed {
-            override fun toString(): String = "Invite(host=${SpoolUrl.host(url)}, room=${secret != null})"
+            override fun toString(): String = "Invite(host=${SpoolUrl.host(url)}, room=${secret != null}, key=${key != null})"
         }
 
         data class Invalid(
@@ -89,11 +102,18 @@ object RelayInvite {
 
         /** A room secret of the wrong length: a typo must never hash into a subscription to nothing. */
         BAD_SECRET,
+
+        /** A key with no issuer, or an issuer that is not an origin this build may contact ([IssuerOrigin]). */
+        BAD_ISSUER,
+
+        /** An issuer with no key, or a key that is not a customer key's shape ([CustomerKey]). */
+        BAD_KEY,
     }
 
     /**
      * Encodes an invite as its bare base64url form (no padding). [url] is stored verbatim, token and all —
-     * the whole point of the link is to carry it. The [name] is clamped like a group title.
+     * the whole point of the link is to carry it. The [name] is clamped like a group title. There is no issuer
+     * or key parameter, on purpose: the phone never mints one, whatever key it holds.
      */
     @OptIn(ExperimentalSerializationApi::class)
     fun mint(
@@ -155,10 +175,18 @@ object RelayInvite {
         if (!isUsableUrl(url, allowCleartext)) return Parsed.Invalid(Reason.BAD_URL)
         val secret = body.c
         if (secret != null && secret.size != ScopeCrypto.COMMONS_SECRET_BYTES) return Parsed.Invalid(Reason.BAD_SECRET)
+        // Both or neither, and each refused as a whole invite rather than dropped: a link that half-carries a key is
+        // one somebody built wrong, and applying its relay alone would hide that from the person who sent it.
+        val issuer = body.i
+        val key = body.k
+        if (key != null && (issuer == null || !IssuerOrigin.isAcceptable(issuer, allowCleartext))) return Parsed.Invalid(Reason.BAD_ISSUER)
+        if (issuer != null && (key == null || !CustomerKey.isWellFormed(key))) return Parsed.Invalid(Reason.BAD_KEY)
         return Parsed.Invite(
             url = url,
             secret = secret,
             name = body.n?.let { clampName(it) }?.takeIf { it.isNotEmpty() },
+            issuer = issuer,
+            key = key,
         )
     }
 

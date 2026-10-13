@@ -17,13 +17,16 @@ behind each lives in `context/mesh-transport.md`, `context/wire-format.md`, and
   `mesh/bluetooth/meshtastic/MeshtasticGatt` under that boundary; its pure session/codec sit in `mesh/lora/`,
   which imports no Android at all — ADR 038; the watch status server is `mesh/bluetooth/wear/WearStatusServer`, its
   pure snapshot `mesh/wear/`, ADR 2026-09.wetm). The rule is :app's: the `:wear` module is its own boundary.
-- Nothing outside `mesh/spool/OkHttpSpoolDialer.kt` and `linkpreview/OkHttpPreviewFetcher.kt` may import
-  `okhttp3.*` (detekt's `ForbiddenImport` enforces it). Each sits behind a pure seam — `SpoolLink`/`SpoolSocket`
-  for the Internet plane's socket, `PreviewFetcher` for the link-preview fetch — for the same reason the radios
+- Nothing outside `mesh/spool/OkHttpSpoolDialer.kt`, `linkpreview/OkHttpPreviewFetcher.kt` and
+  `mesh/spool/OkHttpTicketIssuer.kt` may import `okhttp3.*` (detekt's `ForbiddenImport` enforces it). Each sits
+  behind a pure seam — `SpoolLink`/`SpoolSocket` for the Internet plane's socket, `PreviewFetcher` for the
+  link-preview fetch, `TicketIssuer` for the ticket key swap (ADR 2026-10.3sk7) — for the same reason the radios
   sit behind `MeshTransport`: everything protocol- or policy-shaped above it (`SpoolConnection`, `ScopeSync`,
-  `LinkPreviewService`) stays pure and runs against an in-process fake in unit tests. The preview fetcher
-  additionally binds every socket and DNS lookup to the `Network` the gate handed it, so preview bytes can
-  never ride the Wi-Fi Aware NDI, and refuses any address `PublicAddressPolicy` calls private on every hop.
+  `LinkPreviewService`, `TicketRefresher`) stays pure and runs against an in-process fake in unit tests. The preview
+  fetcher additionally binds every socket and DNS lookup to the `Network` the gate handed it, so preview bytes can
+  never ride the Wi-Fi Aware NDI, and refuses any address `PublicAddressPolicy` calls private on every hop. The
+  ticket issuer binds the same way, follows no redirect (the customer key belongs to the origin it arrived with) and
+  applies no address guard: its origin is one the person confirmed on the invite sheet, like the relay beside it.
 - Everything above the transport talks only to the `MeshTransport` interface; `CompositeMeshTransport`
   runs every radio at once behind that seam (Bluetooth preferred, Wi-Fi Aware second, LoRa last), so
   orchestration (`MeshManager`/`MeshRouter`) is unchanged and another sibling transport drops in the same

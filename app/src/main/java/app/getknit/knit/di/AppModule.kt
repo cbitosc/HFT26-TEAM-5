@@ -46,6 +46,7 @@ import app.getknit.knit.data.ratchet.RatchetRepository
 import app.getknit.knit.data.relay.RelayInviteApplier
 import app.getknit.knit.data.settings.SettingsKeys
 import app.getknit.knit.data.settings.SettingsStore
+import app.getknit.knit.data.settings.TicketKeyStore
 import app.getknit.knit.demo.DemoComposer
 import app.getknit.knit.identity.AndroidDeviceIdSource
 import app.getknit.knit.identity.DeviceIdSource
@@ -203,7 +204,18 @@ val appModule =
         // Relay invites (docs/RELAY_INVITE.md): the link handoff inbox and the one apply sequence both doors
         // share. The commons store rides only while `BuildConfig.COMMONS` is on — null is the wx8e seam.
         single { RelayInviteInbox() }
-        single { RelayInviteApplier(get(), if (BuildConfig.COMMONS) get<CommonsRepository>() else null, get()) }
+        // The customer keys an invite hands this phone (ADR 2026-10.3sk7), beside the relay list in the settings DataStore.
+        single { TicketKeyStore(get()) }
+        // A build without tickets (release: CALLS_WIRED off) hands the applier no key store, so an invite's issuer and
+        // key are ignored without a word, as the room half is with the commons dark.
+        single {
+            RelayInviteApplier(
+                get(),
+                if (BuildConfig.COMMONS) get<CommonsRepository>() else null,
+                get(),
+                keys = if (CALLS_WIRED) get<TicketKeyStore>() else null,
+            )
+        }
         // Single-shot signal that the rate/review prompt should show (drained by KnitApp).
         single { ReviewPromptInbox() }
         // Decides when to ask for an app rating and where to route it (installer-aware); no-op in demo builds.

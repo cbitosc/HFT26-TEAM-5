@@ -116,6 +116,16 @@ private fun InviteFacts(preview: RelayInviteApplier.Preview) {
                 else -> "relay_invite_room" to stringResource(R.string.relays_invite_room_unnamed)
             }
     }
+    // The key's line names the issuer and what it will be asked, about once a day (ADR 2026-10.3sk7): no price, no
+    // product, no link. A held key says so; a different one says it replaces the held one.
+    preview.ticketKey?.let { key ->
+        lines +=
+            when {
+                key.alreadyHeld -> "relay_invite_key_held" to stringResource(R.string.relays_invite_key_held)
+                key.replacesKey -> "relay_invite_key_replaces" to stringResource(R.string.relays_invite_key_replaces, key.issuerHost)
+                else -> "relay_invite_key" to stringResource(R.string.relays_invite_key, key.issuerHost)
+            }
+    }
     for ((tag, text) in lines) {
         Text(
             text = text,
@@ -130,11 +140,14 @@ private fun InviteFacts(preview: RelayInviteApplier.Preview) {
 private fun confirmLabel(preview: RelayInviteApplier.Preview): Int {
     val joins = preview.room?.let { !it.alreadyJoined } ?: false
     val turnsOn = preview.consentNeeded || preview.planeOff
+    // The relay is in place and on, so all a confirmation does is hold the link's ticket key.
+    val savesKeyOnly = preview.alreadyAdded && !preview.parked && preview.ticketKey?.alreadyHeld == false
     return when {
         preview.isNoOp -> R.string.relays_invite_confirm_noop
         turnsOn && joins -> R.string.relays_invite_confirm_turn_on_join
         turnsOn -> R.string.relays_invite_confirm_turn_on_add
         joins -> R.string.relays_invite_confirm_join
+        savesKeyOnly -> R.string.relays_invite_confirm_key
         else -> R.string.relays_invite_confirm_add
     }
 }

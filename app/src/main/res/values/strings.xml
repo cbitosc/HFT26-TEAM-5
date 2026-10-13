@@ -1357,6 +1357,9 @@
     <string name="relays_invite_room_unnamed">Joins its shared room. Everyone there becomes a contact, and their messages skip your requests inbox.</string>
     <string name="relays_invite_room_joined">You\'re already in its room.</string>
     <string name="relays_invite_room_replaces">Replaces the room you joined here. That room and its history leave this phone; the people in it stay in your contacts.</string>
+    <string name="relays_invite_key">Carries a ticket key, so this phone can fetch the relay\'s tickets itself. About once a day it will contact %1$s for them.</string>
+    <string name="relays_invite_key_replaces">Carries a new ticket key for this relay, replacing the one this phone holds. About once a day it will contact %1$s for the relay\'s tickets.</string>
+    <string name="relays_invite_key_held">This phone already has this ticket key.</string>
     <string name="relays_invite_already">Already in your list.</string>
     <string name="relays_invite_parked">In your list, turned off. This turns it back on.</string>
     <string name="relays_invite_replaces">Replaces your entry for this relay with one that carries its access key.</string>
@@ -1365,6 +1368,7 @@
     <string name="relays_invite_confirm_join">Join room</string>
     <string name="relays_invite_confirm_turn_on_add">Turn on and add</string>
     <string name="relays_invite_confirm_turn_on_join">Turn on and join</string>
+    <string name="relays_invite_confirm_key">Save key</string>
     <string name="relays_invite_confirm_noop">OK</string>
     <string name="relays_invite_decline">Not now</string>
     <string name="relays_invite_share_desc">Invite others to %1$s</string>

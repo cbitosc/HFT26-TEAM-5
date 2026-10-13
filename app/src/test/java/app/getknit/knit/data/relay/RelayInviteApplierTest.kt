@@ -5,7 +5,11 @@ import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.mesh.MeshController
 import app.getknit.knit.mesh.spool.CommonsRoom
 import app.getknit.knit.mesh.spool.CommonsRoots
+import app.getknit.knit.mesh.spool.HeldKey
+import app.getknit.knit.mesh.spool.KeyAnswer
+import app.getknit.knit.mesh.spool.KeyState
 import app.getknit.knit.mesh.spool.RelayInvite
+import app.getknit.knit.mesh.spool.TicketRefresherTest
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.coVerifyOrder
@@ -62,7 +66,18 @@ class RelayInviteApplierTest {
             }
     }
 
-    private fun applier(withCommons: Boolean = true) = RelayInviteApplier(settings, commons.takeIf { withCommons }, mesh, clock = { NOW })
+    private val keys = TicketRefresherTest.MemoryKeyJournal()
+
+    private fun applier(
+        withCommons: Boolean = true,
+        withTickets: Boolean = true,
+    ) = RelayInviteApplier(settings, commons.takeIf { withCommons }, mesh, keys = keys.takeIf { withTickets }, clock = { NOW })
+
+    private fun keyed(
+        url: String = TOKENED,
+        key: String = KEY,
+        issuer: String = ISSUER,
+    ) = RelayInvite.Parsed.Invite(url, null, null, issuer = issuer, key = key)
 
     private fun invite(
         url: String = TOKENED,
@@ -255,7 +270,85 @@ class RelayInviteApplierTest {
             assertArrayEquals(secret, preview.room!!.secret)
         }
 
+    @Test
+    fun anInvitesKeyIsHeldForTheRelaysHostInTheSameConfirmation() =
+        runTest {
+            val preview = applier().preview(keyed())
+            val key = preview.ticketKey!!
+            assertEquals("home.example.org", key.host)
+            assertEquals("anywhere.example.org", key.issuerHost)
+            assertFalse(key.alreadyHeld)
+            assertFalse(key.replacesKey)
+            assertTrue(keys.held.value.isEmpty()) // nothing before the tap
+            applier().apply(preview)
+            assertEquals(HeldKey(ISSUER, KEY), keys.held.value["home.example.org"])
+            coVerify { settings.addSpoolUrl(TOKENED) }
+        }
+
+    @Test
+    fun theSameKeyAgainIsANoOpAndKeepsTheRefreshersState() =
+        runTest {
+            spoolEnabled.value = true
+            spoolConsented.value = true
+            spoolUrls.value = setOf(TOKENED)
+            keys.putKey("home.example.org", HeldKey(ISSUER, KEY))
+            keys.states.value = mapOf("home.example.org" to KeyState(KeyAnswer.OK, notBefore = 42))
+            val preview = applier().preview(keyed())
+            assertTrue(preview.ticketKey!!.alreadyHeld)
+            assertTrue(preview.isNoOp)
+            applier().apply(preview)
+            assertEquals(KeyState(KeyAnswer.OK, notBefore = 42), keys.states.value["home.example.org"])
+        }
+
+    @Test
+    fun aDifferentKeyForTheSameRelayReplacesTheHeldOne() =
+        runTest {
+            spoolEnabled.value = true
+            spoolConsented.value = true
+            spoolUrls.value = setOf(TOKENED)
+            keys.putKey("home.example.org", HeldKey(ISSUER, OTHER_KEY))
+            keys.states.value = mapOf("home.example.org" to KeyState(KeyAnswer.UNKNOWN_KEY))
+            val preview = applier().preview(keyed())
+            assertTrue(preview.ticketKey!!.replacesKey)
+            assertFalse(preview.isNoOp)
+            applier().apply(preview)
+            assertEquals(HeldKey(ISSUER, KEY), keys.held.value["home.example.org"])
+            assertNull(keys.states.value["home.example.org"]) // a fresh key lifts the unknown-key park
+        }
+
+    @Test
+    fun anInviteWithoutAKeyNeverRemovesOne() =
+        runTest {
+            spoolUrls.value = setOf(TOKENED)
+            keys.putKey("home.example.org", HeldKey(ISSUER, KEY))
+            val preview = applier().preview(invite(TOKENED))
+            assertNull(preview.ticketKey)
+            applier().apply(preview)
+            assertEquals(HeldKey(ISSUER, KEY), keys.held.value["home.example.org"])
+        }
+
+    @Test
+    fun aBuildWithoutTicketsAppliesTheRelayAndIgnoresTheKey() =
+        runTest {
+            val preview = applier(withTickets = false).preview(keyed())
+            assertNull(preview.ticketKey)
+            applier(withTickets = false).apply(preview)
+            coVerify { settings.addSpoolUrl(TOKENED) }
+            assertTrue(keys.held.value.isEmpty())
+        }
+
+    @Test
+    fun aKeyedPreviewNeverPrintsTheKey() =
+        runTest {
+            val key = applier().preview(keyed()).ticketKey!!
+            assertFalse(key.toString().contains(KEY.removePrefix("kak1_").take(12)))
+            assertFalse(keyed().toString().contains(KEY.removePrefix("kak1_").take(12)))
+        }
+
     private companion object {
+        const val ISSUER = "https://anywhere.example.org"
+        const val KEY = "kak1_FBsiKTA3PkVMU1phaG92fYSLkpmgp661vMPK0djf5u0"
+        const val OTHER_KEY = "kak1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
         const val NOW = 1_757_800_000_000L
         const val TOKENED = "wss://home.example.org/spool/v1?k=t0ken"
         const val UNTOKENED = "wss://home.example.org/spool/v1"

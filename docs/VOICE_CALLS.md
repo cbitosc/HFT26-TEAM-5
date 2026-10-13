@@ -232,6 +232,9 @@ sig = Ed25519(issuer key, "knit/spool/v1/ticket" ‖ tk)
 | **S-7.6-22** | On a connection whose HELLO carried `ent` with bit 1 in `entGates`, `aput` needs the uploading connection's own live ticket with bit 1 of `fl` and budget left, else `err ticket` with `q`, `scope` and a `msg` of `missing`, `expired`, `flags` or `budget`. Another subscriber's ticket never admits it. The budget is `min(ab, the spool's own)` bytes per pseudonym, charged only for chunks stored, at the size the spool charges them. A refusal is never a strike. |
 | **S-7.6-23** | A ticket never gates `aget`: a member without one fetches every attachment a member with one stored.                                                                                                                             |
 | **C-7.6-24** | A client without a files ticket for a spool whose `entGates` has bit 1 does not offer to send attachments through it, and still fetches the ones it receives. After `budget` it does not upload there again on that ticket.      |
+| **C-7.6-27** | While the Internet plane runs, a client holding a customer key for a relay asks its issuer for a ticket when the key arrives, and whenever that relay's held ticket is missing, not presentable (`SpoolTicketPolicy.presentable`), or less than 6 h from its `exp` on the phone's clock. After a 200 it asks no sooner than 1 h later, so an account whose `exp` is capped at its end can't make it loop. With the plane off it asks nothing. |
+| **C-7.6-28** | A 200 imports the ticket under the host rule; a 401 parks the key until a different one arrives; a 403 records the end and retries daily; anything else backs off from 1 min to 1 h. |
+| **C-7.6-29** | A customer key goes only to the issuer origin it arrived with, only in the `Authorization` header, only over `https://` (`http://` in a debug build). It is stored beside the relay's `?k=` token, under the protection ADR 2026-09.66cw gives that token, and never minted into an invite. Removing the relay forgets its key, issuer and ticket. |
 
 > **Why one ticket per connection.** The spool already ties a connection to every scope it
 > subscribes, so a ticket on each record would buy no unlinkability and cost a signature check per
@@ -246,6 +249,16 @@ sig = Ed25519(issuer key, "knit/spool/v1/ticket" ‖ tk)
 > because a call or a walkie that only one side can use is broken. Attachments are not: a free member
 > still receives every one. A rule under which sending works in some conversations and not others, for
 > reasons the sender cannot see, would need explaining in every client (knit-spool ADR 2026-10.h6pt).
+>
+> **The key swap (C-7.6-27 to C-7.6-29).** A ticket is a day's grant, so something has to fetch the next one. An
+> issuer's operator hands a customer a relay invite (`docs/RELAY_INVITE.md` §2) that carries, beside the relay, the
+> issuer's origin `i` and a customer key `k` (`kak1_…`). Accepting it holds the key for the relay's host name, and
+> the client trades it at `POST <i>/api/v1/ticket` with `Authorization: Bearer <k>` and no body (knit-spool-coordinator
+> ADR 2026-10.ukvm). The answers are 200 `{ ticket, aud, nbf, exp, flags: { turn, cast }, endsAt }`, 401
+> `{ error: "unknown-key" }` and 403 `{ error: "ended", endsAt }`, all `no-store`. The client acts on the claims
+> inside `ticket`, never the JSON copies, and puts it through the same import door as a pasted one, so a ticket
+> whose `aud` is not that relay's host is never held; the connection then presents it at once (C-7.6-19). A phone
+> never re-mints a key into an invite: it lends out the customer's own quota. Client: knit-next ADR 2026-10.3sk7.
 >
 > **Why STUN rides HELLO.** A free phone that is the *caller* gathers before any answer arrives, so a
 > STUN URI carried in the paying peer's signaling would come too late. coturn answers STUN without a
@@ -745,6 +758,12 @@ link down; its own sends were all delivered. Nothing steers a link off Coded whi
     `SpoolConnectionCastTest`; `ScopeSyncTest`'s cast cases; a signed talk frame that fails to open raises no reset
     (`InboundPipelineTest`); the `ct` flag in `CallManagerTest`; and `WalkieTalkLabTest`'s burst cast between two
     phones with no radio path.
+  - The key swap (C-7.6-27 to C-7.6-29): `RelayInviteTest`'s `ticketInvite` vector and refusals, `TicketRefresherTest`
+    for the schedule row by row and the refresher against the stores (the host rule, the park, the daily retry, the
+    route and plane gates, nothing secret in a log), `OkHttpTicketIssuerTest` for the request's shape and the
+    coordinator's three answers on a socket, `TicketKeyStoreTest`, `RelayInviteApplierTest`'s key cases,
+    `InternetRelayScreenContentTest`'s sheet lines and `SettingsSnapshotTest` (the key rides a backup, its state does
+    not).
   - A `CallPayload` golden vector (with `dw`/`dx`).
   - TURN pruning (C-7.6-26): `CallConfigurationTest` pins the prune policy beside continual gathering and relay-only,
     and `RelayTallyTest` the call log's `allocations gathered N, pruned M, held K`; a measured relay-only call gives

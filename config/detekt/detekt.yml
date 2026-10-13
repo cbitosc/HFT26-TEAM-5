@@ -49,13 +49,14 @@ style:
     active: true                           # not in detekt's default-on set; we want dead imports caught in CI
   ForbiddenImport:
     active: true                           # also off by default; ADR 051 — see the header note
-    # One excludes list serves every pattern below, so the two OkHttp files are also exempt from the
+    # One excludes list serves every pattern below, so the three OkHttp files are also exempt from the
     # BitmapFactory ban here; scripts/dex-bitmap-gate.sh still enforces that one on the release dex.
     excludes:
       - '**/data/ImageDecode.kt'                 # the one file allowed to decode
       - '**/mesh/spool/OkHttpSpoolDialer.kt'     # the spool plane's socket (rules/mesh.md)
       - '**/mesh/spool/OkHttpSpoolDialerSocketTest.kt' # ...and its MockWebServer test, whose fake spool is an okhttp3.WebSocketListener
       - '**/linkpreview/OkHttpPreviewFetcher.kt' # the link-preview fetch (rules/mesh.md)
+      - '**/mesh/spool/OkHttpTicketIssuer.kt'    # the ticket key swap (rules/mesh.md, ADR 2026-10.3sk7)
       - '**/location/AndroidLocationSource.kt'   # the one android.location importer (shares the list, so also exempt from the two bans above)
       - '**/transfer/AndroidDirectWifi.kt'       # the one android.net.wifi.p2p importer (direct file transfer)
       - '**/ui/DeviceSupervision.kt'             # the one android.app.admin / UserManager importer (ADR 2026-09.a8ud)
@@ -68,9 +69,10 @@ style:
           dimensions, which for anything off the mesh is attacker-chosen. ADR 051.
       - value: 'okhttp3.*'
         reason: >-
-          OkHttp is confined to mesh/spool/OkHttpSpoolDialer.kt and linkpreview/OkHttpPreviewFetcher.kt
-          (rules/mesh.md): each sits behind a pure seam (SpoolLink/SpoolSocket; PreviewFetcher) so everything
-          above it runs against an in-process fake, and the app's whole Internet surface stays two files.
+          OkHttp is confined to mesh/spool/OkHttpSpoolDialer.kt, linkpreview/OkHttpPreviewFetcher.kt and
+          mesh/spool/OkHttpTicketIssuer.kt (rules/mesh.md): each sits behind a pure seam (SpoolLink/SpoolSocket;
+          PreviewFetcher; TicketIssuer) so everything above it runs against an in-process fake, and the app's whole
+          Internet surface stays three files.
       - value: 'android.net.wifi.p2p.*'
         reason: >-
           Wi-Fi Direct is driven from transfer/AndroidDirectWifi.kt and nowhere else, behind the DirectWifi seam:

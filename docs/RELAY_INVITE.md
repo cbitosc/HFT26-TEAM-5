@@ -5,7 +5,7 @@
 |                    |                                                                                              |
 |--------------------|----------------------------------------------------------------------------------------------|
 | Layout version     | 1                                                                                            |
-| Status             | Built 2026-09-14 (ADR 2026-09.tmbq)                                                           |
+| Status             | Built 2026-09-14 (ADR 2026-09.tmbq); the issuer and customer key added 2026-10-13 (ADR 2026-10.3sk7) |
 | Reference          | `mesh/spool/RelayInvite.kt` (codec), `data/relay/RelayInviteApplier` (the one apply sequence), `ui/relay/RelayInviteSheet` (the preview), `ui/relay/RelayInviteInbox` (the intent hand-off) |
 | Executable anchors | `RelayInviteTest` (golden vectors below), `RelayInviteApplierTest`, `RelayInviteInboxTest`, `InternetRelayViewModelTest`, `InternetPlaneLabTest` (the lab scenario) |
 
@@ -27,8 +27,9 @@ Settings.
 ## 2. Layout
 
 ```
-Body { v: 1, u: str, c?: bstr(32), n?: str }   // the house CBOR: definite-length, unknown keys ignored,
-                                               //   defaults omitted; bstr = CBOR byte string
+Body { v: 1, u: str, c?: bstr(32), n?: str, i?: str, k?: str }
+                    // the house CBOR: definite-length, keys in this order, unknown keys ignored,
+                    //   defaults omitted; bstr = CBOR byte string
 ```
 
 - `u` — the spool URL exactly as it should be stored, `wss://host[:port]/spool/v1[?k=<token>]`
@@ -40,7 +41,22 @@ Body { v: 1, u: str, c?: bstr(32), n?: str }   // the house CBOR: definite-lengt
 - **Unsigned.** The contact card is signed because it asserts an identity; an invite asserts nothing —
   the URL is the capability, and a relay has no identity key to sign as. What a signature could not
   prove anyway (that the host is who the sender says it is) the sheet puts in the largest type on it.
-- `v` exists for the change `ignoreUnknownKeys` cannot absorb; a field added to `Body` is additive.
+- `i` and `k` — a ticket issuer's origin and the customer key it takes (experimental, ADR 2026-10.3sk7;
+  `docs/VOICE_CALLS.md` §2.6, C-7.6-27 to C-7.6-29). They come **both or neither**: an invite with only one of them,
+  a `k` that fails the pattern or an `i` that is not an acceptable origin is refused as a whole (`BAD_KEY`,
+  `BAD_ISSUER`), as a wrong-length `c` is.
+  - `i`: `https://<host>[:port]`, scheme and host lowercase, nothing after — no path, query, fragment, user info or
+    trailing slash — at most 128 characters. The host is a DNS-shaped name (an IPv4 literal is one) or a bracketed
+    IPv6 literal, and a port is 1..65535 with no leading zero. `http://` is accepted only by a debug build, the same
+    privilege `ws://` has for `u`. The exact rule (`IssuerOrigin`):
+    `^(https?)://([a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*|\[[0-9a-f:.]+\])(?::([1-9][0-9]{0,4}))?$`
+    with the port at most 65535.
+  - `k`: `^kak1_[A-Za-z0-9_-]{43}$` (`CustomerKey`; the coordinator's `packages/core/src/anywhere.ts`).
+  - The key belongs to the relay in `u`: the tickets it buys name that relay's host name, and a ticket for any other
+    host is never held (`SpoolTickets.import`).
+- `v` exists for the change `ignoreUnknownKeys` cannot absorb; a field added to `Body` is additive. `i` and `k` were
+  added that way: a released app reading an invite that carries them adds the relay and ignores the key. `v` stays 1
+  and the 512-byte cap stays, because a released app refuses anything bigger: a minter refuses a body past it.
 
 Text forms, both accepted by `RelayInvite.parse`: `https://getknit.app/r#<base64url(Body)>` (the invite
 rides the fragment, which a browser never sends to the server — it carries a bearer token) and
@@ -74,12 +90,25 @@ without a sheet, and the sheet is built around one question — *do you trust th
   states — and confirming leaves then joins.
 - A build with the commons dark (`BuildConfig.COMMONS` off) applies the relay half and ignores the room
   half without mentioning it.
+- **A customer key is a lent quota.** The sheet names the issuer's host and says what the key does: this phone
+  will contact that host about once a day to fetch this relay's tickets. No price, no product name, no link.
+  Confirming holds the key for the relay's host name in the same apply sequence. The same key again is a no-op; a
+  different key for the same relay replaces the held one, and the sheet says so (an `account rotate-key`); an invite
+  without `i` and `k` over a relay that holds a key keeps the key, as an untokened invite never downgrades a stored
+  token. The key goes only to the origin it arrived with, only in an `Authorization` header (C-7.6-29).
+- A build without tickets (release today: no calls, `CALLS_WIRED` off) applies the relay and room halves and
+  ignores `i` and `k` without mentioning them.
 
 ## 4. Minting
 
 - **On the phone:** the relay row's Share / Copy actions mint `u` as stored (token included) plus the
   room's `c`/`n` when this device has joined it. "Invite to my instance" means the room; a member who
-  wants to share the relay alone leaves the room first.
+  wants to share the relay alone leaves the room first. The phone **never** writes `i` or `k`, whatever key it
+  holds: a forwarded customer key lends out the customer's own quota, so `RelayInvite.mint` has no way to.
+- **By the issuer's operator** (knit-spool-coordinator, out of repo): `npm run anywhere -- account create` (and
+  `rotate-key`) prints an invite with `u` the account's relay (its host must be the account's `spool_host`), `i` the
+  issuer's origin and `k` the new key. Its encoder refuses what this parser refuses (`bad-issuer`, `bad-key`) and a
+  body past 512 bytes (`too-large`).
 - **By the daemon** (out of repo): `knit-spool commons-invite` SHOULD print `https://getknit.app/r#…`
   beside `knit-commons:v1:…`, with `u` the spool's public URL including `?k=` when it is private, `c`
   the same 32 bytes, and `n` `SPOOL_COMMONS_NAME`. The vectors below are the contract.
@@ -95,7 +124,14 @@ fullInvite = u "wss://home.example.org/spool/v1?k=fixture-token", c fixture(32, 
              pGF2AWF1eC93c3M6Ly9ob21lLmV4YW1wbGUub3JnL3Nwb29sL3YxP2s9Zml4dHVyZS10b2tlbmFjWCAKERgfJi00O0JJUFdeZWxzeoGIj5adpKuyucDHztXc42FuZEhvbWU
 bareInvite = u "wss://lax.spool.getknit.app/spool/v1", no c, no n:
              omF2AWF1eCR3c3M6Ly9sYXguc3Bvb2wuZ2V0a25pdC5hcHAvc3Bvb2wvdjE
+ticketInvite = u "wss://lab.example.org/spool/v1?k=fixture-token", no c, no n,
+               i "https://anywhere.example.org", k "kak1_" + base64url(fixture(32, 20))
+               = "kak1_FBsiKTA3PkVMU1phaG92fYSLkpmgp661vMPK0djf5u0":
+             pGF2AWF1eC53c3M6Ly9sYWIuZXhhbXBsZS5vcmcvc3Bvb2wvdjE_az1maXh0dXJlLXRva2VuYWl4HGh0dHBzOi8vYW55d2hlcmUuZXhhbXBsZS5vcmdha3gwa2FrMV9GQnNpS1RBM1BrVk1VMXBoYUc5MmZZU0xrcG1ncDY2MXZNUEswZGpmNXUw
 ```
+
+`ticketInvite` cannot be minted by the phone, so `RelayInviteTest` builds it with its own hand-rolled CBOR and the
+pinned string was computed separately by a throwaway script; both must agree.
 
 ## 6. Out of repo
 

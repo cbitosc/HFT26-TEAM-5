@@ -102,6 +102,16 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   that keeps it from going out again). A free phone on an Anywhere spool reads `ent: true`, `stun: 1`,
   `held: false`. Logcat under `ScopeSync`: `<host>: ticket presented|accepted|refused: <word>` and, per call,
   `<host>: TURN ask (ticketed): …` or `TURN ask skipped, no ticket (ent)`.
+  `--es url <spoolUrl> --es issuer <https://host[:port]> --es key <kak1_…>` holds a **customer key** for that relay's
+  host without an invite (ADR 2026-10.3sk7; debug builds only, where the ticket refresher runs): the refresher then
+  trades it at that issuer for the host's tickets, at once and again before the held one is 6 h from `exp`, and
+  imports what comes back exactly as `--es ticket` does. `--es key clear` forgets the key, its schedule and the
+  host's ticket (as `drop` does when no other row shares the host). The issuer may be `http://` in a debug build — a
+  bench issuer behind `adb reverse tcp:3000 tcp:3000` is `http://127.0.0.1:3000`. Each spool's `ticketKey` in the
+  dump shows `held`, the `issuer` origin, the last `answer` (`ok`/`unknown-key`/`ended`, null before one), `endsAt`
+  (epoch ms), `failures` (asks in a row with no verdict) and `nextAskAt` / `nextAskInMs` (null when parked by
+  `unknown-key`) — never the key or the ticket. Logcat under `ScopeSync`: `<host>: ticket fetched from <issuer>
+  (exp …)` or `<host>: ticket ask: unknown-key|ended (endsAt …)|no verdict (<reason>)`.
   The dump's `disabled` array is the parked set, and a parked URL stays in `configured` while leaving
   `spools[]` within one 15 s `ScopeSync` reconcile tick as its worker stops (that disappearance is the
   oracle that parking actually closed the socket). `drop` clears a parked flag too, so a re-added URL

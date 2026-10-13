@@ -1,5 +1,7 @@
 package app.getknit.knit.data.settings
 
+import androidx.datastore.preferences.core.stringPreferencesKey
+
 /**
  * The few DataStore facts that live outside [SettingsStore]: the file the store is built over and the key
  * names the backup restore writes or strips **without** the store (`data/backup/SettingsSnapshot` runs on
@@ -16,6 +18,26 @@ object SettingsKeys {
     /** See [SettingsStore.onboardingSeen]; a restore sets it so the name page never overwrites the restored name. */
     const val ONBOARDING_SEEN = "onboarding_seen"
 
+    // A held entitlement ticket and its verdict, per spool host name (ADR 2026-10.xkp4). Both start with
+    // "spool_ticket", the backup-transient prefix in [TRANSIENT_PREFIXES]; neither prefix is a prefix of the other.
+    // Here rather than in the store because `TicketKeyStore` forgets a host's ticket in the same edit as its key.
+    const val SPOOL_TICKET_PREFIX = "spool_ticket:"
+    const val SPOOL_TICKET_VERDICT_PREFIX = "spool_ticket_verdict:"
+
+    fun spoolTicketKey(host: String) = stringPreferencesKey(SPOOL_TICKET_PREFIX + host)
+
+    fun spoolTicketVerdictKey(host: String) = stringPreferencesKey(SPOOL_TICKET_VERDICT_PREFIX + host)
+
+    // A customer key and its issuer, per relay host name, and what the refresher knows about asking with it (ADR
+    // 2026-10.3sk7). The key rides a Knit backup, as the relay's `?k=` token does; the state is about this phone's
+    // asks and does not ("spool_key_state" is in [TRANSIENT_PREFIXES]). Neither prefix is a prefix of the other.
+    const val SPOOL_KEY_PREFIX = "spool_key:"
+    const val SPOOL_KEY_STATE_PREFIX = "spool_key_state:"
+
+    fun spoolKeyKey(host: String) = stringPreferencesKey(SPOOL_KEY_PREFIX + host)
+
+    fun spoolKeyStateKey(host: String) = stringPreferencesKey(SPOOL_KEY_STATE_PREFIX + host)
+
     /**
      * Keys a backup never carries: state about *this phone's* radios and ROM (the Aware give-up and
      * initiator-hold journals, the model poison-pill latch), and the paired LoRa board's address, names and
@@ -26,7 +48,8 @@ object SettingsKeys {
      * so is the mesh pause deadline (`mesh_pause_until`): a backup taken mid-pause must not pause the other phone.
      * Debug-build diagnostic knobs (`debug_`, e.g. the Bluetooth link cap) are about this phone's test run. A spool
      * entitlement ticket (`spool_ticket…`, ADR 2026-10.xkp4) is a bearer grant to this phone for a day, and must not
-     * ride a backup file anywhere.
+     * ride a backup file anywhere; what the ticket refresher knows about its asks (`spool_key_state…`, ADR 2026-10.3sk7)
+     * is this phone's schedule, so a restored phone asks at once. The customer key beside it rides, like a `?k=` token.
      */
     val TRANSIENT_PREFIXES: List<String> =
         listOf(
@@ -42,5 +65,6 @@ object SettingsKeys {
             "lora_plane_state",
             "debug_",
             "spool_ticket",
+            "spool_key_state",
         )
 }

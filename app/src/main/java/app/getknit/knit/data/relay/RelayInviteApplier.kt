@@ -3,8 +3,11 @@ package app.getknit.knit.data.relay
 import app.getknit.knit.data.commons.CommonsRepository
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.mesh.MeshController
+import app.getknit.knit.mesh.spool.HeldKey
+import app.getknit.knit.mesh.spool.IssuerOrigin
 import app.getknit.knit.mesh.spool.RelayInvite
 import app.getknit.knit.mesh.spool.SpoolUrl
+import app.getknit.knit.mesh.spool.TicketKeyJournal
 import kotlinx.coroutines.flow.first
 
 /**
@@ -20,12 +23,15 @@ import kotlinx.coroutines.flow.first
  * second door, not a second consent.
  *
  * [commons] is null while the commons is dark (`BuildConfig.COMMONS` off): the room half of a link is
- * then ignored without comment, and the relay half still applies.
+ * then ignored without comment, and the relay half still applies. [keys] is null in a build without tickets
+ * (release: `CALLS_WIRED` off, ADR 2026-10.3sk7), and the issuer and customer key a link carries are ignored the same
+ * way; with it, the key is held for the relay's host in the same confirmation, and the ticket refresher trades it.
  */
 class RelayInviteApplier(
     private val settings: SettingsStore,
     private val commons: CommonsRepository?,
     private val mesh: MeshController,
+    private val keys: TicketKeyJournal? = null,
     private val clock: () -> Long = System::currentTimeMillis,
 ) {
     /**
@@ -51,10 +57,32 @@ class RelayInviteApplier(
         val consentNeeded: Boolean,
         /** The room the link joins, or null when it carries none or this build cannot join one. */
         val room: Room?,
+        /** The customer key the link carries, or null when it carries none or this build has no tickets. */
+        val ticketKey: TicketKey? = null,
     ) {
         /** Nothing would change: every fact is already true. The sheet still shows, so the tap is answered. */
         val isNoOp: Boolean
-            get() = alreadyAdded && !parked && !planeOff && replaces == null && (room == null || room.alreadyJoined)
+            get() =
+                alreadyAdded && !parked && !planeOff && replaces == null && (room == null || room.alreadyJoined) &&
+                    (ticketKey == null || ticketKey.alreadyHeld)
+    }
+
+    /**
+     * A customer key the link carries for this relay's host, and the issuer it is traded with (ADR 2026-10.3sk7). A
+     * plain class whose [toString] names the issuer only: the key must never reach a log line.
+     */
+    class TicketKey(
+        val host: String,
+        val held: HeldKey,
+        /** These very key and issuer are already held for this host: applying changes nothing. */
+        val alreadyHeld: Boolean,
+        /** A different key (or issuer) is held for this host: applying replaces it — an `account rotate-key`. */
+        val replacesKey: Boolean,
+    ) {
+        /** What the sheet names: the issuer's host, never its scheme, never the key. */
+        val issuerHost: String get() = IssuerOrigin.host(held.issuer)
+
+        override fun toString(): String = "TicketKey(host=$host, issuer=$issuerHost)"
     }
 
     class Room(
@@ -102,6 +130,7 @@ class RelayInviteApplier(
                     replacesRoom = !joined && bound.isNotEmpty(),
                 )
             }
+        val ticketKey = ticketKeyFor(invite, url)
         return Preview(
             url = url,
             host = SpoolUrl.host(url),
@@ -112,7 +141,26 @@ class RelayInviteApplier(
             planeOff = !settings.spoolEnabled.first(),
             consentNeeded = !settings.spoolConsented.first(),
             room = room,
+            ticketKey = ticketKey,
         )
+    }
+
+    /**
+     * The link's key against the one held for [url]'s host, or null: no key in the link, no key store in this build,
+     * or a relay with no host name a ticket could name (an IPv6 literal). An invite without a key never yields one, so
+     * applying it never removes a held key — the same rule as an untokened invite over a tokened row.
+     */
+    private suspend fun ticketKeyFor(
+        invite: RelayInvite.Parsed.Invite,
+        url: String,
+    ): TicketKey? {
+        val store = keys ?: return null
+        val issuer = invite.issuer ?: return null
+        val key = invite.key ?: return null
+        val host = SpoolUrl.hostname(url) ?: return null
+        val offered = HeldKey(issuer, key)
+        val held = store.keys.first()[host]
+        return TicketKey(host, offered, alreadyHeld = held == offered, replacesKey = held != null && held != offered)
     }
 
     /** Applies [preview], in order, each step idempotent; ends by nudging the plane so the relay dials now. */
@@ -132,6 +180,9 @@ class RelayInviteApplier(
             // link's (possibly absent) name would erase the one the relay advertised at join time.
             if (!room.alreadyJoined) store.join(preview.url, room.secret, room.name, clock())
         }
+        val ticketKey = preview.ticketKey
+        // `putKey` is a no-op for the same key, so a re-tap never resets the refresher's schedule.
+        if (keys != null && ticketKey != null) keys.putKey(ticketKey.host, ticketKey.held)
         mesh.refreshRelays()
     }
 

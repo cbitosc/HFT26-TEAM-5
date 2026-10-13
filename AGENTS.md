@@ -81,7 +81,7 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   **sender** fetches and sends as an ordinary attachment under its own MIME (no wire field, no DB change); the receiver
   never fetches, both ends screen the card's picture and text into one verdict, and the fetch is gated on
   `net/InternetGate` (a validated route, never the NAN link), bound to that `Network`, https-only, with a
-  private-address DNS guard. `okhttp3` stays confined to the two files `rules/mesh.md` names.
+  private-address DNS guard. `okhttp3` stays confined to the three files `rules/mesh.md` names.
 - **When touching `transfer/`, `MeshTransport.pause`/`resume`, or anything that hands the Wi-Fi radio to a
   second role:** READ `.agents/context/direct-transfer.md` — a large file goes to one nearby contact over a
   Wi-Fi Direct group the two phones raise, never over the mesh and never custodied (ADR 2026-09.wtmz, the

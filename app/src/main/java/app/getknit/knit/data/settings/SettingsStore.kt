@@ -923,10 +923,10 @@ class SettingsStore(
                 .asMap()
                 .entries
                 .mapNotNull { (key, value) ->
-                    if (!key.name.startsWith(SPOOL_TICKET_PREFIX)) return@mapNotNull null
-                    val host = key.name.removePrefix(SPOOL_TICKET_PREFIX)
+                    if (!key.name.startsWith(SettingsKeys.SPOOL_TICKET_PREFIX)) return@mapNotNull null
+                    val host = key.name.removePrefix(SettingsKeys.SPOOL_TICKET_PREFIX)
                     val text = value as? String ?: return@mapNotNull null
-                    host to StoredSpoolTicket(text, prefs[spoolTicketVerdictKey(host)])
+                    host to StoredSpoolTicket(text, prefs[SettingsKeys.spoolTicketVerdictKey(host)])
                 }.toMap()
         }
 
@@ -935,15 +935,15 @@ class SettingsStore(
         text: String,
     ) {
         dataStore.edit {
-            it[spoolTicketKey(host)] = text
-            it.remove(spoolTicketVerdictKey(host))
+            it[SettingsKeys.spoolTicketKey(host)] = text
+            it.remove(SettingsKeys.spoolTicketVerdictKey(host))
         }
     }
 
     override suspend fun removeSpoolTicket(host: String) {
         dataStore.edit {
-            it.remove(spoolTicketKey(host))
-            it.remove(spoolTicketVerdictKey(host))
+            it.remove(SettingsKeys.spoolTicketKey(host))
+            it.remove(SettingsKeys.spoolTicketVerdictKey(host))
         }
     }
 
@@ -954,19 +954,19 @@ class SettingsStore(
         drop: Boolean,
     ) {
         dataStore.edit {
-            if (it[spoolTicketKey(host)] != text) return@edit
+            if (it[SettingsKeys.spoolTicketKey(host)] != text) return@edit
             when {
                 drop -> {
-                    it.remove(spoolTicketKey(host))
-                    it.remove(spoolTicketVerdictKey(host))
+                    it.remove(SettingsKeys.spoolTicketKey(host))
+                    it.remove(SettingsKeys.spoolTicketVerdictKey(host))
                 }
 
                 verdict == null -> {
-                    it.remove(spoolTicketVerdictKey(host))
+                    it.remove(SettingsKeys.spoolTicketVerdictKey(host))
                 }
 
                 else -> {
-                    it[spoolTicketVerdictKey(host)] = verdict
+                    it[SettingsKeys.spoolTicketVerdictKey(host)] = verdict
                 }
             }
         }
@@ -1067,15 +1067,6 @@ class SettingsStore(
 
     private companion object {
         const val LAST_READ_PREFIX = "last_read_"
-
-        // A held entitlement ticket and its verdict, per spool host name. Both start with "spool_ticket", the
-        // backup-transient prefix in `SettingsKeys.TRANSIENT_PREFIXES`; neither prefix is a prefix of the other.
-        const val SPOOL_TICKET_PREFIX = "spool_ticket:"
-        const val SPOOL_TICKET_VERDICT_PREFIX = "spool_ticket_verdict:"
-
-        fun spoolTicketKey(host: String) = stringPreferencesKey(SPOOL_TICKET_PREFIX + host)
-
-        fun spoolTicketVerdictKey(host: String) = stringPreferencesKey(SPOOL_TICKET_VERDICT_PREFIX + host)
 
         const val MODEL_LOAD_PREFIX = "model_load_"
 
