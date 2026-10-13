@@ -8,6 +8,11 @@ import app.getknit.knit.mesh.spool.AttachmentDeferPolicy
 import app.getknit.knit.mesh.spool.FakeSpool
 import app.getknit.knit.mesh.spool.ScopeSync
 import app.getknit.knit.mesh.spool.SpoolCommonsInfo
+import app.getknit.knit.mesh.spool.SpoolTicket
+import app.getknit.knit.mesh.spool.SpoolTickets
+import app.getknit.knit.mesh.spool.SpoolTicketsTest
+import app.getknit.knit.mesh.spool.SpoolUploads
+import app.getknit.knit.mesh.spool.SpoolUrl
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -31,7 +36,8 @@ import kotlin.random.Random
  * same DM scope (ADR 032), a photo the radio already carried not being uploaded until the peers part
  * (ADR 021), a planted blob quarantined without breaking convergence (spec §9.3), two card holders meeting
  * at the pair scope with no radio (ADR 042), a relay that drops every socket, and a sealed profile update
- * crossing the relay (ADR 020). Slow by nature: the scope table derives on its inputs' events (a confirmed
+ * crossing the relay (ADR 020), and a relay that takes files only from ticket holders (knit-spool ADR 2026-10.h6pt).
+ * Slow by nature: the scope table derives on its inputs' events (a confirmed
  * session, a pair peer named or pinned, a root minted or adopted, a room joined — ADR 2026-09.dcah) with a
  * 60 s poll under the calendar-only transitions, a round runs on a change (a moved digest, a delivery, a
  * custody change) and a worker that missed one waits for its own 60 s tick (ADR 2026-09.wa79), hence
@@ -533,6 +539,71 @@ class InternetPlaneLabTest {
             lab.assertConverged(listOf(alice, bob), atLeast = 3, timeoutMs = MeshLab.SPOOL_AWAIT_MS) {
                 alice.dmThreadWith(bob)(it)
             }
+        }
+
+    // This node's one connected relay: whether it takes the node's uploads (C-7.6-24).
+    private fun LabNode.uploads(): SpoolUploads? = manager.spoolStatus().singleOrNull { it.connected }?.uploads
+
+    /**
+     * A relay that takes files only from ticket holders (knit-spool ADR 2026-10.h6pt, C-7.6-24). Alice holds a files
+     * ticket for it and Bob holds none. Parted, Alice's photo reaches Bob through the relay — receiving needs no
+     * ticket — while Bob's own never goes up: no `aput`, so no refusal for the spool to answer, only a round that
+     * settles it as locked. Linked again, the radio carries Bob's photo and the pair converge.
+     */
+    @Test
+    fun aFilesTicketHolderSendsAPhotoThroughAGatedRelayAndTheOtherSideStillReceivesIt() =
+        runBlocking {
+            val spool = FakeSpool(ent = true, entGates = SpoolTicket.FL_FILES)
+            val alice = lab.node("alice", spool = spool).apply { setDisplayName("Alice") }
+            val bob = lab.node("bob", spool = spool).apply { setDisplayName("Bob") }
+            val ticket = SpoolTicketsTest.ticket(aud = checkNotNull(SpoolUrl.hostname(MeshLab.SPOOL_URL)), fl = SpoolTicket.FL_FILES)
+            assertTrue(SpoolTickets(alice.settings).import(MeshLab.SPOOL_URL, ticket.text) is SpoolTickets.Import.Held)
+            // Derives both DM scopes, and leaves the pair unlinked.
+            lab.meetOnTheRelay(alice, bob)
+            // Both see the gate before either sends: Alice's ticket accepted, Bob's connection locked for want of one.
+            assertTrue(
+                "alice's files ticket never opened uploads\n${lab.report(listOf(alice, bob))}",
+                lab.tryAwait(1, timeoutMs = MeshLab.SPOOL_AWAIT_MS) { if (alice.uploads() == SpoolUploads.Open) 1 else 0 },
+            )
+            assertEquals(SpoolUploads.Locked(SpoolUploads.MISSING), bob.uploads())
+
+            assertTrue(alice.sendImage(Random(91).nextBytes(4_096), "through the relay", to = bob))
+            assertTrue(bob.sendImage(Random(92).nextBytes(4_096), "nearby only", to = alice))
+            val aliceHash =
+                checkNotNull(alice.attachmentHash(alice.dmWith(bob), alice.ownMessageId(alice.dmWith(bob), "through the relay")))
+            // Bob's round judged his own photo: settled as locked, never pushed, never asked about. Read before the
+            // jump, while Alice's push is still deferred, so the only attachment Bob holds here is his own.
+            assertTrue(
+                "bob's round never judged his photo\n${lab.report(listOf(alice, bob))}",
+                lab.tryAwait(1, timeoutMs = MeshLab.SPOOL_AWAIT_MS) {
+                    bob.metrics
+                        .spool()
+                        .spoolAttachLocked
+                        .toInt()
+                },
+            )
+            // Alice's push waits out the radio sighting of the acquaintance (ADR 021); the lapse is when it goes up.
+            lab.clock.advance(AttachmentDeferPolicy.RADIO_WINDOW_MS + 60_000L)
+            assertTrue(
+                "bob never got alice's photo over the relay\n${lab.report(listOf(alice, bob))}",
+                lab.tryAwait(1, timeoutMs = MeshLab.SPOOL_AWAIT_MS) { if (bob.blobs.exists(aliceHash)) 1 else 0 },
+            )
+            assertEquals(0L, bob.metrics.spool().spoolAttachPushed)
+            assertTrue("the spool refused an upload: ${spool.aputRefusals}", spool.aputRefusals.isEmpty())
+            assertEquals(
+                "only alice's attachment went up: ${spool.aputs}",
+                1,
+                spool.aputs
+                    .map { it.substringBefore(':') }
+                    .distinct()
+                    .size,
+            )
+
+            // In range again, the radio carries what the relay would not take.
+            lab.link(alice, bob)
+            lab.assertConverged(listOf(alice, bob), atLeast = 4) { alice.dmThreadWith(bob)(it) }
+            assertEquals(0L, bob.metrics.spool().spoolAttachPushed)
+            assertTrue(spool.aputRefusals.isEmpty())
         }
 
     /**

@@ -232,12 +232,46 @@ class RelayReachTest {
     }
 
     @Test
+    fun `relays that carry attachments but take none of this phone's report locked`() {
+        // C-7.6-24: every connected relay gates uploads behind a files ticket this phone does not hold, or its day's
+        // uploads there are spent. Receiving is untouched, so the reader's line still names the relay.
+        val locked = covered.copy(maxUploadBytes = null)
+        assertEquals(AttachmentRelay.Locked, attachmentReach("peer-a", 1_000, locked))
+        assertEquals(AttachmentWait.Relay, attachmentWait("peer-a", locked))
+    }
+
+    @Test
+    fun `locked sits between unsupported and too large`() {
+        // No relay carries attachments at all: that is the cause, whatever the gates say.
+        assertEquals(
+            AttachmentRelay.Unsupported,
+            attachmentReach("peer-a", 1_000, covered.copy(maxAttachBytes = null, maxUploadBytes = null)),
+        )
+        // Some relay would hold it, but none takes ours: locked, even for a size no relay could hold.
+        assertEquals(
+            AttachmentRelay.Locked,
+            attachmentReach("peer-a", Int.MAX_VALUE / 2, covered.copy(maxUploadBytes = null)),
+        )
+        // Too large is measured against the relays that take ours, not the biggest one that does not.
+        val small = ScopeCrypto.SEALED_CHUNK_BYTES
+        val taking = covered.copy(maxAttachBytes = 16 * 1024 * 1024, maxUploadBytes = small)
+        assertEquals(AttachmentRelay.TooLarge, attachmentReach("peer-a", ScopeCrypto.ATTACH_CHUNK_BYTES + 1, taking))
+        assertEquals(AttachmentRelay.Relayable, attachmentReach("peer-a", ScopeCrypto.ATTACH_CHUNK_BYTES, taking))
+    }
+
+    @Test
+    fun `only locked, too large and unsupported draw the nearby only marker`() {
+        val marked = AttachmentRelay.entries.filter { it.marksNearbyOnly() }
+        assertEquals(listOf(AttachmentRelay.TooLarge, AttachmentRelay.Unsupported, AttachmentRelay.Locked), marked)
+    }
+
+    @Test
     fun `an attachment exactly filling the budget still relays`() {
         val twoChunks = ScopeCrypto.ATTACH_CHUNK_BYTES * 2
         val budget = ScopeCrypto.SEALED_CHUNK_BYTES * 2
         assertEquals(
             AttachmentRelay.Relayable,
-            attachmentReach("peer-a", twoChunks, covered.copy(maxAttachBytes = budget)),
+            attachmentReach("peer-a", twoChunks, covered.copy(maxAttachBytes = budget, maxUploadBytes = budget)),
         )
     }
 
@@ -249,7 +283,7 @@ class RelayReachTest {
         val budget = ScopeCrypto.SEALED_CHUNK_BYTES * 2
         assertEquals(
             AttachmentRelay.TooLarge,
-            attachmentReach("peer-a", twoChunksPlusOne, covered.copy(maxAttachBytes = budget)),
+            attachmentReach("peer-a", twoChunksPlusOne, covered.copy(maxAttachBytes = budget, maxUploadBytes = budget)),
         )
     }
 

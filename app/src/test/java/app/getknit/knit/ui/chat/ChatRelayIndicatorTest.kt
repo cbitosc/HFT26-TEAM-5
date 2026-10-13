@@ -259,6 +259,22 @@ class ChatRelayIndicatorTest {
     }
 
     @Test
+    fun anAttachmentNoRelayTakesFromThisPhoneIsMarkedAndExplained() {
+        render(rows = listOf(row(attachmentRelay = AttachmentRelay.Locked)))
+        compose.onNodeWithText("Nearby only").assertIsDisplayed()
+        compose.onNodeWithTag("chat_relay_marker").performClick()
+        compose.onNodeWithText("Your relays are not taking files from this phone").assertIsDisplayed()
+        // The rule, both ways it locks (no ticket, or today's amount sent), the fallback, and that receiving still works.
+        compose
+            .onNodeWithText(
+                "They take attachments from phones with a ticket for sending files, up to a daily amount for each ticket. " +
+                    "This phone has none there, or has sent today's amount, so this one is not being uploaded. " +
+                    "It still arrives when you and Ana are in Wi-Fi or Bluetooth range of each other, " +
+                    "and attachments sent to you still come through your relays.",
+            ).assertIsDisplayed()
+    }
+
+    @Test
     fun theDeliveryTickIsUntouchedByAnUnrelayableAttachment() {
         // Reach and delivery are separate facts: a nearby-only photo is still "Sent".
         render(rows = listOf(row(attachmentRelay = AttachmentRelay.TooLarge)))

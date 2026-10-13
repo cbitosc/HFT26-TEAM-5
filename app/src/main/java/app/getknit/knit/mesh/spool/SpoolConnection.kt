@@ -99,6 +99,47 @@ sealed interface SpoolTicketState {
 }
 
 /**
+ * Whether this phone may upload attachments (`aput`) on a connection (C-7.6-24, knit-spool ADR 2026-10.h6pt): what the
+ * push half of the attachment plane, the chat's "Nearby only" marker and the debug bridge all read. Only bit 1 of the
+ * HELLO's `entGates` closes uploads; without it every connection is [Open], ticket or not. [word] is the bridge's
+ * spelling: `open`, `locked:<reason>`, `spent`.
+ */
+sealed interface SpoolUploads {
+    val word: String
+
+    /** The files gate is off here, or this connection holds a live accepted ticket that grants files. */
+    data object Open : SpoolUploads {
+        override val word: String get() = "open"
+    }
+
+    /**
+     * Gated, and no ticket here grants files: [MISSING] (none accepted), [EXPIRED] (the accepted one lapsed on our
+     * clock), [FLAGS] (the accepted one lacks bit 1), [PENDING] (a files ticket is on its way, unanswered) — or the
+     * word of the `err ticket` an `aput` drew here, which holds until a files ticket is next accepted.
+     */
+    data class Locked(
+        val reason: String,
+    ) : SpoolUploads {
+        override val word: String get() = "locked:$reason"
+    }
+
+    /** The ticket's pseudonym has spent its day's uploads at this relay (`err ticket` `budget`). */
+    data object Spent : SpoolUploads {
+        override val word: String get() = "spent"
+    }
+
+    companion object {
+        const val MISSING = "missing"
+        const val EXPIRED = "expired"
+        const val FLAGS = "flags"
+        const val PENDING = "pending"
+
+        /** The `aput` refusal that spends a pseudonym's day here, rather than locking the connection. */
+        const val BUDGET = "budget"
+    }
+}
+
+/**
  * What a PULL actually yielded: the blobs that arrived, the ids the spool no longer holds, and the ids
  * it answered with something unusable.
  *
@@ -256,10 +297,18 @@ class SpoolConnection(
 
     /**
      * Whether this spool takes entitlement tickets (HELLO `ent`; experimental, docs/VOICE_CALLS.md §2.6) — read after
-     * [awaitReady]. [present] sends nothing without it, and with it a `turnreq` needs an accepted ticket (S-7.6-16).
+     * [awaitReady]. [present] sends nothing without it. Which verbs need one is [gates], not this.
      */
     @Volatile
     var ent: Boolean = false
+        private set
+
+    /**
+     * The `fl` bits this connection needs a ticket for (`SpoolHello.ticketGates`, S-7.6-13), from its own HELLO and
+     * fixed for its life: bit 0 gates `turnreq`, bit 1 `aput`, bit 3 casts (C-7.6-30). 0 before [awaitReady].
+     */
+    @Volatile
+    var gates: Long = 0L
         private set
 
     /**
@@ -282,9 +331,13 @@ class SpoolConnection(
     @Volatile
     private var castBudget: CastBudget? = null
 
-    // The ticket the spool last accepted here, until its `exp` lapses on our clock or a later one replaces it.
+    // The ticket the spool last accepted here, until its `exp` lapses on our clock or a later one replaces it, and its
+    // pseudonym — what an upload here is charged to (S-7.6-22).
     @Volatile
     private var accepted: SpoolTicketState.Accepted? = null
+
+    @Volatile
+    private var acceptedPseudonym: TicketPseudonym? = null
 
     // The most recent ENT still unanswered — what a TURN ask waits on — and the word the last refusal carried.
     @Volatile
@@ -449,8 +502,9 @@ class SpoolConnection(
 
     /**
      * Whether a TURN ask here rides a ticket: an `ent` spool where the live ticket, or the one on its way, grants TURN.
-     * What C-7.6-21 asks on every call, subscribed or not; on an `ent` spool without it a `turnreq` is certain to be
-     * refused (S-7.6-16).
+     * What C-7.6-21 asks on every call, subscribed or not; where bit 0 of [gates] is set, a `turnreq` without it is
+     * certain to be refused (S-7.6-16). Where it is not, the ticket still waives the subscription gate (knit-spool ADR
+     * 2026-10.h6pt), so it counts on any `ent` spool.
      */
     val ticketedTurn: Boolean
         get() = ent && (turnTicketLive() || presenting?.ticket?.grantsTurn == true)
@@ -460,6 +514,34 @@ class SpoolConnection(
     private fun turnTicketLive(): Boolean = liveTicket()?.let { it.fl and SpoolTicket.FL_TURN != 0L } == true
 
     private fun castTicketLive(): Boolean = liveTicket()?.let { it.fl and SpoolTicket.FL_CAST != 0L } == true
+
+    private fun filesTicketLive(): Boolean = liveTicket()?.let { it.fl and SpoolTicket.FL_FILES != 0L } == true
+
+    /** Whether this connection's HELLO gates [flag] (C-7.6-30): a verb whose bit is not set needs no ticket here. */
+    fun gated(flag: Long): Boolean = gates and flag != 0L
+
+    /**
+     * Whether this connection may take this phone's uploads, as far as the connection knows (C-7.6-24): [SpoolUploads.Open]
+     * where bit 1 is not gated or the live accepted ticket grants files, else [SpoolUploads.Locked] — [SpoolUploads.PENDING]
+     * while a files ticket is unanswered, because the spool judges an `aput` after the `ent` sent before it, and the
+     * answer may be a refusal. A spent budget and a refused `aput` are `ScopeSync`'s to add: they outlive or narrow
+     * what this connection holds.
+     */
+    fun uploads(): SpoolUploads {
+        if (!gated(SpoolTicket.FL_FILES) || filesTicketLive()) return SpoolUploads.Open
+        if (presenting?.ticket?.grantsFiles == true) return SpoolUploads.Locked(SpoolUploads.PENDING)
+        val held = accepted
+        val reason =
+            when {
+                held == null -> SpoolUploads.MISSING
+                clock() / MS_PER_S > held.exp -> SpoolUploads.EXPIRED
+                else -> SpoolUploads.FLAGS
+            }
+        return SpoolUploads.Locked(reason)
+    }
+
+    /** The pseudonym an upload here is charged to: the live accepted ticket's, while it grants files; else null. */
+    fun uploadPseudonym(): TicketPseudonym? = acceptedPseudonym?.takeIf { filesTicketLive() }
 
     /**
      * Whether this phone's own ticket unlocks casts here: an `ent` spool where the live ticket, or the one on its way,
@@ -471,13 +553,13 @@ class SpoolConnection(
 
     /**
      * Whether a cast for [scopeHex] would leave here at all, short of the budget and the queue: casts advertised, the
-     * hello done, the scope subscribed, and on an `ent` spool a cast ticket held here or by the peer ([peerTicketed],
-     * from its walkie signal). The spool makes the real ticket decision; this only spares it casts it would drop.
+     * hello done, the scope subscribed, and where bit 3 of [gates] is set a cast ticket held here or by the peer
+     * ([peerTicketed], from its walkie signal). The spool makes the real ticket decision; this only spares it casts it would drop.
      */
     fun canCast(
         scopeHex: String,
         peerTicketed: Boolean,
-    ): Boolean = cast != null && isReady && isSubscribed(scopeHex) && (!ent || ticketedCast || peerTicketed)
+    ): Boolean = cast != null && isReady && isSubscribed(scopeHex) && (!gated(SpoolTicket.FL_CAST) || ticketedCast || peerTicketed)
 
     /**
      * Sends one cast (experimental, docs/VOICE_CALLS.md §2.7): no `q`, no [pending] entry, no answer awaited, no strike.
@@ -502,15 +584,16 @@ class SpoolConnection(
      * never advertised `turn` (C-7.6-3) and when it stays silent past [timeoutMs]. A call is waiting on the answer, so
      * the wait is short and a silence is no strike against the connection: the sync plane's requests own that counter.
      *
-     * On an `ent` spool (S-7.6-16) it first waits, inside the same [timeoutMs], for a ticket still on its way, and asks
-     * nothing unless the live one grants TURN: a `turnreq` without one is certain to be refused, and spends the
-     * spool's per-IP bucket that a ticketed ask from the same address may need (ADR 2026-10.xkp4).
+     * Where bit 0 of [gates] is set (S-7.6-16) it first waits, inside the same [timeoutMs], for a ticket still on its
+     * way, and asks nothing unless the live one grants TURN: a `turnreq` without one is certain to be refused, and
+     * spends the spool's per-IP bucket that a ticketed ask from the same address may need (ADR 2026-10.xkp4). An `ent`
+     * spool that leaves bit 0 out is asked like an unticketed one (C-7.6-30).
      */
     suspend fun turnCredential(timeoutMs: Long): SpoolReply {
         if (!turn) return SpoolReply.Closed
         val reply =
             withTimeoutOrNull(timeoutMs) {
-                if (ent) {
+                if (gated(SpoolTicket.FL_TURN)) {
                     // A live ticket that grants TURN is enough; only without one is a newer `ent` worth waiting for.
                     if (!turnTicketLive()) presenting?.reply?.await()
                     if (!turnTicketLive()) return@withTimeoutOrNull SpoolReply.Closed
@@ -521,7 +604,10 @@ class SpoolConnection(
             } ?: SpoolReply.Closed
         // The spool holds no live ticket for us, whatever our clock says: asking again before a new `ent` is accepted
         // would only be refused again.
-        if (reply is SpoolReply.Failed && reply.code == SpoolErrCode.TICKET) accepted = null
+        if (reply is SpoolReply.Failed && reply.code == SpoolErrCode.TICKET) {
+            accepted = null
+            acceptedPseudonym = null
+        }
         // An `ok` completes whatever `q` it names, so anything but a credential is a failure here.
         return if (reply is SpoolReply.Turn || reply is SpoolReply.Failed) reply else SpoolReply.Closed
     }
@@ -631,6 +717,7 @@ class SpoolConnection(
         commons = hello.commons?.clamped(limits)
         turn = hello.turn == true
         ent = hello.ent == true
+        gates = hello.ticketGates
         // A hostile list is bounded here, before anything holds it: four URLs a call can actually use, or none.
         stun = StunServers.pick(hello.stun.orEmpty())
         cast = hello.cast?.clamped(limits)
@@ -744,6 +831,7 @@ class SpoolConnection(
         if (ticket != null) {
             settleTicket(entry) {
                 accepted = SpoolTicketState.Accepted(exp = ticket.claims.exp, fl = ticket.claims.fl)
+                acceptedPseudonym = ticket.pseudonym
                 refusal = null
             }
         }
@@ -773,6 +861,9 @@ class SpoolConnection(
             if (ticket != null) onTicketAnswer(ticket, reply)
             return
         }
+        // A ticket refusal whose request is gone (it timed out; an `aput`'s carries its `q` and `scope`) answers no
+        // SUB: a SUB is never refused `ticket`, so reading it as one would drop a subscribed scope for nothing.
+        if (err.code == SpoolErrCode.TICKET) return
         // No correlation: a scoped SUB refusal (pow/quota) or a connection-scoped fault. A refused
         // scope is not subscribed, whatever we optimistically recorded when the SUB went out.
         val scopeHex = err.scope?.let(::hex)

@@ -19,6 +19,7 @@ import app.getknit.knit.mesh.spool.SpoolTicket
 import app.getknit.knit.mesh.spool.SpoolTicketJournal
 import app.getknit.knit.mesh.spool.SpoolTicketState
 import app.getknit.knit.mesh.spool.SpoolTicketsTest
+import app.getknit.knit.mesh.spool.SpoolUploads
 import app.getknit.knit.mesh.spool.StoredSpoolTicket
 import app.getknit.knit.mesh.spool.TicketKeyJournal
 import app.getknit.knit.net.InternetGate
@@ -348,6 +349,31 @@ class InternetRelayViewModelTest {
             relayTicket(SpoolTicketState.None, StoredSpoolTicket(held, null), 1_800_090_000_000L),
         )
         assertEquals(RelayTicket.Presenting, relayTicket(SpoolTicketState.None, StoredSpoolTicket(held, "retry:early"), now))
+    }
+
+    @Test
+    fun aFilesTicketListsFilesAndASpentDayGetsItsOwnLine() {
+        val now = 1_800_000_000_000L
+        assertEquals(
+            RelayTicket.Live(1_800_086_400L, turn = true, walkie = true, files = true),
+            relayTicket(SpoolTicketState.Accepted(1_800_086_400L, 11L), null, now),
+        )
+
+        fun status(uploads: SpoolUploads) =
+            SpoolStatus(
+                url = OTHER,
+                connected = true,
+                powBits = 0,
+                lastError = null,
+                scopes = emptyList(),
+                ent = true,
+                entGates = 11L,
+                ticket = SpoolTicketState.Accepted(1_800_086_400L, 11L),
+                uploads = uploads,
+            )
+        assertTrue(relayCalls(status(SpoolUploads.Spent), null, now)!!.uploadsSpent)
+        assertFalse(relayCalls(status(SpoolUploads.Open), null, now)!!.uploadsSpent)
+        assertFalse(relayCalls(status(SpoolUploads.Locked(SpoolUploads.MISSING)), null, now)!!.uploadsSpent)
     }
 
     @Test

@@ -308,6 +308,7 @@ class MeshMetrics {
     private val spoolAttachPulled = AtomicLong()
     private val spoolAttachDeferred = AtomicLong()
     private val spoolAttachRefused = AtomicLong()
+    private val spoolAttachLocked = AtomicLong()
     private val loraSent = AtomicLong()
     private val loraFragSent = AtomicLong()
     private val loraTranscoded = AtomicLong()
@@ -929,6 +930,15 @@ class MeshMetrics {
     }
 
     /**
+     * An attachment of ours was settled without asking a spool because that connection takes none of this phone's
+     * uploads (C-7.6-24: a files gate and no files ticket here, or the ticket's day spent). Counted for the same
+     * reason as a deferral: a locked upload and a broken one look alike otherwise.
+     */
+    fun onSpoolAttachmentLocked() {
+        spoolAttachLocked.incrementAndGet()
+    }
+
+    /**
      * A spool attachment this device's own screening refused (bytes dropped, verdict kept) was not fetched
      * again (#109). Counted for the same reason as a deferral: a skip and a stuck fetch look alike otherwise.
      */
@@ -1379,6 +1389,7 @@ class MeshMetrics {
             spoolAttachPulled = spoolAttachPulled.get(),
             spoolAttachDeferred = spoolAttachDeferred.get(),
             spoolAttachRefused = spoolAttachRefused.get(),
+            spoolAttachLocked = spoolAttachLocked.get(),
         )
 
     /** The [Snapshot.Lora] counters alone, read now. */
@@ -1628,6 +1639,7 @@ class MeshMetrics {
             val spoolAttachPulled: Long = 0,
             val spoolAttachDeferred: Long = 0,
             val spoolAttachRefused: Long = 0,
+            val spoolAttachLocked: Long = 0,
         )
 
         /** The LoRa plane. */

@@ -20,9 +20,17 @@ class HeldTicket private constructor(
     val tk: ByteArray,
     val sig: ByteArray,
     val claims: SpoolTicket,
+    /**
+     * The holder's pseudonym for the day (`ps`), what a spool charges uploads to (S-7.6-22): the key of the spent mark
+     * `ScopeSync` keeps after a `budget` refusal. Null when `tk` carries none, which a spool would refuse anyway.
+     */
+    val pseudonym: TicketPseudonym?,
 ) {
     /** Whether bit 0 of `fl` lets this ticket ask for TURN. */
     val grantsTurn: Boolean get() = claims.fl and SpoolTicket.FL_TURN != 0L
+
+    /** Whether bit 1 of `fl` lets this ticket upload attachments on its own connection, within its day's budget. */
+    val grantsFiles: Boolean get() = claims.fl and SpoolTicket.FL_FILES != 0L
 
     /** Whether bit 3 of `fl` lets this ticket cast, and unlock casts on its connection's scopes. */
     val grantsCast: Boolean get() = claims.fl and SpoolTicket.FL_CAST != 0L
@@ -52,7 +60,8 @@ class HeldTicket private constructor(
             val parsed = SpoolCodec.decode<TicketText>(body) ?: return null
             if (parsed.tk.size > MAX_TK_BYTES || parsed.sig.size != SIG_BYTES) return null
             val claims = SpoolCodec.decode<SpoolTicket>(parsed.tk)?.takeIf(::wellFormed) ?: return null
-            return HeldTicket(trimmed, parsed.tk, parsed.sig, claims)
+            val pseudonym = SpoolCodec.decode<TicketPs>(parsed.tk)?.ps?.let(::TicketPseudonym)
+            return HeldTicket(trimmed, parsed.tk, parsed.sig, claims, pseudonym)
         }
 
         // The spool checks more (key id, window length, pseudonym size); a client only needs claims it can act on.
@@ -66,6 +75,27 @@ private class TicketText(
     val tk: ByteArray,
     val sig: ByteArray,
 )
+
+// The one claim [SpoolTicket] leaves out on purpose, read apart so the claims never carry it.
+@Serializable
+private class TicketPs(
+    val ps: ByteArray? = null,
+)
+
+/**
+ * A ticket's daily pseudonym (`ps`), opaque: equal by its bytes, so it can key a map, and never printed. It names the
+ * holder to the spool that issued for it for a day, so it stays out of every log line, status, bridge reply and
+ * rendering, like the ticket it came from (ADR 2026-10.xkp4). Nothing outside this file reads the bytes.
+ */
+class TicketPseudonym(
+    private val bytes: ByteArray,
+) {
+    override fun equals(other: Any?): Boolean = other is TicketPseudonym && bytes.contentEquals(other.bytes)
+
+    override fun hashCode(): Int = bytes.contentHashCode()
+
+    override fun toString(): String = "TicketPseudonym(…)"
+}
 
 /**
  * What a client does with a ticket once a spool has answered it (C-7.6-19: never retry a refused ticket on every
@@ -184,10 +214,12 @@ class SpoolTickets(
         ) : Import
     }
 
-    /** What the oracle shows of a held ticket: its claims and verdict, never its bytes. */
+    /** What the oracle shows of a held ticket: its claims and verdict, never its bytes or its pseudonym. */
     class View(
         val exp: Long,
         val grantsTurn: Boolean,
+        val grantsFiles: Boolean,
+        val grantsCast: Boolean,
         val verdict: String?,
     )
 
@@ -247,7 +279,7 @@ class SpoolTickets(
         val host = SpoolUrl.hostname(url) ?: return null
         val stored = journal.spoolTickets.first()[host] ?: return null
         val ticket = HeldTicket.parse(stored.text) ?: return null
-        return View(exp = ticket.claims.exp, grantsTurn = ticket.grantsTurn, verdict = stored.verdict)
+        return View(ticket.claims.exp, ticket.grantsTurn, ticket.grantsFiles, ticket.grantsCast, stored.verdict)
     }
 
     private companion object {

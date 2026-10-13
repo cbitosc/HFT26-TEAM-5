@@ -4,6 +4,7 @@ import app.getknit.knit.BuildConfig
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.mesh.MeshController
 import app.getknit.knit.mesh.spool.SpoolStatus
+import app.getknit.knit.mesh.spool.SpoolUploads
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
@@ -74,6 +75,8 @@ class RelayStatusRepository(
                 coveredLabels = coveredLabelsOf(live),
                 // The union rule (§9.1): one relay willing to carry the bytes is enough.
                 maxAttachBytes = live.mapNotNull { it.maxAttachBytes }.maxOrNull(),
+                // And for sending, one relay that takes this phone's uploads (C-7.6-24).
+                maxUploadBytes = live.filter { it.uploads == SpoolUploads.Open }.mapNotNull { it.maxAttachBytes }.maxOrNull(),
             )
         }.distinctUntilChanged()
 

@@ -17,6 +17,7 @@ import app.getknit.knit.mesh.protocol.RelayEnvelope
 import app.getknit.knit.mesh.protocol.WireCodec
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ReceiveChannel
+import kotlinx.serialization.Serializable
 import java.security.MessageDigest
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
@@ -71,8 +72,14 @@ class FakeSpool(
     // connection holding a SUB is answered. false = an older spool, which skips a TURNREQ unanswered.
     private val turn: Boolean = false,
     // Takes entitlement tickets (experimental, docs/VOICE_CALLS.md §2.6): HELLO carries `ent`, an ENT is answered by
-    // [entAnswer], and a TURNREQ needs an accepted ticket with the TURN flag instead of a SUB (S-7.6-16).
+    // [entAnswer], and each verb [entGates] names needs an accepted ticket with its flag (S-7.6-16, S-7.6-22, S-7.7-6).
     private val ent: Boolean = false,
+    // The `entGates` HELLO carries beside `ent` (knit-spool ADR 2026-10.h6pt); null omits it, which a client reads as 9
+    // (TURN and cast), the gates a key turned on before the field existed. Never sent without [ent].
+    private val entGates: Long? = null,
+    // The daemon's `SPOOL_TICKET_ATTACH_BYTES`: a pseudonym's upload budget for its day under the files gate, capped
+    // further by its ticket's `ab`.
+    private val ticketAttachBytes: Long = 134_217_728L,
     // The credential-free STUN list HELLO advertises; null omits the field.
     private val stun: List<String>? = null,
     // Fans out casts (experimental, docs/VOICE_CALLS.md §2.7): HELLO carries these bounds, and a CAST from a subscriber
@@ -203,6 +210,7 @@ class FakeSpool(
                     ent = true.takeIf { ent },
                     stun = stun,
                     cast = cast,
+                    entGates = entGates.takeIf { ent },
                 ),
             ),
         )
@@ -351,6 +359,33 @@ class FakeSpool(
     @Volatile
     var entAnswer: (SpoolEnt) -> String? = { null }
 
+    /** While true, an ENT is recorded and its answer held until [releaseEnts] — a spool slow to judge a ticket. */
+    @Volatile
+    var holdEnts = false
+
+    private val heldEnts = mutableListOf<() -> Unit>()
+
+    /** Answers every ENT held by [holdEnts], in order. */
+    fun releaseEnts() {
+        val held = synchronized(this) { heldEnts.toList().also { heldEnts.clear() } }
+        held.forEach { it() }
+    }
+
+    /** Every APUT this spool was sent, stored or refused, as "aidHex:index" — proves a client never tried. */
+    val aputs: MutableList<String> = Collections.synchronizedList(mutableListOf())
+
+    /** The `msg` of every `err ticket` an APUT got under the files gate. */
+    val aputRefusals: MutableList<String> = Collections.synchronizedList(mutableListOf())
+
+    // Pseudonym hex → bytes charged today: the daemon's `UploadBudgets`, memory only like its own.
+    private val uploadBudgets = ConcurrentHashMap<String, Long>()
+
+    /** What the pseudonym in [ticket] has been charged for its stored chunks, or 0. */
+    fun uploadCharged(ticket: HeldTicket): Long = uploadBudgets[psHex(ticket.tk)] ?: 0L
+
+    // The `fl` bits a connection told this HELLO needs a ticket for — the daemon's `Hello.ticketGates`.
+    private val gates: Long get() = if (ent) entGates ?: SpoolTicket.LEGACY_GATES else 0L
+
     /** How many chunks the spool holds for [aidHex] — the simplest "did the upload land" assertion. */
     fun chunkCount(
         scopeHex: String,
@@ -426,8 +461,15 @@ class FakeSpool(
         private val channel = Channel<ByteArray>(Channel.UNLIMITED)
         private val subscribed = mutableSetOf<String>()
 
-        // The claims an accepted ENT bound to this connection (S-7.6-15); a refused one leaves them in place.
+        // The claims an accepted ENT bound to this connection (S-7.6-15), and its pseudonym's hex; a refused one leaves
+        // them in place.
         private var ticket: SpoolTicket? = null
+        private var ticketPs: String? = null
+
+        // The gates this connection's HELLO named, snapshotted at the dial as the daemon snapshots them.
+        private val connGates = gates
+
+        private fun gated(flag: Long): Boolean = connGates and flag != 0L
 
         @Volatile
         private var open = true
@@ -644,18 +686,27 @@ class FakeSpool(
 
         private fun onEnt(record: SpoolEnt) {
             ents.add(record)
+            if (holdEnts) {
+                heldEnts.add { synchronized(this@FakeSpool) { answerEnt(record) } }
+                return
+            }
+            answerEnt(record)
+        }
+
+        private fun answerEnt(record: SpoolEnt) {
             val word = entAnswer(record)
             if (word != null) {
                 emit(SpoolCodec.encode(SpoolErr(t = SpoolRecordType.ERR, code = SpoolErrCode.TICKET, q = record.q, msg = word)))
                 return
             }
             ticket = SpoolCodec.decode<SpoolTicket>(record.tk)
+            ticketPs = psHex(record.tk)
             emit(SpoolCodec.encode(SpoolOk(t = SpoolRecordType.OK, q = record.q)))
         }
 
         private fun onTurnReq(req: SpoolTurnReq) {
-            if (ent) {
-                val held = ticket
+            val held = ticket
+            if (gated(SpoolTicket.FL_TURN)) {
                 val refusal =
                     when {
                         held == null -> "missing"
@@ -667,8 +718,9 @@ class FakeSpool(
                     emit(SpoolCodec.encode(SpoolErr(t = SpoolRecordType.ERR, code = SpoolErrCode.TICKET, q = req.q, msg = refusal)))
                     return
                 }
-                turnIssuedTicketed++
             }
+            // A TURN ticket rides the issue whether or not `turn` is gated (h6pt: it still waives the subscription gate).
+            if (held != null && held.fl and SpoolTicket.FL_TURN != 0L) turnIssuedTicketed++
             turnIssued++
             emit(
                 SpoolCodec.encode(
@@ -695,7 +747,7 @@ class FakeSpool(
             val bounds = cast ?: return
             if (scopeHex !in subscribed || record.data.size > bounds.maxBytes) return
             val others = synchronized(sockets) { sockets.toList() }.filter { scopeHex in it.subscribed }
-            if (ent && others.none { (it.ticket?.fl ?: 0L) and SpoolTicket.FL_CAST != 0L }) return
+            if (gated(SpoolTicket.FL_CAST) && others.none { (it.ticket?.fl ?: 0L) and SpoolTicket.FL_CAST != 0L }) return
             val relayed = SpoolCodec.encode(SpoolCast(t = SpoolRecordType.CAST, scope = record.scope, data = record.data))
             others.filterNot { it === this }.forEach {
                 it.emit(relayed)
@@ -754,8 +806,50 @@ class FakeSpool(
             emit(SpoolCodec.encode(SpoolOk(t = SpoolRecordType.OK, q = aget.q)))
         }
 
-        @Suppress("ReturnCount") // one guard per §6.5 rejection reason
+        /**
+         * The daemon's `filesAdmitted` (S-7.6-22): where `files` is gated, only this connection's own live files ticket
+         * admits an upload, while its pseudonym has room for the chunk's charge. A refusal is `err ticket` with the
+         * record's `q` and `scope`, recorded, and stores nothing. Returns the pseudonym to charge, or null to stop.
+         */
+        private fun filesAdmitted(aput: SpoolAput): String? {
+            if (!gated(SpoolTicket.FL_FILES)) return ""
+            val held = ticket
+            val ps = ticketPs
+            val reason =
+                when {
+                    held == null || ps == null -> "missing"
+
+                    held.fl and SpoolTicket.FL_FILES == 0L -> "flags"
+
+                    (uploadBudgets[ps] ?: 0L) +
+                        chunkCharge(
+                            aput.data.size,
+                        ) > minOf(held.ab ?: ticketAttachBytes, ticketAttachBytes) -> "budget"
+
+                    else -> return ps
+                }
+            aputRefusals.add(reason)
+            emit(
+                SpoolCodec.encode(
+                    SpoolErr(t = SpoolRecordType.ERR, code = SpoolErrCode.TICKET, q = aput.q, scope = aput.scope, msg = reason),
+                ),
+            )
+            return null
+        }
+
+        @Suppress("ReturnCount", "CyclomaticComplexMethod", "LongMethod") // one guard per §6.5 rejection reason
         private fun onAput(aput: SpoolAput) {
+            aputs.add("${hex(aput.aid)}:${aput.idx}")
+            // The daemon's order: `not_subscribed` before the files gate, the gate before PoW and the store.
+            if (hex(aput.scope) !in subscribed) {
+                emit(
+                    SpoolCodec.encode(
+                        SpoolErr(t = SpoolRecordType.ERR, code = SpoolErrCode.NOT_SUBSCRIBED, q = aput.q, scope = aput.scope),
+                    ),
+                )
+                return
+            }
+            val payer = filesAdmitted(aput) ?: return
             if (powRefused(aput.scope, aput.pow)) {
                 emit(SpoolCodec.encode(SpoolErr(t = SpoolRecordType.ERR, code = SpoolErrCode.POW, q = aput.q, scope = aput.scope)))
                 return
@@ -785,7 +879,8 @@ class FakeSpool(
                 return
             }
             val held = state.attachments.getOrPut(aidHex) { Attachment(aput.total, state.attachments.size) }
-            if (held.chunks.put(aput.idx, aput.data) == null) chunksPut.add("$aidHex:${aput.idx}")
+            val fresh = held.chunks.put(aput.idx, aput.data) == null
+            if (fresh) chunksPut.add("$aidHex:${aput.idx}")
             held.cids[aput.idx] = cidHex
             // Whole-attachment, oldest-first eviction once the scope's byte budget is exceeded (§6.5).
             while (state.attachments.values.sumOf { it.bytes } > maxAttachBytes) {
@@ -801,12 +896,25 @@ class FakeSpool(
                 state.attachments.remove(victim.key)
                 state.attachTombstones.add(victim.key)
             }
+            // Charged only once held: a duplicate or a refused chunk costs its uploader nothing.
+            if (fresh && payer.isNotEmpty()) uploadBudgets.merge(payer, chunkCharge(aput.data.size), Long::plus)
             emit(SpoolCodec.encode(SpoolOk(t = SpoolRecordType.OK, q = aput.q)))
         }
 
         private fun digestFor(scope: ByteArray): SpoolDigest = digestRecord(scope)
     }
 }
+
+// knit-spool `ScopeStore.chunkCharge`: a chunk costs at least 512 bytes of budget.
+private fun chunkCharge(size: Int): Long = maxOf(size, 512).toLong()
+
+// The one claim the client's `SpoolTicket` leaves out, read here as the daemon keys its budgets.
+@Serializable
+private class FakeTicketPs(
+    val ps: ByteArray? = null,
+)
+
+private fun psHex(tk: ByteArray): String? = SpoolCodec.decode<FakeTicketPs>(tk)?.ps?.let(::hex)
 
 /** Parses the lowercase-hex display form back to bytes. Test-side inverse of [hex]. */
 fun unhex(value: String): ByteArray = ByteArray(value.length / 2) { value.substring(it * 2, it * 2 + 2).toInt(16).toByte() }

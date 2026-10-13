@@ -219,6 +219,7 @@ import app.getknit.knit.data.relay.AttachmentRelay
 import app.getknit.knit.data.relay.AttachmentWait
 import app.getknit.knit.data.relay.RelayReach
 import app.getknit.knit.data.relay.dismissable
+import app.getknit.knit.data.relay.marksNearbyOnly
 import app.getknit.knit.data.video.VideoAttachment
 import app.getknit.knit.demo.DemoComposeCommand
 import app.getknit.knit.demo.DemoComposer
@@ -1656,10 +1657,10 @@ internal fun ChatScreenContent(
             title = {
                 Text(
                     stringResource(
-                        if (cause == AttachmentRelay.Unsupported) {
-                            R.string.chat_relay_unsupported_title
-                        } else {
-                            R.string.chat_relay_too_large_title
+                        when (cause) {
+                            AttachmentRelay.Unsupported -> R.string.chat_relay_unsupported_title
+                            AttachmentRelay.Locked -> R.string.chat_relay_locked_title
+                            else -> R.string.chat_relay_too_large_title
                         },
                     ),
                 )
@@ -1667,10 +1668,10 @@ internal fun ChatScreenContent(
             text = {
                 Text(
                     stringResource(
-                        if (cause == AttachmentRelay.Unsupported) {
-                            R.string.chat_relay_unsupported_body
-                        } else {
-                            R.string.chat_relay_too_large_body
+                        when (cause) {
+                            AttachmentRelay.Unsupported -> R.string.chat_relay_unsupported_body
+                            AttachmentRelay.Locked -> R.string.chat_relay_locked_body
+                            else -> R.string.chat_relay_too_large_body
                         },
                         other,
                     ),
@@ -2528,9 +2529,7 @@ private fun MessageBubble(
                         // Reach, not delivery — kept on its own line above the tick so the two facts stay
                         // visually separate. This says the photo will not take the Internet shortcut; the
                         // tick below still reports whether the message itself got there.
-                        if (row.attachmentRelay == AttachmentRelay.TooLarge ||
-                            row.attachmentRelay == AttachmentRelay.Unsupported
-                        ) {
+                        if (row.attachmentRelay.marksNearbyOnly()) {
                             NearbyOnlyMarker(onClick = { onExplainRelay(row.attachmentRelay) })
                         }
                         Row(
@@ -4763,6 +4762,7 @@ private fun AttachmentPreview(
         when (relay) {
             AttachmentRelay.TooLarge -> R.string.chat_relay_staged_too_large
             AttachmentRelay.Unsupported -> R.string.chat_relay_staged_unsupported
+            AttachmentRelay.Locked -> R.string.chat_relay_staged_locked
             AttachmentRelay.Silent, AttachmentRelay.Relayable -> null
         }
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -4908,6 +4908,35 @@ fun MessageBubbleMinePreview() =
                     avatarHash = null,
                     sentAt = PREVIEW_NOW - 2 * 60_000L,
                     received = true,
+                ),
+            now = PREVIEW_NOW,
+            showSenderName = false,
+            onImageClick = {},
+            onOpenProfile = {},
+            onReact = { _, _ -> },
+            onDelete = {},
+            onBlock = {},
+            onCopy = {},
+        )
+    }
+
+/** A sent file no relay takes from this phone (C-7.6-24): the "Nearby only" marker above the tick. */
+@Preview(showBackground = true)
+@Composable
+fun MessageBubbleNearbyOnlyLockedPreview() =
+    KnitPreview {
+        MessageBubble(
+            row =
+                ChatRow(
+                    id = "m3",
+                    body = "The map for Saturday",
+                    mine = true,
+                    senderName = "You",
+                    senderNodeId = "node-self",
+                    avatarHash = null,
+                    sentAt = PREVIEW_NOW - 60_000L,
+                    received = false,
+                    attachmentRelay = AttachmentRelay.Locked,
                 ),
             now = PREVIEW_NOW,
             showSenderName = false,
@@ -5135,6 +5164,25 @@ fun MessageInputPreview() =
         MessageInput(
             state = rememberTextFieldState("See you at 8"),
             pendingAttachment = null,
+            candidates = emptyList(),
+            onMentionAdded = {},
+            onAttachClick = {},
+            onClearAttachment = {},
+            onReceiveImage = {},
+            onSend = {},
+        )
+    }
+
+/** A file staged while no relay takes this phone's uploads (C-7.6-24): the composer's "Nearby only" caption. */
+@Preview(showBackground = true)
+@Composable
+fun MessageInputStagedLockedPreview() =
+    KnitPreview {
+        MessageInput(
+            state = rememberTextFieldState("The map for Saturday"),
+            pendingAttachment =
+                AttachmentStore.Ingested(hash = "h-map", mime = "application/pdf", name = "trail-map.pdf", sizeBytes = 2_400_000),
+            stagedAttachmentRelay = AttachmentRelay.Locked,
             candidates = emptyList(),
             onMentionAdded = {},
             onAttachClick = {},

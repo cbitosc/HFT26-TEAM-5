@@ -96,6 +96,7 @@ import app.getknit.knit.mesh.spool.HeldKey
 import app.getknit.knit.mesh.spool.IssuerOrigin
 import app.getknit.knit.mesh.spool.KeyState
 import app.getknit.knit.mesh.spool.SpoolStatus
+import app.getknit.knit.mesh.spool.SpoolTicket
 import app.getknit.knit.mesh.spool.SpoolTicketState
 import app.getknit.knit.mesh.spool.SpoolTickets
 import app.getknit.knit.mesh.spool.SpoolUrl
@@ -1678,7 +1679,12 @@ class DebugBridgeReceiver :
                         "cast",
                         spool.cast?.let { JSONObject().put("maxBytes", it.maxBytes).put("rate", it.rate) } ?: JSONObject.NULL,
                     ).put("ticket", ticketJson(tickets, spool))
-                    .put("ticketKey", ticketKeyJson(tickets, spool.url)),
+                    .put("ticketKey", ticketKeyJson(tickets, spool.url))
+                    // The `fl` bits this connection's hello gates behind a ticket (`ent` with no `entGates` reads 9;
+                    // no `ent`, 0), and whether it takes this phone's uploads (C-7.6-24): `open`,
+                    // `locked:<missing|expired|flags|pending>` or `spent`. Facts about the live connection.
+                    .put("entGates", spool.entGates)
+                    .put("uploads", spool.uploads.word),
             )
         }
         return JSONObject()
@@ -1783,6 +1789,8 @@ class DebugBridgeReceiver :
     ): JSONObject {
         val held = tickets.view(spool.url)
         val state = spool.ticket
+        // The grants, from the accepted claims' `fl` when the connection has them, else from the held ticket's.
+        val fl = (state as? SpoolTicketState.Accepted)?.fl
         return JSONObject()
             .put(
                 "state",
@@ -1793,7 +1801,9 @@ class DebugBridgeReceiver :
                     is SpoolTicketState.Refused -> "refused"
                 },
             ).put("exp", (state as? SpoolTicketState.Accepted)?.exp ?: held?.exp ?: JSONObject.NULL)
-            .put("turn", (state as? SpoolTicketState.Accepted)?.let { it.fl and 1L != 0L } ?: held?.grantsTurn ?: JSONObject.NULL)
+            .put("turn", fl?.let { it and SpoolTicket.FL_TURN != 0L } ?: held?.grantsTurn ?: JSONObject.NULL)
+            .put("files", fl?.let { it and SpoolTicket.FL_FILES != 0L } ?: held?.grantsFiles ?: JSONObject.NULL)
+            .put("cast", fl?.let { it and SpoolTicket.FL_CAST != 0L } ?: held?.grantsCast ?: JSONObject.NULL)
             .put("reason", (state as? SpoolTicketState.Refused)?.reason ?: JSONObject.NULL)
             // The store's side: whether a ticket is held for this host at all, and the verdict its last answer left
             // (`retry:early`, or the refusal word that keeps it from ever going out again).

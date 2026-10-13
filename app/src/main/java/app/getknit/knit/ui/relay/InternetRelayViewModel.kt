@@ -20,6 +20,7 @@ import app.getknit.knit.mesh.spool.SpoolTicket
 import app.getknit.knit.mesh.spool.SpoolTicketJournal
 import app.getknit.knit.mesh.spool.SpoolTicketPolicy
 import app.getknit.knit.mesh.spool.SpoolTicketState
+import app.getknit.knit.mesh.spool.SpoolUploads
 import app.getknit.knit.mesh.spool.SpoolUrl
 import app.getknit.knit.mesh.spool.StoredSpoolTicket
 import app.getknit.knit.mesh.spool.TicketKeyJournal
@@ -79,13 +80,16 @@ data class RelayCommons(
  * What a relay offers calls (experimental, docs/VOICE_CALLS.md §2), as its HELLO said on the live connection:
  * TURN credentials ([turn], §2.1), credential-free STUN servers ([stunServers], C-7.6-20, counted after the client's
  * URL rule), casts for a walkie's bursts ([walkie], §2.7), and — only on a relay that takes tickets (`ent`, §2.6) —
- * where this phone stands with one there ([ticket]; null on a relay that takes none).
+ * where this phone stands with one there ([ticket]; null on a relay that takes none). [uploadsSpent] says the
+ * ticket's pseudonym has sent its day's uploads there (`err ticket` `budget`, C-7.6-24), which the chat's marker shows
+ * only as the one "not taking your files" case.
  */
 data class RelayCalls(
     val turn: Boolean,
     val stunServers: Int,
     val walkie: Boolean,
     val ticket: RelayTicket?,
+    val uploadsSpent: Boolean = false,
 )
 
 /**
@@ -99,11 +103,12 @@ sealed interface RelayTicket {
     /** One is on its way to the relay, or held and about to go. */
     data object Presenting : RelayTicket
 
-    /** The relay accepted a ticket good until [exp] (Unix seconds), granting TURN and casts as its flags say. */
+    /** The relay accepted a ticket good until [exp] (Unix seconds), granting TURN, casts and uploads as its flags say. */
     data class Live(
         val exp: Long,
         val turn: Boolean,
         val walkie: Boolean,
+        val files: Boolean = false,
     ) : RelayTicket
 
     /** The relay refused the ticket with [reason], its `err ticket` word. */
@@ -455,6 +460,7 @@ internal fun relayCalls(
         stunServers = status.stun.size,
         walkie = status.cast != null,
         ticket = if (status.ent) relayTicket(status.ticket, stored, now) else null,
+        uploadsSpent = status.uploads == SpoolUploads.Spent,
     )
 }
 
@@ -466,7 +472,12 @@ internal fun relayTicket(
 ): RelayTicket =
     when (live) {
         is SpoolTicketState.Accepted -> {
-            RelayTicket.Live(live.exp, turn = live.fl and SpoolTicket.FL_TURN != 0L, walkie = live.fl and SpoolTicket.FL_CAST != 0L)
+            RelayTicket.Live(
+                live.exp,
+                turn = live.fl and SpoolTicket.FL_TURN != 0L,
+                walkie = live.fl and SpoolTicket.FL_CAST != 0L,
+                files = live.fl and SpoolTicket.FL_FILES != 0L,
+            )
         }
 
         SpoolTicketState.Pending -> {

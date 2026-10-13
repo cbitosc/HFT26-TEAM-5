@@ -70,9 +70,12 @@ object SpoolErrCode {
     const val CONFLICT = "conflict"
 
     /**
-     * An `ent` the spool will not accept, or a `turnreq` on an `ent` spool without a live ticket that grants TURN
-     * (experimental, docs/VOICE_CALLS.md §2.6). `msg` carries one word: `malformed`, `key`, `signature`, `audience`,
-     * `early` or `expired` for an `ent`; `missing`, `expired` or `flags` for a `turnreq`. Never a strike.
+     * An `ent` the spool will not accept, or a gated verb on a connection without the live ticket its gate needs
+     * (experimental, docs/VOICE_CALLS.md §2.6): a `turnreq` under bit 0 of `entGates`, an `aput` under bit 1.
+     * `msg` carries one word: `malformed`, `key`, `signature`, `audience`, `early` or `expired` for an `ent`;
+     * `missing`, `expired` or `flags` for a `turnreq`; those three or `budget` (the ticket's pseudonym has spent its
+     * day's uploads here) for an `aput`, which carries the record's `q` and `scope`. Never a strike, and never the
+     * answer to a SUB.
      */
     const val TICKET = "ticket"
 }
@@ -193,9 +196,10 @@ class ScopeSub(
  * First record in each direction. Spool→client: [v] is the highest supported version, with [min],
  * [limits], [powBits] (0 = PoW off), [commons] when the spool runs one (§7.4), and [turn] when it issues
  * TURN credentials (experimental, docs/VOICE_CALLS.md §2.1: presence is the signal, `false` is never sent).
- * [ent] says the spool takes entitlement tickets ([SpoolEnt]) and that a `turnreq` here needs one; [stun] lists up
- * to four `stun:`/`stuns:` URIs anyone may gather from with no credential (experimental, docs/VOICE_CALLS.md §2.6).
- * Both are absent when off: `false` and an empty list are never sent. [cast] says the spool fans out [SpoolCast]s
+ * [ent] says the spool takes entitlement tickets ([SpoolEnt]), and [entGates] which verbs need one, in the bits of a
+ * ticket's `fl` ([ticketGates] reads the pair); [stun] lists up to four `stun:`/`stuns:` URIs anyone may gather from
+ * with no credential (experimental, docs/VOICE_CALLS.md §2.6). All three are absent when off: `false` and an empty
+ * list are never sent. [cast] says the spool fans out [SpoolCast]s
  * within its bounds (experimental, docs/VOICE_CALLS.md §2.7), and is absent when it does not.
  * Client→spool: [v] is the chosen version, everything else omitted — a client identifies itself no further
  * than that.
@@ -212,7 +216,16 @@ class SpoolHello(
     val ent: Boolean? = null,
     val stun: List<String>? = null,
     val cast: SpoolCastInfo? = null,
-)
+    val entGates: Long? = null,
+) {
+    /**
+     * The `fl` bits this spool requires a ticket for (S-7.6-13), mirroring knit-spool's `Hello.ticketGates`: none
+     * without [ent], whatever [entGates] says, and [SpoolTicket.LEGACY_GATES] (TURN and cast) from a spool that sent
+     * [ent] but predates [entGates]. Each bit gates one verb (C-7.6-30): a bit not set needs no ticket.
+     */
+    val ticketGates: Long
+        get() = if (ent == true) entGates ?: SpoolTicket.LEGACY_GATES else 0L
+}
 
 /**
  * A spool's cast bounds (experimental, docs/VOICE_CALLS.md §2.7): [maxBytes] caps a cast's `data`, and [rate] is casts
@@ -365,10 +378,11 @@ class SpoolEnt(
 
 /**
  * The claims of a ticket's `tk`, as far as a client reads them (experimental, docs/VOICE_CALLS.md §2.6): [aud] is the
- * one spool host it is good for, [nbf] and [exp] are Unix **seconds**, and bit 0 of [fl] lets it ask for TURN. The
+ * one spool host it is good for, [nbf] and [exp] are Unix **seconds**, [fl] says which gated verbs it unlocks, and
+ * [ab], when the issuer set it, is the upload budget in bytes for the holder's day (absent: the spool's own). The
  * wire also carries `kid` and `ps`, the holder's daily pseudonym; neither is declared here, so the codec skips both
- * and a client never holds the pseudonym in a field it could log or show. Unknown keys are ignored, so later claims
- * add without a version bump.
+ * and the claims never hold the pseudonym in a field they could log or show (`HeldTicket.pseudonym` reads it apart,
+ * behind a redacted type). Unknown keys are ignored, so later claims add without a version bump.
  */
 @Serializable
 class SpoolTicket(
@@ -377,21 +391,31 @@ class SpoolTicket(
     val nbf: Long,
     val exp: Long,
     val fl: Long,
+    val ab: Long? = null,
 ) {
-    override fun toString(): String = "SpoolTicket(aud=$aud, nbf=$nbf, exp=$exp, fl=$fl)"
+    override fun toString(): String = "SpoolTicket(aud=$aud, nbf=$nbf, exp=$exp, fl=$fl, ab=$ab)"
 
     companion object {
         const val VERSION = 1
 
-        /** [fl] bit: the holder may ask for TURN credentials. */
+        /** [fl] bit 0: the holder may ask for TURN credentials. */
         const val FL_TURN = 1L
 
         /**
+         * [fl] bit 1: the holder may upload attachments (`aput`) on its own connection, within its day's budget
+         * (knit-spool ADR 2026-10.h6pt). Only the uploader's ticket counts: another member's never admits an upload.
+         */
+        const val FL_FILES = 2L
+
+        /**
          * [fl] bit 3: the holder may cast, and its connection unlocks casts on every scope it subscribes, for the
-         * scope's other members too (docs/VOICE_CALLS.md §2.7). Bits 1 and 2 are reserved for knit-spool's proposed
-         * files and scope-creation claims.
+         * scope's other members too (docs/VOICE_CALLS.md §2.7). Bit 2 is reserved for knit-spool's proposed
+         * scope-creation claim; nothing here reads or sets it.
          */
         const val FL_CAST = 8L
+
+        /** The gates a HELLO with `ent` and no `entGates` means (S-7.6-13): TURN and cast, what a key gated first. */
+        const val LEGACY_GATES = FL_TURN or FL_CAST
     }
 }
 

@@ -98,11 +98,18 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   presents an import at once; the reply's `ticketImport` names the host and `exp`, never the ticket. Each spool in
   the dump carries `ent` (its hello takes tickets), `stun` (how many STUN URIs its hello gave a call, after the
   client's URL rule), `turn` (its hello offers TURN), `cast` (its hello's `maxBytes` and `rate`, or null) and
-  `ticket`: `state` (`none`/`pending`/`accepted`/`refused`) with `exp`, `turn` and the refusal `reason` for this
-  connection, plus `held` and `verdict` for the stored ticket (`retry:early`, or the word that keeps it from going
-  out again). A free phone on an Anywhere spool reads `ent: true`, `stun: 1`,
-  `held: false`. Logcat under `ScopeSync`: `<host>: ticket presented|accepted|refused: <word>` and, per call,
-  `<host>: TURN ask (ticketed): …` or `TURN ask skipped, no ticket (ent)`.
+  `ticket`: `state` (`none`/`pending`/`accepted`/`refused`) with `exp`, the grants `turn`, `files` and `cast` (from
+  the accepted claims' `fl`, else the held ticket's) and the refusal `reason` for this connection, plus `held` and
+  `verdict` for the stored ticket (`retry:early`, or the word that keeps it from going out again). Beside it,
+  `entGates` is the `fl` bits this connection's hello gates behind a ticket (`ent` without `entGates` reads 9, no
+  `ent` 0; knit-spool ADR 2026-10.h6pt) and `uploads` whether it takes this phone's attachments (C-7.6-24): `open`,
+  `locked:<missing|expired|flags|pending>` (no files ticket accepted here, it lapsed, it lacks bit 1, or one is still
+  unanswered — or the word an `aput` drew, held until a files ticket is next accepted) or `spent` (the ticket's
+  pseudonym has sent its day's uploads here; held in memory across reconnects, cleared by a ticket with another
+  pseudonym). A free phone on an Anywhere spool reads `ent: true`, `stun: 1`, `held: false`, and on one that gates
+  files `entGates: 11`, `uploads: locked:missing`. Logcat under `ScopeSync`: `<host>: ticket presented|accepted|refused:
+  <word>`, `<host>: uploads refused: <word>` and, per call, `<host>: TURN ask (ticketed): …` or `TURN ask skipped,
+  no ticket (ent)`.
   `--es url <spoolUrl> --es issuer <https://host[:port]> --es key <kak1_…>` holds a **customer key** for that relay's
   host without an invite (ADR 2026-10.3sk7; debug builds only, where the ticket refresher runs): the refresher then
   trades it at that issuer for the host's tickets, at once and again before the held one is 6 h from `exp`, and
@@ -114,7 +121,7 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   `unknown-key`) — never the key or the ticket. Logcat under `ScopeSync`: `<host>: ticket fetched from <issuer>
   (exp …)` or `<host>: ticket ask: unknown-key|ended (endsAt …)|no verdict (<reason>)`.
   The dump's `disabled` array is the parked set, and a parked URL stays in `configured` while leaving
-  `spools[]` within one 15 s `ScopeSync` reconcile tick as its worker stops (that disappearance is the
+  `spools[]` within one 60 s `ScopeSync` reconcile tick as its worker stops (that disappearance is the
   oracle that parking actually closed the socket). `drop` clears a parked flag too, so a re-added URL
   comes back in use. Debug builds accept plain `ws://` (a `knit-spool` daemon terminates no TLS of its
   own — that's a reverse-proxy job); release refuses it at dial time whatever is stored. The reply's per-scope

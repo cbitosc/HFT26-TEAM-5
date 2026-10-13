@@ -1333,6 +1333,8 @@
     <string name="relays_calls_label">Calls · %1$s</string>
     <string name="relays_calls_turn">TURN</string>
     <string name="relays_calls_walkie">walkie</string>
+    <!-- A ticket's grant to send photos and files through this relay (knit-spool ADR 2026-10.h6pt). -->
+    <string name="relays_calls_files">files</string>
     <plurals name="relays_calls_stun">
         <item quantity="one">%d STUN server</item>
         <item quantity="other">%d STUN servers</item>
@@ -1343,6 +1345,8 @@
     <string name="relays_calls_ticket_live">Ticket good until %1$s</string>
     <string name="relays_calls_ticket_refused">Ticket refused (%1$s)</string>
     <string name="relays_calls_ticket_expired">Ticket ran out %1$s</string>
+    <!-- The ticket's upload allowance at this relay is used up for its day; a daily sending allowance, not storage. -->
+    <string name="relays_calls_uploads_spent">Today\'s uploads here are used up</string>
     <string name="relays_calls_key_waiting">Ticket key from %1$s · asking for a ticket</string>
     <string name="relays_calls_key_unanswered">Ticket key from %1$s · not answering</string>
     <string name="relays_calls_key_ok">Ticket key from %1$s · account ends %2$s</string>
@@ -1424,6 +1428,12 @@
     <string name="chat_relay_unsupported_body">None of your relays accepts attachments, so this one is not being uploaded. It still arrives when you and %1$s are in Wi-Fi or Bluetooth range of each other.</string>
     <string name="chat_relay_staged_too_large">Nearby only — too large for your relays</string>
     <string name="chat_relay_staged_unsupported">Nearby only — your relays carry messages only</string>
+    <!-- No relay takes this phone's uploads: each takes files only from phones with a ticket for sending them, up to a
+         daily amount per ticket, and this phone has none there or has sent today's amount (C-7.6-24). Receiving
+         still works. Name no product, price or shop; the daily amount is a sending allowance, never a storage cap. -->
+    <string name="chat_relay_locked_title">Your relays are not taking files from this phone</string>
+    <string name="chat_relay_locked_body">They take attachments from phones with a ticket for sending files, up to a daily amount for each ticket. This phone has none there, or has sent today\'s amount, so this one is not being uploaded. It still arrives when you and %1$s are in Wi-Fi or Bluetooth range of each other, and attachments sent to you still come through your relays.</string>
+    <string name="chat_relay_staged_locked">Nearby only — your relays are not taking your files</string>
     <!-- LoRa plane (ADR 040): a DM whose peer only the board has heard lately, and the composer's length hint -->
     <string name="chat_lora_only">Reachable over LoRa only</string>
     <string name="chat_lora_only_title">Over LoRa only</string>

@@ -531,6 +531,13 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   Before touching `SpoolPow`, `ScopeSync`'s `stampFor` / `stampDemanded`, or what a request does on `err pow`: READ
   ADR 2026-10.rn9j — a stamp goes out only after a spool asked for one (C-8-4), its first ask is retried at once
   and never parked, and the miner allocates nothing per hash (`SpoolPowTest` pins it).
+  Before touching `SpoolHello.ticketGates` / `entGates`, `SpoolConnection.gates` / `uploads`, `SpoolUploads`,
+  `ScopeSync`'s `uploadsOn` / `spentUploads` / `LocalPass.LOCKED`, `HeldTicket.pseudonym`, `AttachmentRelay.Locked` or
+  `RelayFacts.maxUploadBytes`: READ ADR 2026-10.8t2y (knit-spool ADR 2026-10.h6pt) — each gate is its own bit of
+  `entGates` (C-7.6-30); an attachment of ours on a connection the files gate locks is settled with no `ahave` and no
+  `aput` while fetching is untouched; a `budget` spends the ticket's pseudonym per relay host in memory, never in the
+  verdict journal; and the sender's "Nearby only" reads `Locked` only when no connected relay takes this phone's
+  uploads. The gate reading and the marker ship in every build; the readouts stay behind `CALLS_WIRED`.
 - **When creating or modifying anything under `app/src/test/java/app/getknit/knit/mesh/lab/`:** keep
   `scripts/lab-lint.py` clean (a `PostToolUse` hook runs it on every scenario edit, `lab-chaos.sh` before every sweep,
   both CIs as `lab-lint`; a deliberate finding carries `// lab-lint: allow <rule> — <why>`), then RUN

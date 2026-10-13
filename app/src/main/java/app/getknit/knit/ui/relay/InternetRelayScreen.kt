@@ -515,9 +515,10 @@ private fun RelayHeadRow(
 }
 
 /**
- * A relay's call details (experimental, docs/VOICE_CALLS.md §2), up to three lines under its status: what its HELLO
+ * A relay's call details (experimental, docs/VOICE_CALLS.md §2), up to four lines under its status: what its HELLO
  * offers calls (TURN, the walkie's casts, how many STUN servers), where this connection stands with a ticket on a
- * relay that takes them, and the ticket key held for its host with what the issuer last said (ADR 2026-10.3sk7).
+ * relay that takes them (with uploads among its grants, and a line when its day's uploads are used up), and the
+ * ticket key held for its host with what the issuer last said (ADR 2026-10.3sk7).
  * Names the issuer's host and the ticket's claims only — never the key, the ticket or a STUN URI.
  */
 @Composable
@@ -536,6 +537,7 @@ private fun RelayCallDetails(relay: RelayRow) {
                     }
                 if (offers.isNotEmpty()) add(stringResource(R.string.relays_calls_label, offers.joinToString(", ")))
                 calls.ticket?.let { add(ticketLine(it, calls.turn)) }
+                if (calls.uploadsSpent) add(stringResource(R.string.relays_calls_uploads_spent))
             }
             relay.account?.let { add(accountLine(it)) }
         }
@@ -570,6 +572,7 @@ private fun ticketLine(
                 buildList {
                     if (ticket.turn) add(stringResource(R.string.relays_calls_turn))
                     if (ticket.walkie) add(stringResource(R.string.relays_calls_walkie))
+                    if (ticket.files) add(stringResource(R.string.relays_calls_files))
                 }
             if (grants.isEmpty()) until else "$until · ${grants.joinToString(", ")}"
         }
@@ -949,7 +952,8 @@ fun InternetRelayScreenCallsPreview() =
                                         stunServers = 1,
                                         walkie = true,
                                         // 2026-10-14 16:00 UTC.
-                                        ticket = RelayTicket.Live(exp = 1_791_993_600L, turn = true, walkie = true),
+                                        ticket = RelayTicket.Live(exp = 1_791_993_600L, turn = true, walkie = true, files = true),
+                                        uploadsSpent = true,
                                     ),
                                 // 2026-11-30 UTC.
                                 account = RelayAccount("issuer.example.org", KeyAnswer.OK, endsAt = 1_796_000_000_000L, failures = 0),

@@ -24,6 +24,7 @@ import app.getknit.knit.ui.chat.MessageBubbleEmojiPreview
 import app.getknit.knit.ui.chat.MessageBubbleLinkPreview
 import app.getknit.knit.ui.chat.MessageBubbleMinePreview
 import app.getknit.knit.ui.chat.MessageBubbleMineViaInternetPreview
+import app.getknit.knit.ui.chat.MessageBubbleNearbyOnlyLockedPreview
 import app.getknit.knit.ui.chat.MessageBubblePhotoArrivingPreview
 import app.getknit.knit.ui.chat.MessageBubbleTheirsPreview
 import app.getknit.knit.ui.chat.MessageBubbleTheirsViaInternetPreview
@@ -32,6 +33,7 @@ import app.getknit.knit.ui.chat.MessageBubbleWithMentionPreview
 import app.getknit.knit.ui.chat.MessageDetailsScreenEmptyPreview
 import app.getknit.knit.ui.chat.MessageDetailsScreenPreview
 import app.getknit.knit.ui.chat.MessageInputPreview
+import app.getknit.knit.ui.chat.MessageInputStagedLockedPreview
 import app.getknit.knit.ui.chat.ReactionRowPreview
 import app.getknit.knit.ui.chat.StagedLinkTilePreview
 import app.getknit.knit.ui.chat.StagedLocationTileFailedPreview
@@ -61,6 +63,11 @@ fun MessageBubbleTheirs() = MessageBubbleTheirsPreview()
 @ComponentShots
 @Composable
 fun MessageBubbleMine() = MessageBubbleMinePreview()
+
+@PreviewTest
+@ComponentShots
+@Composable
+fun MessageBubbleNearbyOnlyLocked() = MessageBubbleNearbyOnlyLockedPreview()
 
 @PreviewTest
 @ComponentShots
@@ -101,6 +108,11 @@ fun ReactionRow() = ReactionRowPreview()
 @ComponentShots
 @Composable
 fun MessageInput() = MessageInputPreview()
+
+@PreviewTest
+@ComponentShots
+@Composable
+fun MessageInputStagedLocked() = MessageInputStagedLockedPreview()
 
 @PreviewTest
 @ComponentShots

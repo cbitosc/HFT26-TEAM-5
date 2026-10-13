@@ -260,6 +260,8 @@ class SpoolTicketsTest {
             exp: Long = 1_800_086_400L,
             fl: Long = SpoolTicket.FL_TURN,
             sigByte: Byte = 1,
+            // Shifts every byte of `ps`: a different pseudonym, as the next day's ticket or another account's carries.
+            psSeed: Int = 0,
         ): HeldTicket {
             val tk =
                 SpoolCodec.encode(
@@ -271,7 +273,7 @@ class SpoolTicketsTest {
                         exp = exp,
                         ps =
                             ByteArray(16) {
-                                it.toByte()
+                                (it + psSeed).toByte()
                             },
                         fl = fl,
                     ),

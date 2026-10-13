@@ -190,6 +190,14 @@ class SpoolStatus(
     val turn: Boolean = false,
     /** This connection's HELLO cast bounds (docs/VOICE_CALLS.md §2.7), or null when the spool fans out no casts. */
     val cast: SpoolCastInfo? = null,
+    /** The `fl` bits this connection's HELLO gates behind a ticket (`SpoolHello.ticketGates`); 0 while disconnected. */
+    val entGates: Long = 0L,
+    /**
+     * Whether this connection takes this phone's attachment uploads (C-7.6-24): what the chat's "Nearby only" marker
+     * reads beside [maxAttachBytes], which stays the download capability. [SpoolUploads.Open] while disconnected,
+     * where [maxAttachBytes] is null anyway.
+     */
+    val uploads: SpoolUploads = SpoolUploads.Open,
 )
 
 /**
@@ -277,7 +285,9 @@ class ScopeSync(
     private val attachmentRetryMs: Long = ATTACHMENT_RETRY_MS,
     // The entitlement tickets this device holds (experimental, docs/VOICE_CALLS.md §2.6, ADR 2026-10.xkp4): each
     // connection to an `ent` spool presents its host's ticket right after the hello, and again the moment a different
-    // one is imported. Null presents nothing — every build without the store, and every test that does not ask.
+    // one is imported. Null presents nothing, for the tests that do not ask. Every build passes the store, release
+    // included: there nothing imports into it (the import doors and the refresher sit behind `CALLS_WIRED`), so a
+    // release phone holds no ticket and is locked out of uploads on a files-gated spool, as an unticketed one is.
     private val tickets: SpoolTickets? = null,
     // Where the plane says what it did with a ticket and a TURN ask (the app's `ScopeSync` logcat tag). Never handed
     // a ticket, a credential or a token: hosts, outcome words and counts only.
@@ -285,6 +295,13 @@ class ScopeSync(
 ) {
     private val workers = ConcurrentHashMap<String, Worker>()
     private val sealCache = SealCache(SEAL_CACHE_MAX)
+
+    // Relay host name → the ticket pseudonym that has spent its day's uploads there (`err ticket` `budget`, C-7.6-24).
+    // Here rather than on a worker, whose per-dial state goes with every session, so the mark survives a reconnect and
+    // a re-presented ticket with the same pseudonym; an accepted files ticket with another pseudonym clears it. Memory
+    // only, and never the verdict journal: `SpoolTicketPolicy` would read a stored word as "never present again" and
+    // take TURN and casts away from the same ticket. A process restart forgets it, which costs one refused chunk.
+    private val spentUploads = ConcurrentHashMap<String, TicketPseudonym>()
 
     @Volatile
     private var lastPresent: Set<String> = emptySet()
@@ -367,8 +384,9 @@ class ScopeSync(
      * gate is any subscription (S-7.6-4), so a spool that has answered the SUB of a live scope shared with the peer,
      * the spools the call would be relayed beside anyway. A spool where this connection holds a ticket that grants TURN
      * (accepted, or on its way) is asked on every call whether or not the peer's scope is there (C-7.6-21), and goes
-     * **first**: it is the one a payer's relay is on, and the cap must not crowd it out. An `ent` spool with no such
-     * ticket is not asked at all — S-7.6-16 would refuse it, from the per-IP bucket (ADR 2026-10.xkp4). Asked in
+     * **first**: it is the one a payer's relay is on, and the cap must not crowd it out. A spool whose HELLO gates TURN
+     * (bit 0 of `entGates`) with no such ticket here is not asked at all — S-7.6-16 would refuse it, from the per-IP
+     * bucket (ADR 2026-10.xkp4); one that leaves bit 0 out is asked as an unticketed spool (C-7.6-30). Asked in
      * parallel, each for at most [TURN_ASK_MS], on the connection directly and never under a worker's round lock: a
      * call is waiting. A refusal or a silence just leaves that spool out.
      */
@@ -390,7 +408,7 @@ class ScopeSync(
     /**
      * Whether a cast to [peerId] would leave through at least one connected spool (experimental,
      * docs/VOICE_CALLS.md §2.7): one whose hello advertised `cast`, that has answered the SUB of the peer's current
-     * DM scope, and — on an `ent` spool — where this phone holds a cast ticket or the peer does ([peerTicketed], from
+     * DM scope, and — where its HELLO gates casts — where this phone holds a cast ticket or the peer does ([peerTicketed], from
      * its walkie signal). Lock-free and synchronous, so the walkie can ask before it seals and spends a ratchet step.
      */
     fun canCast(
@@ -565,6 +583,12 @@ class ScopeSync(
 
         /** The radios still carry it (§9.5's push-half deferral): owed a look once that lapses. */
         DEFERRED(1),
+
+        /**
+         * Ours to push, on a connection that may not take this phone's uploads (C-7.6-24): settled, owed nothing, and
+         * looked at again only when a files ticket is accepted here or the connection is replaced.
+         */
+        LOCKED(0),
     }
 
     /**
@@ -661,6 +685,17 @@ class ScopeSync(
         // whole, dead, or past its frame's TTL. Skipped until a timed round finds the entry older than
         // ATTACHMENT_RECHECK_MS (the spool may have evicted it since), and dropped with the connection.
         private val settledAttachments = ConcurrentHashMap<String, LinkedHashMap<String, Long>>()
+
+        // scopeHex → the attachments of ours a round settled without asking because this connection may not take
+        // our uploads ([LocalPass.LOCKED]). Guarded by [settledAttachments]' lock; what [reopenUploads] un-settles
+        // when a files ticket is accepted, so they go up without waiting for the hourly recheck.
+        private val lockedUploads = HashMap<String, MutableSet<String>>()
+
+        // The word of the `err ticket` an `aput` drew on this connection (`missing`, `expired`, `flags`, or `budget`
+        // without a pseudonym to mark): uploads stay locked here until a files ticket is next accepted. Reset with
+        // every session, since the next connection presents afresh.
+        @Volatile
+        private var uploadRefusal: String? = null
 
         // scopeHex → the one pending re-look for an attachment a round could not finish (the spool has no
         // chunks yet, an upload half done, a deferral in force) — the old 15 s reconcile's cadence, paid
@@ -761,7 +796,10 @@ class ScopeSync(
             val live = table.mapTo(HashSet()) { it.idHex }
             forgetScopesNotIn(live)
             dirty.retainAll(live)
-            synchronized(settledAttachments) { settledAttachments.keys.retainAll(live) }
+            synchronized(settledAttachments) {
+                settledAttachments.keys.retainAll(live)
+                lockedUploads.keys.retainAll(live)
+            }
             // A scope that stayed but now takes a different push set — a live DM scope that became the retiring
             // one our reset rides, or the reset's ephemeral cleared on the answer (ADR 2026-10.j67x) — is healed
             // now: the round that ran on the custody change may have judged the reset against the old table, and
@@ -811,8 +849,9 @@ class ScopeSync(
          * Whether, and how, this worker's live connection may be asked for a TURN credential, or null when it is no
          * candidate at all: no completed hello that carried `turn`, or (without a ticket) no answered SUB for one of
          * [hexes] — a digest arrived, so the spool counts the subscription. A ticket that grants TURN, accepted or
-         * on its way, qualifies on its own (C-7.6-21). An `ent` spool without one is a [TurnAsk] with no connection:
-         * a skip worth saying, since S-7.6-16 would only refuse it. Lock-free like [status]; the connection is
+         * on its way, qualifies on its own (C-7.6-21). A spool that gates TURN (bit 0 of `entGates`) without one is a
+         * [TurnAsk] with no connection: a skip worth saying, since S-7.6-16 would only refuse it. One that gates only
+         * other verbs is asked like an unticketed spool (C-7.6-30). Lock-free like [status]; the connection is
          * concurrency-safe for requests.
          */
         fun turnAsk(hexes: Collection<String>): TurnAsk? {
@@ -820,7 +859,7 @@ class ScopeSync(
             val host = SpoolUrl.host(url)
             return when {
                 conn.ticketedTurn -> TurnAsk(host, conn, ticketed = true)
-                conn.ent -> TurnAsk(host, connection = null, ticketed = false)
+                conn.gated(SpoolTicket.FL_TURN) -> TurnAsk(host, connection = null, ticketed = false)
                 hexes.any(spoolDigests::containsKey) -> TurnAsk(host, conn, ticketed = false)
                 else -> null
             }
@@ -832,7 +871,7 @@ class ScopeSync(
         /**
          * Whether this worker's live connection would take a cast for [scope]: the scope belongs here and its SUB was
          * answered (a digest arrived, so the spool counts the subscription), and the connection's own rule holds —
-         * casts advertised, and on an `ent` spool a cast ticket here or the peer's. Lock-free like [turnAsk].
+         * casts advertised, and where its HELLO gates casts a cast ticket here or the peer's. Lock-free like [turnAsk].
          */
         fun canCast(
             scope: Scope,
@@ -884,6 +923,7 @@ class ScopeSync(
                 failed == null -> {
                     log("$host: ticket accepted (exp ${ticket.claims.exp}, fl ${ticket.claims.fl})")
                     tickets?.answered(url, ticket, refusal = null)
+                    if (ticket.grantsFiles) reopenUploads(ticket)
                 }
 
                 failed.code == SpoolErrCode.TICKET -> {
@@ -897,6 +937,64 @@ class ScopeSync(
                     log("$host: ticket not answered: ${failed.code}")
                 }
             }
+        }
+
+        /**
+         * Whether [conn] may take this phone's uploads (C-7.6-24): the connection's own answer ([SpoolConnection.uploads])
+         * narrowed by what this plane learned from the spool — an `aput` it refused here, and a pseudonym whose day is
+         * spent at this relay ([spentUploads]). Lock-free; read before every push and by [status].
+         */
+        fun uploadsOn(conn: SpoolConnection): SpoolUploads {
+            val own = conn.uploads()
+            val refusal = uploadRefusal
+            return when {
+                !conn.gated(SpoolTicket.FL_FILES) -> own
+                refusal == SpoolUploads.BUDGET -> SpoolUploads.Spent
+                refusal != null -> SpoolUploads.Locked(refusal)
+                own == SpoolUploads.Open && spentUploads[spentKey()]?.let { it == conn.uploadPseudonym() } == true -> SpoolUploads.Spent
+                else -> own
+            }
+        }
+
+        // The spent mark's key: the host name a ticket's `aud` names, so it is the relay the ticket was issued for.
+        private fun spentKey(): String = SpoolUrl.hostname(url) ?: url
+
+        /**
+         * An `aput` here drew `err ticket` [word] (C-7.6-24): `budget` spends the connection's ticket pseudonym at this
+         * relay for its day, anything else locks this connection until a files ticket is next accepted. Nothing is
+         * retried: the attachment is settled by the caller, and the next ones are settled without asking.
+         */
+        private fun uploadRefused(
+            conn: SpoolConnection,
+            word: String?,
+        ) {
+            val reason = word ?: SpoolUploads.MISSING
+            val pseudonym = conn.uploadPseudonym()
+            if (reason == SpoolUploads.BUDGET && pseudonym != null) {
+                spentUploads[spentKey()] = pseudonym
+            } else {
+                uploadRefusal = reason
+            }
+            log("${SpoolUrl.host(url)}: uploads refused: $reason")
+        }
+
+        /**
+         * The spool accepted [ticket], which grants files: the refusal lock lifts, and unless its pseudonym is the one
+         * spent here today, uploads open again on this connection — a spent mark for another pseudonym goes, and every
+         * attachment a round settled as [LocalPass.LOCKED] is looked at on the next round rather than an hour later.
+         */
+        private fun reopenUploads(ticket: HeldTicket) {
+            // The refusal lock was this connection's ticket's; an accepted files ticket replaces it either way.
+            uploadRefusal = null
+            val pseudonym = ticket.pseudonym
+            val key = spentKey()
+            if (pseudonym != null && spentUploads[key] == pseudonym) return
+            if (pseudonym != null) spentUploads.remove(key)
+            synchronized(settledAttachments) {
+                for ((scopeHex, hashes) in lockedUploads) settledAttachments[scopeHex]?.keys?.removeAll(hashes)
+                lockedUploads.clear()
+            }
+            markAllDirty()
         }
 
         fun status(all: List<Scope>): SpoolStatus =
@@ -918,6 +1016,8 @@ class ScopeSync(
                 ticket = connection?.takeIf { it.isReady }?.ticketState() ?: SpoolTicketState.None,
                 turn = connection?.takeIf { it.isReady }?.turn == true,
                 cast = connection?.takeIf { it.isReady }?.cast,
+                entGates = connection?.takeIf { it.isReady }?.gates ?: 0L,
+                uploads = connection?.takeIf { it.isReady }?.let(::uploadsOn) ?: SpoolUploads.Open,
                 scopes =
                     mine(all, connection).map { scope ->
                         ScopeStatus(
@@ -999,6 +1099,7 @@ class ScopeSync(
             val conn = connect(socket)
             software = null
             presented = null
+            uploadRefusal = null
             connection = conn
             val pump = host.launch { for (bytes in socket.incoming) conn.onMessage(bytes) }
             // The socket dying before (or instead of) the spool's hello must resolve the handshake rather
@@ -1108,7 +1209,10 @@ class ScopeSync(
             // is the reconnect storm ADR 062 is about.
             accepted.clear()
             // What a round settled was settled against THIS spool's chunk store; the next session asks again.
-            synchronized(settledAttachments) { settledAttachments.clear() }
+            synchronized(settledAttachments) {
+                settledAttachments.clear()
+                lockedUploads.clear()
+            }
             cancelAttachmentRetries()
             // A session we had to abort is not "reached": the backoff must grow, or an unresponsive spool
             // is dialled again a second later and the whole strike budget spent on it once a minute.
@@ -1634,7 +1738,7 @@ class ScopeSync(
                     continue
                 }
                 val mine = blobStore.has(ref.aHash)
-                val passed = passLocally(scope, ref, mine, blobStore)
+                val passed = passLocally(conn, scope, ref, mine, blobStore)
                 if (passed != null) {
                     pending += passed.owed
                 } else {
@@ -1648,7 +1752,7 @@ class ScopeSync(
                         } else {
                             fetchAttachment(conn, scope, ref, aid, presence, blobStore)
                         }
-                    if (done) settleAttachment(scope, ref.aHash) else pending++
+                    if (!settledAfter(conn, scope, ref.aHash, mine, done)) pending++
                 }
             }
             // Something is still in flight or still owed: look again on the old reconcile's cadence rather
@@ -1664,9 +1768,13 @@ class ScopeSync(
          * - **Refused** (#109): a photo our own screening refused and dropped is not fetched back only to be
          *   dropped again (the radios skip it the same way). Settled like a fetched one, so it leaves the scan
          *   window until the timed recheck asks again.
+         * - **Locked** (C-7.6-24): ours to push, on a connection that may not take this phone's uploads ([uploadsOn]):
+         *   no `ahave`, no `aput`, and no retry — settled until a files ticket is accepted here. Fetching is never
+         *   locked, so an attachment we lack goes on to the round trip as before.
          * - **Deferred**: the radios are still carrying an attachment we hold, so its push waits (§9.5).
          */
         private suspend fun passLocally(
+            conn: SpoolConnection,
             scope: Scope,
             ref: ScopeAttachments.Ref,
             mine: Boolean,
@@ -1677,6 +1785,10 @@ class ScopeSync(
                     metrics.onSpoolAttachmentRefused()
                     settleAttachment(scope, ref.aHash)
                     LocalPass.REFUSED
+                }
+
+                mine && uploadsOn(conn) != SpoolUploads.Open && settleLocked(conn, scope, ref.aHash) -> {
+                    LocalPass.LOCKED
                 }
 
                 mine && deferAttachment(scope, ref) -> {
@@ -1716,6 +1828,54 @@ class ScopeSync(
                 set[aHash] = clock()
                 while (set.size > BLOB_SET_MAX) set.remove(set.keys.first())
             }
+        }
+
+        /**
+         * Settles [aHash] after its round trip, or says it is still owed: [done], or ours and refused by the files gate
+         * on the way up — settled as locked until a files ticket reopens uploads here.
+         */
+        private fun settledAfter(
+            conn: SpoolConnection,
+            scope: Scope,
+            aHash: String,
+            mine: Boolean,
+            done: Boolean,
+        ): Boolean =
+            when {
+                done -> {
+                    settleAttachment(scope, aHash)
+                    true
+                }
+
+                mine && uploadsOn(conn) != SpoolUploads.Open && settleLocked(conn, scope, aHash) -> {
+                    true
+                }
+
+                else -> {
+                    false
+                }
+            }
+
+        /**
+         * Settles [aHash] as an upload [conn] would not take ([LocalPass.LOCKED]), for [reopenUploads] to undo; false,
+         * settling nothing, when uploads opened since the caller looked. A ticket's answer lands on the reader while a
+         * round runs: [reopenUploads] moves the state before it takes this lock, so the re-read here either sees it open
+         * or settles first and is un-settled by it — never a locked entry left behind after the reopen ran.
+         */
+        private fun settleLocked(
+            conn: SpoolConnection,
+            scope: Scope,
+            aHash: String,
+        ): Boolean {
+            synchronized(settledAttachments) {
+                if (uploadsOn(conn) == SpoolUploads.Open) return false
+                settleAttachment(scope, aHash)
+                val set = lockedUploads.getOrPut(scope.idHex) { LinkedHashSet() }
+                set += aHash
+                if (set.size > BLOB_SET_MAX) set.remove(set.first())
+            }
+            metrics.onSpoolAttachmentLocked()
+            return true
         }
 
         private fun scheduleAttachmentRetry(scope: Scope) {
@@ -1895,6 +2055,12 @@ class ScopeSync(
                 return true
             }
             if (reply !is SpoolReply.Failed) return false
+            // The files gate (S-7.6-22), ahead of [survivable], which frame PUSH shares: no strike, no error to show —
+            // the connection's upload state says it — and no further chunk on this connection until it reopens.
+            if (reply.code == SpoolErrCode.TICKET) {
+                uploadRefused(conn, reply.msg)
+                return false
+            }
             if (stampDemand(scope.idHex, reply, stamp)) return false
             metrics.onSpoolError()
             lastError = reply.code

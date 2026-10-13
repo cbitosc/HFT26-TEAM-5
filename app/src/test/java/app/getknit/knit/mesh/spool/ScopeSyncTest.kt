@@ -2401,6 +2401,207 @@ class ScopeSyncTest {
             receiver.sync.stop()
         }
 
+    /** A files-gated lab spool (knit-spool ADR 2026-10.h6pt): `ent`, and `entGates` naming bit 1 alone. */
+    private val filesUrl = "ws://lab.example:9480/spool/v1"
+
+    private suspend fun filesTickets(vararg held: HeldTicket): SpoolTickets =
+        SpoolTickets(SpoolTicketsTest.MemoryJournal()) { now }.also { tickets -> held.forEach { tickets.import(filesUrl, it.text) } }
+
+    @Test
+    fun `an unticketed member never uploads to a files-gated spool, and still fetches what a ticketed one sent`() =
+        runTest {
+            val spool = FakeSpool(ent = true, entGates = SpoolTicket.FL_FILES)
+            val (mine, mineBytes) = image()
+            val (theirs, theirBytes) = image(size = 60_000)
+            // Alice holds no ticket; Bob holds one that grants files.
+            val alicePhone = member(spool, alice, bob, blobs = FakeBlobs(mine to mineBytes), urls = listOf(filesUrl))
+            val bobTickets = filesTickets(SpoolTicketsTest.ticket(fl = SpoolTicket.FL_FILES))
+            val bobPhone = member(spool, bob, alice, blobs = FakeBlobs(theirs to theirBytes), urls = listOf(filesUrl), tickets = bobTickets)
+            alicePhone.custody.store(
+                dmFrame("m1", from = alice, to = bob, sentAt = now, attachmentHash = mine),
+                ForwardStore.ORIGIN_SELF,
+                now,
+            )
+            bobPhone.custody.store(
+                dmFrame("m2", from = bob, to = alice, sentAt = now, attachmentHash = theirs),
+                ForwardStore.ORIGIN_SELF,
+                now,
+            )
+
+            // Alice alone first: the attachment's id is the same for both members, so Bob's fetch would ask about it too.
+            alicePhone.sync.start(backgroundScope)
+            pump(rounds = 16)
+            val aliceStatus = alicePhone.sync.status().single()
+            assertEquals(SpoolTicket.FL_FILES, aliceStatus.entGates)
+            assertEquals(SpoolUploads.Locked(SpoolUploads.MISSING), aliceStatus.uploads)
+            // Locked at once: not one `aput` for her photo, nor the `ahave` that would precede one.
+            val mineAid = aidHex(alice, bob, mine)
+            assertTrue(spool.aputs.isEmpty())
+            assertFalse(mineAid in spool.presenceAsks)
+            assertTrue(alicePhone.metrics.spool().spoolAttachLocked > 0)
+            // Settled, not owed: the 15 s re-look never comes back for it.
+            pump(rounds = 40)
+            assertTrue(spool.aputs.isEmpty())
+            assertFalse(mineAid in spool.presenceAsks)
+            assertTrue("the spool refused nothing: nothing was tried", spool.aputRefusals.isEmpty())
+
+            // The ticketed member uploads, and the unticketed one fetches it (S-7.6-23).
+            bobPhone.sync.start(backgroundScope)
+            pump(rounds = 16)
+            assertEquals(
+                SpoolUploads.Open,
+                bobPhone.sync
+                    .status()
+                    .single()
+                    .uploads,
+            )
+            assertTrue(alicePhone.blobs.stored.containsKey(theirs))
+            assertTrue(spool.uploadCharged(SpoolTicketsTest.ticket(fl = SpoolTicket.FL_FILES)) > 0)
+            // Still nothing of hers went up, and the text plane is untouched by the gate.
+            assertTrue(spool.aputs.none { it.startsWith(mineAid) })
+            assertTrue(spool.aputRefusals.isEmpty())
+            assertEquals(listOf("m2"), alicePhone.delivered.map { it.id })
+            alicePhone.sync.stop()
+            bobPhone.sync.stop()
+        }
+
+    @Test
+    fun `a spent budget holds across a reconnect and a same-ps ticket, and another pseudonym reopens uploads`() =
+        runTest {
+            // Room for one sealed chunk a day: the second chunk is refused `budget`.
+            val spool = FakeSpool(ent = true, entGates = SpoolTicket.FL_FILES, ticketAttachBytes = 60_000L)
+            val (first, firstBytes) = image()
+            val (second, secondBytes) = image(size = 30_000)
+            val today = SpoolTicketsTest.ticket(fl = SpoolTicket.FL_FILES)
+            val tickets = filesTickets(today)
+            val phone =
+                member(
+                    spool,
+                    alice,
+                    bob,
+                    blobs = FakeBlobs(first to firstBytes, second to secondBytes),
+                    urls = listOf(filesUrl),
+                    tickets = tickets,
+                )
+            phone.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now, attachmentHash = first), ForwardStore.ORIGIN_SELF, now)
+            phone.custody.store(dmFrame("m2", from = alice, to = bob, sentAt = now, attachmentHash = second), ForwardStore.ORIGIN_SELF, now)
+            phone.sync.start(backgroundScope)
+            pump(rounds = 16)
+
+            assertEquals(listOf("budget"), spool.aputRefusals)
+            assertEquals(
+                SpoolUploads.Spent,
+                phone.sync
+                    .status()
+                    .single()
+                    .uploads,
+            )
+            val tried = spool.aputs.size
+            pump(rounds = 40)
+            assertEquals("no aput after budget, nor the re-look", tried, spool.aputs.size)
+
+            // A reconnect presents the same ticket again; its pseudonym is still spent here.
+            spool.dropSockets()
+            pump(rounds = 30)
+            assertEquals(2, spool.ents.size)
+            assertEquals(
+                SpoolUploads.Spent,
+                phone.sync
+                    .status()
+                    .single()
+                    .uploads,
+            )
+            assertEquals(tried, spool.aputs.size)
+
+            // So does a different ticket of the same day (the refresher's next fetch): same `ps`.
+            tickets.import(filesUrl, SpoolTicketsTest.ticket(fl = SpoolTicket.FL_FILES, sigByte = 7).text)
+            pump(rounds = 16)
+            assertEquals(3, spool.ents.size)
+            assertEquals(tried, spool.aputs.size)
+
+            // A ticket with another pseudonym reopens uploads at once, without waiting for the hourly recheck.
+            val tomorrow = SpoolTicketsTest.ticket(fl = SpoolTicket.FL_FILES, sigByte = 8, psSeed = 1)
+            tickets.import(filesUrl, tomorrow.text)
+            pump(rounds = 16)
+            assertTrue(spool.aputs.size > tried)
+            assertTrue(spool.uploadCharged(tomorrow) > 0)
+            phone.sync.stop()
+        }
+
+    @Test
+    fun `a files ticket accepted after a round locked the upload sends it on the next round`() =
+        runTest {
+            // The spool is slow to judge the ticket: the first rounds see it pending, and lock the upload.
+            val spool = FakeSpool(ent = true, entGates = SpoolTicket.FL_FILES).apply { holdEnts = true }
+            val (aHash, bytes) = image()
+            val tickets = filesTickets(SpoolTicketsTest.ticket(fl = SpoolTicket.FL_FILES))
+            val phone = member(spool, alice, bob, blobs = FakeBlobs(aHash to bytes), urls = listOf(filesUrl), tickets = tickets)
+            phone.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now, attachmentHash = aHash), ForwardStore.ORIGIN_SELF, now)
+            phone.sync.start(backgroundScope)
+            pump(rounds = 16)
+            assertEquals(
+                SpoolUploads.Locked(SpoolUploads.PENDING),
+                phone.sync
+                    .status()
+                    .single()
+                    .uploads,
+            )
+            assertTrue(spool.aputs.isEmpty())
+            assertTrue(phone.metrics.spool().spoolAttachLocked > 0)
+
+            // Accepted: the locked attachment is looked at again at once — not at the 15 s re-look, and not at the
+            // timed round's ten-minute recheck.
+            spool.releaseEnts()
+            pump(rounds = 4)
+            assertEquals(
+                SpoolUploads.Open,
+                phone.sync
+                    .status()
+                    .single()
+                    .uploads,
+            )
+            assertEquals(3, spool.chunkCount(scopeHex(alice, bob), aidHex(alice, bob, aHash)))
+            phone.sync.stop()
+        }
+
+    @Test
+    fun `a free phone on a spool that gates only files still asks it for turn`() =
+        runTest {
+            val spool = FakeSpool(turn = true, ent = true, entGates = SpoolTicket.FL_FILES)
+            val lines = mutableListOf<String>()
+            val phone = member(spool, alice, bob, urls = listOf(filesUrl), log = { lines += it })
+            phone.sync.start(backgroundScope)
+            pump()
+            assertEquals(1, phone.sync.turnCredentials(bob).size)
+            assertEquals(1, spool.turnIssued)
+            assertTrue(spool.turnRefusals.isEmpty())
+            assertFalse(lines.any { "TURN ask skipped" in it })
+            phone.sync.stop()
+        }
+
+    @Test
+    fun `a late ticket refusal of an aput leaves the scope subscribed`() =
+        runTest {
+            val spool = FakeSpool(ent = true, entGates = SpoolTicket.FL_FILES)
+            val phone = member(spool, alice, bob, urls = listOf(filesUrl))
+            phone.sync.start(backgroundScope)
+            pump()
+            val scope = scopeHex(alice, bob)
+            val subs = spool.subAttempts[scope]
+            // An `aput`'s refusal whose request has already timed out names a `q` nothing waits on any more.
+            spool.gossip(
+                SpoolCodec.encode(
+                    SpoolErr(t = SpoolRecordType.ERR, code = SpoolErrCode.TICKET, q = 9_999L, scope = unhex(scope), msg = "missing"),
+                ),
+            )
+            pump(rounds = 70)
+            val status = phone.sync.status().single()
+            assertNull(status.lastError)
+            assertEquals("never re-subscribed as if the SUB had been refused", subs, spool.subAttempts[scope])
+            assertTrue(status.scopes.single().converged)
+            phone.sync.stop()
+        }
+
     @Test
     fun `a spool that advertises no attachment support is never sent an attachment record`() =
         runTest {

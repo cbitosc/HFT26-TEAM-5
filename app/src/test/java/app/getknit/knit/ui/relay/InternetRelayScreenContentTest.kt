@@ -227,6 +227,33 @@ class InternetRelayScreenContentTest {
     }
 
     @Test
+    fun aFilesTicketNamesFilesAndASpentDaySaysSo() {
+        render(
+            InternetRelayUiState(
+                enabled = true,
+                relays =
+                    listOf(
+                        relay(
+                            host = "lab.lax.spool.getknit.app",
+                            calls =
+                                RelayCalls(
+                                    turn = true,
+                                    stunServers = 1,
+                                    walkie = true,
+                                    ticket = RelayTicket.Live(exp = 1_800_086_400L, turn = true, walkie = true, files = true),
+                                    uploadsSpent = true,
+                                ),
+                        ),
+                    ),
+            ),
+        )
+        compose
+            .onNode(hasText("Ticket good until", substring = true) and hasText("· TURN, walkie, files", substring = true))
+            .assertIsDisplayed()
+        compose.onNodeWithText("Today's uploads here are used up").assertIsDisplayed()
+    }
+
+    @Test
     fun aTicketedRelayWithoutATicketSaysWhatTurnNeeds() {
         render(
             InternetRelayUiState(

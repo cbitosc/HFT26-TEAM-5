@@ -15,7 +15,8 @@ import org.junit.Test
 /**
  * **Experimental.** One connection's side of entitlement tickets and STUN (docs/VOICE_CALLS.md §2.6, ADR 2026-10.xkp4):
  * when an `ent` goes out and to whom, what its answer does to the connection, the `turnreq` gate on an `ent` spool,
- * and the hello's STUN list. The record state machine around it is [SpoolConnectionTest]'s.
+ * the hello's STUN list, and the per-bit gates of `entGates` (C-7.6-30) with the upload state they leave
+ * (C-7.6-24). The record state machine around it is [SpoolConnectionTest]'s.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class SpoolConnectionTicketTest {
@@ -44,6 +45,8 @@ class SpoolConnectionTicketTest {
         turn: Boolean? = null,
         ent: Boolean? = null,
         stun: List<String>? = null,
+        entGates: Long? = null,
+        cast: SpoolCastInfo? = null,
     ) = SpoolCodec.encode(
         SpoolHello(
             t = SpoolRecordType.HELLO,
@@ -53,6 +56,8 @@ class SpoolConnectionTicketTest {
             turn = turn,
             ent = ent,
             stun = stun,
+            cast = cast,
+            entGates = entGates,
         ),
     )
 
@@ -294,6 +299,143 @@ class SpoolConnectionTicketTest {
             assertEquals("expired", (reply as SpoolReply.Failed).msg)
             assertEquals(SpoolTicketState.None, conn.ticketState())
             assertFalse(conn.ticketedTurn)
+        }
+
+    @Test
+    fun `the gates are read from the hello exactly as the daemon reads them`() =
+        runTest {
+            // knit-spool `Records.kt`'s `ticketGates`: no `ent`, no gates; a bare `ent`, the legacy 9.
+            val table =
+                listOf(
+                    Triple(null, null, 0L),
+                    Triple(true, null, 9L),
+                    Triple(true, 0L, 0L),
+                    Triple(true, 2L, 2L),
+                    Triple(true, 9L, 9L),
+                    Triple(true, 11L, 11L),
+                    Triple(null, 11L, 0L),
+                )
+            for ((ent, entGates, gates) in table) {
+                val conn = ticketed(RecordingLink()).apply { onMessage(serverHello(ent = ent, entGates = entGates)) }
+                assertEquals("ent=$ent entGates=$entGates", gates, conn.gates)
+                val decoded = SpoolCodec.decode<SpoolHello>(serverHello(ent = ent, entGates = entGates))!!
+                assertEquals(gates, decoded.ticketGates)
+            }
+        }
+
+    @Test
+    fun `a spool that gates only files is asked for TURN like an unticketed one`() =
+        runTest {
+            val link = RecordingLink()
+            val conn = ticketed(link)
+            conn.onMessage(serverHello(turn = true, ent = true, entGates = SpoolTicket.FL_FILES))
+            var reply: SpoolReply? = null
+            launch { reply = conn.turnCredential(3_000) }
+            runCurrent()
+            // No ticket held, and none needed: bit 0 is not gated here (C-7.6-30).
+            val q = link.last<SpoolTurnReq>().q
+            conn.onMessage(
+                SpoolCodec.encode(SpoolTurnCred(t = SpoolRecordType.TURNCRED, q = q, urls = urls, user = "u", pass = "p", exp = 9)),
+            )
+            runCurrent()
+            assertTrue(reply is SpoolReply.Turn)
+            assertFalse("no ticket, so the ask rides none", conn.ticketedTurn)
+        }
+
+    @Test
+    fun `each verb answers to its own bit`() =
+        runTest {
+            val cast = SpoolCastInfo(maxBytes = 2_048, rate = 4)
+            val scope = ByteArray(32) { 7 }
+            val scopeHex = scope.joinToString("") { "%02x".format(it) }
+
+            // Casts: gated only under bit 3.
+            val filesOnly = ticketed(RecordingLink())
+            filesOnly.onMessage(serverHello(turn = true, ent = true, entGates = SpoolTicket.FL_FILES, cast = cast))
+            filesOnly.sub(listOf(ScopeSub(scope, ScopeBounds(maxFrames = 10, ttlMs = 1, maxBlob = 64))))
+            assertTrue(filesOnly.canCast(scopeHex, peerTicketed = false))
+            assertFalse(filesOnly.gated(SpoolTicket.FL_TURN))
+            assertTrue(filesOnly.gated(SpoolTicket.FL_FILES))
+            assertEquals(SpoolUploads.Locked(SpoolUploads.MISSING), filesOnly.uploads())
+
+            val castOnly = ticketed(RecordingLink())
+            castOnly.onMessage(serverHello(turn = true, ent = true, entGates = SpoolTicket.FL_CAST, cast = cast))
+            castOnly.sub(listOf(ScopeSub(scope, ScopeBounds(maxFrames = 10, ttlMs = 1, maxBlob = 64))))
+            assertFalse(castOnly.canCast(scopeHex, peerTicketed = false))
+            // Uploads are open where bit 1 is not gated, ticket or not.
+            assertEquals(SpoolUploads.Open, castOnly.uploads())
+            assertNull(castOnly.uploadPseudonym())
+
+            // No `ent` at all: nothing is gated, whatever else the hello says.
+            val open = ticketed(RecordingLink())
+            open.onMessage(serverHello(turn = true, entGates = 11L, cast = cast))
+            open.sub(listOf(ScopeSub(scope, ScopeBounds(maxFrames = 10, ttlMs = 1, maxBlob = 64))))
+            assertTrue(open.canCast(scopeHex, peerTicketed = false))
+            assertEquals(SpoolUploads.Open, open.uploads())
+        }
+
+    @Test
+    fun `uploads under the files gate follow the accepted ticket`() =
+        runTest {
+            val link = RecordingLink()
+            val conn = ticketed(link)
+            conn.onMessage(serverHello(ent = true, entGates = 11L))
+            assertEquals("locked at once with nothing to present", SpoolUploads.Locked(SpoolUploads.MISSING), conn.uploads())
+
+            // On its way: the spool judges an `aput` after this `ent`, and may refuse it.
+            val files = ticket(fl = SpoolTicket.FL_TURN or SpoolTicket.FL_FILES)
+            conn.present(files)
+            assertEquals(SpoolUploads.Locked(SpoolUploads.PENDING), conn.uploads())
+            assertNull(conn.uploadPseudonym())
+            conn.onMessage(ticketOk(link))
+            assertEquals(SpoolUploads.Open, conn.uploads())
+            assertEquals(files.pseudonym, conn.uploadPseudonym())
+
+            // A TURN-only ticket accepted after it replaces it: the flags lack bit 1.
+            conn.present(ticket(fl = SpoolTicket.FL_TURN, sigByte = 2))
+            conn.onMessage(ticketOk(link))
+            assertEquals(SpoolUploads.Locked(SpoolUploads.FLAGS), conn.uploads())
+            assertNull(conn.uploadPseudonym())
+
+            // A files ticket that lapses on our clock.
+            conn.present(ticket(fl = SpoolTicket.FL_FILES, sigByte = 3))
+            conn.onMessage(ticketOk(link))
+            assertEquals(SpoolUploads.Open, conn.uploads())
+            nowMs = 1_800_086_401_000L
+            assertEquals(SpoolUploads.Locked(SpoolUploads.EXPIRED), conn.uploads())
+            assertNull(conn.uploadPseudonym())
+        }
+
+    @Test
+    fun `a late ticket refusal is never read as a refused sub`() =
+        runTest {
+            val errors = mutableListOf<String>()
+            val link = RecordingLink()
+            val conn =
+                SpoolConnection(
+                    "wss://lab.example/spool/v1",
+                    link,
+                    onDigest = {},
+                    onEvent = {},
+                    onScopeError = { _, code, _ -> errors += code },
+                    clock = { nowMs },
+                )
+            conn.onMessage(serverHello(ent = true, entGates = 11L))
+            val scope = ByteArray(32) { 3 }
+            val scopeHex = scope.joinToString("") { "%02x".format(it) }
+            conn.sub(listOf(ScopeSub(scope, ScopeBounds(maxFrames = 10, ttlMs = 1, maxBlob = 64))))
+            // An `aput`'s refusal whose request already timed out: its `q` names nothing pending any more.
+            conn.onMessage(
+                SpoolCodec.encode(
+                    SpoolErr(t = SpoolRecordType.ERR, code = SpoolErrCode.TICKET, q = 999L, scope = scope, msg = "missing"),
+                ),
+            )
+            assertTrue(conn.isSubscribed(scopeHex))
+            assertTrue(errors.isEmpty())
+            // A real scoped refusal still lands.
+            conn.onMessage(SpoolCodec.encode(SpoolErr(t = SpoolRecordType.ERR, code = SpoolErrCode.QUOTA, scope = scope)))
+            assertFalse(conn.isSubscribed(scopeHex))
+            assertEquals(listOf(SpoolErrCode.QUOTA), errors)
         }
 
     @Test

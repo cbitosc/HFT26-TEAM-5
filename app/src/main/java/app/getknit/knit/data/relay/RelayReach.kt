@@ -27,7 +27,13 @@ import app.getknit.knit.mesh.spool.SpoolStatus
  * [maxAttachBytes] is the largest per-scope attachment budget advertised by any connected spool, or
  * null when none of them carries attachments at all. Taking the **max** rather than the min is correct
  * because a member converges through the union of whatever every spool holds (spec §9.1): one relay
- * willing to store the bytes is enough.
+ * willing to store the bytes is enough. It says what a member can *fetch*, so it is what the reader's
+ * placeholder ([attachmentWait]) reads.
+ *
+ * [maxUploadBytes] is the same max taken over only the connected spools that take **this phone's** uploads
+ * (`SpoolStatus.uploads`, C-7.6-24): a spool that gates `aput` behind a files ticket this phone does not hold
+ * still serves every attachment it stores, but takes none of ours. Null when no connected spool would take an
+ * upload of any size. Always at most [maxAttachBytes]; what the sender's marker ([attachmentReach]) reads.
  */
 data class RelayFacts(
     val enabled: Boolean = false,
@@ -36,6 +42,7 @@ data class RelayFacts(
     val connected: Int = 0,
     val coveredLabels: Set<String> = emptySet(),
     val maxAttachBytes: Int? = null,
+    val maxUploadBytes: Int? = maxAttachBytes,
 )
 
 /**
@@ -115,7 +122,18 @@ enum class AttachmentRelay {
 
     /** No connected relay advertises attachment support at all (spec §7.3) — frames only. */
     Unsupported,
+
+    /**
+     * Some connected relay carries attachments, but none takes this phone's uploads: each gates sending files behind
+     * a ticket this phone does not hold, or its ticket's uploads there are used up for the day (C-7.6-24). The
+     * attachment still arrives over the radios, and attachments others send still arrive through the relay.
+     */
+    Locked,
 }
+
+/** Whether [this] draws a sent attachment's "Nearby only" marker: a cause that lasts, never Silent or Relayable. */
+fun AttachmentRelay.marksNearbyOnly(): Boolean =
+    this == AttachmentRelay.TooLarge || this == AttachmentRelay.Unsupported || this == AttachmentRelay.Locked
 
 /**
  * What to tell the reader of an attachment whose bytes are not here yet: whether the Internet plane is
@@ -236,10 +254,14 @@ fun dismissable(reach: RelayReach): Boolean = reach == RelayReach.Room
  * - It answers [AttachmentRelay.Silent] for any conversation that is not [RelayReach.Covered]. When the
  *   whole thread is off-plane the conversation-level notice already says so, and repeating it on every
  *   photo would be noise dressed as detail.
- * - It reports only **permanent** causes. A relay that is merely full evicts its oldest attachment and
+ * - It reports only causes that last. A relay that is merely full evicts its oldest attachment and
  *   accepts this one (spec §6.5); a `rate` or `pow` refusal heals on the next round. Neither is visible
- *   here, deliberately — the only two answers are "too big for any relay you use" and "none of your
- *   relays carries photos", both of which stay true until the user changes something.
+ *   here, deliberately — the answers are "none of your relays carries photos", "none takes yours", and
+ *   "too big for any relay that takes yours", each true until something changes on the relay or the phone.
+ *
+ * The precedence is that order: [AttachmentRelay.Unsupported] when no relay carries attachments at all,
+ * [AttachmentRelay.Locked] when some do but none takes this phone's ([RelayFacts.maxUploadBytes] is null),
+ * then [AttachmentRelay.TooLarge] against the relays that do take them.
  */
 fun attachmentReach(
     conversationId: String,
@@ -247,7 +269,8 @@ fun attachmentReach(
     facts: RelayFacts,
 ): AttachmentRelay {
     if (reachFor(conversationId, facts) != RelayReach.Covered) return AttachmentRelay.Silent
-    val budget = facts.maxAttachBytes ?: return AttachmentRelay.Unsupported
+    if (facts.maxAttachBytes == null) return AttachmentRelay.Unsupported
+    val budget = facts.maxUploadBytes ?: return AttachmentRelay.Locked
     return if (sealedAttachmentBytes(sizeBytes) <= budget) AttachmentRelay.Relayable else AttachmentRelay.TooLarge
 }
 
