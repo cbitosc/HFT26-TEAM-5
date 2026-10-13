@@ -37,13 +37,15 @@ import kotlinx.coroutines.withTimeoutOrNull
  *
  * `addCall` holds its coroutine for the call's whole life, so each call runs in a job of its own on [scope], and the
  * sync gets the call once Telecom has added it. Every verb is bounded: a session Telecom has already closed may never
- * answer one.
+ * answer one. [onAnswered] runs when a headset, a watch or a car answered, once the call layer took it, so the call's
+ * microphone service can start where the call screen never opens.
  */
 internal class TelecomCalls(
     private val context: Context,
     private val peers: () -> PeerRepository,
     private val scope: CoroutineScope,
     private val log: (String) -> Unit,
+    private val onAnswered: () -> Unit = {},
 ) : SystemCalls {
     private val manager by lazy { CallsManager(context.applicationContext) }
 
@@ -80,7 +82,11 @@ internal class TelecomCalls(
                 try {
                     manager.addCall(
                         attributes,
-                        onAnswer = { check(onAnswer()) { "the call no longer rings" } },
+                        onAnswer = {
+                            check(onAnswer()) { "the call no longer rings" }
+                            // Inside Telecom's own callback: the window Android lets a backgrounded app take the mic in.
+                            onAnswered()
+                        },
                         onDisconnect = { onDisconnect() },
                         onSetActive = {},
                         onSetInactive = { error("a Knit call cannot be held") },

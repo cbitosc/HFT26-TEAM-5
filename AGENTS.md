@@ -119,7 +119,7 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   only to the spool whose host name is its `aud` (a privacy rule), a refusal is a stored verdict, an `ent` spool gets
   no `turnreq` without a TURN-flagged ticket and a ticketed one is asked first, and every call gathers from the
   hellos' STUN under a URL rule narrower than the spec's, because one URL libwebrtc refuses ends the call.
-  **Before touching `call/Walkie.kt` (`CallWalkie`, `WalkiePolicy`, `TalkWire`, `OpusPackets`, `TalkQueue`), `CallKind`,
+  **Before touching `call/Walkie.kt` (`CallWalkie`, `WalkiePolicy`, `TalkWire`, `OpusPackets`, `TalkQueue`), `call/TalkGain`, `CallKind`,
   `CallPayload.MEDIA_WALKIE`, `FrameType.TALK`, `mesh/protocol/TalkSeal`, `MeshManager.sendCallTalk`,
   `InboundPipeline.handleTalk` / `isTalkShape`, `Protocol.CAP_WALKIE`, `CallManager`'s `fallback` / `walkieOk` /
   `onTalk`, `MeshTransport.sendLive` / `holdLink`, `mesh/wifiaware/NanLinkHold` (the hold in `superviseLink`), `TalkLink`,

@@ -8,17 +8,19 @@ import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.media.MediaRecorder
 import android.util.Log
+import app.getknit.knit.call.TalkGain
 import app.getknit.knit.call.WalkiePolicy
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import java.util.Locale
 import kotlin.math.abs
 
 /**
  * Records a walkie burst as Opus packets while it is spoken (docs/VOICE_CALLS.md §3.11): the microphone through
- * [AudioRecord] at 16 kHz mono into the platform Opus encoder at [WalkiePolicy.BIT_RATE], each 20 ms packet handed on
- * the moment it comes out. There is no container, no file, and nothing on disk. The chat's `VoiceRecorder` writes AAC
+ * [AudioRecord] at 16 kHz mono, through [TalkGain], into the platform Opus encoder at [WalkiePolicy.BIT_RATE], each
+ * 20 ms packet handed on the moment it comes out. There is no container, no file, and nothing on disk. The chat's `VoiceRecorder` writes AAC
  * through `MediaRecorder`, which at a speech rate is about twice Opus's size and buffers besides.
  *
  * One burst at a time: `WalkieTalk` calls [start], [stop] and [cancel] under its lock. The capture loop runs on one IO
@@ -40,6 +42,9 @@ internal class TalkRecorder(
 
     @Volatile
     private var peak = 0
+
+    // One gain per microphone, kept across bursts and sessions (§3.11, C-3.11-5): the phone's and a headset's differ.
+    private val gains = mapOf(false to TalkGain(), true to TalkGain())
 
     /** Milliseconds since [start], or 0 when not recording. */
     fun elapsedMs(): Long = startedAt.let { if (it == 0L) 0L else System.currentTimeMillis() - it }
@@ -70,7 +75,8 @@ internal class TalkRecorder(
         dropping = false
         peak = 0
         startedAt = System.currentTimeMillis()
-        job = scope.launch(Dispatchers.IO) { pump(record, codec, onPacket) }
+        val gain = gains.getValue(headset).also { it.newBurst() }
+        job = scope.launch(Dispatchers.IO) { pump(record, codec, gain, onPacket) }
         return true
     }
 
@@ -92,6 +98,7 @@ internal class TalkRecorder(
     private fun pump(
         record: AudioRecord,
         codec: MediaCodec,
+        gain: TalkGain,
         onPacket: (ByteArray) -> Unit,
     ) {
         val pcm = ByteArray(FRAME_BYTES)
@@ -102,6 +109,7 @@ internal class TalkRecorder(
                 val n = record.read(pcm, 0, pcm.size)
                 if (n < 0) break
                 if (n == 0) continue
+                gain.apply(pcm, n)
                 peak = maxOf(peak, peakOf(pcm, n))
                 if (!queue(codec, pcm, n, ptsUs, 0)) break
                 ptsUs += n / PCM_BYTES * US_PER_S / WalkiePolicy.SAMPLE_RATE
@@ -116,6 +124,9 @@ internal class TalkRecorder(
             // The platform codec and the capture throw what they like; either way the burst ends with what went out.
             Log.w(TAG, "walkie capture ended: ${e.javaClass.simpleName}: ${e.message}")
         } finally {
+            // What the gain made of the burst, for tuning it against a call's level on the phones.
+            val heard = gain.speechDb?.let { "speech at %.0f dBFS".format(Locale.ROOT, it) } ?: "no speech"
+            Log.i(TAG, "walkie gain: $heard, gain %+.1f dB, %d frame(s) limited".format(Locale.ROOT, gain.gainDb, gain.limited))
             runCatching { record.stop() }
             runCatching { record.release() }
             runCatching { codec.stop() }

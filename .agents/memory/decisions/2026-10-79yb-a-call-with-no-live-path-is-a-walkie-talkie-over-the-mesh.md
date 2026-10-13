@@ -376,3 +376,32 @@ starts on the loudspeaker where a live call would start on the earpiece.
 
 The cost is the Bluetooth controller: a headset's call link stays up for the whole session, on the controller that
 carries the chunks.
+
+## Amendment 2026-10-12 (8): a gain before the encoder
+
+A burst played far quieter than a live call at the same volume, on the loudspeaker or off it (the user, 2026-10-12, on
+the P9 and the P7). Amendment (7) made the two comparable, since both now play on the voice-call stream. The cause
+was older than that, though. `TalkRecorder` captures the phone's microphone from `VOICE_RECOGNITION`, a flat path with
+no gain control, while a live call's capture passes WebRTC's.
+
+The capture now passes `call/TalkGain` before the Opus encoder (`docs/VOICE_CALLS.md` C-3.11-5).
+
+- **Level.** Speech is brought toward −18 dBFS RMS. It gains at most 24 dB and is never turned down.
+- **Speed.** The gain falls at once and rises at most 5 dB per second of speech, so it settles near the loud
+  syllables instead of pumping the quiet ones up.
+- **Pauses.** It holds between words, where a frame is within 12 dB of the quietest frame of the last 2 s, and a
+  steady hum becomes that floor.
+- **Limiter.** No peak passes −1 dBFS.
+- **State.** One gain per microphone (the phone's, a headset's), kept across bursts.
+
+It sits on the sender, because a receiver cannot win back what the codec spent on a quiet signal. Older builds hear
+the louder bursts unchanged.
+
+Rejected: the platform's own `AutomaticGainControl` effect on the record session. Phones offer it unevenly, and the
+P9's call path lists only echo cancellation and noise suppression. Also rejected: switching the phone's microphone to
+`VOICE_COMMUNICATION`, which still leaves the level to the phone's call tuning and adds that path's processing to a
+half-duplex burst.
+
+Owed: a by-ear comparison against a live call on the two phones. Each burst logs `walkie gain: speech at … dBFS, gain
+… dB, … frame(s) limited` under `KnitCall`, for tuning the target.
+

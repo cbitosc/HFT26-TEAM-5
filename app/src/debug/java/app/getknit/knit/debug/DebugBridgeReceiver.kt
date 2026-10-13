@@ -115,6 +115,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import org.koin.core.component.KoinComponent
@@ -2193,6 +2194,8 @@ class DebugBridgeReceiver :
                         ?: return reply("error", "to must be speaker|earpiece|wired|bluetooth")
                 val route = routing.available.firstOrNull { it.kind == kind } ?: return reply("error", "no $to route now")
                 val moved = system.request(route)
+                // A Bluetooth route reports in only once its call link is up, a second or so after Telecom took the ask.
+                if (moved) withTimeoutOrNull(ROUTE_SETTLE_MS) { system.routing.first { it?.current?.key == route.key } }
                 return reply(if (moved) "ok" else "refused", "audio to ${route.name}").put("audio", audioJson(system))
             }
 
@@ -2991,6 +2994,9 @@ class DebugBridgeReceiver :
 
         // How long `…debug.PHY` waits after storing a mode before reading the status back: the transport collects it.
         const val PHY_SETTLE_MS = 300L
+
+        // How long `…debug.CALL --es op audio --es to …` waits for the call to report the route it asked for.
+        const val ROUTE_SETTLE_MS = 3_000L
 
         // The queue a `…debug.LINKTUNE --ei windowQueueMs` may set a windowed feed to keep ahead of its receiver.
         const val MIN_WINDOW_QUEUE_MS = 100

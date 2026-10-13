@@ -17,6 +17,7 @@ import androidx.compose.material.icons.filled.SettingsVoice
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -41,8 +42,8 @@ import app.getknit.knit.call.CallRouting
 /**
  * Where a call's audio goes, on the call screen of either kind (docs/VOICE_CALLS.md §3.13). With only the earpiece and
  * the loudspeaker it is the loudspeaker's toggle every phone's call screen has; once a headset is there too it names
- * the route the call is on, and a tap lists every route the system offers. Before the system holds the call there is
- * nowhere to choose, and it is drawn disabled.
+ * the route the call is on, filled as the toggle is when on, and a tap lists every route the system offers. Before the
+ * system holds the call there is nowhere to choose, and it is drawn disabled.
  */
 @Composable
 internal fun AudioRouteButton(
@@ -66,7 +67,22 @@ internal fun AudioRouteButton(
     val current = routing?.current
     val label = current?.let(::routeLabel) ?: "Audio"
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-        FilledTonalIconButton(onClick = { open = true }, modifier = Modifier.size(ToggleSize), shape = CircleShape) {
+        // Filled as the loudspeaker's toggle is when on: a route is in use, whichever it is. Unfilled reads as off.
+        val on = IconButtonDefaults.filledTonalIconToggleButtonColors()
+        FilledTonalIconButton(
+            onClick = { open = true },
+            modifier = Modifier.size(ToggleSize),
+            shape = CircleShape,
+            colors =
+                if (current != null) {
+                    IconButtonDefaults.filledTonalIconButtonColors(
+                        containerColor = on.checkedContainerColor,
+                        contentColor = on.checkedContentColor,
+                    )
+                } else {
+                    IconButtonDefaults.filledTonalIconButtonColors()
+                },
+        ) {
             Icon(
                 routeIcon(current?.kind),
                 contentDescription = "Audio: $label. Choose where the call plays",

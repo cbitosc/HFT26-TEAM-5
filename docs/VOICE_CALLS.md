@@ -600,8 +600,12 @@ an experiment behind `BuildConfig.WALKIE` (`-Pwalkie=`, on in debug and off in r
   a peer sends it (`CallManager.dropToWalkie`, off), so a lost live call ends `no_route`. In a P9↔P7 call over the
   Internet the drop left the two phones in a walkie session neither could send on, because the peer was off every
   radio. A walkie session placed on purpose is unchanged.
-- **C-3.11-5** A burst is Opus at 8 kbps, captured at 16 kHz mono, in 20 ms packets, up to 60 s. It is cut into
-  chunks: one each time 480 ms of audio is in hand, then the rest marked as the last. A chunk's plaintext is binary:
+- **C-3.11-5** A burst is Opus at 8 kbps, captured at 16 kHz mono, in 20 ms packets, up to 60 s. Before the encoder
+  the capture passes a gain stage (`call/TalkGain`), because the phone's flat microphone path has no gain control and
+  a live call's audio has WebRTC's. Speech is brought toward −18 dBFS RMS, gaining at most 24 dB and never losing.
+  The gain falls at once and rises at most 5 dB per second of speech. It holds between words, where a frame is within
+  12 dB of the quietest frame of the last 2 s. No peak passes −1 dBFS. Each microphone keeps its own gain across
+  bursts. It is cut into chunks: one each time 480 ms of audio is in hand, then the rest marked as the last. A chunk's plaintext is binary:
 
   ```text
   flags (bit 0: last) · call tag (2 bytes, big-endian) · varint b · varint q · packets
@@ -697,9 +701,15 @@ scope, never on the inbound path. `debug/call/TelecomCalls` is the one importer 
 | **C-3.13-7** | Nothing but Telecom sets the route while a call is up: no `setCommunicationDevice`, no `startBluetoothSco`, no preferred device on a track. Both kinds play on the voice-communication usage. A walkie burst is recorded from `VOICE_COMMUNICATION` while a headset has the call, else from the phone's microphone (`VOICE_RECOGNITION`, then `MIC`). |
 | **C-3.13-8** | The call screen's route control is the loudspeaker toggle while the earpiece and the loudspeaker are the only routes. With a third route it names the current one and lists them all. The notification's one route action goes onto the loudspeaker, or off it to a Bluetooth headset, then a wired one, then the earpiece. It carries that route's key, so a stale tap never moves the call anywhere unseen. |
 | **C-3.13-9** | A mute set from a car or a watch reaches the call. The first value the system reports is only where it starts, and is not acted on.                                                                                                                                             |
+| **C-3.13-10** | A call the system answered starts the call's microphone service from inside the system's answer, because the call screen may never open. Without the service, a backgrounded call's microphone is silenced. Android allowed that background start on the trial phone (a Pixel 9, API 37). |
 
 The system shows the peer's label as the call's name, and `knit:<node id>` as its address. VoIP calls stay out of the
 system call log. A call's line in its thread is §3.12's.
+
+**Known limit: a Bluetooth headset and Coded PHY.** While a headset holds a call link, its eSCO slots share the
+controller with the mesh's Bluetooth links. Over 1M PHY a walkie loses nothing to it. Over Coded PHY, whose packets
+are long, the phone holding the eSCO link received 2 of each 9 chunks in the 2026-10-12 trial, against 9 of 9 with the
+link down; its own sends were all delivered. Nothing steers a link off Coded while eSCO is up yet.
 
 ## 4. Tests this would add
 

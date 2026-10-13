@@ -1,13 +1,17 @@
 package app.getknit.knit.debug.call
 
+import android.Manifest
 import android.app.PendingIntent
+import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.Person
 import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.IconCompat
 import androidx.lifecycle.LifecycleService
 import androidx.lifecycle.lifecycleScope
@@ -26,9 +30,10 @@ import org.koin.core.component.inject
 
 /**
  * Keeps the microphone while a call is live and Knit is not on screen (experimental, debug only): a foreground
- * service of types `microphone` and `phoneCall` (the call is a Telecom one, §3.13), started by [CallActivity] while it
- * is in the foreground — the only place Android 14+ lets a microphone service start — and only once RECORD_AUDIO is
- * granted. Stops itself when the call ends.
+ * service of types `microphone` and `phoneCall` (the call is a Telecom one, §3.13), started once RECORD_AUDIO is
+ * granted by [CallActivity] while it is in the foreground, or by [startAnswered] from inside Telecom's answer when a
+ * headset, a watch or a car took the call — the two places Android 14+ lets a microphone service start. Stops itself
+ * when the call ends.
  *
  * Its notification is the way back to a call the user left: the ongoing CallStyle with the peer's face, where the call
  * stands (the timer once connected), Hang up, Mute (a live call's only) and one route action — onto the loudspeaker,
@@ -122,7 +127,7 @@ class CallService :
             ServiceCompat.startForeground(this, CallNotifications.ID + 1, notification, type)
         } catch (e: SecurityException) {
             // RECORD_AUDIO revoked between the check and here, or started from the background: nothing to hold.
-            Log.w("KnitCall", "call service refused: ${e.message}")
+            Log.w(TAG, "call service refused: ${e.message}")
         }
     }
 
@@ -177,10 +182,30 @@ class CallService :
             else -> "Voice call"
         }
 
-    private companion object {
-        const val UNNAMED = "Knit call"
+    companion object {
+        private const val TAG = "KnitCall"
+        private const val UNNAMED = "Knit call"
+
+        /**
+         * Starts the service for a call the system answered — a headset's button, a watch, a car — where the call screen
+         * may never open (§3.13, C-3.13-10). Called from inside Telecom's answer, which lets an app in the background
+         * start it with the microphone (device-observed on a Pixel 9, API 37: `allowWiu` ACTIVITY_STARTER). Where Android
+         * refuses, the call runs unheard until the user opens it, and the log says so.
+         */
+        fun startAnswered(context: Context) {
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                Log.w(TAG, "call service not started: no microphone grant; the call screen asks for it")
+                return
+            }
+            try {
+                ContextCompat.startForegroundService(context, Intent(context, CallService::class.java))
+            } catch (e: IllegalStateException) {
+                // ForegroundServiceStartNotAllowedException: this phone does not count the answer as a reason.
+                Log.w(TAG, "call service not started: ${e.javaClass.simpleName}: ${e.message}")
+            }
+        }
 
         // The ongoing-call green the system's own call chip uses, dark enough for white text.
-        const val ONGOING_GREEN = 0xFF137333.toInt()
+        private const val ONGOING_GREEN = 0xFF137333.toInt()
     }
 }

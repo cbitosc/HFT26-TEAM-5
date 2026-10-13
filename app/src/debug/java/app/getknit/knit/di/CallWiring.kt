@@ -22,6 +22,7 @@ import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.debug.call.CallBarHost
 import app.getknit.knit.debug.call.CallController
 import app.getknit.knit.debug.call.CallFaces
+import app.getknit.knit.debug.call.CallService
 import app.getknit.knit.debug.call.TalkLinks
 import app.getknit.knit.debug.call.TalkPath
 import app.getknit.knit.debug.call.TalkPlayer
@@ -78,7 +79,16 @@ fun callModule(): Module? =
     module {
         // §3.13: every call, live or walkie, is a self-managed Telecom call, which owns its audio route. The peers are
         // late-bound, as the faces' are; the sync follows the manager's call from process start (startCallsIfWired).
-        single { TelecomCalls(androidContext(), peers = { get() }, scope = get<CoroutineScope>(), log = { Log.i(TAG, it) }) }
+        single {
+            val context = androidContext()
+            TelecomCalls(
+                context,
+                peers = { get() },
+                scope = get<CoroutineScope>(),
+                log = { Log.i(TAG, it) },
+                onAnswered = { CallService.startAnswered(context) },
+            )
+        }
         single<SystemCalls> { get<TelecomCalls>() }
         single<CallControl> { get<CallManager>() }
         single { SystemCallSync(calls = get(), system = get(), scope = get<CoroutineScope>(), log = { Log.i(TAG, it) }) }
