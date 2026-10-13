@@ -982,7 +982,8 @@ class ScopeSync(
         /** One connection lifetime. Returns whether the handshake completed — that drives the backoff. */
         private suspend fun session(): Boolean {
             val host = this@ScopeSync.session ?: return false
-            lastDialAt = clock()
+            val dialedAt = clock()
+            lastDialAt = dialedAt
             val socket = dialer.dial(url)
             if (socket == null) {
                 lastError = UNREACHABLE
@@ -1010,6 +1011,9 @@ class ScopeSync(
             // relabel a transport death as this fault.
             if (!ready && conn.isOpen && socket.closeReason == null) conn.abort(NO_HELLO)
             if (ready) {
+                // Paired with the dialer's "spool socket failed" line: together they bound when a frame could reach
+                // the spool (a call offer queued in between went out on the next hello, possibly after its end).
+                log("${SpoolUrl.host(url)}: connected (hello ${clock() - dialedAt} ms after the dial)")
                 dialFailures = 0
                 // A route change that landed during this handshake asked for a dial that this hello has
                 // now answered; left in the channel it would fire an immediate re-dial, with the backoff
@@ -1056,6 +1060,7 @@ class ScopeSync(
                 } finally {
                     ticker.cancel()
                     ticketWatch?.cancel()
+                    log("${SpoolUrl.host(url)}: disconnected after ${(clock() - dialedAt) / MS_PER_S} s")
                 }
             }
             pump.cancel()
@@ -2438,6 +2443,8 @@ class ScopeSync(
          * purpose: that one retires when a request is answered, this one the moment a hello completes.
          */
         const val NO_HELLO = "no_hello"
+
+        private const val MS_PER_S = 1_000L
 
         /**
          * [SpoolStatus.lastError] when a spool's listing named more ids than a conforming one can hold

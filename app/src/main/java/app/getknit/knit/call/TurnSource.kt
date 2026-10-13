@@ -37,3 +37,9 @@ class TurnServer(
 ) {
     override fun toString(): String = "TurnServer(urls=$urls)"
 }
+
+/** "1 TURN, 1 STUN" for a log line: the credential-free STUN entry is not a relay, so it is counted apart. */
+fun List<TurnServer>.iceSummary(): String {
+    val stun = count { it.user.isEmpty() }
+    return "${size - stun} TURN, $stun STUN"
+}

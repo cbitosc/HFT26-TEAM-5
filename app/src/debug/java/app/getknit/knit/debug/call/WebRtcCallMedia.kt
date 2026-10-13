@@ -7,6 +7,7 @@ import app.getknit.knit.call.DirectLink
 import app.getknit.knit.call.MediaEvent
 import app.getknit.knit.call.SdpGuard
 import app.getknit.knit.call.TurnServer
+import app.getknit.knit.call.iceSummary
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
@@ -238,7 +239,7 @@ private class WebRtcSession(
         pc.addTrack(track, listOf("knit"))
         audio.begin()
         log(
-            "webrtc: opened (${servers.size} TURN, relay=$relayOnly, direct=$direct" +
+            "webrtc: opened (${servers.iceSummary()}, relay=$relayOnly, direct=$direct" +
                 (if (tlsUnchecked) ", turns unchecked" else "") +
                 (if (followPath) ", prefer ${preferred?.name?.lowercase() ?: "pending"}" else "") + ")",
         )

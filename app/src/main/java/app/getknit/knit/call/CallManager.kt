@@ -803,7 +803,7 @@ class CallManager(
                 if (l.relay) l.invite = null
                 withLiveMedia(CallPayload(id = l.id, ph = CallPayload.PHASE_OFFER, sdp = sdp, dw = l.invite), l.offeredWalkie)
             }
-        log("call ${l.id}: offering (${servers.size} TURN, relay=${l.relay}, direct=${offer.dw != null})")
+        log("call ${l.id}: offering (${servers.iceSummary()}, relay=${l.relay}, direct=${offer.dw != null})")
         if (!signals.sendCallSignal(l.peerId, offer)) {
             mutex.withLock { if (current(l)) finish(l, CallPayload.REASON_ERROR) }
             return
