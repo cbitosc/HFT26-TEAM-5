@@ -133,6 +133,32 @@
             <meta-data
                 android:name="android.support.wearable.complications.UPDATE_PERIOD_SECONDS"
                 android:value="300" />
+            <!-- The Knit watch face (`watchface/`) binds this source by default; listed so it needs no grant. -->
+            <meta-data
+                android:name="android.support.wearable.complications.SAFE_WATCH_FACES"
+                android:value="app.getknit.knit.watchfacepush.stitch" />
+        </service>
+
+        <!-- The Knit watch face's link ring: a code only that face reads (ADR 2026-10.3y2s). -->
+        <service
+            android:name=".RingComplicationService"
+            android:exported="true"
+            android:icon="@drawable/ic_radios"
+            android:label="@string/complication_ring"
+            android:permission="com.google.android.wearable.permission.BIND_COMPLICATION_PROVIDER">
+            <intent-filter>
+                <action android:name="android.support.wearable.complications.ACTION_COMPLICATION_UPDATE_REQUEST" />
+            </intent-filter>
+            <meta-data
+                android:name="android.support.wearable.complications.SUPPORTED_TYPES"
+                android:value="LONG_TEXT" />
+            <meta-data
+                android:name="android.support.wearable.complications.UPDATE_PERIOD_SECONDS"
+                android:value="300" />
+            <!-- The Knit watch face (`watchface/`) binds this source by default; listed so it needs no grant. -->
+            <meta-data
+                android:name="android.support.wearable.complications.SAFE_WATCH_FACES"
+                android:value="app.getknit.knit.watchfacepush.stitch" />
         </service>
         <!-- Every read of the phone runs here: a running job keeps the process out of the freezer. -->
         <service

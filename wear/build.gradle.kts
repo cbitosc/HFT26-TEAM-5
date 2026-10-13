@@ -32,9 +32,10 @@ fun releaseSigningCred(
 // Deriving it from the phone's keeps one counter (gradle.properties) and keeps both rising together.
 val wearVersionCodeBase = 1_000_000_000
 
-// The Wear OS watch app for the mesh-status prototype: four complications and a status screen, fed by one
-// read of the phone's `WearStatusServer` GATT characteristic. In the build only under `-Pknit.wear=true`
-// (settings.gradle.kts), so nothing here ever reaches :app's graph or a shipped artifact.
+// The Wear OS watch app for the mesh-status prototype: complications, a tile and a status screen, fed by one
+// read of the phone's `WearStatusServer` (RFCOMM first, the GATT characteristic as the fallback). In the build
+// only under `-Pknit.wear=true` (settings.gradle.kts), so nothing here ever reaches :app's graph or a shipped
+// artifact.
 android {
     namespace = "app.getknit.knit.wear"
     // Lockstep with :app (see the compileSdk / buildToolsVersion comments there).

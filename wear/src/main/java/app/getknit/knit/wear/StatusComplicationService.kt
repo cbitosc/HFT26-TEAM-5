@@ -146,6 +146,7 @@ abstract class StatusComplicationService : SuspendingTimelineComplicationDataSou
                 DayComplicationService::class.java,
                 RelayedComplicationService::class.java,
                 CarryingComplicationService::class.java,
+                RingComplicationService::class.java,
             )
 
         /** Ask the system to re-query every Knit complication on the face (after a read changed what they show). */
@@ -265,7 +266,25 @@ class CarryingComplicationService : StatusComplicationService() {
         }
 }
 
-// --- builders shared by the four sources ------------------------------------------------------------------------
+/**
+ * The Knit watch face's link ring, as [RingCode] — a code for that face, not words for any other: its picker
+ * label says so. The face binds it to its fixed bezel slot (ADR 2026-10.3y2s); TalkBack hears the nearby line.
+ */
+class RingComplicationService : StatusComplicationService() {
+    override fun Context.build(
+        type: ComplicationType,
+        view: WatchView,
+    ): ComplicationData? {
+        if (type != ComplicationType.LONG_TEXT) return null
+        val shown = view.status?.let { Shown(it, view.agedSinceMs) }
+        return LongTextComplicationData
+            .Builder(text(RingCode.of(shown)), describe(StatusLines.nearbyLine(view.status).text, view.agedSinceMs))
+            .setTapAction(openApp())
+            .build()
+    }
+}
+
+// --- builders shared by the sources ------------------------------------------------------------------------
 
 /**
  * A short text; an aged reading ([agedSinceMs]) keeps its value but trades the title for its age ("12m ago",

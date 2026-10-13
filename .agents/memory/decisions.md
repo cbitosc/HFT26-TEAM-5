@@ -208,6 +208,7 @@ carries; never renumber an old one.
 | [2026-09.zu5t](decisions/2026-09-zu5t-content-capture-is-off.md) | Content capture is off | privacy, ui, performance |
 | [2026-10.2da4](decisions/2026-10-2da4-a-bluetooth-link-that-feeds-a-file-asks-for-a-short-interval-and-earns-a-larger.md) | A Bluetooth link that feeds a file asks for a short interval and earns a larger budget | ble, mesh |
 | [2026-10.3tee](decisions/2026-10-3tee-internet-plane-voice-calls-use-webrtc-signalled-over-sealed-spool-frames.md) | Internet-plane voice calls use WebRTC signalled over sealed Spool frames | voip, spool, webrtc, privacy |
+| [2026-10.3y2s](decisions/2026-10-3y2s-the-knit-watch-face-is-a-wff-v4-face-fed-by-a-ring-complication.md) | The Knit watch face is a WFF v4 face fed by a ring complication | wear, ui |
 | [2026-10.47rw](decisions/2026-10-47rw-a-keystore-refusal-is-not-proof-a-secret-is-gone.md) | A Keystore refusal is not proof a secret is gone | crypto, storage, reliability |
 | [2026-10.5buf](decisions/2026-10-5buf-a-bluetooth-file-feed-is-clocked-by-its-receiver-s-reports.md) | A Bluetooth file feed is clocked by its receiver's reports | ble, mesh, blobs |
 | [2026-10.5hzt](decisions/2026-10-5hzt-a-transfer-s-ready-is-sent-until-the-receiver-connects.md) | A transfer's READY is sent until the receiver connects, and a send that ended short is retried from its card | transfer, ui |

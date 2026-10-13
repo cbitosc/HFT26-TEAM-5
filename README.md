@@ -319,6 +319,15 @@ It shares the phone app's package name, so install it with an explicit `-s` (or 
 `./gradlew installDebug -Pknit.wear=true` with a phone attached can replace the phone app with the watch
 build. Debug builds of the phone app serve the watch; release builds don't yet.
 
+The Knit watch face (Wear OS 6+) is a second module behind the same switch; install it next to the watch app
+and pick "Knit" in the watch's face picker:
+
+```bash
+./gradlew :watchface:assembleDebug -Pknit.wear=true
+adb -s <watch-serial> install watchface/build/outputs/apk/debug/watchface-debug.apk
+scripts/check-watchface.sh          # Google's WFF validator and memory budget
+```
+
 ## 📱 Running
 
 The mesh drives the Wi-Fi Aware and Bluetooth LE radios directly, so it needs **physical devices**:

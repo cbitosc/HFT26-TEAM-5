@@ -68,7 +68,7 @@ OTHER_REPO = re.compile(r"\bknit-(?!next\b)[a-z]+\b[^.]{0,80}$")
 FILE_EXT = re.compile(r"kt|kts|py|sh|md|json|xml|yml|yaml|toml|txt|png|tflite")
 FENCE = re.compile(r"^\s*(```|~~~)")
 INLINE_CODE = re.compile(r"(`+)(.+?)\1")
-FENCED_PATH = re.compile(r"(?<![\w./-])((?:scripts|\.agents|\.claude|\.github|\.gitlab|app|docs|vectors|wear)/[\w./-]*\w)")
+FENCED_PATH = re.compile(r"(?<![\w./-])((?:scripts|\.agents|\.claude|\.github|\.gitlab|app|docs|vectors|wear|watchface)/[\w./-]*\w)")
 
 RULES = {
     "retired-symbol": "the name was declared in this repository's Kotlin and has since gone from every tracked source "

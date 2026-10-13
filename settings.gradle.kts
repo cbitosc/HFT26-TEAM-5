@@ -44,6 +44,9 @@ if (providers.gradleProperty("knit.baselineProfile").orNull.toBoolean()) {
 // The Wear OS watch app for the mesh-status prototype (the phone side is `WearStatusServer`, behind
 // `BuildConfig.WEAR_STATUS`). Opt-in for the same reason as :baselineprofile: F-Droid's rebuild and CI never
 // configure it or resolve the Wear libraries, so it cannot move a byte of :app's release.
+// The Knit watch face (`watchface/`, ADR 2026-10.3y2s) rides the same switch: a resource-only face whose ring
+// :wear's complication feeds, so one is no use without the other.
 if (providers.gradleProperty("knit.wear").orNull.toBoolean()) {
     include(":wear")
+    include(":watchface")
 }

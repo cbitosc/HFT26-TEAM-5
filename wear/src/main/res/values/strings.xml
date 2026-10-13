@@ -6,6 +6,7 @@
     <string name="complication_day">Knit · Your day</string>
     <string name="complication_relayed">Knit · Relayed today</string>
     <string name="complication_carrying">Knit · Carrying</string>
+    <string name="complication_ring">Knit · Link ring (for the Knit face)</string>
     <string name="tile_label">Knit mesh</string>
     <string name="tile_description">Peers nearby, messages relayed today and held for others by your phone</string>
 </resources>

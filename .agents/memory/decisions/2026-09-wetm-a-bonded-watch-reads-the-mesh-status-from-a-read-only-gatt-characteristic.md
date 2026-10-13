@@ -260,3 +260,9 @@ Still owed before a Play release, outside the code: the listing (WO-G2: name the
 the phone side on in release (`BuildConfig.WEAR_STATUS`), without which the non-standalone watch app has nothing to
 read (WO-P5). The watch screenshots must stay out of the fastlane tree F-Droid reads, since F-Droid ships no watch
 build.
+
+## Amendment 2026-10-13 (6) — the Knit face
+
+The face this ADR left for later is ADR 2026-10.3y2s: a Watch Face Format v4 face in `:watchface` whose bezel ring
+is drawn from one more source here, `RingComplicationService`, carrying `WearExtra.links` as a text code
+(`RingCode`). It ages on the same timeline as every other source; the phone side is unchanged.
