@@ -2,9 +2,13 @@ package app.getknit.knit.debug.call
 
 /**
  * A call's TURN allocations as its log counts them (C-7.6-26). Each relay candidate libwebrtc surfaces is one
- * allocation, labelled by how this phone reaches the server (`udp`, `tcp` or `tls`, from the URL it came from) and
- * the address family of the network it leaves on (the candidate's related address, which keeps its family even where
- * libwebrtc blanks it). A removed one was pruned, or its network went away, and its allocation is being released.
+ * allocation, labelled `udp/wifi#2/ipv4`: how this phone reaches the server (`udp`, `tcp` or `tls`, from the URL it
+ * came from), then the network it leaves on, by the line's `network-cost` (`wifi`, `cellular`, `vpn`) and libwebrtc's
+ * `network-id` for it (an IPv4 and an IPv6 network of one interface are two ids), then that network's address family,
+ * read from the related address (the mapped address the server saw). Relay-only (C-3.7-3) blanks that address to an
+ * empty one of the *relay's* family, which says nothing of the network, so the family is then `?`. The JNI hands a
+ * gathered candidate over with no adapter type, which is why the cost names the network.
+ * A removed one was pruned, or its network went away, and its allocation is being released.
  * Types and counts only: the relay address that matches a removal to its gathering stays in here, never in a log.
  *
  * What it cannot see: a relay pruned the moment it was ready, because a better one on its network was already up.
@@ -45,11 +49,14 @@ internal class RelayTally {
     fun summary(): String = "allocations gathered $gathered, pruned ${gathered - live.size}, held ${live.size}"
 
     companion object {
-        /** "udp/ipv4": how this phone reaches the TURN server, and the family of the network it leaves on. */
+        /** "udp/wifi#2/ipv4": how this phone reaches the TURN server, and the network it leaves on. */
         fun label(
             sdp: String,
             serverUrl: String?,
-        ): String = "${transportOf(serverUrl)}/${familyOf(sdp)}"
+        ): String {
+            val fields = sdp.split(' ')
+            return "${transportOf(serverUrl)}/${networkOf(fields)}/${familyOf(fields)}"
+        }
 
         /** "2 (tls/ipv4 1, udp/ipv6 1)". */
         fun counts(labels: List<String>): String {
@@ -73,12 +80,33 @@ internal class RelayTally {
                 else -> "?"
             }
 
-        private fun familyOf(sdp: String): String {
-            val fields = sdp.split(' ')
-            val related = fields.indexOf("raddr").takeIf { it >= 0 }?.let { fields.getOrNull(it + 1) }
-            val address = related ?: fields.getOrNull(ADDRESS) ?: return "?"
-            return if (address.contains(':')) "ipv6" else "ipv4"
+        // rtc_base/network_constants.h: 10 Wi-Fi or Ethernet, 1 VPN, 250 to 980 cellular by generation, 50 unknown.
+        private fun networkOf(fields: List<String>): String {
+            val cost = attribute(fields, "network-cost")?.toIntOrNull()
+            val kind =
+                when {
+                    cost == null -> "?"
+                    cost == VPN_COST -> "vpn"
+                    cost <= LOW_COST -> "wifi"
+                    cost >= CELLULAR_COST -> "cellular"
+                    else -> "unknown"
+                }
+            return "$kind#${attribute(fields, "network-id") ?: "?"}"
         }
+
+        private fun familyOf(fields: List<String>): String {
+            val related = attribute(fields, "raddr") ?: return "?"
+            return when {
+                related == "0.0.0.0" || related == "::" -> "?"
+                related.contains(':') -> "ipv6"
+                else -> "ipv4"
+            }
+        }
+
+        private fun attribute(
+            fields: List<String>,
+            name: String,
+        ): String? = fields.indexOf(name).takeIf { it >= 0 }?.let { fields.getOrNull(it + 1) }
 
         // "candidate:<foundation> <component> <protocol> <priority> <address> <port> typ relay …"
         private fun relayKey(sdp: String): String? {
@@ -87,6 +115,9 @@ internal class RelayTally {
             return "${fields[ADDRESS]} ${fields[PORT]}"
         }
 
+        private const val VPN_COST = 1
+        private const val LOW_COST = 10
+        private const val CELLULAR_COST = 248
         private const val ADDRESS = 4
         private const val PORT = 5
     }
