@@ -2,6 +2,7 @@ package app.getknit.knit.ui.relay
 
 import android.content.ClipData
 import android.os.Build
+import android.text.format.DateUtils
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -62,6 +63,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.getknit.knit.R
 import app.getknit.knit.data.relay.RelayInviteApplier
+import app.getknit.knit.mesh.spool.KeyAnswer
 import app.getknit.knit.mesh.spool.RelayInvite
 import app.getknit.knit.mesh.spool.ScopeSync
 import app.getknit.knit.mesh.spool.SpoolConnection
@@ -397,6 +399,9 @@ private fun RelayListRow(
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
         RelayHeadRow(relay, planeEnabled, offline, onSetEnabled, onRemove, onShareInvite, onCopyInvite)
+        // What the relay offers calls and where this phone stands with its ticket and key — text only, below the
+        // head row like the room, so the switch's announcement stays the host and its status.
+        if (relay.calls != null || relay.account != null) RelayCallDetails(relay)
         // The relay's commons (§7.4), once its HELLO has advertised one: the room's name and one verb —
         // Join while this device is outside it, Leave once inside. Below the head row rather than in it, so
         // the switch and the delete button stay the two controls a screen reader already knows there.
@@ -508,6 +513,118 @@ private fun RelayHeadRow(
         }
     }
 }
+
+/**
+ * A relay's call details (experimental, docs/VOICE_CALLS.md §2), up to three lines under its status: what its HELLO
+ * offers calls (TURN, the walkie's casts, how many STUN servers), where this connection stands with a ticket on a
+ * relay that takes them, and the ticket key held for its host with what the issuer last said (ADR 2026-10.3sk7).
+ * Names the issuer's host and the ticket's claims only — never the key, the ticket or a STUN URI.
+ */
+@Composable
+private fun RelayCallDetails(relay: RelayRow) {
+    val calls = relay.calls
+    val lines =
+        buildList {
+            if (calls != null) {
+                val offers =
+                    buildList {
+                        if (calls.turn) add(stringResource(R.string.relays_calls_turn))
+                        if (calls.walkie) add(stringResource(R.string.relays_calls_walkie))
+                        if (calls.stunServers > 0) {
+                            add(pluralStringResource(R.plurals.relays_calls_stun, calls.stunServers, calls.stunServers))
+                        }
+                    }
+                if (offers.isNotEmpty()) add(stringResource(R.string.relays_calls_label, offers.joinToString(", ")))
+                calls.ticket?.let { add(ticketLine(it, calls.turn)) }
+            }
+            relay.account?.let { add(accountLine(it)) }
+        }
+    Column(modifier = Modifier.fillMaxWidth().padding(start = 22.dp).testTag("relay_calls_${relay.host}")) {
+        lines.forEach { line ->
+            Text(
+                text = line,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@Composable
+private fun ticketLine(
+    ticket: RelayTicket,
+    turn: Boolean,
+): String =
+    when (ticket) {
+        RelayTicket.None -> {
+            stringResource(if (turn) R.string.relays_calls_ticket_none_turn else R.string.relays_calls_ticket_none)
+        }
+
+        RelayTicket.Presenting -> {
+            stringResource(R.string.relays_calls_ticket_presenting)
+        }
+
+        is RelayTicket.Live -> {
+            val until = stringResource(R.string.relays_calls_ticket_live, dateTime(ticket.exp * MS_PER_S))
+            val grants =
+                buildList {
+                    if (ticket.turn) add(stringResource(R.string.relays_calls_turn))
+                    if (ticket.walkie) add(stringResource(R.string.relays_calls_walkie))
+                }
+            if (grants.isEmpty()) until else "$until · ${grants.joinToString(", ")}"
+        }
+
+        is RelayTicket.Refused -> {
+            stringResource(R.string.relays_calls_ticket_refused, ticket.reason)
+        }
+
+        is RelayTicket.Expired -> {
+            stringResource(R.string.relays_calls_ticket_expired, dateTime(ticket.exp * MS_PER_S))
+        }
+    }
+
+@Composable
+private fun accountLine(account: RelayAccount): String =
+    when (account.answer) {
+        null -> {
+            stringResource(
+                if (account.failures > 0) R.string.relays_calls_key_unanswered else R.string.relays_calls_key_waiting,
+                account.issuer,
+            )
+        }
+
+        KeyAnswer.OK -> {
+            account.endsAt?.let { stringResource(R.string.relays_calls_key_ok, account.issuer, date(it)) }
+                ?: stringResource(R.string.relays_calls_key_ok_open, account.issuer)
+        }
+
+        KeyAnswer.UNKNOWN_KEY -> {
+            stringResource(R.string.relays_calls_key_unknown, account.issuer)
+        }
+
+        KeyAnswer.ENDED -> {
+            account.endsAt?.let { stringResource(R.string.relays_calls_key_ended, account.issuer, date(it)) }
+                ?: stringResource(R.string.relays_calls_key_ended_undated, account.issuer)
+        }
+    }
+
+/** A ticket's `exp`: the day and the time, never the year — a ticket is good for 48 h at most (§2.6). */
+@Composable
+private fun dateTime(epochMillis: Long): String =
+    DateUtils.formatDateTime(
+        LocalContext.current,
+        epochMillis,
+        DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_SHOW_TIME or DateUtils.FORMAT_NO_YEAR or DateUtils.FORMAT_ABBREV_MONTH,
+    )
+
+/** An account's end: the day, with its year. */
+@Composable
+private fun date(epochMillis: Long): String =
+    DateUtils.formatDateTime(
+        LocalContext.current,
+        epochMillis,
+        DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_SHOW_YEAR or DateUtils.FORMAT_ABBREV_MONTH,
+    )
 
 @Composable
 private fun RelayInviteMenu(
@@ -761,6 +878,8 @@ private const val BUSY_STATUS = "http 503"
 /** A close-reason string carrying spec §7.1's private-spool token rejection (`close 4001 …`). */
 private const val AUTH_CLOSE_CODE = "4001"
 
+private const val MS_PER_S = 1_000L
+
 @Preview(showBackground = true)
 @Composable
 fun InternetRelayScreenOnPreview() =
@@ -799,6 +918,58 @@ fun InternetRelayScreenOnPreview() =
                                 enabled = true,
                                 connected = false,
                                 lastError = "unreachable",
+                            ),
+                        ),
+                ),
+            onBack = {},
+            onToggle = {},
+        )
+    }
+
+@Preview(showBackground = true)
+@Composable
+fun InternetRelayScreenCallsPreview() =
+    KnitPreview {
+        InternetRelayScreenContent(
+            state =
+                InternetRelayUiState(
+                    enabled = true,
+                    relays =
+                        listOf(
+                            RelayRow(
+                                url = "wss://lab.lax.spool.getknit.app/spool/v1",
+                                host = "lab.lax.spool.getknit.app",
+                                enabled = true,
+                                connected = true,
+                                scopeCount = 4,
+                                carriesPhotos = true,
+                                calls =
+                                    RelayCalls(
+                                        turn = true,
+                                        stunServers = 1,
+                                        walkie = true,
+                                        // 2026-10-14 16:00 UTC.
+                                        ticket = RelayTicket.Live(exp = 1_791_993_600L, turn = true, walkie = true),
+                                    ),
+                                // 2026-11-30 UTC.
+                                account = RelayAccount("issuer.example.org", KeyAnswer.OK, endsAt = 1_796_000_000_000L, failures = 0),
+                            ),
+                            RelayRow(
+                                url = "wss://anywhere.example.org/spool/v1",
+                                host = "anywhere.example.org",
+                                enabled = true,
+                                connected = true,
+                                scopeCount = 2,
+                                carriesPhotos = true,
+                                calls = RelayCalls(turn = true, stunServers = 2, walkie = false, ticket = RelayTicket.None),
+                            ),
+                            RelayRow(
+                                url = "wss://ended.example.org/spool/v1",
+                                host = "ended.example.org",
+                                enabled = true,
+                                connected = false,
+                                lastError = "unreachable",
+                                account = RelayAccount("issuer.example.org", KeyAnswer.ENDED, endsAt = 1_790_000_000_000L, failures = 0),
                             ),
                         ),
                 ),

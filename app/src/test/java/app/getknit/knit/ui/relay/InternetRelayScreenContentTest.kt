@@ -6,6 +6,7 @@ import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
 import androidx.compose.ui.test.assertTextEquals
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
@@ -21,6 +22,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import app.getknit.knit.data.relay.RelayInviteApplier
 import app.getknit.knit.mesh.spool.CommonsInvite
 import app.getknit.knit.mesh.spool.HeldKey
+import app.getknit.knit.mesh.spool.KeyAnswer
 import app.getknit.knit.ui.theme.KnitTheme
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -137,6 +139,8 @@ class InternetRelayScreenContentTest {
         carriesPhotos: Boolean? = true,
         lastError: String? = null,
         commons: RelayCommons? = null,
+        calls: RelayCalls? = null,
+        account: RelayAccount? = null,
     ) = RelayRow(
         url = "wss://$host/spool/v1",
         host = host,
@@ -146,6 +150,8 @@ class InternetRelayScreenContentTest {
         carriesPhotos = carriesPhotos,
         lastError = lastError,
         commons = commons,
+        calls = calls,
+        account = account,
     )
 
     @Test
@@ -187,6 +193,67 @@ class InternetRelayScreenContentTest {
     fun aFramesOnlyRelaySaysSoBeforeAPhotoFailsToUpload() {
         render(InternetRelayUiState(enabled = true, relays = listOf(relay(carriesPhotos = false))))
         compose.onNodeWithText("Carries messages only — no photos").assertIsDisplayed()
+    }
+
+    @Test
+    fun aRelayWithCallFeaturesNamesThemItsTicketAndItsKey() {
+        render(
+            InternetRelayUiState(
+                enabled = true,
+                relays =
+                    listOf(
+                        relay(
+                            host = "lab.lax.spool.getknit.app",
+                            calls =
+                                RelayCalls(
+                                    turn = true,
+                                    stunServers = 2,
+                                    walkie = true,
+                                    ticket = RelayTicket.Live(exp = 1_800_086_400L, turn = true, walkie = true),
+                                ),
+                            account = RelayAccount("issuer.example.org", KeyAnswer.OK, endsAt = 1_801_000_000_000L, failures = 0),
+                        ),
+                        relay(host = "plain.example.org"),
+                    ),
+            ),
+        )
+        compose.onNodeWithText("Calls · TURN, walkie, 2 STUN servers").assertIsDisplayed()
+        compose
+            .onNode(hasText("Ticket good until", substring = true) and hasText("· TURN, walkie", substring = true))
+            .assertIsDisplayed()
+        compose.onNodeWithText("Ticket key from issuer.example.org · account ends", substring = true).assertIsDisplayed()
+        // A relay that offers calls nothing says nothing about them.
+        compose.onAllNodesWithTag("relay_calls_plain.example.org").assertCountEquals(0)
+    }
+
+    @Test
+    fun aTicketedRelayWithoutATicketSaysWhatTurnNeeds() {
+        render(
+            InternetRelayUiState(
+                enabled = true,
+                relays =
+                    listOf(
+                        relay(
+                            calls = RelayCalls(turn = true, stunServers = 1, walkie = false, ticket = RelayTicket.None),
+                            account = RelayAccount("issuer.example.org", KeyAnswer.UNKNOWN_KEY, endsAt = null, failures = 0),
+                        ),
+                        relay(
+                            host = "refused.example.org",
+                            calls = RelayCalls(turn = false, stunServers = 0, walkie = true, ticket = RelayTicket.Refused("audience")),
+                        ),
+                        relay(
+                            host = "down.example.org",
+                            connected = false,
+                            account = RelayAccount("issuer.example.org", answer = null, endsAt = null, failures = 3),
+                        ),
+                    ),
+            ),
+        )
+        compose.onNodeWithText("Calls · TURN, 1 STUN server").assertIsDisplayed()
+        compose.onNodeWithText("No ticket — TURN here needs one").assertIsDisplayed()
+        compose.onNodeWithText("issuer.example.org doesn't recognise this ticket key").assertIsDisplayed()
+        compose.onNodeWithText("Ticket refused (audience)").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Ticket key from issuer.example.org · not answering").performScrollTo().assertIsDisplayed()
     }
 
     @Test

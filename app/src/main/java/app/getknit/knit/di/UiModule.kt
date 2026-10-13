@@ -9,6 +9,7 @@ import app.getknit.knit.data.commons.CommonsRepository
 import app.getknit.knit.data.crypto.IdentityKeyStore
 import app.getknit.knit.data.forward.ForwardRepository
 import app.getknit.knit.data.relay.RelayStatusRepository
+import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.data.settings.TicketKeyStore
 import app.getknit.knit.linkpreview.LinkPreviewService
 import app.getknit.knit.location.LocationSource
@@ -168,6 +169,8 @@ val uiModule =
                 gate = get(),
                 // In every build: removing a relay forgets a ticket the debug bridge imported even where no key exists.
                 ticketKeys = get<TicketKeyStore>(),
+                // A row's call details (TURN, STUN, casts, the ticket and its key) only where calls are wired.
+                spoolTickets = if (CALLS_WIRED) get<SettingsStore>() else null,
             )
         }
         viewModel { LoraRadioViewModel(get(), get(), get(), get()) }

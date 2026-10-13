@@ -97,9 +97,10 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   `url` only names the relay and is not added (re-adding it untokened would make a second row). A live connection
   presents an import at once; the reply's `ticketImport` names the host and `exp`, never the ticket. Each spool in
   the dump carries `ent` (its hello takes tickets), `stun` (how many STUN URIs its hello gave a call, after the
-  client's URL rule) and `ticket`: `state` (`none`/`pending`/`accepted`/`refused`) with `exp`, `turn` and the
-  refusal `reason` for this connection, plus `held` and `verdict` for the stored ticket (`retry:early`, or the word
-  that keeps it from going out again). A free phone on an Anywhere spool reads `ent: true`, `stun: 1`,
+  client's URL rule), `turn` (its hello offers TURN), `cast` (its hello's `maxBytes` and `rate`, or null) and
+  `ticket`: `state` (`none`/`pending`/`accepted`/`refused`) with `exp`, `turn` and the refusal `reason` for this
+  connection, plus `held` and `verdict` for the stored ticket (`retry:early`, or the word that keeps it from going
+  out again). A free phone on an Anywhere spool reads `ent: true`, `stun: 1`,
   `held: false`. Logcat under `ScopeSync`: `<host>: ticket presented|accepted|refused: <word>` and, per call,
   `<host>: TURN ask (ticketed): …` or `TURN ask skipped, no ticket (ent)`.
   `--es url <spoolUrl> --es issuer <https://host[:port]> --es key <kak1_…>` holds a **customer key** for that relay's

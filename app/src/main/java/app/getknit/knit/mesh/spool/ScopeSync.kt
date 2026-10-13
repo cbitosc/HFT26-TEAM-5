@@ -186,6 +186,10 @@ class SpoolStatus(
     val ent: Boolean = false,
     val stun: List<String> = emptyList(),
     val ticket: SpoolTicketState = SpoolTicketState.None,
+    /** Whether this connection's HELLO said the spool issues TURN credentials (`turn`, docs/VOICE_CALLS.md §2.1). */
+    val turn: Boolean = false,
+    /** This connection's HELLO cast bounds (docs/VOICE_CALLS.md §2.7), or null when the spool fans out no casts. */
+    val cast: SpoolCastInfo? = null,
 )
 
 /**
@@ -912,6 +916,8 @@ class ScopeSync(
                 ent = connection?.takeIf { it.isReady }?.ent == true,
                 stun = stunUrls(),
                 ticket = connection?.takeIf { it.isReady }?.ticketState() ?: SpoolTicketState.None,
+                turn = connection?.takeIf { it.isReady }?.turn == true,
+                cast = connection?.takeIf { it.isReady }?.cast,
                 scopes =
                     mine(all, connection).map { scope ->
                         ScopeStatus(

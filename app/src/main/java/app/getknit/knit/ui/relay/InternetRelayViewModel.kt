@@ -9,8 +9,19 @@ import app.getknit.knit.data.relay.RelayStatusRepository
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.mesh.MeshController
 import app.getknit.knit.mesh.spool.CommonsInvite
+import app.getknit.knit.mesh.spool.HeldKey
+import app.getknit.knit.mesh.spool.HeldTicket
+import app.getknit.knit.mesh.spool.IssuerOrigin
+import app.getknit.knit.mesh.spool.KeyAnswer
+import app.getknit.knit.mesh.spool.KeyState
 import app.getknit.knit.mesh.spool.RelayInvite
+import app.getknit.knit.mesh.spool.SpoolStatus
+import app.getknit.knit.mesh.spool.SpoolTicket
+import app.getknit.knit.mesh.spool.SpoolTicketJournal
+import app.getknit.knit.mesh.spool.SpoolTicketPolicy
+import app.getknit.knit.mesh.spool.SpoolTicketState
 import app.getknit.knit.mesh.spool.SpoolUrl
+import app.getknit.knit.mesh.spool.StoredSpoolTicket
 import app.getknit.knit.mesh.spool.TicketKeyJournal
 import app.getknit.knit.net.InternetGate
 import kotlinx.coroutines.flow.Flow
@@ -50,12 +61,72 @@ data class RelayRow(
     // The commons this relay runs (§7.4), once its HELLO has said so: the room's advertised name and, when
     // this device has joined it, the thread it lives in. Null while disconnected or when the relay runs none.
     val commons: RelayCommons? = null,
+    // What this relay offers calls, once its HELLO has said so, and where this phone stands with a ticket there.
+    // Null while disconnected, when it offers calls nothing, and in a build without calls.
+    val calls: RelayCalls? = null,
+    // The ticket key this phone holds for the relay's host and what its issuer last said. Not a fact about the
+    // connection, so it shows while disconnected too; null when no key is held, and in a build without calls.
+    val account: RelayAccount? = null,
 )
 
 /** A relay's commons as the row shows it: the operator's name for it, and our thread id when joined. */
 data class RelayCommons(
     val name: String?,
     val joinedId: String?,
+)
+
+/**
+ * What a relay offers calls (experimental, docs/VOICE_CALLS.md §2), as its HELLO said on the live connection:
+ * TURN credentials ([turn], §2.1), credential-free STUN servers ([stunServers], C-7.6-20, counted after the client's
+ * URL rule), casts for a walkie's bursts ([walkie], §2.7), and — only on a relay that takes tickets (`ent`, §2.6) —
+ * where this phone stands with one there ([ticket]; null on a relay that takes none).
+ */
+data class RelayCalls(
+    val turn: Boolean,
+    val stunServers: Int,
+    val walkie: Boolean,
+    val ticket: RelayTicket?,
+)
+
+/**
+ * Where this phone stands with a relay's ticket, for the row. The live connection's answer wins; with none there,
+ * the stored ticket's verdict says why (a refusal that keeps it from going out again, or an `exp` past).
+ */
+sealed interface RelayTicket {
+    /** No ticket held for this relay's host. */
+    data object None : RelayTicket
+
+    /** One is on its way to the relay, or held and about to go. */
+    data object Presenting : RelayTicket
+
+    /** The relay accepted a ticket good until [exp] (Unix seconds), granting TURN and casts as its flags say. */
+    data class Live(
+        val exp: Long,
+        val turn: Boolean,
+        val walkie: Boolean,
+    ) : RelayTicket
+
+    /** The relay refused the ticket with [reason], its `err ticket` word. */
+    data class Refused(
+        val reason: String,
+    ) : RelayTicket
+
+    /** The held ticket ran out at [exp] (Unix seconds) and nothing replaced it. */
+    data class Expired(
+        val exp: Long,
+    ) : RelayTicket
+}
+
+/**
+ * The ticket key held for a relay's host (ADR 2026-10.3sk7), as the row shows it: the issuer it is traded with (its
+ * host, never the key), the issuer's last verdict ([answer], null before the first), the account's end as the issuer
+ * last said it ([endsAt], epoch millis), and how many asks in a row got no verdict ([failures]).
+ */
+data class RelayAccount(
+    val issuer: String,
+    val answer: KeyAnswer?,
+    val endsAt: Long?,
+    val failures: Int,
 )
 
 data class InternetRelayUiState(
@@ -117,19 +188,40 @@ class InternetRelayViewModel(
     // Where a relay's customer key, its ask state and its ticket live (ADR 2026-10.3sk7), so removing the relay
     // forgets them (C-7.6-29). Null in the screen tests' rig, which removes the row alone.
     private val ticketKeys: TicketKeyJournal? = null,
+    // Where a relay's held ticket and its verdict live (`SettingsStore`), and the one seam for a row's call details:
+    // production passes it only where calls are wired (`CALLS_WIRED`), and without it no row shows any, nor the key.
+    private val spoolTickets: SpoolTicketJournal? = null,
+    private val clock: () -> Long = System::currentTimeMillis,
 ) : ViewModel() {
     val state: StateFlow<InternetRelayUiState> =
         combine(rows(relayStatus), gate?.online ?: MutableStateFlow(true)) { rows, online -> rows.copy(offline = !online) }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), InternetRelayUiState())
 
+    /** The stored tickets and keys a row's call details read, or null in a build without calls. */
+    private class CallStores(
+        val tickets: Map<String, StoredSpoolTicket>,
+        val keys: Map<String, HeldKey>,
+        val keyStates: Map<String, KeyState>,
+    )
+
+    private fun callStores(): Flow<CallStores?> {
+        val tickets = spoolTickets ?: return flowOf(null)
+        return combine(
+            tickets.spoolTickets,
+            ticketKeys?.keys ?: flowOf(emptyMap()),
+            ticketKeys?.keyStates ?: flowOf(emptyMap()),
+            ::CallStores,
+        )
+    }
+
     private fun rows(relayStatus: RelayStatusRepository): Flow<InternetRelayUiState> =
         combine(
             settings.spoolEnabled,
-            settings.spoolUrls,
-            settings.disabledSpoolUrls,
+            combine(settings.spoolUrls, settings.disabledSpoolUrls, ::Pair),
             relayStatus.statuses,
             commons?.observeAll() ?: flowOf(emptyList()),
-        ) { enabled, urls, parked, statuses, rooms ->
+            callStores(),
+        ) { enabled, (urls, parked), statuses, rooms, stores ->
             val byUrl = statuses.associateBy { it.url }
             val joinedByUrl = rooms.associateBy { it.spoolUrl }
             InternetRelayUiState(
@@ -153,6 +245,8 @@ class InternetRelayViewModel(
                                 } else {
                                     null
                                 },
+                            calls = stores?.let { live?.let { relayCalls(it, SpoolUrl.hostname(url)?.let(stores.tickets::get), clock()) } },
+                            account = stores?.let { relayAccount(SpoolUrl.hostname(url), stores.keys, stores.keyStates) },
                         )
                     },
             )
@@ -343,3 +437,67 @@ class InternetRelayViewModel(
         viewModelScope.launch { settings.setSpoolUrlEnabled(url, enabled) }
     }
 }
+
+/**
+ * What [status] — a connected relay — offers calls, or null when its HELLO offered none of TURN, STUN, casts or
+ * tickets. [stored] is the ticket held for its host, which explains a connection with nothing presented ([now] in
+ * epoch millis tells an `exp` past).
+ */
+internal fun relayCalls(
+    status: SpoolStatus,
+    stored: StoredSpoolTicket?,
+    now: Long,
+): RelayCalls? {
+    val offersNothing = !status.turn && status.stun.isEmpty() && status.cast == null && !status.ent
+    if (offersNothing) return null
+    return RelayCalls(
+        turn = status.turn,
+        stunServers = status.stun.size,
+        walkie = status.cast != null,
+        ticket = if (status.ent) relayTicket(status.ticket, stored, now) else null,
+    )
+}
+
+/** The row's ticket line: the connection's own answer first, then what the store's verdict says about the held one. */
+internal fun relayTicket(
+    live: SpoolTicketState,
+    stored: StoredSpoolTicket?,
+    now: Long,
+): RelayTicket =
+    when (live) {
+        is SpoolTicketState.Accepted -> {
+            RelayTicket.Live(live.exp, turn = live.fl and SpoolTicket.FL_TURN != 0L, walkie = live.fl and SpoolTicket.FL_CAST != 0L)
+        }
+
+        SpoolTicketState.Pending -> {
+            RelayTicket.Presenting
+        }
+
+        is SpoolTicketState.Refused -> {
+            RelayTicket.Refused(live.reason)
+        }
+
+        SpoolTicketState.None -> {
+            val held = stored?.let { HeldTicket.parse(it.text) }
+            val verdict = stored?.verdict
+            when {
+                held == null -> RelayTicket.None
+                verdict != null && !SpoolTicketPolicy.presentable(verdict) -> RelayTicket.Refused(verdict)
+                now / MS_PER_S > held.claims.exp -> RelayTicket.Expired(held.claims.exp)
+                else -> RelayTicket.Presenting
+            }
+        }
+    }
+
+/** The key held for [host] as the row shows it, or null when none is. */
+internal fun relayAccount(
+    host: String?,
+    keys: Map<String, HeldKey>,
+    states: Map<String, KeyState>,
+): RelayAccount? {
+    val key = host?.let(keys::get) ?: return null
+    val state = states[host] ?: KeyState.FRESH
+    return RelayAccount(IssuerOrigin.host(key.issuer), state.answer, state.endsAt, state.failures)
+}
+
+private const val MS_PER_S = 1_000L

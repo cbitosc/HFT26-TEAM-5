@@ -87,8 +87,8 @@ unreachable there. Removing a relay forgets a ticket in every build.
 - **A revoked account's last ticket runs out on its own**, up to 25 h (ukvm). The phone learns of the end only at its
   next ask.
 - **Two relays on one host share one key and one ticket**, as they share an audience.
-- **No user-facing text beyond the sheet.** "Anywhere: N days left" and the rest only read what the store keeps
-  (`endsAt`, the last answer).
+- **No user-facing text beyond the sheet** (lifted by the amendment below). "Anywhere: N days left" and the rest only
+  read what the store keeps (`endsAt`, the last answer).
 - **Not built:** a QR code, the storefront, the in-app scanner reading invites, a spool token in the key swap.
 - **What the iOS port must copy:** `i` and `k` in that order after `n`, both or neither, the origin rule and the key
   pattern (`docs/RELAY_INVITE.md` §2) and the `ticketInvite` vector; never minting them; the sheet's line naming the
@@ -104,3 +104,23 @@ unreachable there. Removing a relay forgets a ticket in every build.
   `RelayInviteApplierTest.aKeyedPreviewNeverPrintsTheKey`. `OkHttpTicketIssuerTest` copies the route's three
   answers from knit-spool-coordinator `main` @ `889bca6` and pins the request's shape. Device trial NOT run: the
   deployed issuer has no domain yet.
+
+## Amendment (2026-10-13): the relay row shows what a relay offers calls
+
+A tester on `lab.lax` could see a relay's calls only through `…debug.SPOOL`. Each relay row on the Internet relays
+screen now carries up to three lines under its status, in a build with calls only:
+
+- **What its hello offers** — `Calls · TURN, walkie, 1 STUN server` — from `SpoolStatus.turn`, `cast` and `stun`,
+  facts about the live connection, so none while it is down. `SpoolStatus` gained `turn` and `cast` for it (the
+  debug bridge's dump too).
+- **Its ticket**, on a relay that takes them (`ent`): the connection's own answer (good until a time, with the
+  grants its flags carry; presenting; refused with the spool's word), and, with nothing presented, why, from the
+  stored verdict (refused for good, or past its `exp`). Without one: "No ticket — TURN here needs one".
+- **The key** held for its host: the issuer's host and its last answer (account ends, not recognised, ended, not
+  answering). Not a fact about the connection, so it shows while the relay is down.
+
+The one seam is the `SpoolTicketJournal` the DI hands `InternetRelayViewModel`, only where `CALLS_WIRED`: without it
+no row says anything about calls, so release shows nothing. The row names the issuer's host and the ticket's claims,
+never the key, the ticket or a STUN URI. Pure mapping in `relayCalls` / `relayTicket` / `relayAccount`
+(`InternetRelayViewModelTest`); lines in `InternetRelayScreenContentTest` and the `InternetRelayScreenCalls`
+preview. Device check owed: open the screen on a phone connected to `lab.lax`.

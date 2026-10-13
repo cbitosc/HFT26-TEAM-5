@@ -8,9 +8,18 @@ import app.getknit.knit.data.relay.RelayInviteApplier
 import app.getknit.knit.data.relay.RelayStatusRepository
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.mesh.MeshController
+import app.getknit.knit.mesh.spool.HeldKey
+import app.getknit.knit.mesh.spool.KeyAnswer
+import app.getknit.knit.mesh.spool.KeyState
 import app.getknit.knit.mesh.spool.RelayInvite
 import app.getknit.knit.mesh.spool.ScopeSync
+import app.getknit.knit.mesh.spool.SpoolCastInfo
 import app.getknit.knit.mesh.spool.SpoolStatus
+import app.getknit.knit.mesh.spool.SpoolTicket
+import app.getknit.knit.mesh.spool.SpoolTicketJournal
+import app.getknit.knit.mesh.spool.SpoolTicketState
+import app.getknit.knit.mesh.spool.SpoolTicketsTest
+import app.getknit.knit.mesh.spool.StoredSpoolTicket
 import app.getknit.knit.mesh.spool.TicketKeyJournal
 import app.getknit.knit.net.InternetGate
 import io.mockk.coEvery
@@ -245,6 +254,110 @@ class InternetRelayViewModelTest {
             coVerify(exactly = 0) { shared.forgetHost(any()) }
         }
 
+    @Test
+    fun aRelaysCallFeaturesAndTicketKeyReachItsRowOnlyWhereCallsAreWired() =
+        runTest {
+            // The lab relay's shape: TURN, casts and STUN behind tickets, a ticket accepted for TURN and casts, and a
+            // key held for its host. The plain relay offers calls nothing, so its row shows nothing about them.
+            every { settings.spoolUrls } returns flowOf(setOf(LAB, OTHER))
+            every { relayStatus.statuses } returns
+                flowOf(
+                    listOf(
+                        SpoolStatus(
+                            url = LAB,
+                            connected = true,
+                            powBits = 0,
+                            lastError = null,
+                            scopes = emptyList(),
+                            ent = true,
+                            stun = listOf("stun:stun.lab.lax.spool.getknit.app:3478"),
+                            ticket = SpoolTicketState.Accepted(exp = 1_800_086_400L, fl = SpoolTicket.FL_TURN or SpoolTicket.FL_CAST),
+                            turn = true,
+                            cast = SpoolCastInfo(maxBytes = 2_048, rate = 4),
+                        ),
+                        SpoolStatus(url = OTHER, connected = true, powBits = 0, lastError = null, scopes = emptyList()),
+                    ),
+                )
+            val tickets = mockk<SpoolTicketJournal>()
+            every { tickets.spoolTickets } returns flowOf(emptyMap())
+            val keys = mockk<TicketKeyJournal>()
+            every { keys.keys } returns flowOf(mapOf(LAB_HOST to HeldKey("https://issuer.example.org", KEY)))
+            every { keys.keyStates } returns flowOf(mapOf(LAB_HOST to KeyState(KeyAnswer.OK, endsAt = 1_801_000_000_000L)))
+
+            val wired = InternetRelayViewModel(settings, relayStatus, commons, mesh, ticketKeys = keys, spoolTickets = tickets)
+            val rows = state(wired).relays.associateBy { it.url }
+            assertEquals(
+                RelayCalls(
+                    turn = true,
+                    stunServers = 1,
+                    walkie = true,
+                    ticket = RelayTicket.Live(1_800_086_400L, turn = true, walkie = true),
+                ),
+                rows.getValue(LAB).calls,
+            )
+            assertEquals(RelayAccount("issuer.example.org", KeyAnswer.OK, 1_801_000_000_000L, failures = 0), rows.getValue(LAB).account)
+            assertNull(rows.getValue(OTHER).calls)
+            assertNull(rows.getValue(OTHER).account)
+
+            // A build without calls hands the screen no ticket journal: no row says anything about them, key or not.
+            val dark = InternetRelayViewModel(settings, relayStatus, commons, mesh, ticketKeys = keys)
+            state(dark).relays.forEach {
+                assertNull(it.calls)
+                assertNull(it.account)
+            }
+        }
+
+    @Test
+    fun aDisconnectedRelayShowsItsKeyButNoHelloFacts() =
+        runTest {
+            every { settings.spoolUrls } returns flowOf(setOf(LAB))
+            every { relayStatus.statuses } returns
+                flowOf(
+                    listOf(SpoolStatus(url = LAB, connected = false, powBits = 0, lastError = ScopeSync.UNREACHABLE, scopes = emptyList())),
+                )
+            val tickets = mockk<SpoolTicketJournal>()
+            every { tickets.spoolTickets } returns flowOf(emptyMap())
+            val keys = mockk<TicketKeyJournal>()
+            every { keys.keys } returns flowOf(mapOf(LAB_HOST to HeldKey("https://issuer.example.org", KEY)))
+            every { keys.keyStates } returns flowOf(emptyMap())
+
+            val row =
+                state(
+                    InternetRelayViewModel(settings, relayStatus, commons, mesh, ticketKeys = keys, spoolTickets = tickets),
+                ).relays.single()
+            assertNull(row.calls)
+            assertEquals(RelayAccount("issuer.example.org", answer = null, endsAt = null, failures = 0), row.account)
+        }
+
+    @Test
+    fun aTicketLineExplainsAConnectionWithNothingPresentedFromTheStore() {
+        val now = 1_800_000_000_000L
+        val held = SpoolTicketsTest.ticket(exp = 1_800_086_400L).text
+        // The connection's own answer wins over whatever the store says.
+        assertEquals(
+            RelayTicket.Live(1_800_086_400L, turn = true, walkie = false),
+            relayTicket(SpoolTicketState.Accepted(1_800_086_400L, SpoolTicket.FL_TURN), StoredSpoolTicket(held, "signature"), now),
+        )
+        assertEquals(RelayTicket.Presenting, relayTicket(SpoolTicketState.Pending, null, now))
+        assertEquals(RelayTicket.Refused("audience"), relayTicket(SpoolTicketState.Refused("audience"), null, now))
+        // Nothing presented here: no ticket, a refusal that keeps it home, one past its exp, or one about to go.
+        assertEquals(RelayTicket.None, relayTicket(SpoolTicketState.None, null, now))
+        assertEquals(RelayTicket.Refused("signature"), relayTicket(SpoolTicketState.None, StoredSpoolTicket(held, "signature"), now))
+        assertEquals(
+            RelayTicket.Expired(1_800_086_400L),
+            relayTicket(SpoolTicketState.None, StoredSpoolTicket(held, null), 1_800_090_000_000L),
+        )
+        assertEquals(RelayTicket.Presenting, relayTicket(SpoolTicketState.None, StoredSpoolTicket(held, "retry:early"), now))
+    }
+
+    @Test
+    fun aRelayThatTakesNoTicketsHasNoTicketLine() {
+        val plain = SpoolStatus(url = OTHER, connected = true, powBits = 0, lastError = null, scopes = emptyList(), turn = true)
+        assertEquals(RelayCalls(turn = true, stunServers = 0, walkie = false, ticket = null), relayCalls(plain, null, 0L))
+        val ticketed = SpoolStatus(url = OTHER, connected = true, powBits = 0, lastError = null, scopes = emptyList(), ent = true)
+        assertEquals(RelayTicket.None, relayCalls(ticketed, null, 0L)?.ticket)
+    }
+
     private fun TestScope.collect(vm: InternetRelayViewModel): List<InternetRelayEvent> {
         val events = mutableListOf<InternetRelayEvent>()
         backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.events.collect { events += it } }
@@ -254,5 +367,10 @@ class InternetRelayViewModelTest {
     private companion object {
         const val TOKENED = "wss://home.example.org/spool/v1?k=t0ken"
         const val OTHER = "wss://lax.spool.getknit.app/spool/v1"
+        const val LAB_HOST = "lab.lax.spool.getknit.app"
+        const val LAB = "wss://$LAB_HOST/spool/v1?k=t0ken"
+
+        /** A customer key's shape; never shown, only its issuer is. */
+        const val KEY = "kak1_FBsiKTA3PkVMU1phaG92fYSLkpmgp661vMPK0djf5u0"
     }
 }

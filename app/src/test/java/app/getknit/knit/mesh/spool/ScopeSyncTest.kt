@@ -343,6 +343,7 @@ class ScopeSyncTest {
             assertEquals(1, lab.ents.size)
             val status = caller.sync.status().single { it.url == urls[2] }
             assertTrue(status.ent)
+            assertTrue(status.turn)
             assertEquals(listOf("stun:lab.example:3478"), status.stun)
             assertEquals(SpoolTicketState.Accepted(exp = 1_800_086_400L, fl = SpoolTicket.FL_TURN), status.ticket)
 
@@ -2777,6 +2778,15 @@ class ScopeSyncTest {
             pump()
 
             assertTrue(sender.sync.canCast(bob, peerTicketed = false))
+            // The relay row's call details read the hello's bounds off the status.
+            assertEquals(
+                2_048,
+                sender.sync
+                    .status()
+                    .single()
+                    .cast
+                    ?.maxBytes,
+            )
             assertEquals(1, sender.castTalk())
             pump(1)
 
@@ -2802,6 +2812,12 @@ class ScopeSyncTest {
             sender.sync.start(backgroundScope)
             pump()
             assertFalse(sender.sync.canCast(bob, peerTicketed = true))
+            assertNull(
+                sender.sync
+                    .status()
+                    .single()
+                    .cast,
+            )
             assertEquals(0, sender.castTalk())
             assertFalse(SpoolRecordType.CAST in spool.skippedRecords)
             assertTrue(spool.casts.isEmpty())

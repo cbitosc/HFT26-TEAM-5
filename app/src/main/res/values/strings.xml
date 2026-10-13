@@ -1328,6 +1328,28 @@
         <item quantity="other">%d conversations</item>
     </plurals>
     <string name="relays_no_photos">Carries messages only — no photos</string>
+    <!-- A relay's call details (experimental, docs/VOICE_CALLS.md §2), drawn only in a build with calls. TURN and STUN
+         are the protocols' own names; "walkie" is the push-to-talk call. -->
+    <string name="relays_calls_label">Calls · %1$s</string>
+    <string name="relays_calls_turn">TURN</string>
+    <string name="relays_calls_walkie">walkie</string>
+    <plurals name="relays_calls_stun">
+        <item quantity="one">%d STUN server</item>
+        <item quantity="other">%d STUN servers</item>
+    </plurals>
+    <string name="relays_calls_ticket_none">No ticket</string>
+    <string name="relays_calls_ticket_none_turn">No ticket — TURN here needs one</string>
+    <string name="relays_calls_ticket_presenting">Presenting a ticket…</string>
+    <string name="relays_calls_ticket_live">Ticket good until %1$s</string>
+    <string name="relays_calls_ticket_refused">Ticket refused (%1$s)</string>
+    <string name="relays_calls_ticket_expired">Ticket ran out %1$s</string>
+    <string name="relays_calls_key_waiting">Ticket key from %1$s · asking for a ticket</string>
+    <string name="relays_calls_key_unanswered">Ticket key from %1$s · not answering</string>
+    <string name="relays_calls_key_ok">Ticket key from %1$s · account ends %2$s</string>
+    <string name="relays_calls_key_ok_open">Ticket key from %1$s</string>
+    <string name="relays_calls_key_unknown">%1$s doesn\'t recognise this ticket key</string>
+    <string name="relays_calls_key_ended">Account at %1$s ended %2$s</string>
+    <string name="relays_calls_key_ended_undated">Account at %1$s has ended</string>
     <string name="relays_error_unreachable">Cannot be reached</string>
     <string name="relays_error_busy">Busy — it is not taking new connections right now</string>
     <string name="relays_error_auth">Rejected the access token</string>

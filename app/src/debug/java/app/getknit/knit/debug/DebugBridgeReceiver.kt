@@ -1672,7 +1672,12 @@ class DebugBridgeReceiver :
                     // and where this connection and the store stand with a ticket. Never the ticket itself.
                     .put("ent", spool.ent)
                     .put("stun", spool.stun.size)
-                    .put("ticket", ticketJson(tickets, spool))
+                    // §2.1 and §2.7: whether its hello offered TURN, and its cast bounds (null when it fans out none).
+                    .put("turn", spool.turn)
+                    .put(
+                        "cast",
+                        spool.cast?.let { JSONObject().put("maxBytes", it.maxBytes).put("rate", it.rate) } ?: JSONObject.NULL,
+                    ).put("ticket", ticketJson(tickets, spool))
                     .put("ticketKey", ticketKeyJson(tickets, spool.url)),
             )
         }
