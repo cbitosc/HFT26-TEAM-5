@@ -224,7 +224,11 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
     (android default)` when the default moves mid-call); the `pairs` line names each pair's local network. `--es op turntls --es check off|on` opens the next calls' `turns:` legs without
     checking the certificate (in memory, `state`'s `turnTls`; a diagnosis switch, never a default — libwebrtc checks
     TURN/TLS against built-in roots that hold no Let's Encrypt root); `webrtc: relays udp N, tcp N, tls N` after each
-    offer or answer says which legs to the TURN server allocated. Logcat lines: `the peer is joining; hosting the group`, `group up on …`,
+    offer or answer says which legs to the TURN server allocated. `--es op turnprune --es prune off|on` opens the next
+    calls with TURN pruning off (C-7.6-26's "before"; in memory, `state`'s `turnPrune`). Each relay logs `webrtc:
+    relay gathered udp|tcp|tls/ipv4|ipv6` and `webrtc: relays removed N (…)` when pruned, and the call ends on `webrtc:
+    allocations gathered N, pruned M, held K` (with pruning on, a relay pruned the moment it was ready never surfaces,
+    so `gathered` is a floor and `held` exact). Logcat lines: `the peer is joining; hosting the group`, `group up on …`,
     `lane up`, `lane over (…)`, `direct leg over; radio back to the mesh`, `webrtc: the group is a network …`.
   - **The walkie-talkie** (§3.11, ADR 2026-10.79yb). Both ends need `CAP_WALKIE` pinned (`BuildConfig.WALKIE`, on in
     debug).

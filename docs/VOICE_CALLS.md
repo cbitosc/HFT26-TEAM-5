@@ -67,6 +67,7 @@ cover every refusal, plus `ticket` on a spool that takes entitlement tickets (§
 | **S-7.6-10** | The spool process MUST NOT relay media. TURN is a separate service that shares only the secret.                                                                                                                                  |
 | **C-7.6-11** | A client SHOULD fetch a credential per call, or reuse a cached one only while `exp` is at least 1 h away. It MUST NOT send a credential to its peer or into any frame.                                                          |
 | **C-7.6-12** | A client SHOULD request from every spool of the DM scope that advertises `turn` and is connected, and SHOULD offer relay candidates from at most two TURN servers, to bound ICE checks.                                          |
+| **C-7.6-26** | A client SHOULD prune its TURN ports once one is ready: on each network, a relay that ranks below the best ready one (relay protocol first, then address family) is released. This refines C-7.6-12, which still asks up to two spools. With one spool, a pruned call holds about one allocation per network. With two, each spool whose best relay ties the best ready one keeps a relay there, so two spools that both answer over UDP each keep one, and the second stays a backup. |
 
 > **Why no scope.** Asking for a credential "for scope S" would tell the spool which conversation is
 > calling, a fact it otherwise never learns. Holding *some* subscription is the whole gate: it costs a
@@ -81,6 +82,18 @@ cover every refusal, plus `ticket` on a spool that takes entitlement tickets (§
 >
 > **Why HMAC-SHA1.** It is what coturn and every TURN server implementing the REST scheme verify. It is
 > not a choice this protocol makes, and it carries nothing a short-lived credential needs beyond a MAC.
+>
+> **Why prune (C-7.6-26).** Unpruned, a phone keeps an allocation for every network, address family and TURN URL
+> it tries, and keeps them all for the call (knit-spool ADR 2026-10.y2ph): two URLs on a phone with Wi-Fi and mobile
+> data, each with IPv4 and IPv6, make about 8 before pruning, and the third URL S-7.6-25 drops made up to 12. Those
+> count against the TURN server's per-user and total quotas (§2.4). libwebrtc's
+> `PortPrunePolicy.PRUNE_BASED_ON_PRIORITY` ranks a network's relays (by interface, across every server) UDP over
+> TCP over TLS to the server, then IPv6 over IPv4, and releases the lower ones. Ties are kept, which is why two spools
+> answering over UDP both keep a relay; a second spool loses its relay on a network only where it ranks lower, as a
+> TLS relay against the first's UDP one. A pruned port frees its allocation (a Refresh with lifetime 0) once it holds
+> no candidate pair. On the caller that is at once, because pruning happens while it gathers, before the answer. The
+> callee has the offer's candidates already, so a relay it prunes after its checks began lingers until the ICE agent
+> drops those pairs, about a minute after the call connects.
 
 **Test vector** (proposed §13 addition). `turnSecret = "knit-turn-test-secret"`, `exp = 1800000000`,
 suffix bytes `fixture(10, 11)`:
@@ -97,11 +110,18 @@ Environment variables, following the house rule that an invalid value refuses to
 | Variable                 | Meaning                                                                                                  |
 |--------------------------|----------------------------------------------------------------------------------------------------------|
 | `SPOOL_TURN_SECRET`      | The shared secret, the same value as coturn's `static-auth-secret`. Unset ⇒ no `turn` in HELLO           |
-| `SPOOL_TURN_URLS`        | Comma-separated `turn:`/`turns:` URIs. Required when the secret is set                                   |
+| `SPOOL_TURN_URLS`        | Comma-separated `turn:`/`turns:` URIs. Required when the secret is set. Two (UDP and TLS) are the recommended set (S-7.6-25) |
 | `SPOOL_TURN_TTL_S`       | Credential lifetime, default `300` (60–3600; S-7.6-8)                                                    |
 | `SPOOL_TURN_RATE`        | Issues per connection per 10 min, default `4`                                                            |
 
 `SpoolServer` gains one record handler. `ScopeStore` is untouched, because nothing is stored.
+
+| ID           | Requirement                                                                                                                                                                                                                       |
+|--------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **S-7.6-25** | A spool SHOULD hand out one TURN URL per transport for each TURN server, in this order: `turn:<host>:3478?transport=udp`, then `turns:<host>:<TLS port>?transport=tcp`. A plain `turn:…?transport=tcp` URL adds an allocation per network to every call, and seldom reaches a network that the other two miss. |
+
+The TLS port is 5349 for a TURN sidecar on a spool's own box, where Caddy holds 443, and 443 for a TURN box of its
+own. An operator may still list a plain TCP URL; the client takes what it is given.
 
 ### 2.4 Running the TURN server
 
@@ -726,6 +746,9 @@ link down; its own sends were all delivered. Nothing steers a link off Coded whi
     (`InboundPipelineTest`); the `ct` flag in `CallManagerTest`; and `WalkieTalkLabTest`'s burst cast between two
     phones with no radio path.
   - A `CallPayload` golden vector (with `dw`/`dx`).
+  - TURN pruning (C-7.6-26): `CallConfigurationTest` pins the prune policy beside continual gathering and relay-only,
+    and `RelayTallyTest` the call log's `allocations gathered N, pruned M, held K`; a measured relay-only call gives
+    the numbers.
   - Reconnecting (§3.8): the restart cases in `CallManagerTest` — answered under the same call, a blip that costs no
     frame, two restarts then dropped, the callee's window and its renewal, a restart that does not fit, a superseded
     answer, relay-only.

@@ -99,8 +99,55 @@ internal class WebRtcCallMedia(
          */
         @Volatile
         var turnTlsUnchecked: Boolean = false
+
+        /**
+         * A measurement switch, never a default: true opens the next calls with TURN pruning off (`NO_PRUNE`), so a
+         * call holds every allocation it makes, as before C-7.6-26: the "before" of the allocation count. In memory,
+         * set by `…debug.CALL --es op turnprune`.
+         */
+        @Volatile
+        var turnPruneOff: Boolean = false
     }
 }
+
+/**
+ * The call's peer connection configuration, built once per session; a restart (C-3.8) only swaps its ICE servers.
+ *
+ * **TURN ports are pruned by priority (C-7.6-26, knit-spool ADR 2026-10.y2ph).** Without it a phone keeps an allocation
+ * for every network, address family and TURN URL it tried. Once a relay is ready on a network, libwebrtc releases each
+ * relay on that network (by interface name, across every server) that ranks below the best ready one: UDP over TCP over
+ * TLS to the server, then IPv6 over IPv4. Ties are kept, so C-7.6-12's second spool stays a backup while its best relay
+ * ties the first's (both over UDP), and is lost on a network only where it ranks lower (its TLS relay against the
+ * first's UDP). A pruned port's allocation is freed (a Refresh with lifetime 0) once it holds no connection: the
+ * caller prunes in the gathering window, before the answer, so at once; the callee has the offer's candidates already,
+ * so a port pruned after its checks began lingers until the ICE controller drops them, about a minute after connecting.
+ * The deprecated `pruneTurnPorts` stays false, since true would override the policy with this same one.
+ */
+internal fun callConfiguration(
+    servers: List<PeerConnection.IceServer>,
+    relayOnly: Boolean,
+    direct: Boolean,
+    directAsEthernet: Boolean,
+    prune: Boolean,
+): PeerConnection.RTCConfiguration =
+    PeerConnection.RTCConfiguration(servers).apply {
+        sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
+        bundlePolicy = PeerConnection.BundlePolicy.MAXBUNDLE
+        rtcpMuxPolicy = PeerConnection.RtcpMuxPolicy.REQUIRE
+        // Continual, so a network the monitor reports after the first allocation is still gathered (WebRtcCallMedia).
+        continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
+        turnPortPrunePolicy = if (prune) PeerConnection.PortPrunePolicy.PRUNE_BASED_ON_PRIORITY else PeerConnection.PortPrunePolicy.NO_PRUNE
+        // C-3.7-3: relay candidates only; SdpGuard strips anything else on the way out as well.
+        iceTransportsType = if (relayOnly) PeerConnection.IceTransportsType.RELAY else PeerConnection.IceTransportsType.ALL
+        if (direct) {
+            // §3.10: the group's network wins ties too, and the Internet pairs it outranks are pinged often enough to
+            // take over within seconds of the group going away.
+            if (directAsEthernet) networkPreference = PeerConnection.AdapterType.ETHERNET
+            iceBackupCandidatePairPingInterval = BACKUP_PING_MS
+        }
+    }
+
+private const val BACKUP_PING_MS = 5_000
 
 /** The route's trailing mark for a pair on the call's Wi-Fi Direct group: "host/host/wifi-direct" (§3.10). */
 internal const val ROUTE_DIRECT = "wifi-direct"
@@ -119,6 +166,7 @@ private class WebRtcSession(
 ) : CallSession {
     private val lock = Any()
     private val statsReader = CallStatsReader()
+    private val relays = RelayTally()
     private val gathered = CompletableDeferred<Unit>()
     private val firstCandidate = CompletableDeferred<Unit>()
 
@@ -165,6 +213,7 @@ private class WebRtcSession(
 
             override fun onIceCandidate(candidate: IceCandidate) {
                 firstCandidate.complete(Unit)
+                relays.gathered(candidate.sdp, candidate.serverUrl)?.let { log("webrtc: relay gathered $it") }
                 if (onGroup(candidate.sdp)) {
                     lateDirect(candidate.sdp)
                     return
@@ -177,7 +226,11 @@ private class WebRtcSession(
                 log("webrtc: candidate error ${event.errorCode} ${event.errorText} from ${event.url}")
             }
 
-            override fun onIceCandidatesRemoved(candidates: Array<out IceCandidate>) = Unit
+            override fun onIceCandidatesRemoved(candidates: Array<out IceCandidate>) {
+                // Pruned (C-7.6-26) or its network gone: libwebrtc is releasing these relays' allocations.
+                val released = relays.removed(candidates.map { it.sdp })
+                if (released.isNotEmpty()) log("webrtc: relays removed ${RelayTally.counts(released)}")
+            }
 
             override fun onSelectedCandidatePairChanged(event: CandidatePairChangeEvent) {
                 val group = if (onGroup(event.local.sdp)) "/$ROUTE_DIRECT" else ""
@@ -209,24 +262,15 @@ private class WebRtcSession(
 
     init {
         val tlsUnchecked = WebRtcCallMedia.turnTlsUnchecked
+        val prune = !WebRtcCallMedia.turnPruneOff
         config =
-            PeerConnection.RTCConfiguration(iceServers(servers)).apply {
-                sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
-                bundlePolicy = PeerConnection.BundlePolicy.MAXBUNDLE
-                rtcpMuxPolicy = PeerConnection.RtcpMuxPolicy.REQUIRE
-                // Continual, so a network the monitor reports after the first allocation is still gathered (see above).
-                continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
-                // C-3.7-3: relay candidates only; SdpGuard strips anything else on the way out as well.
-                iceTransportsType = if (relayOnly) PeerConnection.IceTransportsType.RELAY else PeerConnection.IceTransportsType.ALL
-                if (direct) {
-                    // §3.10: the group's network wins ties too, and the Internet pairs it outranks are pinged often
-                    // enough to take over within seconds of the group going away.
-                    if (DirectNetworkDetector.reportAs == NetworkChangeDetector.ConnectionType.CONNECTION_ETHERNET) {
-                        networkPreference = PeerConnection.AdapterType.ETHERNET
-                    }
-                    iceBackupCandidatePairPingInterval = BACKUP_PING_MS
-                }
-            }
+            callConfiguration(
+                iceServers(servers),
+                relayOnly = relayOnly,
+                direct = direct,
+                directAsEthernet = DirectNetworkDetector.reportAs == NetworkChangeDetector.ConnectionType.CONNECTION_ETHERNET,
+                prune = prune,
+            )
         val followPath = !direct && DefaultPath.enabled
         if (followPath) {
             // Known now unless this is the process's first call: its network monitor starts with the connection.
@@ -240,6 +284,7 @@ private class WebRtcSession(
         log(
             "webrtc: opened (${servers.iceSummary()}, relay=$relayOnly, direct=$direct" +
                 (if (tlsUnchecked) ", turns unchecked" else "") +
+                (if (prune) "" else ", prune off") +
                 (if (followPath) ", prefer ${preferred?.name?.lowercase() ?: "pending"}" else "") + ")",
         )
         // Also fires at once with the current default: the first call of a process gets its preference here.
@@ -261,6 +306,7 @@ private class WebRtcSession(
 
     override suspend fun restart(servers: List<TurnServer>): String? {
         if (!useServers(servers)) return null
+        relays.restarted()
         pc.restartIce()
         val description = create { pc.createOffer(it, MediaConstraints()) } ?: return null
         if (!apply { pc.setLocalDescription(it, description) }) return null
@@ -272,6 +318,7 @@ private class WebRtcSession(
         servers: List<TurnServer>,
     ): String? {
         if (!useServers(servers)) return null
+        relays.restarted()
         if (!apply { pc.setRemoteDescription(it, SessionDescription(SessionDescription.Type.OFFER, remoteOffer)) }) return null
         val description = create { pc.createAnswer(it, MediaConstraints()) } ?: return null
         if (!apply { pc.setLocalDescription(it, description) }) return null
@@ -280,7 +327,8 @@ private class WebRtcSession(
 
     /**
      * A restart's ICE servers (§3.8): what the call layer just fetched, so a long call's TURN credential is a live one.
-     * False once closed. A refused configuration keeps the old servers and the restart goes on with them.
+     * False once closed. A refused configuration keeps the old servers and the restart goes on with them. The same
+     * [config] goes back, so the restart's new ports are pruned under the policy the call opened with.
      */
     private fun useServers(servers: List<TurnServer>): Boolean =
         synchronized(lock) {
@@ -366,6 +414,8 @@ private class WebRtcSession(
         pathWatch?.close()
         onClosed(this)
         gathered.complete(Unit)
+        // What this phone held of the TURN server's quota when the call ended (C-7.6-26).
+        log("webrtc: ${relays.summary()}")
         // dispose() closes the connection and its senders; the source is ours to free.
         pc.dispose()
         source.dispose()
@@ -499,7 +549,6 @@ private class WebRtcSession(
         const val FIRST_CANDIDATE_MS = 5_000L
         const val FIRST_CANDIDATE_DIRECT_MS = 1_000L
         const val DIRECT_DEBOUNCE_MS = 250L
-        const val BACKUP_PING_MS = 5_000
         const val GATHER_MS = 1_500L
         const val LATE_WINDOW_MS = 4_000L
         const val SDP_MS = 10_000L

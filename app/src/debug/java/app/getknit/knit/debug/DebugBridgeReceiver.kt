@@ -2058,6 +2058,8 @@ class DebugBridgeReceiver :
      * android|off` sets whether a call prefers the network Android routes over (DefaultPath; on by default), and `turntls --es check
      * off|on` opens the next calls' `turns:` legs without checking the certificate, a diagnosis switch held in memory
      * (libwebrtc's own roots hold no Let's Encrypt root); `webrtc: relays …` then says whether a `tls` relay came.
+     * `turnprune --es prune off|on` opens the next calls with TURN pruning off (C-7.6-26's "before", in memory); a
+     * call's `webrtc: allocations gathered N, pruned M, held K` at close is the count either way.
      *
      * `start` and `answer` need Knit in the foreground (`am start` it first): the call's microphone service and its
      * screen can only start from there. `answer` opens the call screen, which answers, so it asks for the microphone
@@ -2185,6 +2187,17 @@ class DebugBridgeReceiver :
                 return reply("ok", "turns: certificates $what from the next call on")
             }
 
+            "turnprune" -> {
+                WebRtcCallMedia.turnPruneOff =
+                    when (intent.getStringExtra("prune")) {
+                        "off" -> true
+                        "on" -> false
+                        else -> return reply("error", "prune must be on|off")
+                    }
+                val what = if (WebRtcCallMedia.turnPruneOff) "OFF (measurement only)" else "on"
+                return reply("ok", "TURN pruning $what from the next call on")
+            }
+
             "audio" -> {
                 val system = getKoin().get<SystemCallSync>()
                 val routing = system.routing.value ?: return reply("error", "the system holds no call")
@@ -2222,6 +2235,7 @@ class DebugBridgeReceiver :
             .put("relayOnly", calls.relayOnly)
             .put("pathPref", if (DefaultPath.enabled) "android" else "off")
             .put("turnTls", if (WebRtcCallMedia.turnTlsUnchecked) "unchecked" else "checked")
+            .put("turnPrune", if (WebRtcCallMedia.turnPruneOff) "off" else "on")
             .put("directMode", if (getKoin().get<SettingsStore>().debugDirectCallsOff.first()) "off" else calls.directMode.name.lowercase())
             .put("direct", getKoin().getOrNull<DirectCallPath>()?.describe() ?: JSONObject.NULL)
             .put(
