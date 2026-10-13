@@ -63,6 +63,10 @@
             <meta-data
                 android:name="android.support.wearable.complications.UPDATE_PERIOD_SECONDS"
                 android:value="300" />
+            <!-- The Knit monogram (`watchface-monogram/`) binds this source by default; listed so it needs no grant. -->
+            <meta-data
+                android:name="android.support.wearable.complications.SAFE_WATCH_FACES"
+                android:value="app.getknit.knit.watchfacepush.monogram" />
         </service>
 
         <service

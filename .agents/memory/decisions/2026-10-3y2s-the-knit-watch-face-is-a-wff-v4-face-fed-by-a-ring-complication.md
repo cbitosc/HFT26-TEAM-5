@@ -86,3 +86,34 @@ dims the ring within six minutes and a failed read blanks it; a pause greys it; 
 dashes, the time, the date and the slots' contents; a ranged source in a bottom slot draws its arc. Distribution —
 a Play listing of its own, or Watch Face Push from `:wear` for F-Droid, whose Play-services dependency is
 unconfirmed — is a later amendment.
+
+## Amendment 2026-10-13 — the monogram, an analog sibling
+
+A second face, `watchface-monogram/` (`app.getknit.knit.watchfacepush.monogram`, "Knit Monogram"), is a branded
+analog face, for fun and for the store page. A WFF APK holds one face, so it is its own module, behind the same
+`-Pknit.wear=true` switch; `scripts/gen-watchface.py` writes both faces (they share the round user slots) and
+`scripts/check-watchface.sh` checks both.
+
+It is the launcher icon's "K" on an oxblood dial: the icon's maroon (the stitch face's fabric) in a radial glow,
+falling to near-black at the bezel. The icon's flat slate was the first dial and read as a placeholder on the
+wrist (device trial, 2026-10-13); the glow is one native `RadialGradient`, so the face stays vector. The spine's four dashes and the node are printed on the dial;
+the hands are the K's two arms and pivot on the node's right corner, where the icon's arms meet, so at 1:22 (and
+13:22) the face draws the icon. The geometry is the icon path's own cap centres, scaled by 0.6. Four choices came
+out of mockups:
+
+- **The node is one solid diamond**, not the icon's ring with four dots. With the ring, a hand pointing anywhere
+  but right piled onto the node's corners and dots and the face read as a tangle at every time but 1:22.
+- **The printed K is muted** (the stroke mixed about halfway into the dial) and only the hands are bright, so the hands never
+  read as part of the static K. **The hour hand is the icon's deep coral and the minute hand its light coral**, and
+  the minute hand alone carries a thin thread on to the track: both arms are the icon's length, so length cannot
+  tell them apart.
+- **For the minute of 1:22 the K lights up**: the printed K crossfades to the icon's colours, the hour hand turns
+  light coral, and both hands snap to the icon's exact arm angles (43.4° and 135.4°; the true hands are within 3°
+  of them all that minute). The rest of the day the K sits back. `LIT` in the generator is the one condition.
+- **Two user slots at about 4 and 8 o'clock**, in off the track, clear of the spine, and far enough round that the 1:22 arm
+  passes the right one by a hand's width. The left defaults to Knit's Nearby source, whose manifest lists the
+  monogram as a safe face; the right to the system step count.
+
+No link ring: the monogram reads no Knit data beyond the slot a user may change. Always-on is black with a dark
+grey K, grey hands and the hour stitches. Owed on a watch: the 1:22 swap and snap happen on the minute and undo at
+1:23; the hands' angle transforms track the time in always-on; the Nearby slot binds without a prompt.

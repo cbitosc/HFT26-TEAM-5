@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Generate the Knit watch face's `watchface/src/main/res/raw/watchface.xml` (Watch Face Format v4).
+"""Generate the Knit watch faces' `res/raw/watchface.xml` files (Watch Face Format v4).
 
-    python3 scripts/gen-watchface.py          # rewrite the face
-    python3 scripts/gen-watchface.py --check  # fail if the committed face is stale
+    python3 scripts/gen-watchface.py          # rewrite both faces
+    python3 scripts/gen-watchface.py --check  # fail if a committed face is stale
 
-The face is "running stitch, three slots" (ADR 2026-10.3y2s): a bezel ring of two rounds of DASHES short dashes,
+Two faces, one APK each (a WFF APK holds one face): the stitch face in `watchface/` and the monogram in
+`watchface-monogram/`. They share the round user slots below.
+
+The stitch face is "running stitch, three slots" (ADR 2026-10.3y2s): a bezel ring of two rounds of DASHES short dashes,
 the time and date, and three circular complication slots. A WFF face runs no code, so the ring is drawn from one
 text complication, `RingComplicationService`, whose text is `RingCode` (`wear/.../RingCode.kt`): character 0 the
 reading's state, then DASHES plane codes for the outer round and DASHES for the inner. Every dash here reads its
@@ -14,6 +17,12 @@ with `:wear`, pinned on that side by `RingCodeTest`. Change the two together.
 
 Ninety-six dashes, each with its own colour expression, are why this file is generated: hand-edited, one typo
 darkens one dash and nobody notices. Edit the geometry and palette below, never the XML.
+
+The monogram face is analog: the launcher icon's "K" (ADR 2026-10.3y2s's amendment). The spine and the node are
+printed on the dial, muted; the hands are the K's two arms, pivoting on the node's right corner where the icon's
+arms meet. At 1:22 (and 13:22) the arms point where the icon's do, and for that minute the K lights to the icon's
+own colours and the hands snap to its exact angles: the face is the app icon. The geometry is the icon path's own
+(`app/src/main/res/drawable/ic_launcher_monochrome.xml`), its cap centres measured once into the constants below.
 """
 
 import os
@@ -22,6 +31,7 @@ from xml.sax.saxutils import escape
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 OUT = os.path.join(ROOT, "watchface/src/main/res/raw/watchface.xml")
+MONOGRAM_OUT = os.path.join(ROOT, "watchface-monogram/src/main/res/raw/watchface.xml")
 
 SIZE = 450
 C = SIZE / 2
@@ -243,6 +253,23 @@ def clock():
     </PartText>"""
 
 
+class SlotStyle:
+    """A round user slot's look: its size, the type and the colours it draws in, scaled to its diameter."""
+
+    def __init__(self, r, value, title, icon, image, mono, fill, accent, track, ink, ring=None):
+        self.r, self.d = r, 2 * r
+        self.ring = ring
+        self.value, self.title, self.icon, self.image, self.mono = value, title, icon, image, mono
+        self.fill, self.accent, self.track, self.ink = fill, accent, track, ink
+        # The rows, from the stitch face's tuned 96 px slot, scaled to this one.
+        k = self.d / 96
+        self.icon_y, self.title_x, self.title_y, self.title_h = round(14 * k), round(10 * k), round(17 * k), round(26 * k)
+        self.value_y, self.value_y_titled, self.value_h = round(44 * k), round(42 * k), round(34 * k)
+
+
+STITCH_SLOT = SlotStyle(SLOT_R, VALUE_SIZE, TITLE_SIZE, ICON, 54, 40, SLOT_FILL, ACCENT, TRACK, INK)
+
+
 def text_part(x, y, w, h, expr, size, colour, weight="SEMI_BOLD"):
     return (
         f'<PartText x="{x}" y="{y}" width="{w}" height="{h}">'
@@ -251,78 +278,82 @@ def text_part(x, y, w, h, expr, size, colour, weight="SEMI_BOLD"):
     )
 
 
-def icon_part(x, y, s):
+def icon_part(x, y, s, st):
     return (
-        f'<PartImage x="{x}" y="{y}" width="{s}" height="{s}" tintColor="{ACCENT}">'
+        f'<PartImage x="{x}" y="{y}" width="{s}" height="{s}" tintColor="{st.accent}">'
         f'<Image resource="[COMPLICATION.MONOCHROMATIC_IMAGE]"/></PartImage>'
     )
 
 
-def disc(d):
+def disc(st):
+    d = st.d
+    ring = f'<Stroke color="{st.ring}" thickness="1"/>' if st.ring else ""
     return (
         f'<PartDraw x="0" y="0" width="{d}" height="{d}"><Ellipse x="0" y="0" width="{d}" height="{d}">'
-        f'<Fill color="{SLOT_FILL}"/></Ellipse><Variant mode="AMBIENT" target="alpha" value="0"/></PartDraw>'
+        f'<Fill color="{st.fill}"/>{ring}</Ellipse><Variant mode="AMBIENT" target="alpha" value="0"/></PartDraw>'
     )
 
 
-def icon_and_text(d):
+def icon_and_text(st):
     """An icon over a value when there is an icon, else the title over the value."""
+    d, h = st.d, st.value_h
     return (
         "<Condition><Expressions>"
         '<Expression name="icon">[COMPLICATION.MONOCHROMATIC_IMAGE] != null</Expression>'
         '<Expression name="title">[COMPLICATION.TITLE] != null</Expression>'
         "</Expressions>"
-        f'<Compare expression="icon">{icon_part((d - ICON) // 2, 14, ICON)}'
-        f"{text_part(6, 44, d - 12, 34, '[COMPLICATION.TEXT]', VALUE_SIZE, INK)}</Compare>"
-        f"<Compare expression=\"title\">{text_part(10, 17, d - 20, 26, '[COMPLICATION.TITLE]', TITLE_SIZE, ACCENT, 'MEDIUM')}"
-        f"{text_part(6, 42, d - 12, 34, '[COMPLICATION.TEXT]', VALUE_SIZE, INK)}</Compare>"
-        f"<Default>{text_part(6, (d - 34) // 2, d - 12, 34, '[COMPLICATION.TEXT]', VALUE_SIZE, INK)}</Default>"
+        f'<Compare expression="icon">{icon_part((d - st.icon) // 2, st.icon_y, st.icon, st)}'
+        f"{text_part(6, st.value_y, d - 12, h, '[COMPLICATION.TEXT]', st.value, st.ink)}</Compare>"
+        f"<Compare expression=\"title\">{text_part(st.title_x, st.title_y, d - 2 * st.title_x, st.title_h, '[COMPLICATION.TITLE]', st.title, st.accent, 'MEDIUM')}"
+        f"{text_part(6, st.value_y_titled, d - 12, h, '[COMPLICATION.TEXT]', st.value, st.ink)}</Compare>"
+        f"<Default>{text_part(6, (d - h) // 2, d - 12, h, '[COMPLICATION.TEXT]', st.value, st.ink)}</Default>"
         "</Condition>"
     )
 
 
-def gauge(d, value, lo, hi):
+def gauge(st, value, lo, hi):
     """A 270° arc on the slot's edge: the track, and the value over it."""
+    d = st.d
     r = d / 2
     frac = f"clamp((({value}) - ({lo})) / (({hi}) - ({lo})), 0, 1)"
     return (
         f'<PartDraw x="0" y="0" width="{d}" height="{d}">'
         f'<Arc centerX="{r}" centerY="{r}" width="{d - 8}" height="{d - 8}" startAngle="-135" endAngle="135">'
-        f'<Stroke color="{TRACK}" thickness="5" cap="ROUND"/></Arc>'
+        f'<Stroke color="{st.track}" thickness="5" cap="ROUND"/></Arc>'
         f'<Arc centerX="{r}" centerY="{r}" width="{d - 8}" height="{d - 8}" startAngle="-135" endAngle="-135">'
-        f'<Stroke color="{ACCENT}" thickness="5" cap="ROUND"/>'
+        f'<Stroke color="{st.accent}" thickness="5" cap="ROUND"/>'
         f'<Transform target="endAngle" value="{q(f"-135 + 270 * {frac}")}"/></Arc>'
         "</PartDraw>"
     )
 
 
-def user_slot(slot_id, name, cx, cy, provider, ptype, system, stype):
-    d = 2 * SLOT_R
-    x, y = cx - SLOT_R, cy - SLOT_R
+def user_slot(st, slot_id, name, cx, cy, provider, ptype, system, stype):
+    d = st.d
+    x, y = cx - st.r, cy - st.r
     policy = f'defaultSystemProvider="{system}" defaultSystemProviderType="{stype}"'
     if provider:
         policy = f'primaryProvider="{provider}" primaryProviderType="{ptype}" ' + policy
-    ranged = gauge(d, "[COMPLICATION.RANGED_VALUE_VALUE]", "[COMPLICATION.RANGED_VALUE_MIN]", "[COMPLICATION.RANGED_VALUE_MAX]")
-    goal = gauge(d, "[COMPLICATION.GOAL_PROGRESS_VALUE]", "0", "[COMPLICATION.GOAL_PROGRESS_TARGET_VALUE]")
+    ranged = gauge(st, "[COMPLICATION.RANGED_VALUE_VALUE]", "[COMPLICATION.RANGED_VALUE_MIN]", "[COMPLICATION.RANGED_VALUE_MAX]")
+    goal = gauge(st, "[COMPLICATION.GOAL_PROGRESS_VALUE]", "0", "[COMPLICATION.GOAL_PROGRESS_TARGET_VALUE]")
     image = (
-        f'<PartImage x="{(d - 54) // 2}" y="{(d - 54) // 2}" width="54" height="54">'
+        f'<PartImage x="{(d - st.image) // 2}" y="{(d - st.image) // 2}" width="{st.image}" height="{st.image}">'
         f'<Image resource="[COMPLICATION.SMALL_IMAGE]"/></PartImage>'
     )
-    mono = icon_part((d - 40) // 2, (d - 40) // 2, 40)
+    mono = icon_part((d - st.mono) // 2, (d - st.mono) // 2, st.mono, st)
     return f"""    <ComplicationSlot name="{q(name)}" slotId="{slot_id}" displayName="{q(name)}" x="{x}" y="{y}" width="{d}" height="{d}" supportedTypes="{SLOT_TYPES}">
       <DefaultProviderPolicy {policy}/>
       <BoundingOval x="0" y="0" width="{d}" height="{d}" outlinePadding="2"/>
-      <Complication type="SHORT_TEXT">{disc(d)}{icon_and_text(d)}</Complication>
-      <Complication type="RANGED_VALUE">{disc(d)}{ranged}{icon_and_text(d)}</Complication>
-      <Complication type="GOAL_PROGRESS">{disc(d)}{goal}{icon_and_text(d)}</Complication>
-      <Complication type="SMALL_IMAGE">{disc(d)}{image}</Complication>
-      <Complication type="MONOCHROMATIC_IMAGE">{disc(d)}{mono}</Complication>
+      <Complication type="SHORT_TEXT">{disc(st)}{icon_and_text(st)}</Complication>
+      <Complication type="RANGED_VALUE">{disc(st)}{ranged}{icon_and_text(st)}</Complication>
+      <Complication type="GOAL_PROGRESS">{disc(st)}{goal}{icon_and_text(st)}</Complication>
+      <Complication type="SMALL_IMAGE">{disc(st)}{image}</Complication>
+      <Complication type="MONOCHROMATIC_IMAGE">{disc(st)}{mono}</Complication>
       <Complication type="EMPTY"/>
     </ComplicationSlot>"""
 
 
-def face():
-    parts = [fabric(), ring_slot(), node(), needle(), clock()] + [user_slot(*s) for s in SLOTS]
+def stitch_face():
+    parts = [fabric(), ring_slot(), node(), needle(), clock()] + [user_slot(STITCH_SLOT, *s) for s in SLOTS]
     body = "\n".join(parts)
     return f"""<?xml version="1.0" encoding="utf-8"?>
 <!-- GENERATED by scripts/gen-watchface.py — do not edit; change the script and re-run it. -->
@@ -336,22 +367,223 @@ def face():
 """
 
 
+# --- the monogram ------------------------------------------------------------------------------------------------
+# An oxblood dial — the icon's maroon (the stitch face's fabric) in a radial glow, lighter under the K and falling
+# to near-black at the bezel; a flat slate read as a placeholder on the wrist. The icon's stroke and dots, and the
+# K at rest in the stroke mixed about halfway into the dial, so the printed K sits back and only the hands are
+# bright.
+DIAL_GLOW = ["#4A221C", "#2A120F", "#0E0605"]
+DIAL_STOPS = [0, 0.65, 1]
+K_STROKE = "#F4928E"
+K_DOT = "#E55E4C"
+K_REST = "#9A5650"
+K_REST_NODE = "#B04D41"
+HAND_SHADOW = "#99000000"  # a soft dark keyline, so a hand crossing the printed K stays its own shape
+HOUR_BODY = "#E55E4C"  # the hour hand is the deep coral, the minute hand the light: told apart at a glance
+HOUR_TIP = "#B8402F"
+PIVOT = "#C24A3B"
+MONO_AMBIENT_K = "#4A4A4A"
+MONO_AMBIENT_HAND = "#A0A0A0"
+
+# The icon in its own units (the monochrome path's viewport), measured from its cap centres. The scene puts the
+# arms' pivot — the node's right corner — at the dial's centre and scales by K_SCALE.
+K_SCALE = 0.6
+K_PIVOT = (229.9, 261.5)
+K_STROKE_W = 40
+K_SPINE = [(90.9, 118), (182, 209.9), (313.1, 338), (401.7, 427.8)]  # y spans of the spine's four dashes
+K_SPINE_X = 177.3
+K_NODE_HALF = 52.6  # the node's half-diagonal; the solid diamond replaces the icon's ring and its four dots
+K_ARM = [(85, 148), (206.5, 234.6)]  # an arm's two dashes, as distances from the pivot (its nub is dropped)
+K_ARM_TIP = 234.6
+UP_ARM, DOWN_ARM = 43.36, 135.35  # the icon's arm angles, clockwise from 12
+
+LIT = "([HOUR_0_11] == 1 && [MINUTE] == 22)"
+HOUR_ANGLE = f"{LIT} ? {UP_ARM} : [HOUR_0_11] * 30 + [MINUTE] * 0.5"
+MINUTE_ANGLE = f"{LIT} ? {DOWN_ARM} : [MINUTE] * 6 + [SECOND] * 0.1"
+NEARBY_PROVIDER = "app.getknit.knit/app.getknit.knit.wear.NearbyComplicationService"
+MONO_SLOT = SlotStyle(42, 21, 15, 24, 48, 36, "#210C09", K_STROKE, "#3A1B16", "#F2E6E3", ring="#6B3E37")
+MONO_SLOTS = [
+    # 138 from the centre at 110° and 250°: in off the track by a slot's radius, clear of the spine, and far enough
+    # round from the 1:22 arm (135°) that it passes the right one by a hand's width.
+    ("1", "Left", 95, 272, NEARBY_PROVIDER, "RANGED_VALUE", "EMPTY", "EMPTY"),
+    ("2", "Right", 355, 272, None, None, "STEP_COUNT", "SHORT_TEXT"),
+]
+
+
+def k_at(x, y):
+    """A point in the icon's units, in the scene."""
+    return round(C + (x - K_PIVOT[0]) * K_SCALE, 2), round(C + (y - K_PIVOT[1]) * K_SCALE, 2)
+
+
+def k_len(v):
+    return round(v * K_SCALE, 2)
+
+
+def stroke_line(x1, y1, x2, y2, w, colour):
+    return (
+        f'<Line startX="{x1}" startY="{y1}" endX="{x2}" endY="{y2}">'
+        f'<Stroke color="{colour}" thickness="{w}" cap="ROUND"/></Line>'
+    )
+
+
+def round_dot(cx, cy, d, colour):
+    return f'<Ellipse x="{round(cx - d / 2, 2)}" y="{round(cy - d / 2, 2)}" width="{d}" height="{d}"><Fill color="{colour}"/></Ellipse>'
+
+
+def whole(name, body, alpha=None, ambient=None, transform=None):
+    """A part over the whole dial (so a rotation turns about the dial's centre)."""
+    a = f' alpha="{alpha}"' if alpha is not None else ""
+    t = f'\n      <Transform target="angle" value="{q(transform)}"/>' if transform else ""
+    v = f'\n      <Variant mode="AMBIENT" target="alpha" value="{ambient}"/>' if ambient is not None else ""
+    return f'    <PartDraw name="{name}" x="0" y="0" width="{SIZE}" height="{SIZE}"{a}>\n      {body}{t}{v}\n    </PartDraw>'
+
+
+def dial():
+    glow = f'<RadialGradient centerX="{C}" centerY="{C}" radius="{C}" colors="{" ".join(DIAL_GLOW)}" positions="{" ".join(map(str, DIAL_STOPS))}"/>'
+    return whole("dial", f'<Ellipse x="0" y="0" width="{SIZE}" height="{SIZE}"><Fill color="{DIAL_GLOW[1]}">{glow}</Fill></Ellipse>', ambient=0)
+
+
+def minute_track():
+    """Sixty stitches round the edge, the hours heavier; 12 is the cast-on node's, so it stays bare."""
+    def tick(i, w, colour):
+        a = i * 6
+        return f'<Arc centerX="{C}" centerY="{C}" width="420" height="420" startAngle="{a - 1.6}" endAngle="{a + 1.6}"><Stroke color="{colour}" thickness="{w}" cap="ROUND"/></Arc>'
+    active = "".join(tick(i, 6, "#8A8A9C") if i % 5 == 0 else tick(i, 4, "#5C5C70") for i in range(1, 60))
+    ambient = "".join(tick(i, 4, "#5A5A5A") for i in range(5, 60, 5))
+    return whole("track", active, ambient=0) + "\n" + whole("track_ambient", ambient, alpha=0, ambient=255)
+
+
+def cast_on():
+    """The node at 12, as on the stitch face."""
+    side, box = 10, 16
+    x, y = round(C - box / 2), 15 - box // 2
+    o = (box - side) / 2
+    return (
+        f'    <PartDraw name="cast_on" x="{x}" y="{y}" width="{box}" height="{box}" angle="45">\n'
+        f'      <Rectangle x="{o}" y="{o}" width="{side}" height="{side}"><Fill color="{K_DOT}"/></Rectangle>\n'
+        f'      <Variant mode="AMBIENT" target="alpha" value="160"/>\n    </PartDraw>'
+    )
+
+
+def spine(body, dot):
+    x = k_at(K_SPINE_X, 0)[0]
+    w = k_len(K_STROKE_W)
+    out = "".join(stroke_line(x, k_at(0, a)[1], x, k_at(0, b)[1], w, body) for a, b in K_SPINE)
+    if dot:
+        out += round_dot(x, k_at(0, K_SPINE[0][0])[1], w, dot) + round_dot(x, k_at(0, K_SPINE[-1][1])[1], w, dot)
+    return out
+
+
+def k_node(name, colour, alpha, ambient, swaps=True):
+    """The solid diamond: the icon's ring and four dots in one shape, its right corner on the pivot."""
+    cx, cy = k_at(K_SPINE_X, K_PIVOT[1])
+    # A rounded square turned 45°, its corner tips at the icon's half-diagonal plus a soft corner.
+    side, radius, box = 50, 3, 72
+    x, y = round(cx - box / 2), round(cy - box / 2)
+    o = (box - side) / 2
+    return (
+        f'    <PartDraw name="{name}" x="{x}" y="{y}" width="{box}" height="{box}" angle="45" alpha="{alpha}">\n'
+        f'      <RoundRectangle x="{o}" y="{o}" width="{side}" height="{side}" cornerRadiusX="{radius}" cornerRadiusY="{radius}"><Fill color="{colour}"/></RoundRectangle>\n'
+        + (f'      <Transform target="alpha" value="{q(f"{LIT} ? {255 - alpha} : {alpha}")}"/>\n' if swaps else "")
+        + f'      <Variant mode="AMBIENT" target="alpha" value="{ambient}"/>\n    </PartDraw>'
+    )
+
+
+def k_static():
+    """The printed K, twice — at rest and lit — crossfaded on the 1:22 minute, and a grey one for always-on."""
+    def lit_swap(name, body, rest):
+        alpha = 255 if rest else 0
+        return (
+            f'    <PartDraw name="{name}" x="0" y="0" width="{SIZE}" height="{SIZE}" alpha="{alpha}">\n      {body}\n'
+            f'      <Transform target="alpha" value="{q(f"{LIT} ? {255 - alpha} : {alpha}")}"/>\n'
+            f'      <Variant mode="AMBIENT" target="alpha" value="0"/>\n    </PartDraw>'
+        )
+    return "\n".join([
+        lit_swap("spine_rest", spine(K_REST, K_REST_NODE), rest=True),
+        lit_swap("spine_lit", spine(K_STROKE, K_DOT), rest=False),
+        k_node("node_rest", K_REST_NODE, 255, 0),
+        k_node("node_lit", K_DOT, 0, 0),
+        whole("spine_ambient", spine(MONO_AMBIENT_K, None), alpha=0, ambient=255),
+        k_node("node_ambient", MONO_AMBIENT_K, 0, 255, swaps=False),
+    ])
+
+
+def arm(body, tip, keyline):
+    """One hand, drawn pointing at 12 from the dial's centre: the arm's two dashes and its dot."""
+    w = k_len(K_STROKE_W)
+    segs = [(C, C - k_len(a), C, C - k_len(b)) for a, b in K_ARM]
+    tip_y = C - k_len(K_ARM_TIP)
+    out = "".join(stroke_line(*s, w + 8, keyline) for s in segs) + round_dot(C, tip_y, w + 8, keyline)
+    return out + "".join(stroke_line(*s, w, body) for s in segs) + round_dot(C, tip_y, w, tip)
+
+
+def thread(colour):
+    """The minute hand's thread, from its tip on to the track: the other way, after colour, to tell it."""
+    return stroke_line(C, round(C - k_len(K_ARM_TIP) - 16, 2), C, C - 198, 3, colour)
+
+
+def hands():
+    lit_hour = (
+        f'    <PartDraw name="hour_lit" x="0" y="0" width="{SIZE}" height="{SIZE}" alpha="0">\n      {arm(K_STROKE, K_DOT, HAND_SHADOW)}\n'
+        f'      <Transform target="angle" value="{q(HOUR_ANGLE)}"/>\n'
+        f'      <Transform target="alpha" value="{q(f"{LIT} ? 255 : 0")}"/>\n'
+        f'      <Variant mode="AMBIENT" target="alpha" value="0"/>\n    </PartDraw>'
+    )
+    hour = (
+        f'    <PartDraw name="hour" x="0" y="0" width="{SIZE}" height="{SIZE}">\n      {arm(HOUR_BODY, HOUR_TIP, HAND_SHADOW)}\n'
+        f'      <Transform target="angle" value="{q(HOUR_ANGLE)}"/>\n'
+        f'      <Transform target="alpha" value="{q(f"{LIT} ? 0 : 255")}"/>\n'
+        f'      <Variant mode="AMBIENT" target="alpha" value="0"/>\n    </PartDraw>'
+    )
+    return "\n".join([
+        hour,
+        lit_hour,
+        whole("minute", thread(K_STROKE) + arm(K_STROKE, K_DOT, HAND_SHADOW), ambient=0, transform=MINUTE_ANGLE),
+        whole("hour_ambient", arm(MONO_AMBIENT_HAND, MONO_AMBIENT_HAND, "#FF000000"), alpha=0, ambient=255, transform=HOUR_ANGLE),
+        whole("minute_ambient", thread(MONO_AMBIENT_HAND) + arm(MONO_AMBIENT_HAND, MONO_AMBIENT_HAND, "#FF000000"), alpha=0, ambient=255, transform=MINUTE_ANGLE),
+        whole("pivot", round_dot(C, C, 17, PIVOT), ambient=0),
+        whole("seconds", round_dot(C, C - 200, 8, K_DOT), ambient=0, transform="[SECOND] * 6"),
+    ])
+
+
+def monogram_face():
+    parts = [dial(), minute_track(), cast_on()] + [user_slot(MONO_SLOT, *s) for s in MONO_SLOTS] + [k_static(), hands()]
+    body = "\n".join(parts)
+    return f"""<?xml version="1.0" encoding="utf-8"?>
+<!-- GENERATED by scripts/gen-watchface.py — do not edit; change the script and re-run it. -->
+<WatchFace width="{SIZE}" height="{SIZE}">
+  <Metadata key="CLOCK_TYPE" value="ANALOG"/>
+  <Metadata key="PREVIEW_TIME" value="01:22:30"/>
+  <Scene backgroundColor="#FF000000">
+{body}
+  </Scene>
+</WatchFace>
+"""
+
+
+FACES = [(OUT, stitch_face), (MONOGRAM_OUT, monogram_face)]
+
+
 def main():
     check = "--check" in sys.argv[1:]
-    out = face()
-    current = None
-    if os.path.exists(OUT):
-        with open(OUT, encoding="utf-8") as f:
-            current = f.read()
-    if check:
-        if current != out:
-            print(f"{os.path.relpath(OUT, ROOT)} is stale: run python3 scripts/gen-watchface.py", file=sys.stderr)
-            sys.exit(1)
-        return
-    os.makedirs(os.path.dirname(OUT), exist_ok=True)
-    with open(OUT, "w", encoding="utf-8") as f:
-        f.write(out)
-    print(f"wrote {os.path.relpath(OUT, ROOT)} ({len(out) // 1024} KiB)")
+    stale = []
+    for path, build in FACES:
+        out = build()
+        current = None
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as f:
+                current = f.read()
+        if check:
+            if current != out:
+                stale.append(os.path.relpath(path, ROOT))
+            continue
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(out)
+        print(f"wrote {os.path.relpath(path, ROOT)} ({len(out) // 1024} KiB)")
+    if stale:
+        print(f"{', '.join(stale)} stale: run python3 scripts/gen-watchface.py", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -325,7 +325,9 @@ and pick "Knit" in the watch's face picker:
 ```bash
 ./gradlew :watchface:assembleDebug -Pknit.wear=true
 adb -s <watch-serial> install watchface/build/outputs/apk/debug/watchface-debug.apk
-scripts/check-watchface.sh          # Google's WFF validator and memory budget
+./gradlew :watchface-monogram:assembleDebug -Pknit.wear=true   # the analog "Knit Monogram"
+adb -s <watch-serial> install watchface-monogram/build/outputs/apk/debug/watchface-monogram-debug.apk
+scripts/check-watchface.sh          # both faces: Google's WFF validator and memory budget
 ```
 
 ## 📱 Running

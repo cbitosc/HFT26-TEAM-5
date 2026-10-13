@@ -45,8 +45,10 @@ if (providers.gradleProperty("knit.baselineProfile").orNull.toBoolean()) {
 // `BuildConfig.WEAR_STATUS`). Opt-in for the same reason as :baselineprofile: F-Droid's rebuild and CI never
 // configure it or resolve the Wear libraries, so it cannot move a byte of :app's release.
 // The Knit watch face (`watchface/`, ADR 2026-10.3y2s) rides the same switch: a resource-only face whose ring
-// :wear's complication feeds, so one is no use without the other.
+// :wear's complication feeds, so one is no use without the other; and its analog sibling, the monogram
+// (`watchface-monogram/`), one face per APK as the format requires.
 if (providers.gradleProperty("knit.wear").orNull.toBoolean()) {
     include(":wear")
     include(":watchface")
+    include(":watchface-monogram")
 }
