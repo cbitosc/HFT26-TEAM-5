@@ -2317,7 +2317,11 @@ class ScopeSync(
             val now = clock()
             stamps[scope.idHex]?.let { if (SpoolPow.reusable(it.d, now)) return it }
             val day = SpoolPow.utcDay(now)
-            val n = SpoolPow.stamp(scope.id, day, bits, POW_BUDGET) ?: return null
+            val started = System.nanoTime()
+            val n = SpoolPow.stamp(scope.id, day, bits, POW_BUDGET)
+            val tookMs = (System.nanoTime() - started) / NS_PER_MS
+            log("${SpoolUrl.host(url)}: mined a $bits-bit stamp in $tookMs ms${if (n == null) ", none found" else ""}")
+            if (n == null) return null
             return PowStamp(n = n, d = day).also { stamps[scope.idHex] = it }
         }
     }
@@ -2445,6 +2449,8 @@ class ScopeSync(
         const val NO_HELLO = "no_hello"
 
         private const val MS_PER_S = 1_000L
+
+        private const val NS_PER_MS = 1_000_000L
 
         /**
          * [SpoolStatus.lastError] when a spool's listing named more ids than a conforming one can hold
