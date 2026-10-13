@@ -1981,8 +1981,9 @@ class ScopeSync(
             // A commons exists from the spool's boot, so it is never an unknown scope and never gated (§7.4):
             // mining for it would spend a phone's battery on a stamp the spool ignores.
             if (bits <= 0 || scope.commonsId != null) return null
-            val day = SpoolPow.utcDay(clock())
-            stamps[scope.idHex]?.let { if (it.d == day) return it }
+            val now = clock()
+            stamps[scope.idHex]?.let { if (SpoolPow.reusable(it.d, now)) return it }
+            val day = SpoolPow.utcDay(now)
             val n = SpoolPow.stamp(scope.id, day, bits, POW_BUDGET) ?: return null
             return PowStamp(n = n, d = day).also { stamps[scope.idHex] = it }
         }

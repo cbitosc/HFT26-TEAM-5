@@ -7,7 +7,9 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.lang.management.ManagementFactory
 import java.security.MessageDigest
+import kotlin.random.Random
 
 /**
  * Behavior anchors for [SpoolPow]: the stamp digest is recomputed independently, difficulty counting
@@ -69,4 +71,68 @@ class SpoolPowTest {
         assertEquals(1L, SpoolPow.utcDay(SpoolPow.DAY_MS))
         assertEquals(-1L, SpoolPow.utcDay(-1L))
     }
+
+    @Test
+    fun theMinerCountsWhatTheReferenceDigestCounts() {
+        val random = Random(7)
+        // Prefix lengths around every block edge the counter can straddle, §8's 57 bytes among them.
+        for (scopeLength in listOf(0, 1, 7, 8, 32, 38, 39, 40, 46, 47, 48, 100, 111, 112)) {
+            val scopeId = random.nextBytes(scopeLength)
+            val day = random.nextLong(0, 100_000)
+            val miner = PowMiner("knit/spool/v1/pow".toByteArray() + scopeId + u64be(day))
+            // Runs across the 256- and 65 536-counter edges where the cached state turns over, then far counters.
+            val counters = (0L..600L) + (65_000L..66_000L) + listOf(Long.MAX_VALUE, -1L, 1L shl 40) + List(200) { random.nextLong() }
+            for (n in counters) {
+                assertEquals(
+                    "scope ${scopeId.size} B, n=$n",
+                    SpoolPow.leadingZeroBits(SpoolPow.digest(scopeId, day, n)),
+                    miner.leadingZeroBits(n),
+                )
+            }
+        }
+    }
+
+    @Test
+    fun miningMatchesTheReferenceLoop() {
+        val random = Random(11)
+        repeat(8) {
+            val scopeId = random.nextBytes(32)
+            val day = random.nextLong(0, 100_000)
+            val bits = 6 + it % 5
+            val startN = random.nextLong(0, 1_000)
+            var expected = startN
+            while (!SpoolPow.verify(scopeId, day, expected, bits)) expected++
+            assertEquals(expected, SpoolPow.stamp(scopeId, day, bits, maxAttempts = 1_000_000, startN = startN))
+        }
+        assertEquals(5L, SpoolPow.stamp(ByteArray(32), day = 1L, bits = 0, maxAttempts = 1, startN = 5L))
+        assertNull(SpoolPow.stamp(ByteArray(32), day = 1L, bits = 0, maxAttempts = 0))
+    }
+
+    @Test
+    fun miningAllocatesNothingPerAttempt() {
+        val threads = ManagementFactory.getThreadMXBean() as com.sun.management.ThreadMXBean
+        val scopeId = ByteArray(32) { 3 }
+        SpoolPow.stamp(scopeId, day = 1L, bits = 256, maxAttempts = 10_000) // warm up
+        val before = threads.currentThreadAllocatedBytes
+        assertNull(SpoolPow.stamp(scopeId, day = 1L, bits = 256, maxAttempts = 200_000))
+        val allocated = threads.currentThreadAllocatedBytes - before
+        // The miner's own buffers are well under 1 KiB; one allocation per attempt would be megabytes.
+        assertTrue("allocated $allocated bytes over 200 000 attempts", allocated < 64 * 1024)
+    }
+
+    @Test
+    fun aStampIsReusedThroughTheSpoolsWindowLessTheMargin() {
+        val day = 20_000L
+        val start = day * SpoolPow.DAY_MS
+        assertTrue("the day it was minted", SpoolPow.reusable(day, start))
+        assertTrue("all of the next day, which a spool still takes", SpoolPow.reusable(day, start + SpoolPow.DAY_MS + 3_600_000L))
+        val closes = (day + 2) * SpoolPow.DAY_MS - SpoolPow.REUSE_MARGIN_MS
+        assertTrue(SpoolPow.reusable(day, closes - 1))
+        assertFalse("inside the margin before the window closes", SpoolPow.reusable(day, closes))
+        assertFalse("two days on", SpoolPow.reusable(day, start + 2 * SpoolPow.DAY_MS))
+        assertTrue("a day ahead is still in a spool's window", SpoolPow.reusable(day + 1, start))
+        assertFalse("further ahead is not (a clock set back)", SpoolPow.reusable(day + 2, start))
+    }
+
+    private fun u64be(value: Long) = ByteArray(8) { (value ushr ((7 - it) * 8)).toByte() }
 }
