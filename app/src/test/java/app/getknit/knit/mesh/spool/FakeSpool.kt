@@ -3,6 +3,7 @@ package app.getknit.knit.mesh.spool
 import app.getknit.knit.mesh.CarriedFrame
 import app.getknit.knit.mesh.ForwardStore
 import app.getknit.knit.mesh.crypto.scope.ScopeCrypto
+import app.getknit.knit.mesh.crypto.scope.SpoolPow
 import app.getknit.knit.mesh.protocol.ChatContent
 import app.getknit.knit.mesh.protocol.CommonsPost
 import app.getknit.knit.mesh.protocol.EncEnvelope
@@ -62,6 +63,8 @@ class FakeSpool(
     // Hostile listing shape: this many synthetic ids appended to every LIST answer's live set / tombstones.
     private val listingPadding: Int = 0,
     private val tombstonePadding: Int = 0,
+    // A spool that turns every stamp down (a difficulty the client cannot meet, a day it will not take).
+    private val rejectStamps: Boolean = false,
 ) : SpoolDialer {
     private class Attachment(
         val total: Int,
@@ -90,6 +93,31 @@ class FakeSpool(
 
     /** SUB stamps the spool was handed, by scope hex — lets a test assert PoW actually rode along. */
     val stamps = ConcurrentHashMap<String, PowStamp>()
+
+    /** Every SUB entry, in order, as (scope hex, whether it carried a stamp) — proves when a stamp went out. */
+    val subStamped: MutableList<Pair<String, Boolean>> = java.util.Collections.synchronizedList(mutableListOf())
+
+    /** `err pow` answers, by scope hex: the daemon's §6.4 gate on a scope it does not hold. */
+    val powRefusals = ConcurrentHashMap<String, Int>()
+
+    /** Sheds [scopeHex] as the daemon's store may (S-6.2-8): the next request for it meets the creation gates. */
+    fun forget(scopeHex: String) {
+        scopes.remove(scopeHex)
+    }
+
+    // The daemon's unknown-scope gate (§6.4, S-6.4-2): with PoW on, a scope this spool does not hold needs a
+    // stamp that verifies. Not its day window — this spool keeps no clock — and not its per-IP bucket.
+    private fun powRefused(
+        scope: ByteArray,
+        pow: PowStamp?,
+    ): Boolean {
+        val scopeHex = hex(scope)
+        // A commons exists from the spool's boot, so it is never an unknown scope (the daemon's rule too).
+        if (powBits <= 0 || scopes.containsKey(scopeHex) || commons?.first?.let(::hex) == scopeHex) return false
+        if (pow != null && !rejectStamps && SpoolPow.verify(scope, pow.d, pow.n, powBits)) return false
+        powRefusals.merge(scopeHex, 1, Int::plus)
+        return true
+    }
 
     /** Every scope any connection ever SUBbed, by hex — proves a scope was (or was never) asked for here. */
     val subscribedScopes: MutableSet<String> = ConcurrentHashMap.newKeySet()
@@ -432,6 +460,11 @@ class FakeSpool(
                     )
                     return@forEach
                 }
+                subStamped.add(scopeHex to (entry.pow != null))
+                if (powRefused(entry.scope, entry.pow)) {
+                    emit(SpoolCodec.encode(SpoolErr(t = SpoolRecordType.ERR, code = SpoolErrCode.POW, scope = entry.scope)))
+                    return@forEach
+                }
                 entry.pow?.let { stamps[scopeHex] = it }
                 subscribed.add(scopeHex)
                 subscribedScopes.add(scopeHex)
@@ -480,6 +513,10 @@ class FakeSpool(
 
         private fun onPush(push: SpoolPush) {
             val scopeHex = hex(push.scope)
+            if (powRefused(push.scope, push.pow)) {
+                emit(SpoolCodec.encode(SpoolErr(t = SpoolRecordType.ERR, code = SpoolErrCode.POW, q = push.q, scope = push.scope)))
+                return
+            }
             val state = scopes.getOrPut(scopeHex) { ScopeState() }
             val idHex = hex(push.blobId)
             val refusal =
@@ -562,6 +599,10 @@ class FakeSpool(
 
         @Suppress("ReturnCount") // one guard per §6.5 rejection reason
         private fun onAput(aput: SpoolAput) {
+            if (powRefused(aput.scope, aput.pow)) {
+                emit(SpoolCodec.encode(SpoolErr(t = SpoolRecordType.ERR, code = SpoolErrCode.POW, q = aput.q, scope = aput.scope)))
+                return
+            }
             val state = scopes.getOrPut(hex(aput.scope)) { ScopeState() }
             val aidHex = hex(aput.aid)
             val cidHex = hex(aput.cid)

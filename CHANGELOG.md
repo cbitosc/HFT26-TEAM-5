@@ -37,8 +37,8 @@ document:
   dropped it first once it had as many connections as it could hold, and sometimes turned the iPhone away when
   it tried to reconnect.
 - With an internet relay switched on, Knit could stutter for up to half a minute after it started, reconnected
-  to a relay or passed midnight UTC. It now catches up without holding up the screen or a call, and does so
-  every other day instead of at each midnight.
+  to a relay or passed midnight UTC. It now skips that work for chats the relay already holds, and a new
+  chat's setup no longer holds up the screen or a call.
 
 ## [2.9.0](https://github.com/getknit/knit/releases/tag/v2.9.0) — 2026-10-12T23:11:38Z
 

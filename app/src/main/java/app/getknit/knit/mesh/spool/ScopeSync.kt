@@ -467,6 +467,16 @@ class ScopeSync(
         private val accounted = ConcurrentHashMap<String, LinkedHashMap<String, Long>>()
         private val stamps = ConcurrentHashMap<String, PowStamp>()
 
+        // The scopes this spool has asked a stamp for (`err pow` on a request that carried none) and not yet
+        // taken one for. A spool demands a stamp only for a scope it does not hold (S-6.4-2), so a stamp goes
+        // out only after a demand: mining one for every scope on every SUB spent a stamp per scope at each
+        // process start and each UTC day, for spools that already held them all (device-observed 2026-10-12).
+        private val stampDemanded: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+        // The scopes whose latest SUB carried a stamp: a SUB's refusal names no request (§7.2), so this is how
+        // [handleScopeError] tells a demand from a stamp the spool turned down.
+        private val stampedSubs: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
         // scopeHex → when a SUB for it may be tried again, after the spool refused it (`quota`: the spool
         // is at its `maxScopes`; `pow`: it wants a stamp we could not or would not mine). Without this the
         // refused scope is re-SUBbed every tick for as long as the spool stays full — and a `pow` refusal
@@ -646,6 +656,8 @@ class ScopeSync(
                 synchronized(sets) { sets.keys.retainAll(live) }
             }
             synchronized(accounted) { accounted.keys.retainAll(live) }
+            stampDemanded.retainAll(live)
+            stampedSubs.retainAll(live)
             synchronized(invalidAttachments) { invalidAttachments.keys.retainAll(live) }
             synchronized(parked) { parked.keys.retainAll(live) }
             // And the connection's own record, or a scope that comes back is never SUBbed again and its heal
@@ -877,7 +889,13 @@ class ScopeSync(
                     .sortedBy { it.commonsId == null }
                     .take(room.coerceAtLeast(0))
             if (batch.isEmpty()) return
-            val sent = conn.sub(batch.map { ScopeSub(scope = it.id, bounds = declaredBounds(it, conn), pow = stampFor(it, conn.powBits)) })
+            val subs =
+                batch.map { scope ->
+                    val pow = stampFor(scope, conn.powBits)
+                    if (pow != null) stampedSubs.add(scope.idHex) else stampedSubs.remove(scope.idHex)
+                    ScopeSub(scope = scope.id, bounds = declaredBounds(scope, conn), pow = pow)
+                }
+            val sent = conn.sub(subs)
             // A SUB the record layer refused to send is a spool advertising a `maxRecord` too small to
             // carry it — and then too small to carry any blob either. Without this the relay reads as
             // connected forever while subscribing to nothing.
@@ -1182,12 +1200,13 @@ class ScopeSync(
             if (scope.retiring) return emptyList() // a retiring scope is drained, never refilled
             val pushed = mutableListOf<ByteArray>()
             for (entry in pushable(conn, scope, local, spoolIds, tombstoned, quarantined)) {
-                val reply = conn.push(scope.id, entry.sealed.blobId, entry.sealed.blob, stampFor(scope, conn.powBits))
+                val pow = stampFor(scope, conn.powBits)
+                val reply = conn.push(scope.id, entry.sealed.blobId, entry.sealed.blob, pow)
                 if (reply is SpoolReply.Ok) {
                     pushed.add(entry.sealed.blobId)
                     metrics.onSpoolPushed()
                 } else {
-                    if (reply is SpoolReply.Failed) {
+                    if (reply is SpoolReply.Failed && !stampDemand(scope.idHex, reply, pow)) {
                         metrics.onSpoolError()
                         lastError = reply.code
                     }
@@ -1262,8 +1281,9 @@ class ScopeSync(
             if (ScopeFrames.deadOnArrival(env, bounds.ttlMs, clock())) return false
             val sealed = ScopeFrames.seal(scope, wire.sig, wire.signed)
             if (sealed.blob.size > minOf(conn.limits?.maxBlob ?: Int.MAX_VALUE, bounds.maxBlob)) return false
-            val reply = conn.push(scope.id, sealed.blobId, sealed.blob, stampFor(scope, conn.powBits))
-            if (reply is SpoolReply.Failed) {
+            val pow = stampFor(scope, conn.powBits)
+            val reply = conn.push(scope.id, sealed.blobId, sealed.blob, pow)
+            if (reply is SpoolReply.Failed && !stampDemand(scope.idHex, reply, pow)) {
                 metrics.onSpoolError()
                 lastError = reply.code
             }
@@ -1611,6 +1631,7 @@ class ScopeSync(
                 return true
             }
             if (reply !is SpoolReply.Failed) return false
+            if (stampDemand(scope.idHex, reply, stamp)) return false
             metrics.onSpoolError()
             lastError = reply.code
             return survivable(reply)
@@ -1653,6 +1674,8 @@ class ScopeSync(
             // Anchors are keyed by scope with no other bound, so a spool naming scopes we do not carry
             // would grow these maps without limit. We only ever asked about our own.
             val scope = scopes.firstOrNull { it.idHex == scopeHex } ?: return
+            // A digest is the spool holding the scope, so it asks no stamp for it again until it sheds it.
+            stampDemanded.remove(scopeHex)
             val value = ScopeCrypto.digestValue(digest.digest)
             val moved = spoolDigests.put(scopeHex, value) != value
             val grew = spoolCounts.put(scopeHex, digest.count) != digest.count
@@ -1683,6 +1706,7 @@ class ScopeSync(
             code: String,
             retryMs: Long?,
         ) {
+            if (scopeHex != null && code == SpoolErrCode.POW && demanded(scopeHex, stamped = scopeHex in stampedSubs)) return
             metrics.onSpoolError()
             lastError = code
             if (scopeHex == null) return
@@ -1973,14 +1997,48 @@ class ScopeSync(
             known: Set<String>,
         ): Boolean = synchronized(invalid) { invalid[scopeHex]?.removeAll { it in known && it !in live } == true }
 
-        /** A cached hashcash stamp for [scope], mined only when the spool demands one (§8). */
+        /**
+         * Whether a refused PUSH or APUT was the spool asking for a stamp the request did not carry — then
+         * the scope is marked [stampDemanded] and the next round sends one, with no error raised. A refusal
+         * of a stamp that went out is stale or short (the spool's day or difficulty moved): the stamp is
+         * dropped, so the next request mines afresh, and the refusal stands as one.
+         */
+        private fun stampDemand(
+            scopeHex: String,
+            reply: SpoolReply.Failed,
+            sent: PowStamp?,
+        ): Boolean {
+            if (reply.code != SpoolErrCode.POW) return false
+            if (sent != null) {
+                stamps.remove(scopeHex)
+                return false
+            }
+            if (stampDemanded.add(scopeHex)) wake()
+            return true
+        }
+
+        /**
+         * A SUB's `err pow`: true when it was the spool's first demand for a stamp the SUB did not carry, so
+         * the next round re-SUBs with one, unparked. A refused stamp, or a demand we already could not meet
+         * (mining ran out of budget), falls through to the ordinary refusal — parked, the stamp dropped.
+         */
+        private fun demanded(
+            scopeHex: String,
+            stamped: Boolean,
+        ): Boolean {
+            if (stamped || !stampDemanded.add(scopeHex)) return false
+            wake()
+            return true
+        }
+
+        /** A cached hashcash stamp for [scope], mined only once the spool demanded one ([stampDemanded], §8). */
         private fun stampFor(
             scope: Scope,
             bits: Int,
         ): PowStamp? {
             // A commons exists from the spool's boot, so it is never an unknown scope and never gated (§7.4):
             // mining for it would spend a phone's battery on a stamp the spool ignores.
-            if (bits <= 0 || scope.commonsId != null) return null
+            if (bits <= 0 || scope.commonsId != null || scope.idHex !in stampDemanded) return null
             val now = clock()
             stamps[scope.idHex]?.let { if (SpoolPow.reusable(it.d, now)) return it }
             val day = SpoolPow.utcDay(now)

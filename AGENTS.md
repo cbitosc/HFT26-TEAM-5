@@ -457,6 +457,9 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   Before touching `RECONCILE_INTERVAL_MS`, who calls `ScopeSync.onScopeTableChanged`, `RatchetSessions.rootChanges`
   or `IntroSync.onPairsChanged`: READ ADR 2026-09.dcah — the scope table derives on its inputs' events and the
   60 s poll is only the net under the calendar; a hook that fires on an unchanged input is the old poll back.
+  Before touching `SpoolPow`, `ScopeSync`'s `stampFor` / `stampDemanded`, or what a request does on `err pow`: READ
+  ADR 2026-10.rn9j — a stamp goes out only after a spool asked for one (C-8-4), its first ask is retried at once
+  and never parked, and the miner allocates nothing per hash (`SpoolPowTest` pins it).
 - **When creating or modifying anything under `app/src/test/java/app/getknit/knit/mesh/lab/`:** keep
   `scripts/lab-lint.py` clean (a `PostToolUse` hook runs it on every scenario edit, `lab-chaos.sh` before every sweep,
   both CIs as `lab-lint`; a deliberate finding carries `// lab-lint: allow <rule> — <why>`), then RUN

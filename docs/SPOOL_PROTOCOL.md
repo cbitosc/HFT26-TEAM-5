@@ -1038,11 +1038,12 @@ valid   ⇔ leadingZeroBits(SHA-256(input)) ≥ powBits           // powBits fro
 day     = floor(unixMillis / 86 400 000)                       // UTC day number
 ```
 
-| ID        | Requirement                                                             |
-|-----------|-------------------------------------------------------------------------|
-| **S-8-1** | A spool MUST accept `day ∈ {today − 1, today, today + 1}` and no wider. |
-| **S-8-2** | A spool SHOULD cache accepted `(scopeId, day)` pairs.                   |
-| **B-8-3** | The stamp binds no spool identity.                                      |
+| ID        | Requirement                                                                                                                                                                                                                               |
+|-----------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **S-8-1** | A spool MUST accept `day ∈ {today − 1, today, today + 1}` and no wider.                                                                                                                                                                   |
+| **S-8-2** | A spool SHOULD cache accepted `(scopeId, day)` pairs.                                                                                                                                                                                     |
+| **B-8-3** | The stamp binds no spool identity.                                                                                                                                                                                                        |
+| **C-8-4** | A client SHOULD send a stamp only for a scope the spool refused `pow` on a request that carried none, and then at once, unparked: a spool asks only for a scope it does not hold (S-6.4-2). A stamp it refuses is parked as C-9.1-5 says. |
 
 > **Why no spool binding.** Spools have no protocol identity beyond a URL, so there is nothing sound
 > to

@@ -155,8 +155,11 @@ class ScopeSyncTest {
         peer: String,
     ) = hex(ScopeCrypto.dmScopeId(pairwiseRoot, self, peer))
 
-    /** Steps virtual time in small slices so the infinite loops make progress without being drained. */
+    // Whether each SUB of [scopeHex] carried a stamp, in order.
+    private fun List<Pair<String, Boolean>>.stampedFor(scopeHex: String): List<Boolean> =
+        synchronized(this) { filter { it.first == scopeHex }.map { it.second } }
 
+    /** Steps virtual time in small slices so the infinite loops make progress without being drained. */
     private fun TestScope.pump(rounds: Int = 8) {
         repeat(rounds) {
             advanceTimeBy(1_000)
@@ -1917,6 +1920,96 @@ class ScopeSyncTest {
             assertTrue("the gated spool must get a valid stamp", stamp != null)
             a.sync.stop()
             b.sync.stop()
+        }
+
+    @Test
+    fun `a scope the spool asks a stamp for is re-sent with one at once, with no error and no park`() =
+        runTest {
+            val spool = FakeSpool(powBits = 8)
+            val hex = scopeHex(alice, bob)
+            val member = member(spool, alice, bob)
+
+            member.sync.start(backgroundScope)
+            pump()
+
+            assertEquals("asked bare, refused, asked again with a stamp", listOf(false, true), spool.subStamped.stampedFor(hex))
+            assertEquals(1, spool.powRefusals[hex])
+            assertTrue("subscribed well inside the 5 min park", hex in spool.subscribedScopes)
+            assertNull(
+                "a demand for a stamp is the protocol working, not a fault",
+                member.sync
+                    .status()
+                    .single()
+                    .lastError,
+            )
+            member.sync.stop()
+        }
+
+    @Test
+    fun `a spool that already holds the scope is never sent a stamp`() =
+        runTest {
+            val spool = FakeSpool(powBits = 8)
+            val hex = scopeHex(alice, bob)
+            val first = member(spool, alice, bob)
+            first.sync.start(backgroundScope)
+            pump()
+            first.sync.stop()
+            val before = spool.subStamped.size
+
+            // The peer's phone, on the same DM scope the spool now holds: no demand, so nothing to mine.
+            val second = member(spool, bob, alice)
+            second.sync.start(backgroundScope)
+            pump()
+
+            val later = spool.subStamped.drop(before).filter { it.first == hex }
+            assertTrue("the peer subscribed", later.isNotEmpty())
+            assertTrue("and never with a stamp", later.none { it.second })
+            assertEquals("only the scope's creation met the gate", 1, spool.powRefusals[hex])
+            second.sync.stop()
+        }
+
+    @Test
+    fun `a reconnect to a spool that still holds the scope sends no stamp, one that shed it is asked again`() =
+        runTest {
+            val spool = FakeSpool(powBits = 8)
+            val hex = scopeHex(alice, bob)
+            val member = member(spool, alice, bob)
+            member.sync.start(backgroundScope)
+            pump()
+
+            spool.dropSockets()
+            pump(rounds = 40)
+            assertEquals("the reconnect's SUB went bare and was taken", listOf(false, true, false), spool.subStamped.stampedFor(hex))
+
+            spool.forget(hex)
+            spool.dropSockets()
+            pump(rounds = 40)
+            assertEquals(listOf(false, true, false, false, true), spool.subStamped.stampedFor(hex))
+            assertEquals(2, spool.powRefusals[hex])
+            assertTrue("subscribed again", hex in spool.subscribedScopes)
+            member.sync.stop()
+        }
+
+    @Test
+    fun `a stamp the spool turns down parks the scope`() =
+        runTest {
+            val spool = FakeSpool(powBits = 8, rejectStamps = true)
+            val hex = scopeHex(alice, bob)
+            // The park is measured on the member's own clock, so this one has to move with virtual time.
+            val member = member(spool, alice, bob, clock = { now + testScheduler.currentTime })
+
+            member.sync.start(backgroundScope)
+            pump(rounds = 200)
+
+            assertEquals("asked bare, then with a stamp, then parked", listOf(false, true), spool.subStamped.stampedFor(hex))
+            assertEquals(
+                SpoolErrCode.POW,
+                member.sync
+                    .status()
+                    .single()
+                    .lastError,
+            )
+            member.sync.stop()
         }
 
     // --- Attachments, spec §4.5/§9.5 ---

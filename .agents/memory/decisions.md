@@ -233,6 +233,7 @@ carries; never renumber an old one.
 | [2026-10.nxfb](decisions/2026-10-nxfb-a-blob-is-not-asked-of-a-peer-streaming-to-us.md) | A blob is not asked of a peer streaming to us, and a fed file stays in flight while its link keeps feeding | mesh, attachments, blob-exchange, bluetooth |
 | [2026-10.pj9w](decisions/2026-10-pj9w-ble-discovery-waits-run-on-the-elapsed-clock.md) | BLE discovery waits run on the elapsed clock, and a dial wakes when its dwell ripens | ble, transport, power |
 | [2026-10.qjap](decisions/2026-10-qjap-android-refuses-a-signed-envelope-whose-text-isn-t-utf-8.md) | Android refuses a signed envelope whose text isn't UTF-8, as iOS does | wire, crypto, interop |
+| [2026-10.rn9j](decisions/2026-10-rn9j-mine-spool-pow-stamps-only-when-a-spool-demands-one.md) | Mine spool PoW stamps only when a spool demands one | spool, pow |
 | [2026-10.ryak](decisions/2026-10-ryak-the-ble-presence-advert-runs-at-full-power.md) | The BLE presence advert runs at full power | ble, mesh, power |
 | [2026-10.swst](decisions/2026-10-swst-art-s-whitespace-is-the-law-for-both-ports.md) | ART's whitespace is the law for both ports | text, interop, testing |
 | [2026-10.unqn](decisions/2026-10-unqn-a-clean-bounded-picture-is-stripped-not-re-encoded.md) | A clean, bounded picture is stripped, not re-encoded | attachments, privacy |
