@@ -53,7 +53,7 @@ import net.zetetic.database.sqlcipher.driver.SQLCipherDriver
  * The `@Database` version, as a top-level constant so the annotation and [KnitDatabase.SCHEMA_VERSION] read
  * one number (an annotation argument cannot name the class's own companion).
  */
-internal const val KNIT_DB_SCHEMA_VERSION = 22
+internal const val KNIT_DB_SCHEMA_VERSION = 23
 
 @Database(
     entities = [
@@ -200,6 +200,10 @@ internal const val KNIT_DB_SCHEMA_VERSION = 22
     //     a request thread's lines while the group lives on, and a frame custody re-served after that flipped the
     //     roster on Android alone (IOS-6, ADR 2026-09.v6fu). Local only, no wire change; carried in a backup like
     //     `groups`. Filled from the lines that exist at upgrade; migrated by KnitMigrations.MIGRATION_21_22.
+    // v23: `messages.replyCheck` and `messages.replyToFlagged`, indexed `(replyToId, replyCheck)` — local only: whether
+    //     an inbound reply's quote was judged against the original it names, and this phone's verdict on the quoted
+    //     words (ADR 2026-10.gpa3). No wire change. Unchecked and unflagged on existing rows; the mesh start's
+    //     `QuoteVerifier.settleBacklog` judges those whose original is held. Migrated by KnitMigrations.MIGRATION_22_23.
     version = KNIT_DB_SCHEMA_VERSION,
     // Export the schema JSON to app/schemas/ (location set by the androidx.room Gradle plugin's
     // room { schemaDirectory(...) } in app/build.gradle.kts). Keeps the schema diffable in review and feeds

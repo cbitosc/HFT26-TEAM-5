@@ -226,6 +226,7 @@ carries; never renumber an old one.
 | [2026-10.fzsy](decisions/2026-10-fzsy-anrs-the-platform-recorded-are-imported-into-the-crash-store-with-their-thread-d.md) | ANRs the platform recorded are imported into the crash store with their thread dumps | crash-reports, reliability, android |
 | [2026-10.g24x](decisions/2026-10-g24x-a-picture-goes-to-its-linked-recipient-first.md) | A picture goes to its linked recipient first, one Bluetooth copy at a time | ble, mesh, blobs |
 | [2026-10.gcrd](decisions/2026-10-gcrd-a-dm-receive-chain-is-keyed-by-the-root-that-derived-it.md) | A DM receive chain is keyed by the root that derived it | crypto, pfs, data |
+| [2026-10.gpa3](decisions/2026-10-gpa3-a-quote-is-checked-against-the-original-it-names.md) | A quote is checked against the original it names | chat, moderation, security |
 | [2026-10.gtmm](decisions/2026-10-gtmm-compose-previews-are-screenshot-tested-on-the-alpha-preview-plugin.md) | Compose previews are screenshot-tested on the alpha preview plugin | testing, toolchain, ui |
 | [2026-10.jbsa](decisions/2026-10-jbsa-conversation-shortcuts-follow-the-chat-list.md) | Conversation shortcuts follow the chat list | notifications, contacts, ui |
 | [2026-10.k8ge](decisions/2026-10-k8ge-a-name-clash-fades-a-week-after-the-look-alike-was-last-heard.md) | A name clash fades a week after the look-alike was last heard | identity, ui, contacts |

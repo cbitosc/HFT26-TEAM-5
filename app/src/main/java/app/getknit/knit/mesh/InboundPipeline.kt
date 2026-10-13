@@ -13,6 +13,7 @@ import app.getknit.knit.data.MeshBlobStore
 import app.getknit.knit.data.MessageReceiptRepository
 import app.getknit.knit.data.MessageRepository
 import app.getknit.knit.data.PeerRepository
+import app.getknit.knit.data.QuoteVerifier
 import app.getknit.knit.data.ReactionRepository
 import app.getknit.knit.data.VoiceAudio
 import app.getknit.knit.data.group.GroupEntity
@@ -22,7 +23,9 @@ import app.getknit.knit.data.message.Conversations
 import app.getknit.knit.data.message.DeliveryPlane
 import app.getknit.knit.data.message.MentionStore
 import app.getknit.knit.data.message.MessageEntity
+import app.getknit.knit.data.message.REPLY_SNIPPET_MAX
 import app.getknit.knit.data.message.StatusNotices
+import app.getknit.knit.data.message.hiddenByFilter
 import app.getknit.knit.data.message.withReply
 import app.getknit.knit.data.peer.PeerEntity
 import app.getknit.knit.data.reaction.ReactionEntity
@@ -70,6 +73,7 @@ import app.getknit.knit.mesh.protocol.ReactionContent
 import app.getknit.knit.mesh.protocol.ReactionPayload
 import app.getknit.knit.mesh.protocol.ReceiptContent
 import app.getknit.knit.mesh.protocol.RelayEnvelope
+import app.getknit.knit.mesh.protocol.ReplyRef
 import app.getknit.knit.mesh.protocol.TransferPayload
 import app.getknit.knit.mesh.protocol.TypingContent
 import app.getknit.knit.mesh.protocol.WireCodec
@@ -78,6 +82,7 @@ import app.getknit.knit.mesh.protocol.isStorable
 import app.getknit.knit.mesh.protocol.mention
 import app.getknit.knit.mesh.spool.ScopeSync
 import app.getknit.knit.moderation.ImageScreeningService
+import app.getknit.knit.normalizeSingleLine
 import app.getknit.knit.notifications.ConversationFaces
 import app.getknit.knit.notifications.Notifier
 import app.getknit.knit.notifications.incomingNotification
@@ -123,6 +128,9 @@ class InboundPipeline(
     // phone holds sealed from its own copy (ADR 2026-10.mptm). Stateless over [messages] and [blobs]; the default
     // is what every test wants.
     private val identities: AttachmentIdentities = AttachmentIdentities(messages, blobs),
+    // Judges an inbound reply's quote against the original it names (ADR 2026-10.gpa3). The default labels a
+    // rebuilt quote in English; the app hands MeshManager one that reads the reader's own strings.
+    private val quotes: QuoteVerifier = QuoteVerifier(messages),
     private val db: KnitDatabase,
     private val identity: IdentitySource,
     private val settings: InboundSettings,
@@ -2623,6 +2631,58 @@ class InboundPipeline(
     }
 
     /**
+     * The quote an inbound frame carries, bounded the way its body is, or null when it cannot name an original —
+     * a blank or overlong id. The author string is kept only as a record (the reader's own label for the author's
+     * id is what renders), and the snippet is cut to what a sender's composer ever writes.
+     */
+    private fun admitReply(ref: ReplyRef?): ReplyRef? {
+        if (ref == null) return null
+        if (ref.messageId.isBlank() || ref.messageId.length > MAX_QUOTED_ID) return null
+        if (ref.authorId.isBlank() || ref.authorId.length > MAX_QUOTED_ID) return null
+        return ref.copy(
+            author = normalizeSingleLine(ref.author).clampToUtf16(TextLimits.DISPLAY_NAME),
+            snippet = normalizeSingleLine(ref.snippet).clampToUtf16(REPLY_SNIPPET_MAX),
+        )
+    }
+
+    /**
+     * Persists [built] with its quote judged, and returns the row as it now reads (ADR 2026-10.gpa3). Somebody else's
+     * quote is a claim until it is checked against the original it names: judged before the insert when the original
+     * is held, else its words are screened, since they show in the bubble. After the insert, whichever of a reply and
+     * its original commits second settles the quote — this row's own, if its original raced in since the check, and
+     * those of the replies that were waiting on it. Read back, so the caller's notification hides a reply whose
+     * quoted words are flagged on this phone.
+     */
+    private suspend fun persistQuoted(
+        built: MessageEntity,
+        isNew: Boolean,
+        me: String,
+        conversationId: String,
+        persist: suspend (MessageEntity) -> Unit,
+    ): MessageEntity {
+        val row = if (isNew && built.senderId != me && built.replyToId != null) quoteOnArrival(built, conversationId) else built
+        persist(row)
+        return (if (isNew) quotes.settleAfterInsert(row.id, me) else null) ?: row
+    }
+
+    /**
+     * [row]'s quote on a first delivery (ADR 2026-10.gpa3): judged against its original when this phone holds it;
+     * otherwise the sender's snippet is all the bubble can show, so it is screened like a body — by the same
+     * moderator, in the same scope — and a flagged one hides the reply. Runs before the persist and outside any
+     * transaction, like [inboundModeration].
+     */
+    private suspend fun quoteOnArrival(
+        row: MessageEntity,
+        conversationId: String,
+    ): MessageEntity {
+        quotes.judge(row)?.let { return it }
+        val snippet = row.replyToSnippet.orEmpty()
+        val flagged =
+            snippet.isNotBlank() && classifyText(snippet, "incoming quote", Conversations.isPublicRoom(conversationId))
+        return row.copy(replyToFlagged = flagged)
+    }
+
+    /**
      * Persists an inbound chat into [conversationId], starts pulling any attachment blob we don't hold,
      * fires the appropriate notification, and acks. Shared by the DM/broadcast and group delivery paths.
      */
@@ -2672,7 +2732,7 @@ class InboundPipeline(
         val isNew = !messages.exists(env.id)
         val hash = content.attachmentHash
         val moderation = inboundModeration(isNew, content.body, conversationId)
-        persist(
+        val built =
             MessageEntity(
                 id = env.id,
                 senderId = env.senderId,
@@ -2711,8 +2771,9 @@ class InboundPipeline(
                 originViaMqtt = origin?.viaMqtt == true,
                 originPeerId = origin?.peerId,
                 originSigned = origin?.signed ?: MessageEntity.ORIGIN_UNSIGNED,
-            ).withReply(content.replyTo),
-        )
+            ).withReply(admitReply(content.replyTo))
+        val stored = persistQuoted(built, isNew, me, conversationId, persist)
+        val hidden = stored.hiddenByFilter(settings.contentFilteringEnabled.first())
         // Start pulling the referenced blob unless we already hold it (the UI observes the blobs table
         // and flips the attachment from "loading" to shown once the bytes land, and onObtained describes it).
         // If we already hold it (carried while its frame was parked for a key, fetched off a spool first, or
@@ -2740,9 +2801,9 @@ class InboundPipeline(
         if (isNew) {
             if (isAccepted(conversationId, me)) {
                 if (env.senderId != me && content.mentions.mention(me)) {
-                    notifyMention(env, content, conversationId, sealed?.attachmentName, moderation)
+                    notifyMention(env, content, conversationId, sealed?.attachmentName, hidden)
                 } else {
-                    notifyIncoming(env, content, conversationId, sealed?.attachmentName, moderation, origin)
+                    notifyIncoming(env, content, conversationId, sealed?.attachmentName, hidden, origin)
                 }
             } else if (env.senderId != me) {
                 // A stranger's first DM/group: no per-message alert — just refresh the coalesced
@@ -2927,27 +2988,25 @@ class InboundPipeline(
         content: ChatContent,
         conversationId: String,
         fileName: String?,
-        moderation: Int,
+        hidden: Boolean,
         origin: MeshPostOrigin? = null,
     ) {
-        notifyWithBody(env, conversationId, notificationBody(content, fileName, moderation), origin)
+        notifyWithBody(env, conversationId, notificationBody(content, fileName, hidden), origin)
     }
 
     /**
-     * What a notification says of [content]. A message the moderator flagged ([moderation]) says only that it
-     * is hidden while content filtering is on — the thread collapses it behind a tap, and a notification has no
-     * tap to reveal. Since only the public rooms screen on the way out (ADR 2026-10.9rh6), this is where a DM's
-     * or a group's flagged text would otherwise land in the shade. Attachment-only messages have a blank body,
-     * so a placeholder names the attachment and they still notify.
+     * What a notification says of [content]. A message content filtering hides ([hidden] — its body flagged, or the
+     * words it quotes, `MessageEntity.hiddenByFilter`) says only that it is hidden — the thread collapses it behind
+     * a tap, and a notification has no tap to reveal. Since only the public rooms screen on the way out (ADR
+     * 2026-10.9rh6), this is where a DM's or a group's flagged text would otherwise land in the shade.
+     * Attachment-only messages have a blank body, so a placeholder names the attachment and they still notify.
      */
     private suspend fun notificationBody(
         content: ChatContent,
         fileName: String?,
-        moderation: Int,
+        hidden: Boolean,
     ): String {
-        if (moderation == MessageEntity.MODERATION_TEXT_FLAGGED && settings.contentFilteringEnabled.first()) {
-            return HIDDEN_NOTIFICATION_BODY
-        }
+        if (hidden) return HIDDEN_NOTIFICATION_BODY
         return GeoUri.describe(content.body, GeoUri.LABEL).ifBlank { attachmentPreview(content, fileName) }
     }
 
@@ -3050,7 +3109,7 @@ class InboundPipeline(
         content: ChatContent,
         conversationId: String,
         fileName: String?,
-        moderation: Int,
+        hidden: Boolean,
     ) {
         val me = identity.nodeId()
         val peer = peers.find(env.senderId)
@@ -3058,7 +3117,7 @@ class InboundPipeline(
         val labels = peers.labelIndex()
         val senderLabel = labels.labelFor(env.senderId, peer?.name)
         val peerAvatar = peer?.avatarHash?.let { blobs.bytes(it) }
-        val body = notificationBody(content, fileName, moderation)
+        val body = notificationBody(content, fileName, hidden)
         val incoming =
             mentionNotification(
                 senderId = env.senderId,
@@ -3613,6 +3672,9 @@ class InboundPipeline(
 
         /** A flagged message's notification text while content filtering hides it; the thread says the same. */
         const val HIDDEN_NOTIFICATION_BODY = "Message hidden"
+
+        /** Longest message or node id a quote may name; every id this protocol mints is far shorter. */
+        const val MAX_QUOTED_ID = 64
 
         /** Most acked ids applied from one sealed CTL_RECEIPT — 2× AckSync's send-side batch cap. */
         const val MAX_RECEIPT_ACKS = 2 * AckSync.MAX_BATCH_ACKS

@@ -98,6 +98,18 @@ class MessageSearchDaoTest : RoomDbTest() {
         }
 
     @Test
+    fun `a reply quoting flagged words is hidden with flagged text, only while asked`() =
+        runTest {
+            // ADR 2026-10.gpa3: the search mirrors MessageEntity.hiddenByFilter, so a clean body quoting flagged words
+            // stays out too.
+            dao.upsert(msg("n1", 1, "peer-1", body = "clean words", id = "m1").copy(replyToId = "o1", replyToFlagged = true))
+            dao.upsert(msg("n1", 2, "peer-1", body = "plain words", id = "m2"))
+
+            assertEquals(listOf("m2"), search("words", hideFlagged = true))
+            assertEquals(listOf("m2", "m1"), search("words", hideFlagged = false))
+        }
+
+    @Test
     fun `newest first with the id tiebreak, bounded by the limit`() =
         runTest {
             dao.upsert(msg("n1", 1, "peer-1", body = "photo one", id = "m1"))

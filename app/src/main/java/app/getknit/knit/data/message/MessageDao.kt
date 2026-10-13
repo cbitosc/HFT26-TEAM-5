@@ -41,11 +41,13 @@ interface MessageDao {
     /**
      * How many messages sit at or newer than [id] in its thread — the window size that just reaches it, so
      * tapping a reply quote can pull an older message into the window in one round trip rather than paging
-     * blindly toward it. Zero when [id] is not stored (the subquery yields null and nothing compares true).
+     * blindly toward it. Zero when [id] is not stored in this thread (the subquery yields null and nothing
+     * compares true): a quote names its original by an id anyone can mint, so one naming a message from another
+     * thread must not size this one's window (ADR 2026-10.gpa3).
      */
     @Query(
         "SELECT COUNT(*) FROM messages WHERE conversationId = :conversationId " +
-            "AND sentAt >= (SELECT sentAt FROM messages WHERE id = :id)",
+            "AND sentAt >= (SELECT sentAt FROM messages WHERE id = :id AND conversationId = :conversationId)",
     )
     suspend fun depthOf(
         conversationId: String,
@@ -73,6 +75,54 @@ interface MessageDao {
 
     @Query("SELECT EXISTS(SELECT 1 FROM messages WHERE id = :id)")
     suspend fun exists(id: String): Boolean
+
+    /** The stored row for [id], or null — a one-shot read, unlike [observeById]. */
+    @Query("SELECT * FROM messages WHERE id = :id")
+    suspend fun findById(id: String): MessageEntity?
+
+    /**
+     * Up to [limit] replies by somebody other than [me] that quote [originalId] and have not been judged against it
+     * yet — what a late original settles when it lands (ADR 2026-10.gpa3). Served whole by the
+     * `(replyToId, replyCheck)` index; a judged reply leaves the set, so the caller pages by asking again.
+     */
+    @Query("SELECT * FROM messages WHERE replyToId = :originalId AND replyCheck = 0 AND senderId != :me LIMIT :limit")
+    suspend fun repliesAwaiting(
+        originalId: String,
+        me: String,
+        limit: Int,
+    ): List<MessageEntity>
+
+    /**
+     * Writes a reply's judged quote, **once**: the `replyCheck = 0` guard makes it a no-op on a row already judged,
+     * so the reply's own arrival and its original's can both try without a transaction — the verdict depends only
+     * on columns neither row ever changes. Touches the quote columns alone, never the rest of the row (a whole-row
+     * upsert would undo a tick or a voice note's metadata written in between). Returns the rows changed.
+     */
+    @Query(
+        "UPDATE messages SET replyCheck = :check, replyToSnippet = :snippet, " +
+            "replyToHasAttachment = :hasAttachment, replyToFlagged = :flagged WHERE id = :id AND replyCheck = 0",
+    )
+    suspend fun applyQuoteVerdict(
+        id: String,
+        check: Int,
+        snippet: String,
+        hasAttachment: Boolean,
+        flagged: Boolean,
+    ): Int
+
+    /**
+     * Up to [limit] unjudged replies by somebody other than [me] whose original **is** held — the backlog the mesh
+     * start settles (rows from before v23, or an insert whose settle a crash cut short). A reply whose original is
+     * absent stays out, so the set only shrinks as it is worked.
+     */
+    @Query(
+        "SELECT r.* FROM messages r WHERE r.replyToId IS NOT NULL AND r.replyCheck = 0 AND r.senderId != :me " +
+            "AND EXISTS (SELECT 1 FROM messages o WHERE o.id = r.replyToId) LIMIT :limit",
+    )
+    suspend fun unsettledQuotes(
+        me: String,
+        limit: Int,
+    ): List<MessageEntity>
 
     /**
      * The [MessageEntity.recipientId] of the stored message [id], or null when it's a broadcast/group
@@ -437,7 +487,8 @@ interface MessageDao {
      * built by `SearchQuery.toMatch` and never from raw input: it is only ever `term* term*`, which both
      * FTS query syntaxes read the same way. [conversations] is an allow-list, the chat list's own visible
      * threads, so a stranger's request thread is never searched (ADR 009); [hideFlagged] drops text the
-     * on-device moderator flagged, mirroring the thread's collapse of those bubbles.
+     * on-device moderator flagged, and replies quoting flagged words, mirroring the thread's collapse of those
+     * bubbles (`MessageEntity.hiddenByFilter`).
      *
      * Shape matters for cost, as everywhere in this file. The subselect makes SQLite drive from the FTS
      * index — the match set, then one rowid seek into `messages` per hit — rather than scan `messages` and
@@ -449,7 +500,7 @@ interface MessageDao {
     @Query(
         "SELECT * FROM messages WHERE rowid IN " +
             "(SELECT rowid FROM messages_fts WHERE messages_fts MATCH :match) " +
-            "AND kind = 0 AND (:hideFlagged = 0 OR moderation = 0) " +
+            "AND kind = 0 AND (:hideFlagged = 0 OR (moderation = 0 AND replyToFlagged = 0)) " +
             "AND senderId NOT IN (:blocked) AND conversationId IN (:conversations) " +
             "ORDER BY sentAt DESC, id DESC LIMIT :limit",
     )

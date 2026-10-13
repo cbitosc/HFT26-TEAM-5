@@ -47,7 +47,7 @@ class KnitDatabaseMigrationTest {
         )
 
     @Test
-    fun `the current schema (v22) creates and opens from the exported JSON`() =
+    fun `the current schema (v23) creates and opens from the exported JSON`() =
         runTest {
             helper.createDatabase(CURRENT_VERSION).close()
         }
@@ -830,12 +830,39 @@ class KnitDatabaseMigrationTest {
             }
         }
 
+    @Test
+    fun `migrate 22 to 23 leaves every reply unchecked and unflagged and indexes the late check's lookup`() =
+        runTest {
+            // A verified quote is rebuilt with localized labels SQL cannot produce, so nothing is judged here; the
+            // mesh start's backlog pass does it (ADR 2026-10.gpa3).
+            helper.createDatabase(22).use { c ->
+                c.execSQL(
+                    "INSERT INTO messages (id, senderId, conversationId, body, sentAt, received, receivedVia, mentions, " +
+                        "replyToHasAttachment, moderation, pendingKey, kind, originViaMqtt, originSigned, attachmentAnimated, " +
+                        "replyToId, replyToAuthorId, replyToSnippet) " +
+                        "VALUES ('r1','n1','peer-1','sure',2,1,0,'[]',0,0,0,0,0,0,0,'o1','n2','old words')",
+                )
+            }
+            helper.runMigrationsAndValidate(23, listOf(KnitMigrations.MIGRATION_22_23)).use { c ->
+                c.prepare("SELECT replyCheck, replyToFlagged, replyToSnippet FROM messages WHERE id = 'r1'").use { s ->
+                    assertTrue(s.step())
+                    assertEquals(0L, s.getLong(0))
+                    assertEquals(0L, s.getLong(1))
+                    assertEquals("old words", s.getText(2))
+                }
+                c
+                    .prepare(
+                        "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'index_messages_replyToId_replyCheck'",
+                    ).use { s -> assertTrue("the replies waiting on an original are found by index", s.step()) }
+            }
+        }
+
     private companion object {
         /**
          * KnitDatabase `@Database(version = …)` — bump alongside the DB (its retention is CLASS, so the version
          * can't be read reflectively). A missing schemas/<db>/<version>.json fails the smoke test.
          */
-        const val CURRENT_VERSION = 22
+        const val CURRENT_VERSION = 23
 
         /** The v16 column list with an attachment — MIGRATION_16_17's test seeds rows through it. */
         const val INSERT_V16 =

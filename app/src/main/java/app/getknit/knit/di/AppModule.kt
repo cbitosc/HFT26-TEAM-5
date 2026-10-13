@@ -26,6 +26,7 @@ import app.getknit.knit.data.LinkCardStore
 import app.getknit.knit.data.MessageReceiptRepository
 import app.getknit.knit.data.MessageRepository
 import app.getknit.knit.data.PeerRepository
+import app.getknit.knit.data.QuoteVerifier
 import app.getknit.knit.data.ReactionRepository
 import app.getknit.knit.data.backup.BackupWriter
 import app.getknit.knit.data.backup.RestoreStager
@@ -76,6 +77,7 @@ import app.getknit.knit.review.ReviewPrompter
 import app.getknit.knit.ui.OfferedConversations
 import app.getknit.knit.ui.RouteInbox
 import app.getknit.knit.ui.addcontact.ContactCardInbox
+import app.getknit.knit.ui.chat.quoteLabels
 import app.getknit.knit.ui.relay.RelayInviteInbox
 import app.getknit.knit.ui.review.ReviewPromptInbox
 import app.getknit.knit.ui.share.ShareInbox
@@ -238,6 +240,16 @@ val appModule =
         single { get<KnitDatabase>().metPeerDao() }
         single { get<KnitDatabase>().savedFileDao() }
         single { MessageRepository(get()) }
+        // Judges an inbound reply's quote against the original it names (ADR 2026-10.gpa3), labelling a rebuilt
+        // quote in the reader's own strings; one backlog batch is one write transaction.
+        single {
+            val db = get<KnitDatabase>()
+            QuoteVerifier(
+                messages = get(),
+                labels = { quoteLabels(androidContext()) },
+                transact = { block -> db.withWriteTransaction { block() } },
+            )
+        }
         // The name-clash fade (ADR 2026-10.k8ge): the never-stale anchors, shared on the app scope so every screen's
         // directory reads one authored-in query; the stamps bank in one write transaction on the metrics tick.
         single { LabelAnchors.from(get(), get(), get<SettingsStore>(), get<Identity>(), get<CoroutineScope>()) }

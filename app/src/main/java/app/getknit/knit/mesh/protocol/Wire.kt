@@ -449,14 +449,16 @@ fun List<Mention>.mention(nodeId: String): Boolean = any { it.nodeId == nodeId }
 /**
  * A quoted-reply reference (the "▎author / snippet" block a reply renders above its own body). The
  * quoted message is **denormalized** into the reply so the quote still renders when the original was
- * never received (store-and-forward), was deleted, or scrolled out of the local store — the receiver
- * never resolves [messageId] against its own history to draw the quote (it's used only for the optional
- * tap-to-scroll). [authorId] is the quoted message's sender node id — each viewer swaps it to "You" when
- * it's their own; [author] is a display-name snapshot (never the literal "You", so a peer that lacks the
- * author's profile still shows a real name); [snippet] is a capped copy of the quoted body (blank for an
- * attachment-only original); [hasAttachment] lets the UI show a "photo" placeholder when [snippet] is
- * blank even if the original isn't present locally. Additive/optional on both [ChatContent] (broadcast)
- * and [app.getknit.knit.mesh.crypto.MessageContent] (encrypted DM/group). A plain nested value.
+ * never received (store-and-forward), was deleted, or scrolled out of the local store. It is the sender's
+ * **claim**, not a fact: [messageId] is a random id bound to no author, so a receiver judges the quote
+ * against the original it holds under that id — same thread, same [authorId] — and rebuilds it from that
+ * original, or shows the snapshot marked unverified when it holds none (ADR 2026-10.gpa3). [authorId] is the
+ * quoted message's sender node id, which the receiver names by its own label for it ("You" when it is its
+ * own); [author] is a display-name snapshot the composer still writes (never the literal "You") but no
+ * receiver renders. [snippet] is a capped copy of the quoted body (blank for an attachment-only original);
+ * [hasAttachment] lets the UI show a "photo" placeholder when [snippet] is blank even if the original isn't
+ * present locally. Additive/optional on both [ChatContent] (broadcast) and
+ * [app.getknit.knit.mesh.crypto.MessageContent] (encrypted DM/group). A plain nested value.
  */
 @Serializable
 data class ReplyRef(

@@ -361,6 +361,14 @@
     <string name="chat_reply_photo">📷 Photo</string>
     <string name="chat_reply_voice">🎤 Voice message</string>
     <string name="chat_reply_cancel">Cancel reply</string>
+    <!-- Under a quote whose original this phone does not hold, so the quoted words are the sender's claim (ADR 2026-10.gpa3). -->
+    <string name="chat_quote_unverified">Unverified — original not on this phone</string>
+    <!-- In place of a quote that names a different author or thread than the original it points at. -->
+    <string name="chat_quote_unavailable">Quoted message unavailable</string>
+    <!-- In place of the quoted words while content filtering hides the reply; its body already says how to reveal. -->
+    <string name="chat_quote_hidden">Quoted message hidden</string>
+    <!-- The same, for a reply with no text of its own, so the quote carries the hint. -->
+    <string name="chat_quote_hidden_reveal">Quoted message hidden — tap to reveal</string>
     <string name="chat_message_copied">Copied to clipboard</string>
     <string name="chat_action_details">Message info</string>
     <string name="chat_action_delete">Delete message</string>

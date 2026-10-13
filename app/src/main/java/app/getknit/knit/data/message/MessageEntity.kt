@@ -51,6 +51,14 @@ import kotlinx.serialization.json.Json
  * [app.getknit.knit.mesh.protocol.ReplyRef] so the quote renders even when the original was never
  * received, was deleted, or scrolled out of history.
  *
+ * On an inbound reply those columns start as the **sender's claim** and are judged against the original this
+ * phone holds (ADR 2026-10.gpa3): [replyCheck] says whether that happened and how it went, and a verified quote's
+ * snippet is rebuilt from the original, so it outlives the original's retention sweep. [replyToAuthor] is the
+ * sender's string and is never rendered for somebody else's reply — the reader's own label for
+ * [replyToAuthorId] is. [replyToFlagged] is this phone's verdict on the quoted words: the original's own
+ * moderation once it is judged, else the snippet's own screening. Our own replies keep what we sent: a re-seal
+ * re-ships `replyRef()`, and we quoted a row we held.
+ *
  * [voiceDurationMs]/[voicePeaks] describe a voice-note attachment for the bubble: its playing time in
  * milliseconds, and a Base64 [ByteArray] of bar heights for the waveform. Both are **local only** — they are
  * derived from the audio itself by [app.getknit.knit.data.VoiceAudio] (the sender at ingest, the recipient
@@ -114,6 +122,7 @@ import kotlinx.serialization.json.Json
         Index(value = ["conversationId", "sentAt", "id"]),
         Index(value = ["conversationId", "kind", "senderId"]),
         Index(value = ["attachmentPlainHash"]),
+        Index(value = ["replyToId", "replyCheck"]),
     ],
 )
 data class MessageEntity(
@@ -205,6 +214,19 @@ data class MessageEntity(
      * how picking the same original again finds the identity it went out under (ADR 2026-10.mptm).
      */
     val attachmentSourceHash: String? = null,
+    /**
+     * Whether this reply's quote was checked against the original it names — one of the `REPLY_*` values below,
+     * written by [app.getknit.knit.data.QuoteVerifier] on an inbound reply, once: before the insert when the
+     * original is already held, else when it lands. **Local only**. Indexed with [replyToId], the column the
+     * late check looks replies up by.
+     */
+    val replyCheck: Int = REPLY_UNCHECKED,
+    /**
+     * The quoted words are flagged on this phone: the original's own [moderation] once the quote is verified,
+     * else the on-device moderator's verdict on the sender's snippet. Hides the whole reply behind the Content
+     * filtering toggle, like a flagged body ([hiddenByFilter]). **Local only.**
+     */
+    val replyToFlagged: Boolean = false,
 ) {
     companion object {
         // [originSigned] values. Append-only like every other registry here: the value is stored on the row.
@@ -236,6 +258,17 @@ data class MessageEntity(
 
         /** [moderation]: the body was flagged as abusive by the on-device text moderator. */
         const val MODERATION_TEXT_FLAGGED = 1
+
+        // [replyCheck] values. Append-only: the value is stored on the row (`QuoteCheckTest` pins them).
+
+        /** [replyCheck]: the original is not held, so the quote is the sender's unverified snapshot. */
+        const val REPLY_UNCHECKED = 0
+
+        /** [replyCheck]: the original was held, in this thread, under the author the quote names; the quote is rebuilt from it. */
+        const val REPLY_VERIFIED = 1
+
+        /** [replyCheck]: a held message answers to the quoted id but not to its author or thread; nothing of the quote is shown. */
+        const val REPLY_MISMATCH = 2
 
         /** [kind]: an ordinary chat message, shown as a sender bubble. */
         const val KIND_NORMAL = 0
@@ -318,6 +351,15 @@ object MentionStore {
  * unread counts, ticks and previews even where its text can't be rendered.
  */
 val MessageEntity.isStatusNotice: Boolean get() = kind != MessageEntity.KIND_NORMAL
+
+/**
+ * Whether the reader's Content filtering ([filterOn]) hides this message: its own body was flagged, or the words
+ * it quotes were ([MessageEntity.replyToFlagged], ADR 2026-10.gpa3). The one predicate every surface that hides a
+ * flagged message reads — the bubble, the details screen, the list previews and the notification — and the
+ * search query's SQL mirrors it.
+ */
+fun MessageEntity.hiddenByFilter(filterOn: Boolean): Boolean =
+    filterOn && (moderation == MessageEntity.MODERATION_TEXT_FLAGGED || replyToFlagged)
 
 /** The plane [receivedVia] names, tolerant of a code this build doesn't know (see [DeliveryPlane.fromCode]). */
 val MessageEntity.receivedPlane: DeliveryPlane get() = DeliveryPlane.fromCode(receivedVia)

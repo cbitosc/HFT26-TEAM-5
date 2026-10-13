@@ -12,6 +12,7 @@ import app.getknit.knit.data.MeshBlobStore
 import app.getknit.knit.data.MessageReceiptRepository
 import app.getknit.knit.data.MessageRepository
 import app.getknit.knit.data.PeerRepository
+import app.getknit.knit.data.QuoteVerifier
 import app.getknit.knit.data.ReactionRepository
 import app.getknit.knit.data.forward.ForwardRepository
 import app.getknit.knit.data.group.GroupEntity
@@ -230,6 +231,10 @@ class MeshManager(
     // attachment's plaintext name and makes a room copy from a sealed one this phone holds. Stateless over [messages]
     // and [blobs], so the default is what every test wants; production hands in the Koin single.
     private val identities: AttachmentIdentities = AttachmentIdentities(messages, blobs),
+    // Judges an inbound reply's quote against the original it names (ADR 2026-10.gpa3): handed to the inbound
+    // pipeline, and run over the held backlog once per start. The default labels rebuilt quotes in English, which is
+    // what every test wants; production hands in the Koin single, which reads the reader's own strings.
+    private val quotes: QuoteVerifier = QuoteVerifier(messages),
     // The field log (ADR 2026-10.a239): each session's start, stop, power and radio status, and the counters'
     // quarter-hourly movement. Null — every test — keeps none.
     private val fieldLog: FieldLog? = null,
@@ -478,6 +483,7 @@ class MeshManager(
             imageScreening = imageScreening,
             blobStore = blobStore,
             identities = identities,
+            quotes = quotes,
             db = db,
             identity = identity,
             settings = settings,
@@ -724,7 +730,8 @@ class MeshManager(
         watchReachable(session)
         watchMetPeers(session)
         openToChatWatch.start(session)
-        watchProfileChanges(session, seeded = seedOwnProfileCustody(session))
+        val seeded = seedOwnProfileCustody(session)
+        watchProfileChanges(session, seeded = seeded)
         watchIncomingFiles(session)
         watchIncomingDigests(session)
         resumePendingFetches(session)
@@ -733,6 +740,12 @@ class MeshManager(
         logMetricsPeriodically(session)
         fieldLog?.start(session, transportStatuses)
         session.launch { introSync.prime() }
+        // Replies held from before quotes were checked, or whose check a crash cut short, are judged against the
+        // originals this phone holds (ADR 2026-10.gpa3) — after the own-profile seed, so first contact never waits.
+        session.launch {
+            seeded.join()
+            quotes.settleBacklog(identity.nodeId())
+        }
         scopeSync?.start(session)
         watchRoute(session)
         watchScopeInputs(session)

@@ -3,9 +3,9 @@ package app.getknit.knit.blepair
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import app.getknit.knit.TextLimits
 import app.getknit.knit.data.message.Conversations
+import app.getknit.knit.data.message.buildReplySnippet
 import app.getknit.knit.mesh.TransportKind
 import app.getknit.knit.mesh.protocol.ReplyRef
-import app.getknit.knit.ui.chat.buildReplySnippet
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch

@@ -255,6 +255,26 @@ one phone.
 `handleChat`'s self-to-self drop) all assume "our node id" means "this phone"; each becomes "our node id,
 another device" and has to deliver rather than drop.
 
+### 10. Bind a frame id to its author
+
+**What.** Derive a frame id from its sender — e.g. a hash over the sender's node id and the random part — so
+that a receiver can tell from the id alone whose frame it names, and refuse a frame whose id does not derive
+from its `senderId`.
+
+**Why it is parked.** A `FrameId` is 128 random bits bound to nobody, and the stores are first-write-wins by
+id (the `SeenSet`, custody, `messages`). ADR 2026-10.gpa3 judges a quoted reply against the original held under
+the quoted id, and checks author and thread because the id alone proves nothing — but a squatter who stores
+a frame under someone else's id first still owns that id on that phone, so the real reply's quote reads
+"unavailable" there. Minting bound ids is additive (an id stays an opaque string to every node); *refusing*
+unbound ones, which is what closes the squat, partitions every build that still mints random ids.
+
+**At the break.** Mint bound ids everywhere (Android, iOS, the spool's own records if any name frames), and
+drop a frame whose id does not derive from its signed `senderId` at `verifyInbound`, before dedup.
+
+**Watch out.** Locally minted ids are not frame ids and keep their own shapes: status notices
+(`leave:…`, `rejoin:…`), `FrameId.forMeshPost` for heard Meshtastic posts. The quote check already requires the
+quoted author to match, so a bound id changes nothing there except that a squatted id can no longer be stored.
+
 ---
 
 ## Deliberately *not* on this list

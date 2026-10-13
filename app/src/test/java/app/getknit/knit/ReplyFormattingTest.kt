@@ -1,8 +1,8 @@
 package app.getknit.knit
 
+import app.getknit.knit.data.message.REPLY_SNIPPET_MAX
+import app.getknit.knit.data.message.buildReplySnippet
 import app.getknit.knit.mesh.protocol.ReplyRef
-import app.getknit.knit.ui.chat.REPLY_SNIPPET_MAX
-import app.getknit.knit.ui.chat.buildReplySnippet
 import app.getknit.knit.ui.chat.quoteAuthorLabel
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse

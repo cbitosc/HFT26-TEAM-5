@@ -84,7 +84,7 @@ and the policy are ADR 2026-10.d62w; `SlurListTest` pins both the inclusions and
   and the lexical pass below reads leet digits as letters, so a run of coordinates can spell a blocked word
   (`LexicalTextFilterTest` pins one). Both directions go through this one function, so the strip is
   symmetric by construction.
-- **Inbound (flag-on-receive):** `MeshManager.deliverChat()` always classifies and stores flagged
+- **Inbound (flag-on-receive):** `InboundPipeline.deliverChat()` always classifies and stores flagged
   messages with `MessageEntity.moderation = MODERATION_TEXT_FLAGGED` (still stored, never dropped). The
   chat bubble collapses them behind tap-to-reveal **only when the content-filtering toggle is on** —
   `ChatViewModel` gates `ChatRow.moderationFlagged` on `contentFilteringEnabled`, so toggling it
@@ -92,6 +92,12 @@ and the policy are ADR 2026-10.d62w; `SlurListTest` pins both the inclusions and
   same toggle the notification (`InboundPipeline.notificationBody`) and the chat-list and message-requests
   preview (`messagePreview(…, hideFlagged)`) say "Message hidden" instead of the words. Block-sender reuses
   the existing long-press menu.
+- **Quoted words are moderated too** (ADR 2026-10.gpa3). A reply's quote is the sender's claim, judged against
+  the original this phone holds (`QuoteVerifier`). A verified quote carries the original's own verdict into
+  `MessageEntity.replyToFlagged`; an unverified one has its snippet screened on arrival, by the same moderator in
+  the same scope as a body. Either way a reply quoting flagged words is hidden like a flagged message: every
+  surface reads one predicate, `MessageEntity.hiddenByFilter`, and the search query's SQL mirrors it. The flag is
+  the original's *own* verdict, so it does not chain: a reply to a reply hidden only for its quote shows.
 
 ## 3. Image moderation (implemented; model required to activate)
 

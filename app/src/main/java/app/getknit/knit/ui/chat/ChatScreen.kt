@@ -171,6 +171,7 @@ import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
@@ -206,6 +207,9 @@ import app.getknit.knit.data.message.Conversations
 import app.getknit.knit.data.message.DeliveryPlane
 import app.getknit.knit.data.message.MessageEntity
 import app.getknit.knit.data.message.PeerRename
+import app.getknit.knit.data.message.QuoteLabels
+import app.getknit.knit.data.message.quoteHasAttachment
+import app.getknit.knit.data.message.quoteSnippet
 import app.getknit.knit.data.relay.AttachmentRelay
 import app.getknit.knit.data.relay.AttachmentWait
 import app.getknit.knit.data.relay.RelayReach
@@ -767,10 +771,13 @@ internal fun ChatScreenContent(
     val scrollScope = rememberCoroutineScope()
     // Hoisted because the reply snippet is built inside a plain (non-composable) lambda; see
     // buildReplySnippet for why a voice note's quote label rides the snippet rather than the wire.
-    val voiceQuoteLabel = stringResource(R.string.chat_reply_voice)
-    val fileQuoteLabel = stringResource(R.string.chat_list_preview_file)
-    val gifQuoteLabel = stringResource(R.string.chat_list_preview_gif)
-    val locationQuoteLabel = stringResource(R.string.chat_list_preview_location)
+    val quoteLabels =
+        QuoteLabels(
+            location = stringResource(R.string.chat_list_preview_location),
+            voice = stringResource(R.string.chat_reply_voice),
+            fileFormat = stringResource(R.string.chat_list_preview_file),
+            gif = stringResource(R.string.chat_list_preview_gif),
+        )
 
     // The thread is rendered bottom-anchored (the LazyColumn below uses reverseLayout), so it opens
     // already resting on the newest message — no initial scroll, no visible glide through history — and
@@ -1340,7 +1347,6 @@ internal fun ChatScreenContent(
                                         // does). The bridged room needs it most of all — its posts come from
                                         // strangers, and an unattributed one would read as if Knit knew who sent it.
                                         showSenderName = state.isRoom || state.isBridged || state.isCommons || state.isGroup,
-                                        myNodeId = state.myNodeId,
                                         imageRatios = imageRatios,
                                         highlighted = row.id == highlightedMessageId,
                                         onImageClick = { fullscreenImage = it },
@@ -1355,34 +1361,17 @@ internal fun ChatScreenContent(
                                                     messageId = msg.id,
                                                     authorId = msg.senderNodeId,
                                                     author = msg.senderPlainName,
+                                                    // The rule a recipient holding the original rebuilds it by.
                                                     snippet =
-                                                        buildReplySnippet(
-                                                            // A quoted position reads as its label, not as a `geo:` line.
-                                                            GeoUri.describe(msg.body, locationQuoteLabel),
-                                                            msg.moderationFlagged,
-                                                            attachmentLabel =
-                                                                when {
-                                                                    msg.attachmentName != null -> {
-                                                                        fileQuoteLabel.format(msg.attachmentName)
-                                                                    }
-
-                                                                    VoiceAudio.isVoice(msg.attachmentMime) -> {
-                                                                        voiceQuoteLabel
-                                                                    }
-
-                                                                    msg.attachmentAnimated -> {
-                                                                        gifQuoteLabel
-                                                                    }
-
-                                                                    else -> {
-                                                                        null
-                                                                    }
-                                                                },
+                                                        quoteSnippet(
+                                                            msg.body,
+                                                            msg.attachmentName,
+                                                            msg.attachmentMime,
+                                                            msg.attachmentAnimated,
+                                                            flagged = msg.moderationFlagged,
+                                                            labels = quoteLabels,
                                                         ),
-                                                    // A quoted card message shows its link text, not an attachment glyph.
-                                                    hasAttachment =
-                                                        msg.attachmentHash != null &&
-                                                            msg.attachmentMime != LinkPreviewBlob.MIME,
+                                                    hasAttachment = quoteHasAttachment(msg.attachmentHash, msg.attachmentMime),
                                                 ),
                                             )
                                         },
@@ -2044,8 +2033,6 @@ private fun MessageBubble(
     now: Long,
     showSenderName: Boolean,
     modifier: Modifier = Modifier,
-    // myNodeId drives the quote's viewer-relative "You" swap; defaulted for the @Preview call sites.
-    myNodeId: String = "",
     // Hash-keyed aspect-ratio cache shared across the list so a re-entering image reserves its height
     // before decode (see [ChatScreen]). Defaulted so the @Preview call sites need no extra wiring.
     imageRatios: MutableMap<String, Float> = HashMap(),
@@ -2236,12 +2223,29 @@ private fun MessageBubble(
                             }
                         }
                         row.origin?.let { MeshOriginLine(it, row.senderName) }
-                        row.replyTo?.let { reply ->
+                        row.quote?.let { quote ->
+                            // Collapsed with the bubble: the quoted words are what got it hidden, or ride along
+                            // with a hidden body. A tap on a collapsed quote reveals, rather than jumping away.
+                            val collapsed = row.moderationFlagged && !revealed
                             QuotedMessage(
-                                replyTo = reply,
-                                myNodeId = myNodeId,
+                                quote = quote,
                                 mine = row.mine,
-                                onClick = { onQuoteClick(reply.messageId) },
+                                collapsed = collapsed,
+                                bodyShown = shownBody.isNotBlank(),
+                                onClick =
+                                    when {
+                                        collapsed -> {
+                                            { revealed = true }
+                                        }
+
+                                        quote.state == QuoteState.Unavailable -> {
+                                            null
+                                        }
+
+                                        else -> {
+                                            { onQuoteClick(quote.messageId) }
+                                        }
+                                    },
                             )
                             Spacer(Modifier.height(4.dp))
                         }
@@ -2584,23 +2588,31 @@ private fun MessageBubble(
 
 /**
  * A quoted-reply block rendered inside a bubble above its body (Signal-style): an accent bar, the quoted
- * author (with the viewer-relative "You" swap via [myNodeId]), and a snippet — or a "photo" placeholder
- * when the quoted original was an attachment with no text. Tapping it jumps to the original ([onClick]).
+ * author as this reader names them, and a snippet — or a "photo" placeholder when the quoted original was an
+ * attachment with no text. Tapping it jumps to the original ([onClick]; null for a quote that names nothing
+ * this phone can show).
+ *
+ * What it may show follows [QuoteView.state] (ADR 2026-10.gpa3): an unverified quote says so under its words, an
+ * unavailable one shows none of the claim, and a [collapsed] one — content filtering hides the bubble — shows a
+ * stand-in, which carries the tap-to-reveal hint itself when the bubble has no body text to carry it
+ * ([bodyShown]).
  */
 @Composable
 private fun QuotedMessage(
-    replyTo: ReplyRef,
-    myNodeId: String,
+    quote: QuoteView,
     mine: Boolean,
-    onClick: () -> Unit,
+    collapsed: Boolean,
+    bodyShown: Boolean,
+    onClick: (() -> Unit)?,
 ) {
     val accent = if (mine) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.primary
     val photoLabel = stringResource(R.string.chat_reply_photo)
     Row(
         modifier =
             Modifier
+                .testTag("chat_quote")
                 .clip(RoundedCornerShape(6.dp))
-                .clickable(onClick = onClick)
+                .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
                 .background(LocalContentColor.current.copy(alpha = 0.10f))
                 .height(IntrinsicSize.Min),
         verticalAlignment = Alignment.CenterVertically,
@@ -2613,20 +2625,47 @@ private fun QuotedMessage(
                     .background(accent),
         )
         Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
+            val muted = LocalContentColor.current.copy(alpha = 0.75f)
+            if (quote.state == QuoteState.Unavailable) {
+                Text(
+                    text = stringResource(R.string.chat_quote_unavailable),
+                    style = MaterialTheme.typography.bodySmall,
+                    fontStyle = FontStyle.Italic,
+                    color = muted,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                return@Column
+            }
             Text(
-                text = quoteAuthorLabel(replyTo, myNodeId, stringResource(R.string.chat_self_name)),
+                text = quote.author,
                 style = MaterialTheme.typography.labelMedium,
                 fontWeight = FontWeight.SemiBold,
                 color = accent,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            val snippet = replyTo.snippet.ifBlank { if (replyTo.hasAttachment) photoLabel else "" }
+            val snippet =
+                when {
+                    collapsed && bodyShown -> stringResource(R.string.chat_quote_hidden)
+                    collapsed -> stringResource(R.string.chat_quote_hidden_reveal)
+                    else -> quote.snippet.ifBlank { if (quote.hasAttachment) photoLabel else "" }
+                }
             if (snippet.isNotEmpty()) {
                 Text(
                     text = snippet,
                     style = MaterialTheme.typography.bodySmall,
-                    color = LocalContentColor.current.copy(alpha = 0.75f),
+                    color = muted,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (quote.state == QuoteState.Unverified) {
+                Text(
+                    text = stringResource(R.string.chat_quote_unverified),
+                    style = MaterialTheme.typography.labelSmall,
+                    fontStyle = FontStyle.Italic,
+                    color = muted,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -4976,12 +5015,13 @@ private fun previewDmRows(): List<ChatRow> =
             sentAt = PREVIEW_NOW - 5 * 60_000L,
             received = false,
             reactions = listOf(ReactionSummary("👍", 1, true)),
-            replyTo =
-                ReplyRef(
+            quote =
+                QuoteView(
                     messageId = "m2",
-                    authorId = "node-self",
-                    author = "Walter",
+                    author = "You",
                     snippet = "On my way — see you in 10 minutes.",
+                    hasAttachment = false,
+                    state = QuoteState.Verified,
                 ),
         ),
     )

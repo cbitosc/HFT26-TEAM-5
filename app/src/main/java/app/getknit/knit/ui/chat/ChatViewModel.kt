@@ -37,10 +37,10 @@ import app.getknit.knit.data.message.MessageEntity
 import app.getknit.knit.data.message.TransferRecord
 import app.getknit.knit.data.message.groupFaces
 import app.getknit.knit.data.message.groupTitle
+import app.getknit.knit.data.message.hiddenByFilter
 import app.getknit.knit.data.message.meshRoomChannel
 import app.getknit.knit.data.message.newestOriginChannel
 import app.getknit.knit.data.message.receivedPlane
-import app.getknit.knit.data.message.replyRef
 import app.getknit.knit.data.reaction.ReactionEntity
 import app.getknit.knit.data.relay.AttachmentRelay
 import app.getknit.knit.data.relay.AttachmentWait
@@ -122,6 +122,65 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
+/** How far a received quote could be checked against the original it names (ADR 2026-10.gpa3). */
+enum class QuoteState {
+    /** Rebuilt from the original this phone held, or one of our own replies. */
+    Verified,
+
+    /** The original is not on this phone, so the quote is the sender's word for it. */
+    Unverified,
+
+    /** It names a message that is not what the quote claims — another author, another thread — or one of ours we do not hold. */
+    Unavailable,
+}
+
+/**
+ * A quote as the bubble draws it. [author] is the reader's own label for the quoted author's id — "You", a
+ * contact's name, an alias — never the name the sender wrote, and blank when [state] is [QuoteState.Unavailable],
+ * which shows nothing of the claim.
+ */
+data class QuoteView(
+    val messageId: String,
+    val author: String,
+    val snippet: String,
+    val hasAttachment: Boolean,
+    val state: QuoteState,
+)
+
+/**
+ * What the bubble shows of [m]'s quote, or null when [m] is not a reply. Our own replies ([mine]) are trusted — we
+ * quoted a row we held. Somebody else's is [QuoteState.Verified] only once the original was held and matched
+ * ([MessageEntity.replyCheck]); a quote of one of **our** messages that was never matched is
+ * [QuoteState.Unavailable] rather than unverified, because this phone holds everything it sent, so an absent
+ * original was deleted, swept or never ours. [labelOf] names a node id the way the thread names its senders.
+ */
+internal fun quoteViewFor(
+    m: MessageEntity,
+    mine: Boolean,
+    me: String?,
+    selfLabel: String,
+    labelOf: (String) -> String,
+): QuoteView? {
+    val id = m.replyToId ?: return null
+    val authorId = m.replyToAuthorId.orEmpty()
+    val state =
+        when {
+            mine -> QuoteState.Verified
+            m.replyCheck == MessageEntity.REPLY_VERIFIED -> QuoteState.Verified
+            m.replyCheck == MessageEntity.REPLY_MISMATCH -> QuoteState.Unavailable
+            authorId == me || authorId.isBlank() -> QuoteState.Unavailable
+            else -> QuoteState.Unverified
+        }
+    if (state == QuoteState.Unavailable) return QuoteView(id, author = "", snippet = "", hasAttachment = false, state = state)
+    return QuoteView(
+        messageId = id,
+        author = if (authorId == me) selfLabel else labelOf(authorId),
+        snippet = m.replyToSnippet.orEmpty(),
+        hasAttachment = m.replyToHasAttachment,
+        state = state,
+    )
+}
+
 data class ChatRow(
     val id: String,
     val body: String,
@@ -153,8 +212,9 @@ data class ChatRow(
     // recorded ackers, which is what makes the tick fall back to a bare "Delivered" (see [deliveryLabel]).
     val deliveredCount: Int = 0,
     val recipientTotal: Int = 0,
-    // True when the on-device text moderator flagged this message's body; the bubble collapses it
-    // behind a tap-to-reveal instead of showing the text outright.
+    // True when content filtering hides this message — the on-device text moderator flagged its body, or the
+    // words it quotes (`MessageEntity.hiddenByFilter`); the bubble collapses it behind a tap-to-reveal instead
+    // of showing the text outright.
     val moderationFlagged: Boolean = false,
     val attachmentHash: String? = null,
     val attachmentMime: String? = null,
@@ -205,9 +265,9 @@ data class ChatRow(
     val voicePeaks: String? = null,
     val mentions: List<Mention> = emptyList(),
     val reactions: List<ReactionSummary> = emptyList(),
-    // The message this row quotes (Signal-style reply), or null when it isn't a reply. Denormalized so the
-    // quote renders even if the quoted original isn't in this thread. See [MessageEntity.replyRef].
-    val replyTo: ReplyRef? = null,
+    // The message this row quotes (Signal-style reply), or null when it isn't a reply: what the reader may be
+    // shown of it, and how far it could be checked against the original (ADR 2026-10.gpa3). See [quoteViewFor].
+    val quote: QuoteView? = null,
     // Set only on a post heard on the paired radio's channel, and the flag the bubble reads to render one
     // differently: a muted name, the provenance line, and an avatar that never opens a profile directly —
     // inert for a stranger, and for a resolved contact ([MeshOrigin.peerId]) a tap that opens the caveat
@@ -964,6 +1024,7 @@ class ChatViewModel(
             val labels = HashMap<String, PeerLabel>()
 
             fun label(nodeId: String) = labels.getOrPut(nodeId) { directory.label(nodeId) }
+            val selfLabel = context.getString(R.string.chat_self_name)
             val rows =
                 msgs.map { m ->
                     // A heard post's author is the Meshtastic speaker, NOT the row's sender — that is this
@@ -1020,7 +1081,7 @@ class ChatViewModel(
                         // since we never ack ourselves (the details screen's rule, kept identical here).
                         deliveredCount = if (mine && isGroup) deliveredCounts[m.id] ?: 0 else 0,
                         recipientTotal = if (mine && isGroup) members.count { it != me } else 0,
-                        moderationFlagged = hideSensitive && m.moderation == MessageEntity.MODERATION_TEXT_FLAGGED,
+                        moderationFlagged = m.hiddenByFilter(hideSensitive),
                         attachmentHash = m.attachmentHash,
                         attachmentMime = m.attachmentMime,
                         attachmentAnimated = m.attachmentAnimated,
@@ -1055,7 +1116,7 @@ class ChatViewModel(
                         location = GeoUri.find(m.body),
                         mentions = MentionStore.decode(m.mentions),
                         reactions = tallies,
-                        replyTo = m.replyRef(),
+                        quote = quoteViewFor(m, mine, me, selfLabel) { label(it).text },
                         origin = origin,
                         transfer =
                             if (m.kind ==

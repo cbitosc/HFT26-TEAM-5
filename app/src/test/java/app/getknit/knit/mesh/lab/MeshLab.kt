@@ -81,6 +81,7 @@ import app.getknit.knit.mesh.lora.LoraMeshTransport
 import app.getknit.knit.mesh.lora.LoraPacePolicy
 import app.getknit.knit.mesh.protocol.FrameType
 import app.getknit.knit.mesh.protocol.Protocol
+import app.getknit.knit.mesh.protocol.ReplyRef
 import app.getknit.knit.mesh.sha256Hex
 import app.getknit.knit.mesh.spool.FakeSpool
 import app.getknit.knit.mesh.spool.RelayInvite
@@ -958,6 +959,13 @@ class LabNode internal constructor(
     @Volatile
     var picturesExplicit = false
 
+    /**
+     * The texts this node's text moderator flags, whole — what the bundled models would say of words they mind. Read
+     * at each classification, so a scenario can set it mid-run; empty, every text is allowed.
+     */
+    @Volatile
+    var flaggedText: Set<String> = emptySet()
+
     /** This node's custody writes, holdable by a scenario ([LabCustodyGate]): a database slow to commit. */
     val custodyGate = LabCustodyGate()
 
@@ -1085,17 +1093,17 @@ class LabNode internal constructor(
                 maxPerGroup = limits.custodyMaxPerGroup,
                 maxBroadcast = limits.custodyMaxBroadcast,
             )
-        // The leaves with a hardware or UI side. Text allowed, every picture allowed unless [picturesExplicit],
+        // The leaves with a hardware or UI side. Text allowed unless [flaggedText], every picture unless [picturesExplicit],
         // notifications swallowed. (A relaxed ImageModerator mock hands back a mocked verdict whose `flagged`
         // reads false by accident; the explicit answer is what the tflite model would say about a picture it does
         // not mind.)
-        val allowAll = mockk<ScopedTextModerator> { coEvery { classify(any(), any()) } returns TextVerdict.ALLOWED }
+        val textModerator = mockk<ScopedTextModerator> { coEvery { classify(any(), any()) } answers { textVerdict(firstArg()) } }
         val pictures =
             mockk<ImageModerator> {
                 coEvery { classify(any()) } answers
                     { if (picturesExplicit) EXPLICIT else ImageVerdict.ALLOWED }
             }
-        val imageScreening = ImageScreeningService(pictures, db.blobVerdictDao(), allowAll)
+        val imageScreening = ImageScreeningService(pictures, db.blobVerdictDao(), textModerator)
         val blobStore = MeshBlobStore(blobs, messages, imageScreening, File(dir, "blobtx"))
         attachments = AttachmentStore(context, blobs, imageScreening, AttachmentIdentities(messages, blobs))
         val notifier = mockk<Notifier>(relaxed = true)
@@ -1155,7 +1163,7 @@ class LabNode internal constructor(
                 partials = partials,
                 forwardStore = custodyGate.over(forwardStore),
                 notifier = notifier,
-                textModeration = allowAll,
+                textModeration = textModerator,
                 messageCrypto = messageCrypto,
                 ratchet =
                     RatchetSessions(
@@ -1322,8 +1330,11 @@ class LabNode internal constructor(
         }
     }
 
-    /** Posts in the Nearby room; the frame the app's composer would send. */
-    suspend fun sendRoom(text: String): Boolean = spaced { manager.sendChat(text = text) }
+    /** Posts in the Nearby room, quoting [replyTo] when given; the frame the app's composer would send. */
+    suspend fun sendRoom(
+        text: String,
+        replyTo: ReplyRef? = null,
+    ): Boolean = spaced { manager.sendChat(text = text, replyTo = replyTo) }
 
     /** Runs the local-storage sweep the 10-minute prune loop runs, now. */
     suspend fun sweepLocalStorage() = manager.sweepLocalStorage()
@@ -1385,13 +1396,14 @@ class LabNode internal constructor(
         return groupId
     }
 
-    /** Sends into a group this node holds; the frame the chat screen's composer would send. */
+    /** Sends into a group this node holds, quoting [replyTo] when given; the frame the chat screen's composer would send. */
     suspend fun sendGroup(
         groupId: String,
         text: String,
+        replyTo: ReplyRef? = null,
     ): Boolean {
         val group = checkNotNull(groups.find(groupId)) { "$name holds no group $groupId" }
-        return spaced { manager.sendChat(text = text, group = group.toGroupInfo()) }
+        return spaced { manager.sendChat(text = text, group = group.toGroupInfo(), replyTo = replyTo) }
     }
 
     /**
@@ -1855,6 +1867,12 @@ class LabNode internal constructor(
                 ?.id,
         ) { "$name holds no own message \"$body\" in $conversationId" }
 
+    /** What this node's text moderator says of [text]: flagged when it is one of [flaggedText], else allowed. */
+    private fun textVerdict(text: String): TextVerdict = if (text in flaggedText) FLAGGED_TEXT else TextVerdict.ALLOWED
+
+    /** This node's stored row for [messageId], or null — the quote columns a reply's check wrote (ADR 2026-10.gpa3). */
+    suspend fun row(messageId: String): MessageEntity? = messages.find(messageId)
+
     /** The plane this node's row for [messageId] in [conversationId] crossed to get here, as the bubble would say it. */
     suspend fun receivedVia(
         conversationId: String,
@@ -2084,6 +2102,9 @@ class LabNode internal constructor(
     private companion object {
         const val IMAGE_MIME = "image/jpeg"
         const val LORA_LOG_LINES = 24
+
+        /** The text classifier's answer to words it minds, under [flaggedText]. */
+        val FLAGGED_TEXT = TextVerdict(allowed = false, category = TextVerdict.Category.TOXICITY, score = 0.99f)
 
         /** The classifier's answer to a picture it minds, under [picturesExplicit]. */
         val EXPLICIT = ImageVerdict(allowed = false, score = 0.99f)

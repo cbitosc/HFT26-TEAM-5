@@ -23,9 +23,12 @@ import app.getknit.knit.data.message.Conversations
 import app.getknit.knit.data.message.DeliveryPlane
 import app.getknit.knit.data.message.MessageEntity
 import app.getknit.knit.data.message.PeerRename
+import app.getknit.knit.data.message.QuoteSettlement
+import app.getknit.knit.data.message.REPLY_SNIPPET_MAX
 import app.getknit.knit.data.message.StatusNotices
 import app.getknit.knit.data.message.isStatusNotice
 import app.getknit.knit.data.message.receivedPlane
+import app.getknit.knit.data.message.settledWith
 import app.getknit.knit.data.peer.PeerEntity
 import app.getknit.knit.data.ratchet.GroupRatchetRepository
 import app.getknit.knit.data.ratchet.RatchetRepository
@@ -75,6 +78,7 @@ import app.getknit.knit.mesh.protocol.ReactionContent
 import app.getknit.knit.mesh.protocol.ReactionPayload
 import app.getknit.knit.mesh.protocol.ReceiptContent
 import app.getknit.knit.mesh.protocol.RelayEnvelope
+import app.getknit.knit.mesh.protocol.ReplyRef
 import app.getknit.knit.mesh.protocol.TransferPayload
 import app.getknit.knit.mesh.protocol.TypingContent
 import app.getknit.knit.mesh.protocol.WireCodec
@@ -348,6 +352,9 @@ class InboundPipelineTest {
         /** What every inbound classification answers: true flags the text. */
         var flagText = false
 
+        /** When set, decides each classification from its text instead of [flagText]. */
+        var flagWhen: ((String) -> Boolean)? = null
+
         /** When armed, records the `isRoom` scope each inbound classification ran under. */
         var classifyScopes: MutableList<Boolean>? = null
 
@@ -374,6 +381,25 @@ class InboundPipelineTest {
                 msgMap.putIfAbsent(firstArg<MessageEntity>().id, firstArg()) == null
             }
             coEvery { messages.recipientOf(any()) } answers { msgMap[firstArg<String>()]?.recipientId }
+            // The quote check's reads and its guarded write (ADR 2026-10.gpa3), over the same fake map.
+            coEvery { messages.find(any()) } answers { msgMap[firstArg<String>()] }
+            coEvery { messages.repliesAwaiting(any(), any(), any()) } answers {
+                msgMap.values
+                    .filter {
+                        it.replyToId == firstArg<String>() &&
+                            it.replyCheck == MessageEntity.REPLY_UNCHECKED &&
+                            it.senderId != secondArg<String>()
+                    }.take(thirdArg())
+            }
+            coEvery { messages.applyQuoteVerdict(any(), any()) } answers {
+                val row = msgMap[firstArg<String>()]
+                if (row == null || row.replyCheck != MessageEntity.REPLY_UNCHECKED) {
+                    false
+                } else {
+                    msgMap[row.id] = row.settledWith(secondArg<QuoteSettlement>())
+                    true
+                }
+            }
             coEvery { messages.conversationOf(any()) } answers { msgMap[firstArg<String>()]?.conversationId }
             coEvery { groups.leftAt(any(), any()) } answers { leftAtMap[firstArg<String>() to secondArg<String>()] ?: 0L }
             // The real repository writes the tick and the acker row in one transaction; the fake keeps that
@@ -439,10 +465,10 @@ class InboundPipelineTest {
                     originate = { originated += it },
                     dmAcks = dmAcks,
                     flushPending = { flushed += it },
-                    classifyText = { _, _, isRoom ->
+                    classifyText = { text, _, isRoom ->
                         if (failClassify) error("moderation boom")
                         classifyScopes?.add(isRoom)
-                        flagText
+                        flagWhen?.invoke(text) ?: flagText
                     },
                     resealUnacked = { resealed += it },
                     redistributeGroupKey = { groupId, requester -> redistributed += groupId to requester },
@@ -494,18 +520,19 @@ class InboundPipelineTest {
 
         fun drops(reason: DropReason): Long = metrics.frames().dropsByReason[reason] ?: 0L
 
-        /** A plaintext broadcast-room chat frame. */
+        /** A plaintext broadcast-room chat frame, quoting [replyTo] when given. */
         fun broadcastChat(
             author: Party,
             id: String,
             body: String,
+            replyTo: ReplyRef? = null,
         ): RelayEnvelope =
             RelayEnvelope(
                 type = FrameType.CHAT,
                 id = id,
                 senderId = author.nodeId,
                 sentAt = 5L,
-                payload = WireCodec.encodePayload(ChatContent(body = body)),
+                payload = WireCodec.encodePayload(ChatContent(body = body, replyTo = replyTo)),
             )
 
         /** An E2E DM chat frame from [author] addressed to [to], sealed to [to]'s bundle. */
@@ -514,9 +541,11 @@ class InboundPipelineTest {
             to: Party,
             id: String,
             body: String,
+            replyTo: ReplyRef? = null,
         ): RelayEnvelope {
             val header = MessageCrypto.header(id, author.nodeId, 5L, to.nodeId)
-            val enc = author.crypto.seal(MessageContent(body = body).encode(), header, mapOf(to.nodeId to to.bundle))!!
+            val enc =
+                author.crypto.seal(MessageContent(body = body, replyTo = replyTo).encode(), header, mapOf(to.nodeId to to.bundle))!!
             return RelayEnvelope(
                 type = FrameType.CHAT,
                 id = id,
@@ -2642,6 +2671,122 @@ class InboundPipelineTest {
             assertEquals(listOf("Message hidden", "something vile"), bodies)
             assertEquals("the row keeps the words either way", "something vile", rig.msgMap["x1"]?.body)
             assertEquals(MessageEntity.MODERATION_TEXT_FLAGGED, rig.msgMap["x1"]?.moderation)
+        }
+
+    @Test
+    fun aReplyWhoseOriginalIsHeldShowsTheOriginalsWordsNotTheSenders() =
+        runTest {
+            // ADR 2026-10.gpa3: a quote is the sender's claim. Held, the original is the authority.
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            val bob = party()
+            rig.pin(alice)
+            rig.pin(bob)
+
+            rig.deliver(alice, rig.broadcastChat(alice, id = "o1", body = "Meet at the trailhead"))
+            rig.deliver(
+                bob,
+                rig.broadcastChat(bob, id = "r1", body = "lol", replyTo = ReplyRef("o1", alice.nodeId, "Alice", "I hate you all")),
+            )
+
+            val reply = rig.msgMap["r1"]!!
+            assertEquals(MessageEntity.REPLY_VERIFIED, reply.replyCheck)
+            assertEquals("Meet at the trailhead", reply.replyToSnippet)
+            assertFalse(reply.replyToFlagged)
+        }
+
+    @Test
+    fun aReplyAheadOfItsOriginalIsScreenedThenRebuiltWhenTheOriginalLands() =
+        runTest {
+            // Custody serves newest-first, so the reply often lands first: its snippet is all the bubble has, and it
+            // is screened like a body. Once the original lands the quote is rebuilt and judged on the real words.
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            val bob = party()
+            rig.pin(alice)
+            rig.pin(bob)
+            rig.flagWhen = { it == "something vile" }
+
+            rig.deliver(
+                bob,
+                rig.broadcastChat(bob, id = "r1", body = "lol", replyTo = ReplyRef("o1", alice.nodeId, "Alice", "something vile")),
+            )
+            val early = rig.msgMap["r1"]!!
+            assertEquals(MessageEntity.REPLY_UNCHECKED, early.replyCheck)
+            assertTrue("the unverified words were screened", early.replyToFlagged)
+            assertEquals(MessageEntity.MODERATION_NONE, early.moderation)
+
+            rig.deliver(alice, rig.broadcastChat(alice, id = "o1", body = "Meet at the trailhead"))
+
+            val settled = rig.msgMap["r1"]!!
+            assertEquals(MessageEntity.REPLY_VERIFIED, settled.replyCheck)
+            assertEquals("Meet at the trailhead", settled.replyToSnippet)
+            assertFalse("judged on the original's own words now", settled.replyToFlagged)
+        }
+
+    @Test
+    fun aQuoteNamingTheWrongAuthorIsAMismatchAndKeepsNothingOfTheClaim() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            val bob = party()
+            val carol = party()
+            rig.pin(alice)
+            rig.pin(bob)
+
+            rig.deliver(alice, rig.broadcastChat(alice, id = "o1", body = "Meet at the trailhead"))
+            rig.deliver(
+                bob,
+                rig.broadcastChat(bob, id = "r1", body = "lol", replyTo = ReplyRef("o1", carol.nodeId, "Carol", "words Carol never said")),
+            )
+
+            val reply = rig.msgMap["r1"]!!
+            assertEquals(MessageEntity.REPLY_MISMATCH, reply.replyCheck)
+            assertEquals("", reply.replyToSnippet)
+        }
+
+    @Test
+    fun aReplyToAFlaggedMessageNotifiesAsHiddenWhileContentFilteringIsOn() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.peerMap[alice.nodeId] =
+                PeerEntity(nodeId = alice.nodeId, pubKey = alice.bundle.encoded, verified = true, updatedAt = 1L)
+            val bodies = mutableListOf<String>()
+            coEvery { rig.notifier.notify(any(), any(), any(), any(), any()) } answers { bodies += firstArg<NotifMessage>().body }
+            rig.flagWhen = { it == "something vile" }
+
+            rig.deliver(alice, rig.dmChat(alice, rig.self, id = "x1", body = "something vile"))
+            rig.deliver(
+                alice,
+                rig.dmChat(alice, rig.self, id = "x2", body = "and I meant it", replyTo = ReplyRef("x1", alice.nodeId, "Alice", "")),
+            )
+
+            assertEquals(listOf("Message hidden", "Message hidden"), bodies)
+            val reply = rig.msgMap["x2"]!!
+            assertEquals("its own words were not flagged", MessageEntity.MODERATION_NONE, reply.moderation)
+            assertTrue(reply.replyToFlagged)
+            // The quote keeps the original's words for a reader who turns filtering off.
+            assertEquals("something vile", reply.replyToSnippet)
+        }
+
+    @Test
+    fun aQuoteThatCannotNameAnOriginalIsDroppedAndAnOversizedOneIsCut() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val bob = party()
+            rig.pin(bob)
+
+            rig.deliver(bob, rig.broadcastChat(bob, id = "r1", body = "lol", replyTo = ReplyRef("", "someone", "Alice", "words")))
+            rig.deliver(
+                bob,
+                rig.broadcastChat(bob, id = "r2", body = "lol", replyTo = ReplyRef("o9", "someone", "A".repeat(500), "w".repeat(5_000))),
+            )
+
+            assertNull(rig.msgMap["r1"]!!.replyToId)
+            val cut = rig.msgMap["r2"]!!
+            assertEquals(REPLY_SNIPPET_MAX, cut.replyToSnippet!!.length)
+            assertEquals(TextLimits.DISPLAY_NAME, cut.replyToAuthor!!.length)
         }
 
     @Test

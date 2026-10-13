@@ -7,6 +7,7 @@ import app.getknit.knit.data.message.Conversations
 import app.getknit.knit.data.message.DeliveryPlane
 import app.getknit.knit.data.message.MessageDao
 import app.getknit.knit.data.message.MessageEntity
+import app.getknit.knit.data.message.QuoteSettlement
 import app.getknit.knit.data.search.SearchQuery
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -81,6 +82,28 @@ class MessageRepository(
     suspend fun saveIfAbsent(message: MessageEntity): Boolean = dao.insertIfAbsent(message) != -1L
 
     suspend fun exists(id: String): Boolean = dao.exists(id)
+
+    /** The stored row for [id], or null. */
+    suspend fun find(id: String): MessageEntity? = dao.findById(id)
+
+    /** Up to [limit] unjudged replies by someone other than [me] that quote [originalId] (ADR 2026-10.gpa3). */
+    suspend fun repliesAwaiting(
+        originalId: String,
+        me: String,
+        limit: Int,
+    ): List<MessageEntity> = dao.repliesAwaiting(originalId, me, limit)
+
+    /** Writes [settlement] into reply [id]'s quote columns unless it was already judged; true when it was written. */
+    suspend fun applyQuoteVerdict(
+        id: String,
+        settlement: QuoteSettlement,
+    ): Boolean = dao.applyQuoteVerdict(id, settlement.check, settlement.snippet, settlement.hasAttachment, settlement.flagged) > 0
+
+    /** Up to [limit] unjudged replies by someone other than [me] whose original is held — the start-up backlog. */
+    suspend fun unsettledQuotes(
+        me: String,
+        limit: Int,
+    ): List<MessageEntity> = dao.unsettledQuotes(me, limit)
 
     /** The DM recipient of message [id], or null for a broadcast/group message or one we don't hold. */
     suspend fun recipientOf(id: String): String? = dao.recipientOf(id)

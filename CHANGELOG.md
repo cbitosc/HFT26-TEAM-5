@@ -25,9 +25,13 @@ document:
 - Private messages over LoRa to someone your board hasn't heard from lately now wait, apart from one every 15
   minutes. Once that one is answered the rest follow, so texting a friend whose board is switched off no
   longer uses up your airtime.
+- With content filtering on, a reply to a hidden message is now hidden too, as is a reply whose quote the
+  filter would hide. Tap it to read it, as with any hidden message.
 
 ### Fixed
 
+- A reply could quote someone saying something they never wrote. Quotes now show the message as your phone
+  received it, and say so when your phone doesn't have the original to check against.
 - In a group still in your message requests, someone who had left could reappear, or someone who had come
   back could disappear again, after Knit cleared the group's older messages. Your phone now shows the same
   members as everyone else's.

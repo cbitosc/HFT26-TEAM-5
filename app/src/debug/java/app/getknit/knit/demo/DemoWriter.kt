@@ -316,7 +316,11 @@ class DemoWriter(
                 // never arrives. Writing them here is what the real inbound path would have written.
                 voiceDurationMs = voice?.durationMs,
                 voicePeaks = voice?.peaks,
-            ).withReply(replyRefFor(m)),
+            ).withReply(replyRefFor(m)).let { row ->
+                // A seeded reply quotes a seeded original, so it is written as the inbound path would leave it once
+                // judged (ADR 2026-10.gpa3) — else every demo quote would wear the "unverified" cue.
+                if (row.replyToId != null && !fromMe) row.copy(replyCheck = MessageEntity.REPLY_VERIFIED) else row
+            },
         )
         m.reactions.forEach { r ->
             reactions.apply(ReactionEntity(m.id, nodeId(r.reactor), r.emoji, now - r.minsAgo * 60_000L))

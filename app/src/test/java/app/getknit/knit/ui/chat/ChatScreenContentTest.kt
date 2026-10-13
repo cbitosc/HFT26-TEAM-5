@@ -56,6 +56,7 @@ import org.robolectric.annotation.GraphicsMode
  */
 @RunWith(AndroidJUnit4::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
+@Suppress("LargeClass") // one screen's whole content contract over one shared content() harness, as ChatViewModelTest
 class ChatScreenContentTest {
     @Suppress("DEPRECATION") // junit4.v2 rules swap in StandardTestDispatcher — a test-semantics migration, see roadmap.md
     @get:Rule
@@ -611,6 +612,80 @@ class ChatScreenContentTest {
         compose.onNodeWithTag("chat_link_card").assertDoesNotExist()
         compose.onNodeWithText("Photo appears once a device that has it is reachable").assertDoesNotExist()
         compose.onNodeWithText("see https://example.com/a", substring = true).assertIsDisplayed()
+    }
+
+    private fun quoteRow(
+        quote: QuoteView,
+        body: String = "on my way",
+        flagged: Boolean = false,
+    ) = ChatRow(
+        id = "r1",
+        body = body,
+        mine = false,
+        senderName = "Bob",
+        senderNodeId = "bob",
+        avatarHash = null,
+        sentAt = 1_700_000_000_000L,
+        received = false,
+        moderationFlagged = flagged,
+        quote = quote,
+    )
+
+    private fun showQuote(row: ChatRow) =
+        compose.setContent(content(input = "", state = ChatUiState(isRoom = true, myNodeId = "me", rows = listOf(row))))
+
+    @Test
+    fun anUnverifiedQuoteSaysSoUnderItsWords() {
+        showQuote(quoteRow(QuoteView("o1", "Ada", "Meet at the trailhead", hasAttachment = false, state = QuoteState.Unverified)))
+
+        compose.onNodeWithText("Meet at the trailhead", useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithText("Unverified — original not on this phone", useUnmergedTree = true).assertIsDisplayed()
+    }
+
+    @Test
+    fun aVerifiedQuoteCarriesNoCue() {
+        showQuote(quoteRow(QuoteView("o1", "Ada", "Meet at the trailhead", hasAttachment = false, state = QuoteState.Verified)))
+
+        compose.onNodeWithText("Ada", useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithText("Unverified — original not on this phone", useUnmergedTree = true).assertDoesNotExist()
+    }
+
+    @Test
+    fun anUnavailableQuoteShowsNothingOfTheClaim() {
+        showQuote(quoteRow(QuoteView("o1", "", "", hasAttachment = false, state = QuoteState.Unavailable)))
+
+        compose.onNodeWithText("Quoted message unavailable", useUnmergedTree = true).assertIsDisplayed()
+    }
+
+    @Test
+    fun aHiddenReplyWithNoTextCollapsesItsQuoteUntilTapped() {
+        // Its body is blank, so the quote carries the hint; the tap reveals rather than jumping to the original.
+        showQuote(
+            quoteRow(
+                QuoteView("o1", "Ada", "something vile", hasAttachment = false, state = QuoteState.Verified),
+                body = "",
+                flagged = true,
+            ),
+        )
+
+        compose.onNodeWithText("Quoted message hidden — tap to reveal", useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithText("something vile", useUnmergedTree = true).assertDoesNotExist()
+        compose.onNodeWithTag("chat_quote", useUnmergedTree = true).performClick()
+        compose.onNodeWithText("something vile", useUnmergedTree = true).assertIsDisplayed()
+    }
+
+    @Test
+    fun aHiddenReplyWithTextLeavesTheHintToItsBody() {
+        showQuote(
+            quoteRow(
+                QuoteView("o1", "Ada", "something vile", hasAttachment = false, state = QuoteState.Verified),
+                flagged = true,
+            ),
+        )
+
+        compose.onNodeWithText("Quoted message hidden", useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithText("Message hidden — tap to reveal", useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithText("on my way", useUnmergedTree = true).assertDoesNotExist()
     }
 
     @Test

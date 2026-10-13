@@ -14,6 +14,7 @@ import app.getknit.knit.data.message.ConversationKind
 import app.getknit.knit.data.message.Conversations
 import app.getknit.knit.data.message.DeliveryPlane
 import app.getknit.knit.data.message.MessageEntity
+import app.getknit.knit.data.message.hiddenByFilter
 import app.getknit.knit.data.message.receivedPlane
 import app.getknit.knit.data.receipt.MessageReceiptEntity
 import app.getknit.knit.data.settings.SettingsStore
@@ -213,7 +214,7 @@ class MessageDetailsViewModel(
                         attachmentName = message.attachmentName,
                         attachmentSize = message.attachmentSize,
                         attachmentAnimated = message.attachmentAnimated,
-                        moderationFlagged = hideSensitive && message.moderation == MessageEntity.MODERATION_TEXT_FLAGGED,
+                        moderationFlagged = message.hiddenByFilter(hideSensitive),
                         mine = message.senderId == me,
                         senderName = directory.label(message.senderId).text,
                         senderNodeId = message.senderId,

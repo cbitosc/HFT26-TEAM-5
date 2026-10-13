@@ -209,6 +209,19 @@ class MessageRepositoryTest : RoomDbTest() {
             assertEquals(0, repo.depthOf(Conversations.NEARBY, "trimmed-away"))
         }
 
+    @Test
+    fun `depthOf reports nothing for a message held in another thread`() =
+        runTest {
+            // A quote names its original by an id anyone can mint (ADR 2026-10.gpa3): one pointing into a DM must not
+            // size the room's window.
+            val repo = repo()
+            repo.save(msg("room", sentAt = 1L))
+            repo.save(msg("dm", conversationId = "peer-1", sentAt = 2L))
+
+            assertEquals(0, repo.depthOf(Conversations.NEARBY, "dm"))
+            assertEquals(1, repo.depthOf("peer-1", "dm"))
+        }
+
     private fun msg(
         id: String,
         recipientId: String? = null,

@@ -424,6 +424,10 @@ class MeshManagerTest {
             coEvery { settings.acceptedConversations } returns MutableStateFlow(emptySet())
             coEvery { textModeration.classify(any(), any()) } returns TextVerdict.ALLOWED
             coEvery { messages.save(any()) } answers { saved += firstArg<MessageEntity>() }
+            // Nothing is held for the quote check (ADR 2026-10.gpa3): a relaxed mock would answer a made-up row.
+            coEvery { messages.find(any()) } returns null
+            coEvery { messages.repliesAwaiting(any(), any(), any()) } returns emptyList()
+            coEvery { messages.unsettledQuotes(any(), any()) } returns emptyList()
             coEvery { peers.find(any()) } returns null // default: no recipient key is known
             // No proof of key held (ADR 2026-09.g64k): relaxed, this would hand KeyExchange a mock frame to serve.
             coEvery { peers.profileFrame(any()) } returns null

@@ -36,6 +36,9 @@ import app.getknit.knit.data.group.toGroupInfo
 import app.getknit.knit.data.message.ConversationKind
 import app.getknit.knit.data.message.Conversations
 import app.getknit.knit.data.message.MessageEntity
+import app.getknit.knit.data.message.hiddenByFilter
+import app.getknit.knit.data.message.quoteHasAttachment
+import app.getknit.knit.data.message.quoteSnippet
 import app.getknit.knit.data.peer.PeerEntity
 import app.getknit.knit.data.settings.KnitBoardSetup
 import app.getknit.knit.data.settings.SettingsStore
@@ -86,7 +89,7 @@ import app.getknit.knit.review.ReviewPrompter
 import app.getknit.knit.transfer.OfferOutcome
 import app.getknit.knit.transfer.TransferManager
 import app.getknit.knit.ui.chat.ChatWindow
-import app.getknit.knit.ui.chat.buildReplySnippet
+import app.getknit.knit.ui.chat.quoteLabels
 import app.getknit.knit.ui.invite.prepareKnitApk
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
@@ -318,7 +321,7 @@ class DebugBridgeReceiver :
                 runCatching {
                     when (action) {
                         ACTION_SEND -> {
-                            handleSend(intent)
+                            handleSend(context, intent)
                         }
 
                         ACTION_SENDIMG -> {
@@ -538,7 +541,10 @@ class DebugBridgeReceiver :
         }
     }
 
-    private suspend fun handleSend(intent: Intent): JSONObject {
+    private suspend fun handleSend(
+        context: Context,
+        intent: Intent,
+    ): JSONObject {
         val text = intent.getStringExtra(EXTRA_TEXT).orEmpty()
         if (text.isBlank()) return reply("error", "missing 'text' extra")
         // A DM shorthand (`to`) or an explicit conversation id (`conv`); default to the broadcast room.
@@ -560,8 +566,16 @@ class DebugBridgeReceiver :
                     messageId = row.id,
                     authorId = row.senderId,
                     author = authorName,
-                    snippet = buildReplySnippet(row.body, row.moderation == MessageEntity.MODERATION_TEXT_FLAGGED),
-                    hasAttachment = row.attachmentHash != null,
+                    snippet =
+                        quoteSnippet(
+                            row.body,
+                            row.attachmentName,
+                            row.attachmentMime,
+                            row.attachmentAnimated,
+                            flagged = row.hiddenByFilter(filterOn = true),
+                            labels = quoteLabels(context),
+                        ),
+                    hasAttachment = quoteHasAttachment(row.attachmentHash, row.attachmentMime),
                 )
             }
         // Route exactly as ChatViewModel.send does, resolving the thread kind from its id.
@@ -980,6 +994,10 @@ class DebugBridgeReceiver :
                     .put("replyToId", m.replyToId ?: JSONObject.NULL)
                     .put("replyToAuthor", m.replyToAuthor ?: JSONObject.NULL)
                     .put("replyToSnippet", m.replyToSnippet ?: JSONObject.NULL)
+                    // The receiver's verdict on the quote (ADR 2026-10.gpa3): 0 unchecked, 1 verified, 2 mismatch; and
+                    // whether the quoted words are flagged on this phone.
+                    .put("replyCheck", m.replyCheck)
+                    .put("replyToFlagged", m.replyToFlagged)
                     // The attachment's identity (ADR 2026-10.mptm): the hash it travels under, whether it is sealed, the
                     // plaintext's name once known, and whether the bytes are here — what a forward trial compares.
                     .put("attachmentHash", m.attachmentHash ?: JSONObject.NULL)

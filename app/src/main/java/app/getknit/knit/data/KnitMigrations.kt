@@ -556,6 +556,25 @@ object KnitMigrations {
             }
         }
 
+    /**
+     * v22 → v23: `messages.replyCheck` and `messages.replyToFlagged`, and an index on `(replyToId, replyCheck)` — whether
+     * an inbound reply's quote was judged against the original it names, and this phone's verdict on the quoted words
+     * (ADR 2026-10.gpa3). Local only. No backfill here: a verified quote is rebuilt from its original with localized
+     * labels SQL cannot produce, so every existing reply starts unchecked and `QuoteVerifier.settleBacklog` judges
+     * those whose original is held on the next mesh start. Additive only; the SQL must stay byte-equivalent to what
+     * Room generates for `app/schemas/**/23.json`.
+     */
+    val MIGRATION_22_23 =
+        object : Migration(22, 23) {
+            override suspend fun migrate(connection: SQLiteConnection) {
+                connection.execSQL("ALTER TABLE `messages` ADD COLUMN `replyCheck` INTEGER NOT NULL DEFAULT 0")
+                connection.execSQL("ALTER TABLE `messages` ADD COLUMN `replyToFlagged` INTEGER NOT NULL DEFAULT 0")
+                connection.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_messages_replyToId_replyCheck` ON `messages` (`replyToId`, `replyCheck`)",
+                )
+            }
+        }
+
     /** All migrations, applied by Room in order. */
     val ALL: Array<Migration> =
         arrayOf(
@@ -580,5 +599,6 @@ object KnitMigrations {
             MIGRATION_19_20,
             MIGRATION_20_21,
             MIGRATION_21_22,
+            MIGRATION_22_23,
         )
 }

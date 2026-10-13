@@ -1,15 +1,16 @@
 package app.getknit.knit.ui.chat
 
+import android.content.Context
+import app.getknit.knit.R
+import app.getknit.knit.data.message.QuoteLabels
 import app.getknit.knit.mesh.protocol.ReplyRef
-import app.getknit.knit.normalizeSingleLine
-
-/** Max characters of the quoted body snapshotted into a [ReplyRef]; the quote UI ellipsizes further. */
-const val REPLY_SNIPPET_MAX = 120
 
 /**
- * The author label a quote shows: the [selfLabel] ("You") when the quoted message is the viewer's own
- * ([ReplyRef.authorId] == [myNodeId]), else the snapshotted [ReplyRef.author]. The swap is viewer-relative,
- * which is why it's resolved here at render time from [myNodeId] rather than baked into the stored snapshot.
+ * The author label the composer's reply banner shows: the [selfLabel] ("You") when the quoted message is the
+ * viewer's own ([ReplyRef.authorId] == [myNodeId]), else the snapshotted [ReplyRef.author]. The swap is
+ * viewer-relative, which is why it's resolved here at render time from [myNodeId] rather than baked into the stored
+ * snapshot. Only for a quote this phone is composing from a row it holds: a received quote's author is the reader's
+ * own label for its id, never the sender's string (`ChatViewModel`'s `QuoteView`, ADR 2026-10.gpa3).
  */
 fun quoteAuthorLabel(
     replyTo: ReplyRef,
@@ -17,29 +18,11 @@ fun quoteAuthorLabel(
     selfLabel: String,
 ): String = if (replyTo.authorId == myNodeId) selfLabel else replyTo.author
 
-/**
- * The snippet to snapshot into a [ReplyRef] when replying to a message whose body is [body]: blank when
- * [flagged] (a moderation-collapsed original isn't re-exposed through a quote that bypasses tap-to-reveal)
- * or when [body] is blank (an attachment-only original — the quote shows a "photo" placeholder instead),
- * else the body flattened to a single line and capped at [cap] characters.
- *
- * [attachmentLabel] is the one exception, and the reason this takes a label rather than deciding for itself.
- * A quoted **voice note** or **file** must not read as "📷 Photo", but [ReplyRef] carries no MIME and no name
- * — only `hasAttachment` — so a recipient cannot tell them apart from the wire. Rather than spend an additive
- * wire field on a cosmetic label, the sender writes the label into the snippet, which is already a free-text
- * string whose documented job is to describe the quoted message. The cost, stated: a cross-locale quote shows
- * the label in the *sender's* language, and a quoted file's name crosses in the snippet even though the file
- * itself may never be fetched. If either ever matters, the fix is a nullable `ReplyRef.attachmentMime`, legal
- * under `docs/WIRE_COMPAT.md` rule 1.
- */
-fun buildReplySnippet(
-    body: String,
-    flagged: Boolean,
-    attachmentLabel: String? = null,
-    cap: Int = REPLY_SNIPPET_MAX,
-): String =
-    when {
-        flagged -> ""
-        body.isBlank() && attachmentLabel != null -> attachmentLabel.take(cap)
-        else -> normalizeSingleLine(body).take(cap)
-    }
+/** The labels a quote names a positional or body-less original by, in the reader's language (see [QuoteLabels]). */
+fun quoteLabels(context: Context): QuoteLabels =
+    QuoteLabels(
+        location = context.getString(R.string.chat_list_preview_location),
+        voice = context.getString(R.string.chat_reply_voice),
+        fileFormat = context.getString(R.string.chat_list_preview_file),
+        gif = context.getString(R.string.chat_list_preview_gif),
+    )

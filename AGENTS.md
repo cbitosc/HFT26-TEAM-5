@@ -172,10 +172,19 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
 - **When touching a send-side screen — `MeshManager.sendChat` / `sendPublicPost` / `sendCommons`'s
   `isTextFlagged`, `AttachmentStore.ingest`'s `screen`, `ChatViewModel.stage`, `LinkPreviewService.fetchCard`,
   `AvatarStore.saveOwnAvatar` — or the "Message hidden" stand-ins (`InboundPipeline.notificationBody`,
-  `messagePreview`'s `hideFlagged`):** READ ADR 2026-10.9rh6. Only the Nearby and Meshtastic rooms screen
-  what is sent; a DM, a group and the commons never do, and the receiver's Content filtering toggle decides
-  what is hidden. Avatars and group photos are the exception, screened when set. A spool requiring
-  moderation (`docs/SPOOL_PROTOCOL.md` §7.5, client half unbuilt) is what would bring the private screen back.
+  `messagePreview`'s `hideFlagged`, all reading `MessageEntity.hiddenByFilter`):** READ ADR 2026-10.9rh6. Only the
+  Nearby and Meshtastic rooms screen what is sent; a DM, a group and the commons never do, and the receiver's Content
+  filtering toggle decides what is hidden. Avatars and group photos are the exception, screened when set. A spool
+  requiring moderation (`docs/SPOOL_PROTOCOL.md` §7.5, client half unbuilt) is what would bring the private screen back.
+- **When touching quoted replies — `ReplyRef`, the `replyTo*` / `replyCheck` / `replyToFlagged` columns,
+  `data/message/QuoteCheck.kt`, `data/QuoteVerifier`, `InboundPipeline.deliverChat`'s quote path, `MessageDao.depthOf`,
+  or `ChatViewModel.quoteViewFor` / `ChatScreen`'s `QuotedMessage`:** READ ADR 2026-10.gpa3. A quote is the sender's
+  claim: the receiver judges it against the original it holds (same id, same thread, same author), rebuilds it from that
+  original by the composer's own `quoteSnippet`, and stores the verdict, judged on whichever of the two lands second,
+  through a once-only conditional update — never a whole-row upsert. A reply quoting words flagged on this phone is
+  hidden like a flagged body (`hiddenByFilter`, non-transitive). The author is always the reader's own label for the
+  id, never `ReplyRef.author`; our own replies are never rewritten. Regression: `QuoteCheckTest`, `QuoteVerifierTest`,
+  `mesh/lab/QuoteLabTest`.
 - **When touching receive-side screening — `MeshBlobStore.ingest` / `saveIncoming`, `MeshManager.scopeBlobs()`,
   `ScopeBlobs.refused`, or what adopts a received avatar or group photo (`InboundPipeline.avatarAdoptable`,
   `adoptAdvertisedAvatar`, `settleArrivedGroupPhoto`):** READ `docs/CONTENT_MODERATION.md` §3 and §7. Every blob

@@ -52,7 +52,10 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   `attachmentPlainHash`, `attachmentHeld` (the bytes are here) and `attachmentAnimated` — a forward trial compares
   the first across rows and reads the fourth instead of the blob store (ADR 2026-10.mptm). Each row
   also carries `received`, which on the sender's own row (`mine: true`) is the ✓✓ — the delivery tick
-  coming home — plus its `reactions`; the top-level `typing` map shows a cue that landed.
+  coming home — plus its `reactions`; the top-level `typing` map shows a cue that landed. A reply carries
+  `replyToId` / `replyToAuthor` / `replyToSnippet` and the receiver's verdict on the quote (ADR 2026-10.gpa3):
+  `replyCheck` (0 unchecked — the original is not here, 1 verified and rebuilt from it, 2 mismatch) and
+  `replyToFlagged` (the quoted words are flagged on this phone, which hides the reply under content filtering).
   `indirect` lists the authors another phone handed us a fresh frame from within the linger
   (`{nodeId, name, via, agoMs}`), which is what Diagnostics shows as "Reachable indirectly" (ADR 2026-10.fw8g); the
   top-level `reachable` array is the *nearby* set (`neighbors`), not `MeshController.reachable`.

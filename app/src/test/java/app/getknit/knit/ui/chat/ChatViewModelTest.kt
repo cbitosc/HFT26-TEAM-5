@@ -29,6 +29,7 @@ import app.getknit.knit.data.message.GroupFace
 import app.getknit.knit.data.message.MessageEntity
 import app.getknit.knit.data.message.TransferPhase
 import app.getknit.knit.data.message.TransferRecord
+import app.getknit.knit.data.message.withReply
 import app.getknit.knit.data.peer.PeerEntity
 import app.getknit.knit.data.reaction.ReactionEntity
 import app.getknit.knit.data.relay.AttachmentWait
@@ -57,6 +58,7 @@ import app.getknit.knit.mesh.lora.PublicPostPolicy
 import app.getknit.knit.mesh.protocol.LinkCard
 import app.getknit.knit.mesh.protocol.LinkPreviewBlob
 import app.getknit.knit.mesh.protocol.Protocol
+import app.getknit.knit.mesh.protocol.ReplyRef
 import app.getknit.knit.mesh.sha256Hex
 import app.getknit.knit.moderation.ImageScreeningService
 import app.getknit.knit.notifications.Notifier
@@ -1447,6 +1449,70 @@ class ChatViewModelTest {
                     .moderationFlagged,
             )
         }
+
+    @Test
+    fun aReplyQuotingFlaggedWordsCollapsesLikeAFlaggedBodyAndNamesItsAuthorItself() =
+        runTest {
+            // ADR 2026-10.gpa3: a clean body quoting flagged words is hidden behind the same toggle, and the quote's
+            // author is this reader's label for the quoted id, never the name the sender wrote.
+            val vm = vm()
+            backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.state.collect {} }
+            messagesFlow.value =
+                listOf(
+                    msg(senderId = "bob", id = "r1", conversationId = Conversations.NEARBY, body = "lol")
+                        .withReply(ReplyRef("o1", "ada", "Forged Name", "something vile"))
+                        .copy(replyToFlagged = true),
+                )
+            advanceUntilIdle()
+            val row =
+                vm.state.value.rows
+                    .single()
+            assertTrue(row.moderationFlagged)
+            assertEquals(QuoteState.Unverified, row.quote!!.state)
+            assertFalse("the sender's string is never the label", row.quote.author == "Forged Name")
+
+            filteringFlow.value = false
+            advanceUntilIdle()
+            assertFalse(
+                vm.state.value.rows
+                    .single()
+                    .moderationFlagged,
+            )
+        }
+
+    @Test
+    fun aQuoteSaysHowFarItWasCheckedAndShowsNothingOfAMismatch() {
+        val label: (String) -> String = { "label:$it" }
+
+        fun reply(
+            check: Int,
+            authorId: String = "ada",
+            from: String = "bob",
+        ) = msg(senderId = from, id = "r", conversationId = Conversations.NEARBY)
+            .withReply(ReplyRef("o1", authorId, "Forged", "words"))
+            .copy(replyCheck = check)
+
+        val verified = quoteViewFor(reply(MessageEntity.REPLY_VERIFIED), mine = false, me = "me", selfLabel = "You", labelOf = label)!!
+        assertEquals(QuoteView("o1", "label:ada", "words", hasAttachment = false, state = QuoteState.Verified), verified)
+
+        val unverified = quoteViewFor(reply(MessageEntity.REPLY_UNCHECKED), mine = false, me = "me", selfLabel = "You", labelOf = label)!!
+        assertEquals(QuoteState.Unverified, unverified.state)
+
+        val mismatch = quoteViewFor(reply(MessageEntity.REPLY_MISMATCH), mine = false, me = "me", selfLabel = "You", labelOf = label)!!
+        assertEquals(QuoteView("o1", "", "", hasAttachment = false, state = QuoteState.Unavailable), mismatch)
+
+        // We hold everything we sent, so an unmatched quote of ours was deleted, swept or forged.
+        val selfQuote = quoteViewFor(reply(MessageEntity.REPLY_UNCHECKED, authorId = "me"), false, "me", "You", label)!!
+        assertEquals(QuoteState.Unavailable, selfQuote.state)
+        val selfVerified = quoteViewFor(reply(MessageEntity.REPLY_VERIFIED, authorId = "me"), false, "me", "You", label)!!
+        assertEquals("You", selfVerified.author)
+
+        // Our own replies are trusted: we quoted a row we held.
+        val mine = quoteViewFor(reply(MessageEntity.REPLY_UNCHECKED, from = "me"), true, "me", "You", label)!!
+        assertEquals(QuoteState.Verified, mine.state)
+
+        assertNull(quoteViewFor(msg(senderId = "bob", id = "plain"), mine = false, me = "me", selfLabel = "You", labelOf = label))
+    }
 
     @Test
     fun theStoredDraftIsHandedOverOnceAndOnlyThenAreEditsKept() =

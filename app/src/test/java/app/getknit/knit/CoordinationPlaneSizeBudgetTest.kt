@@ -1,5 +1,6 @@
 package app.getknit.knit
 
+import app.getknit.knit.data.message.REPLY_SNIPPET_MAX
 import app.getknit.knit.identity.NodeId
 import app.getknit.knit.mesh.DmAckCoalescer
 import app.getknit.knit.mesh.INLINE_ACK_BYTES
@@ -36,7 +37,6 @@ import app.getknit.knit.mesh.protocol.TypingContent
 import app.getknit.knit.mesh.protocol.WireCodec
 import app.getknit.knit.mesh.protocol.WireEnvelope
 import app.getknit.knit.mesh.wifiaware.WifiAwareTransport
-import app.getknit.knit.ui.chat.REPLY_SNIPPET_MAX
 import com.google.crypto.tink.InsecureSecretKeyAccess
 import com.google.crypto.tink.KeyTemplates
 import com.google.crypto.tink.KeysetHandle
