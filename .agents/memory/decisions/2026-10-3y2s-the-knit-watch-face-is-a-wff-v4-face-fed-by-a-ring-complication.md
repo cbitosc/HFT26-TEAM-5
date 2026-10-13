@@ -21,16 +21,30 @@ The phone already sends what the ring needs: `WearExtra.links`, one plane mask p
 `RingComplicationService`, answers `LONG_TEXT` with `RingCode`: 97 characters, the reading's state (`L` live, `A`
 aged, `R` resting — off, paused or no radio — `X` out of reach) and then one plane code per dash (`0` unlit,
 `1`–`4` the planes) for two rounds of 48. Links are knitted in rounds of three: the outer round is a full turn at
-three links, a third each; a fourth starts a thinner inner round, which the face shows only once its first dash is
-lit; a seventh and eighth (the phone sends at most eight, far peers last) share the inner round in equal runs. Each
-run's last dash stays unlit so runs read apart. Which link lands on which dash is decided in Kotlin; the face only
-prints the code. The face binds that source to a fixed, non-customizable slot over the whole dial
-(`DefaultProviderPolicy` `primaryProvider`, bounded by a full-dial `BoundingOval`; the user slots come later in the
-scene, so their taps win), and every dash reads its own character with `subText` and picks its colour with a v4
-colour `Transform`; an aged reading draws at about a third. An unlit "fabric" ring is drawn under the slot outside
-it, so a face without Knit installed, or before the grant, still looks whole. The three user slots default to
-Knit's carrying source (top) and the system's heart rate and steps, and take short text, ranged, goal, small and
-monochrome images.
+three links, a third each; a fourth starts a thinner inner round, which the face shows only once its first run's
+first dash (dash 1) is lit; a seventh and eighth (the phone sends at most eight, far peers last) share the inner
+round. Dash 0 of each round is the cast-on point under the node and never lit; the other 47 split into runs as even
+as whole dashes allow (15, 16, 16 for three links). Each run's last dash stays unlit so runs read apart. Which link
+lands on which dash is decided in Kotlin; the face only prints the code. The face binds that source to a fixed,
+non-customizable slot over the whole dial (`DefaultProviderPolicy` `primaryProvider`, bounded by a full-dial
+`BoundingOval`; the user slots come later in the scene, so their taps win), and every dash reads its own character
+with `subText` and picks its colour with a v4 colour `Transform`; an aged reading draws at about a third. An unlit
+"fabric" ring is drawn under the slot outside it, so a face without Knit installed, or before the grant, still
+looks whole. The three user slots default to Knit's carrying source (top) and the system's heart rate and steps,
+and take short text, ranged, goal, small and monochrome images.
+
+**It is dressed in the launcher icon's materials**, because a first version with neutral grey fabric read as any
+face with a gauge, not Knit. The icon is a K drawn in rounded coral dashes on maroon with a diamond node where the
+strokes meet, which is this ring's vocabulary already. So the unlit fabric and the slot fills are the icon's maroon
+(`#3A1B16`, a shade darker under the slots); the icon's diamond node, in its coral (`#E35D4B`), sits at 12 o'clock
+over both rounds' cast-on dash, where the knitting starts; the time's colon is two coral dots, the hours and
+minutes being separate `TimeText`s either side of them; and a coral needle, a dot just outside the ring, steps
+round with the seconds. Always-on keeps the node (dimmed) and turns the colon grey; the needle hides. The planes
+are the brand's colours too: the short-range ones are the icon's two strokes, Bluetooth its coral (`#E35D4B`) and
+Wi-Fi Aware its highlight (`#F2918D`), so the everyday ring is Knit's own yarn; the long-range ones are the coral's
+analogous neighbours, LoRa amber (`#F0A03C`) and the internet relay raspberry (`#D2508A`), so a far peer stands out
+without leaving the family. An all-coral ring (four shades told apart by lightness alone) was tried first and lost
+the planes: the relay's brick passed for an unlit dash.
 
 The alternatives a reader reaches for first do not fit. `WEIGHTED_ELEMENTS` carries per-element colours a v4 face
 can read, but at most seven elements, and eight runs with their gaps and stripes need up to sixteen. A

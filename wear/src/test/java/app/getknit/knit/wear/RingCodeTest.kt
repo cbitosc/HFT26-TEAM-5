@@ -28,47 +28,63 @@ class RingCodeTest {
 
     private val unlitRound = "0".repeat(48)
 
+    /** A run of [n] dashes for one plane character: all lit but the last. */
+    private fun run(
+        n: Int,
+        c: Char,
+    ) = c.toString().repeat(n - 1) + "0"
+
     @Test
-    fun `three links close the outer round, a third each`() {
-        // Pinned: scripts/gen-watchface.py's face reads exactly this layout (ADR 2026-10.3y2s).
+    fun `three links close the outer round after the cast-on dash`() {
+        // Pinned: scripts/gen-watchface.py's face reads exactly this layout (ADR 2026-10.3y2s). 47 dashes in
+        // thirds as even as whole dashes allow: 15, 16, 16.
         assertEquals(
-            "L" + "1".repeat(15) + "0" + "121212121212121" + "0" + "2".repeat(15) + "0" + unlitRound,
+            "L" + "0" + run(15, '1') + "121212121212121" + "0" + run(16, '2') + unlitRound,
             code(WearLink.BLE, WearLink.BLE or WearLink.NAN, WearLink.NAN),
         )
     }
 
     @Test
     fun `one and two links fill a third and two thirds`() {
-        assertEquals("L" + "1".repeat(15) + "0" + "0".repeat(32) + unlitRound, code(WearLink.BLE))
-        assertEquals("L" + "1".repeat(15) + "0" + "2".repeat(15) + "0" + "0".repeat(16) + unlitRound, code(WearLink.BLE, WearLink.NAN))
+        assertEquals("L" + "0" + run(15, '1') + "0".repeat(32) + unlitRound, code(WearLink.BLE))
+        assertEquals("L" + "0" + run(15, '1') + run(16, '2') + "0".repeat(16) + unlitRound, code(WearLink.BLE, WearLink.NAN))
+    }
+
+    @Test
+    fun `dash 0 of each round is the cast-on point and never lit`() {
+        val c = code(*IntArray(8) { WearLink.BLE or WearLink.NAN or WearLink.LORA or WearLink.SPOOL })
+        assertEquals('0', c[1])
+        assertEquals('0', c[1 + 48])
     }
 
     @Test
     fun `a fourth link starts the inner round`() {
         val c = code(WearLink.BLE, WearLink.BLE, WearLink.BLE, WearLink.NAN)
-        assertEquals(("1".repeat(15) + "0").repeat(3), c.substring(1, 49))
-        assertEquals("2".repeat(15) + "0" + "0".repeat(32), c.substring(49))
+        assertEquals("0" + run(15, '1') + run(16, '1') + run(16, '1'), c.substring(1, 49))
+        assertEquals("0" + run(15, '2') + "0".repeat(32), c.substring(49))
     }
 
     @Test
     fun `six links close both rounds`() {
-        val c = code(*IntArray(6) { WearLink.BLE })
-        assertEquals("L" + ("1".repeat(15) + "0").repeat(6), c)
+        val round = "0" + run(15, '1') + run(16, '1') + run(16, '1')
+        assertEquals("L$round$round", code(*IntArray(6) { WearLink.BLE }))
     }
 
     @Test
-    fun `seven and eight links share the inner round in equal runs`() {
+    fun `seven and eight links share the inner round in runs as even as whole dashes allow`() {
         val eight = code(*IntArray(6) { WearLink.BLE }, WearLink.LORA, WearLink.SPOOL)
-        assertEquals(("1".repeat(8) + "0").repeat(3) + "3".repeat(8) + "0" + "4".repeat(8) + "0" + "000", eight.substring(49))
+        // 47 in fifths: 9, 9, 10, 9, 10.
+        assertEquals("0" + run(9, '1') + run(9, '1') + run(10, '1') + run(9, '3') + run(10, '4'), eight.substring(49))
         val seven = code(*IntArray(6) { WearLink.BLE }, WearLink.LORA)
-        assertEquals(("1".repeat(11) + "0").repeat(3) + "3".repeat(11) + "0", seven.substring(49))
+        // 47 in quarters: 11, 12, 12, 12.
+        assertEquals("0" + run(11, '1') + run(12, '1') + run(12, '1') + run(12, '3'), seven.substring(49))
     }
 
     @Test
     fun `a link on more planes stripes through them in plane order`() {
         val all = WearLink.BLE or WearLink.NAN or WearLink.LORA or WearLink.SPOOL
-        assertEquals("123412341234123", code(all).substring(1, 16))
-        assertEquals("343434343434343", code(WearLink.SPOOL or WearLink.LORA).substring(1, 16))
+        assertEquals("12341234123412", code(all).substring(2, 16))
+        assertEquals("34343434343434", code(WearLink.SPOOL or WearLink.LORA).substring(2, 16))
     }
 
     @Test
