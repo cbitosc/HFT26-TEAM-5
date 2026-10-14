@@ -43,7 +43,7 @@ class PeerBadgesTest {
     fun `a badge lapses on its own once the clock passes it, with no new row`() =
         runTest {
             var nowMs = (EXP + 200) * 1_000
-            val badges = PeerBadges(MutableStateFlow(listOf(good)), keys, backgroundScope, clock = { nowMs })
+            val badges = PeerBadges(MutableStateFlow(listOf(good)), backgroundScope, keys, clock = { nowMs })
             val seen = mutableListOf<Map<String, List<VerifiedBadge>>>()
             backgroundScope.launch { badges.shown.collect { seen += it } }
             runCurrent()

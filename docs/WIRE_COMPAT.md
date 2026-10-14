@@ -563,6 +563,29 @@ shows the post as that contact's, with a shield. What it proves is bounded: the 
 transmitted the words — the frame's Ed25519 signature is what binds that claim to the identity — never that
 the person typed them.
 
+**Precedent — the first sealed-only presentation field, and the one exception to "all three layouts" (the supporter
+badge, ADR 2026-10.r99s, 2026-10-14; spec `docs/SUPPORTER_BADGE.md`).** `ProfilePayload.badges: List<BadgeEntry>? =
+null` and `ProfileV2` label **8**, each entry `{w, r}` (`@ByteString` on the named layout; `{1, 2}` raw on the compact
+one): the issuer-signed credential's wrapper verbatim and the 16 random bytes its `sub` commits to. Rule 1 by the
+nullable route — elided while the holder shows none, so every existing golden vector stayed put (two new ones,
+`profilePayloadBadges` and `messageContentV2ProfileBadges`), and an old build skips the key. Rule 6 holds: both entry
+fields are required, so an entry never encodes as `{}`. **Not on `ProfileContent`, on purpose**: the cleartext bootstrap
+is 432 B of the 448-B two-packet LoRa ceiling (`CoordinationPlaneSizeBudgetTest` is unchanged), and every carrier keeps
+the cleartext frame (ADR 2026-09.g64k), relays included. The rule above — a presentation field rides all three layouts
+or the next sealed update reverts it — is about a field the cleartext frame sets and the sealed path would overwrite;
+the inverse trap is the cleartext frame overwriting a sealed-only field. So a receiver keeps badges in a table of
+their own (`peer_badges`, DB v24), replaced whole only by a sealed profile that passes the version gate (absent
+clears) and **never named by the cleartext profile writer**, whatever its version. Don't move them onto `peers`, and
+don't add a badge field to `ProfileContent` "for symmetry". No capability bit, no ctl value, no version bump, no
+discovery marker; the transcoder never sees the sealed plaintext. *Metadata cost:* the field is inside the seal **and a badge change never moves the cleartext profile's
+version**, but the sealed profile is not padded, so a carrier that can tell a sealed profile from other sealed DMs and
+predicts its size from the cleartext profile it holds can see it is about 185 B larger while a badge is shown (padding
+it to one size is parked as a follow-up). The version rule: it is published under a
+sealed-only version past it (`badge_sealed_version`), since a cleartext version that moved with no visible field
+changed would tell every carrier the holder shows a badge. Every peer with a DM session sees the holder's badge while
+the holder shows it, and the holder chose that (opt-in, off by default). *Size:* one badge adds 185 B to a max-size compact sealed profile
+(`SupporterBadgeSizeTest`).
+
 **Withdrawn precedent — the one `type` string minted since the v1 baseline (`meshpost`, ADR 2026-09.cf7a and
 2026-09.7r4d, September 2026), taken back before it shipped (ADR 2026-09.26q3).** It was the first entry on
 `isCustodial` since v1, and it is gone because of exactly the cost every earlier precedent had avoided:

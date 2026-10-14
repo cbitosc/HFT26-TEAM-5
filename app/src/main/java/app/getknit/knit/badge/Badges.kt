@@ -3,6 +3,7 @@
 package app.getknit.knit.badge
 
 import app.getknit.knit.identity.NodeId
+import app.getknit.knit.mesh.protocol.BadgeEntry
 import com.google.crypto.tink.subtle.Ed25519Verify
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
@@ -146,6 +147,15 @@ object Badges {
         if (nowS < body.nbf - SKEW_S || nowS >= body.exp + SKEW_S || body.exp - body.nbf > MAX_WINDOW_S) return null
         return body
     }
+
+    /**
+     * Whether a received entry is small enough to keep: an `r` of [R_BYTES] and a wrapper no bigger than a `bc` of
+     * [MAX_BC_BYTES] and a [SIG_BYTES] signature can make (C-6-2). Anything else would fail [verify] anyway.
+     */
+    fun entryFits(entry: BadgeEntry): Boolean = entry.r.size == R_BYTES && entry.w.size <= MAX_WRAPPER_BYTES
+
+    /** `{bc, sig}` with the largest `bc` and the signature: two text keys and two byte-string heads of overhead. */
+    const val MAX_WRAPPER_BYTES = 1 + 3 + 3 + MAX_BC_BYTES + 4 + 2 + SIG_BYTES
 
     /** `SHA-256("knit/badge/v1/sub" ‖ id ‖ r)`: the commitment a holder sends the issuer, [id] being its 16 raw node-id bytes. */
     fun subject(

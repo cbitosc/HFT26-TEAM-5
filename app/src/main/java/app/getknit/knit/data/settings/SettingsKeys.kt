@@ -54,6 +54,11 @@ object SettingsKeys {
     const val BADGE_HELD = "badge_held"
     const val BADGE_HELD_STATE = "badge_held_state"
 
+    // The version a badge-only change was published under and what it published; both ride a backup, since a restored
+    // phone must never publish below a version its peers hold. Neither starts with "badge_held".
+    const val BADGE_SEALED_VERSION = "badge_sealed_version"
+    const val BADGE_PUBLISHED = "badge_published"
+
     /**
      * Keys a backup never carries: state about *this phone's* radios and ROM (the Aware give-up and
      * initiator-hold journals, the model poison-pill latch), and the paired LoRa board's address, names and

@@ -147,6 +147,13 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   `TalkLink.SPOOL`:** READ `docs/VOICE_CALLS.md` §2.7 and ADR 2026-10.79yb's sixth amendment — a chunk with no mesh path
   is cast through the spools, signed, never stored, never answered and never a request, and on an `ent` spool only
   where one subscriber's cast ticket unlocks the scope.
+- **When touching `badge/`, `ProfilePayload.badges` / `BadgeEntry` / `ProfileV2` label 8, `peer_badges` /
+  `PeerBadgeEntity`, `data/settings/BadgeStore`, `OkHttpTicketIssuer.issueBadge`, `ui/components/BadgeVisuals` (`BadgeMark`) or
+  `Avatar`'s `badge`:** READ `docs/SUPPORTER_BADGE.md` and ADR 2026-10.r99s (knit-spool-coordinator owns the
+  credential's bytes and the route). The badge rides the two sealed profile layouts only, never `ProfileContent`; a
+  receiver stores it apart and only a sealed profile replaces it; it is verified when drawn, never only on arrival,
+  against the pinned keys in `BadgeKeys` (production's is a placeholder until the maintainer's key is pinned). The
+  coordinator's vectors are copied from its SHA, never recomputed. Never log or dump an `r`, a `sub` or a wrapper.
 - **When touching `location/`, the chat overflow's "Send location" item, or anything that reads the device's
   position:** READ ADR 2026-09.tss4. A shared position is a `geo:` line in the message body (no wire field,
   no capability bit); it is read only between the pin tap and the send, by `ChatViewModel.startLocation`,

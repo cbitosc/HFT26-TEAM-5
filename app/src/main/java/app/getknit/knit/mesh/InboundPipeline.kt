@@ -3,6 +3,7 @@ package app.getknit.knit.mesh
 import android.util.Log
 import androidx.room3.withWriteTransaction
 import app.getknit.knit.TextLimits
+import app.getknit.knit.badge.Badges
 import app.getknit.knit.clampToUtf16
 import app.getknit.knit.data.AnimatedImage
 import app.getknit.knit.data.AttachmentIdentities
@@ -1492,7 +1493,14 @@ class InboundPipeline(
         // replaced whole by a sealed profile that passed the gate above (absent clears), never touched by the
         // cleartext writer, and verified only when drawn. Stored unverified on purpose: a badge whose key this build
         // does not pin yet, or whose window has not opened, shows once it can.
-        peers.replaceBadges(env.senderId, payload.badges.orEmpty().take(BadgeEntry.MAX_PER_PROFILE))
+        // Bounded at intake by the verifier's own limits, so a peer cannot park junk the display check would refuse anyway.
+        peers.replaceBadges(
+            env.senderId,
+            payload.badges
+                .orEmpty()
+                .filter(Badges::entryFits)
+                .take(BadgeEntry.MAX_PER_PROFILE),
+        )
         // Status notices for what actually moved. Compared against the pre-write row, and written here
         // rather than in a writer of their own because this is the point where both the old and the new
         // presentation exist at once — a moment nothing else in the profile paths preserves. Free of the

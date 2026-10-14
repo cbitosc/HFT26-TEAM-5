@@ -6,6 +6,8 @@ import app.getknit.knit.badge.BadgeIssuer
 import app.getknit.knit.badge.BadgeJournal
 import app.getknit.knit.badge.BadgeRefresher
 import app.getknit.knit.badge.PinnedBadgeKey
+import app.getknit.knit.badge.hexOf
+import app.getknit.knit.badge.sha256
 import app.getknit.knit.call.CallSignals
 import app.getknit.knit.call.TurnServer
 import app.getknit.knit.call.TurnSource
@@ -107,8 +109,6 @@ import app.getknit.knit.notifications.Notifier
 import app.getknit.knit.presence.OpenToChatPolicy
 import app.getknit.knit.presence.OpenToChatWatch
 import app.getknit.knit.transfer.TransferSignals
-import app.getknit.knit.ui.contacts.contactIds
-import app.getknit.knit.ui.contacts.observeContactSignals
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -848,6 +848,7 @@ class MeshManager(
         openToChatWatch.start(session)
         val seeded = seedOwnProfileCustody(session)
         watchProfileChanges(session, seeded = seeded)
+        watchBadgeChanges(session)
         watchIncomingFiles(session)
         watchIncomingDigests(session)
         resumePendingFetches(session)
@@ -2973,7 +2974,7 @@ class MeshManager(
                 settings.loraBoard,
             ) { name, status, avatarAt, openToChat, board ->
                 OwnPresentation(name, status, avatarAt, openToChat, board)
-            }.combine(shownBadges()) { presentation, badges -> presentation.copy(badges = badges) }
+            }
                 // Distinct BEFORE the first value is set aside, never after: every one of the five flows is a
                 // projection of the one DataStore, which re-emits on a write to ANY key — so the seed's own
                 // stamp write, the ledger flush, a read-state stamp, each re-emits the unchanged presentation.
@@ -3091,7 +3092,8 @@ class MeshManager(
             profileLock.withLock {
                 // Monotonic bump, persisted: a version that's stable across restarts is what keeps a
                 // custodied profile from minting a new frame every launch (see SettingsStore.profileVersion).
-                settings.setProfileVersion(maxOf(clock(), settings.profileVersion.first() + 1))
+                // Past a badge-only version too (ADR 2026-10.r99s): peers hold it as our watermark.
+                settings.setProfileVersion(maxOf(clock(), profileVersion() + 1))
                 // Ahead of building the envelope: the stamp IS the frame id (and the custody `sentAt`) it reads.
                 settings.setProfilePublishedAt(nextPublishStamp())
                 signOwnProfileLocked()
@@ -3151,7 +3153,8 @@ class MeshManager(
      * idempotently.
      */
     private suspend fun broadcastSealedProfile() {
-        val version = settings.profileVersion.first()
+        publishBadgesIfChanged()
+        val version = profileVersion()
         if (version <= 0L) return
         // Who is owed this version comes first: on every heal with nobody owed — the common case — the payload's
         // five settings reads and its build are skipped, not just the sends.
@@ -3161,14 +3164,9 @@ class MeshManager(
         if (owed.isEmpty()) return
         val me = identity.nodeId()
         val avatarHash = settings.ownAvatarHash.first()
-        val payload = currentProfilePayload(version, avatarHash, withBadges = false)
-        // The badges go to contacts only (docs/SUPPORTER_BADGE.md C-6-4): a session forms with any room stranger whose
-        // tick we sealed, so the session set is wider than the people the holder chose to show a payment status to.
-        val withBadges = currentProfilePayload(version, avatarHash, withBadges = true).takeIf { it.pr?.badges != null }
-        val contacts = if (withBadges != null) badgeAudience(me) else emptySet()
+        val payload = currentProfilePayload(version, avatarHash)
         owed.forEach { session ->
-            val content = if (withBadges != null && session.peerId in contacts) withBadges else payload
-            if (sendCtlDm(session.peerId, content, avatarHash, me)) sentProfileVersions[session.peerId] = version
+            if (sendCtlDm(session.peerId, payload, avatarHash, me)) sentProfileVersions[session.peerId] = version
         }
     }
 
@@ -3176,7 +3174,6 @@ class MeshManager(
     private suspend fun currentProfilePayload(
         version: Long,
         avatarHash: String?,
-        withBadges: Boolean,
     ): MessageContent {
         val board = settings.loraBoard.first()
         return MessageContent(
@@ -3191,35 +3188,52 @@ class MeshManager(
                     openToChat = settings.openToChat.first(),
                     loraNode = board?.node,
                     loraKey = board?.key,
-                    badges = if (withBadges) shownBadges().first().ifEmpty { null } else null,
+                    badges = shownBadges().first().ifEmpty { null },
                 ),
         )
     }
 
     /**
-     * Who our badges go to: the contacts the Contacts screen lists, by its one rule (`ui/contacts/ContactUniverse.kt`'s
-     * [contactIds]), read at send time. A peer that becomes a contact later sees the badge with our next profile version.
+     * Our profile version as the sealed path states it: the cleartext profile's, or the later one a badge-only change
+     * was published under ([BadgeJournal.sealedVersion]). Every edit mints past both.
      */
-    private suspend fun badgeAudience(me: String): Set<String> {
-        val signals = observeContactSignals(messages, groups, settings, flowOf(me)).first()
-        val verified = peers.verifiedNodeIds().toSet()
-        val blocked = settings.blockedNodeIds.first()
-        return contactIds(
-            signals.conversations,
-            signals.authored,
-            signals.groups,
-            signals.groupSenders,
-            signals.accepted,
-            verified,
-            blocked,
-            me,
-        )
+    private suspend fun profileVersion(): Long = maxOf(settings.profileVersion.first(), badgeJournal?.sealedVersion?.first() ?: 0L)
+
+    /**
+     * Publishes a change in the badges our sealed profile carries (ADR 2026-10.r99s) **without** touching the cleartext
+     * profile: a fresh version for the sealed path alone, then the sealed fan-out. A cleartext frame whose version
+     * moved with no visible field changed would tell every carrier the holder shows a supporter badge. Judged against
+     * the fingerprint published last, persisted, so a change made while the mesh was stopped mints a version of its own
+     * too, and one version never carries two badge lists.
+     */
+    private fun watchBadgeChanges(session: CoroutineScope) {
+        val journal = badgeJournal ?: return
+        session.launch {
+            shownBadges().collect { if (publishBadgesIfChanged()) broadcastSealedProfile() }
+        }
     }
 
     /**
-     * The badges our sealed profile carries (docs/SUPPORTER_BADGE.md C-5-10): none while "Show my supporter badge" is
-     * off, else the held ones, at most [BadgeEntry.MAX_PER_PROFILE], in their held order. Whether each still verifies is
-     * each receiver's question at its own clock; nothing is filtered here but the toggle.
+     * Mints a sealed version for the badge list live now if it is not the one published last, and says whether it did.
+     * Run before every sealed send as well as by [watchBadgeChanges], so a send never states a published version with a
+     * list that version did not carry (a quick off-and-on the watcher's `combine` conflated, a heal or an intro inside
+     * it). Under [profileLock], read and write together.
+     */
+    private suspend fun publishBadgesIfChanged(): Boolean {
+        val journal = badgeJournal ?: return false
+        return profileLock.withLock {
+            val fingerprint = badgeFingerprint(shownBadges().first())
+            if (fingerprint == (journal.publishedFingerprint.first() ?: badgeFingerprint(emptyList()))) return@withLock false
+            journal.putSealed(maxOf(clock(), profileVersion() + 1), fingerprint)
+            true
+        }
+    }
+
+    /**
+     * The badges our sealed profile carries (docs/SUPPORTER_BADGE.md C-5-10, C-6-4): none while "Show my supporter badge"
+     * is off, else the held ones, at most [BadgeEntry.MAX_PER_PROFILE], in their held order, to every recipient alike —
+     * opt-in is the whole gate (the maintainer's decision, 2026-10-14). Whether each still verifies is each receiver's
+     * question at its own clock.
      */
     private fun shownBadges(): Flow<List<BadgeEntry>> {
         val journal = badgeJournal ?: return flowOf(emptyList())
@@ -3227,6 +3241,19 @@ class MeshManager(
             if (on) held.take(BadgeEntry.MAX_PER_PROFILE).map { it.entry() } else emptyList()
         }.distinctUntilChanged()
     }
+
+    /** A local fingerprint of a badge list: what [watchBadgeChanges] compares. Never sent anywhere. */
+    private fun badgeFingerprint(badges: List<BadgeEntry>): String =
+        hexOf(
+            sha256(
+                badges.fold(ByteArray(0)) { acc, b ->
+                    acc +
+                        b.w.size
+                            .toString()
+                            .encodeToByteArray() + b.w + b.r
+                },
+            ),
+        )
 
     /**
      * The contact-card intro to [peerId] (`IntroSync`): one sealed `CTL_PROFILE` DM, exactly the frame
@@ -3238,9 +3265,9 @@ class MeshManager(
      */
     private suspend fun sendIntroTo(peerId: String): Boolean {
         val avatarHash = settings.ownAvatarHash.first()
-        val me = identity.nodeId()
-        val payload = currentProfilePayload(settings.profileVersion.first(), avatarHash, withBadges = peerId in badgeAudience(me))
-        return sendCtlDm(peerId, payload, avatarHash, me)
+        publishBadgesIfChanged()
+        val payload = currentProfilePayload(profileVersion(), avatarHash)
+        return sendCtlDm(peerId, payload, avatarHash, identity.nodeId())
     }
 
     /**
@@ -4079,10 +4106,6 @@ private data class OwnPresentation(
     val avatarUpdatedAt: Long,
     val openToChat: Boolean,
     val board: LoraBoard?,
-    // Sealed-only (ADR 2026-10.r99s): a change republishes, but custodyPresentsOtherThan never compares it, since the
-    // cleartext frame custody holds never carries it. An edit made while the mesh was stopped reaches contacts on the
-    // first heal's sealed re-send instead.
-    val badges: List<BadgeEntry> = emptyList(),
 )
 
 /** `"<peerId>|<millis>"` entries ↔ a peer→stamp map, the intro driver's two settings sets. */

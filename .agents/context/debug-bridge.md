@@ -56,6 +56,9 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   `replyToId` / `replyToAuthor` / `replyToSnippet` and the receiver's verdict on the quote (ADR 2026-10.gpa3):
   `replyCheck` (0 unchecked — the original is not here, 1 verified and rebuilt from it, 2 mismatch) and
   `replyToFlagged` (the quoted words are flagged on this phone, which hides the reply under content filtering).
+  `badges` maps each peer node id to the supporter badges this phone would draw for it now (`[{b, exp}]`, verified at
+  this phone's clock against this build's pinned keys), and `ownBadge` is our own side: `show` (the "Show my supporter
+  badge" switch) and `held` (`[{b, exp, verifies}]`). Never an `r`, a `sub` or a wrapper (docs/SUPPORTER_BADGE.md).
   `indirect` lists the authors another phone handed us a fresh frame from within the linger
   (`{nodeId, name, via, agoMs}`), which is what Diagnostics shows as "Reachable indirectly" (ADR 2026-10.fw8g); the
   top-level `reachable` array is the *nearby* set (`neighbors`), not `MeshController.reachable`.

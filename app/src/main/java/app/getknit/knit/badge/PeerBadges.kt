@@ -20,8 +20,9 @@ import kotlinx.coroutines.flow.transformLatest
  */
 class PeerBadges(
     rows: Flow<List<PeerBadgeEntity>>,
-    private val keys: List<PinnedBadgeKey>,
     scope: CoroutineScope,
+    // Defaulted to the production pins: the DI passes this build's own list (`BadgeKeys.forBuild`).
+    private val keys: List<PinnedBadgeKey> = BadgeKeys.forBuild(debug = false),
     private val clock: () -> Long = { System.currentTimeMillis() },
     private val maxSleepMs: Long = MAX_SLEEP_MS,
 ) {

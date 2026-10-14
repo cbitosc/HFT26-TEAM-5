@@ -26,6 +26,8 @@ document:
   gets the same mention alert as if you had picked them one by one.
 - You can now send short videos in any chat, Nearby included. Knit shrinks each one to about 3 MB and keeps
   the first 61 seconds, and like a large photo, a video only Bluetooth can bring waits for your tap.
+- If you support Knit, you can show a small supporter badge on your photo. It's off until you switch it on in your
+  profile, and other phones check each badge before they show it.
 
 ### Changed
 

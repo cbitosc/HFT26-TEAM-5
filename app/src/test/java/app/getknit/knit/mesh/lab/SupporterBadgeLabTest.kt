@@ -16,9 +16,10 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 
 /**
- * The supporter badge end to end (docs/SUPPORTER_BADGE.md, ADR 2026-10.r99s): it rides the sealed profile only, so a
- * contact with a session sees it and a stranger who shares only the room never does; turning it off clears it on the
- * contact's phone; and no cleartext profile, newer or not, brings it back or takes it away.
+ * The supporter badge end to end (docs/SUPPORTER_BADGE.md, ADR 2026-10.r99s): it rides every sealed profile the holder
+ * sends, so a contact sees it and so does a room stranger the holder shares a session with (the maintainer's call,
+ * 2026-10-14: showing it is opt-in); turning it off clears it on both; no cleartext profile, newer or not, brings it
+ * back or takes it away; and a badge copied into another identity's profile verifies for no one.
  */
 @RunWith(RobolectricTestRunner::class)
 class SupporterBadgeLabTest {
@@ -55,7 +56,7 @@ class SupporterBadgeLabTest {
     )
 
     @Test
-    fun aContactSeesTheBadgeAStrangerNeverDoesAndTurningItOffClearsIt() =
+    fun everyPeerTheSealedProfileReachesSeesTheBadgeAndTurningItOffClearsIt() =
         runBlocking {
             val alice = lab.node("alice").apply { setDisplayName("Alice") }
             val bob = lab.node("bob").apply { setDisplayName("Bob") }
@@ -71,12 +72,14 @@ class SupporterBadgeLabTest {
             alice.badges.setShow(true)
             awaitShown(bob, alice, shown = true)
             assertEquals(listOf("supporter"), bob.badgesShownFor(alice))
-            assertTrue("turning it on publishes a new version", alice.settings.profileVersion.first() > before)
+            // A badge change moves the sealed path's version alone: no carrier sees Alice's cleartext version move.
+            assertEquals("the cleartext profile version never moved", before, alice.settings.profileVersion.first())
 
-            // Carol hears every cleartext profile Alice floods, and no sealed one: she shares no session with her.
+            // Carol only shares the room with Alice, but the room's sealed ticks give the two a session, so Alice's sealed
+            // profile reaches her too and she draws the badge: every recipient gets the same bytes.
             assertTrue(alice.sendRoom("hello room"))
             lab.assertConverged(listOf(alice, bob, carol), atLeast = 1) { Conversations.NEARBY }
-            assertTrue(carol.badgesShownFor(alice).isEmpty())
+            awaitShown(carol, alice, shown = true)
 
             // A rename republishes both layouts; the cleartext copy must not clear what the sealed one carries.
             alice.setDisplayName("Alice Again")
@@ -85,10 +88,39 @@ class SupporterBadgeLabTest {
 
             alice.badges.setShow(false)
             awaitShown(bob, alice, shown = false)
+            awaitShown(carol, alice, shown = false)
             assertTrue(alice.sendDm(bob, "still here"))
             lab.assertConverged(listOf(alice, bob), atLeast = 3) { it.dmWith(if (it === alice) bob else alice) }
             assertTrue(bob.badgesShownFor(alice).isEmpty())
             assertTrue(carol.badgesShownFor(alice).isEmpty())
+        }
+
+    /**
+     * Turned off while Alice's mesh was stopped: the first start after it still publishes a version of its own, so Bob
+     * never holds two badge lists under one version, and his badge for Alice clears.
+     */
+    @Test
+    fun turningItOffWhileStoppedStillClearsIt() =
+        runBlocking {
+            val alice = lab.node("alice").apply { setDisplayName("Alice") }
+            val bob = lab.node("bob").apply { setDisplayName("Bob") }
+            lab.link(alice, bob)
+            lab.awaitAcquainted(alice, bob)
+            assertTrue(alice.sendDm(bob, "hi bob"))
+            assertTrue(bob.sendDm(alice, "hi alice"))
+            lab.assertConverged(listOf(alice, bob), atLeast = 2) { it.dmWith(if (it === alice) bob else alice) }
+            alice.badges.putHeld(listOf(badgeFor(alice)), BadgeAskState())
+            alice.badges.setShow(true)
+            awaitShown(bob, alice, shown = true)
+            val sealedOn = alice.badges.sealedVersion.first()
+
+            alice.restart { badges.setShow(false) }
+            lab.link(alice, bob)
+            awaitShown(bob, alice, shown = false)
+            assertTrue("a fresh version carried the change", alice.badges.sealedVersion.first() > sealedOn)
+            assertTrue(alice.sendDm(bob, "back"))
+            lab.assertConverged(listOf(alice, bob), atLeast = 3) { it.dmWith(if (it === alice) bob else alice) }
+            assertTrue(bob.badgesShownFor(alice).isEmpty())
         }
 
     @Test
@@ -104,10 +136,8 @@ class SupporterBadgeLabTest {
             lab.assertConverged(listOf(bob, carol), atLeast = 2) { it.dmWith(if (it === bob) carol else bob) }
 
             // Carol shows Alice's credential, r and all: it commits to Alice's id, so Bob draws nothing for Carol.
-            val before = carol.settings.profileVersion.first()
             carol.badges.putHeld(listOf(badgeFor(alice)), BadgeAskState())
             carol.badges.setShow(true)
-            assertTrue(lab.tryAwait(1) { if (carol.settings.profileVersion.first() > before) 1 else 0 })
             assertTrue("bob never stored the copied badge", lab.tryAwait(1) { bob.badgeRowsFor(carol) })
             assertTrue(carol.sendDm(bob, "look"))
             lab.assertConverged(listOf(bob, carol), atLeast = 3) { it.dmWith(if (it === bob) carol else bob) }

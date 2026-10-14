@@ -1335,11 +1335,12 @@ class LabNode internal constructor(
     /**
      * Process death and relaunch: the live stack goes, the identity, database and settings stay. The links
      * go too, and every peer's neighbor collector is handed the departure before the node is back (see
-     * [MeshLab.unlink]).
+     * [MeshLab.unlink]). [whileDown] runs between the two: a settings edit made while the mesh was stopped.
      */
-    suspend fun restart() {
+    suspend fun restart(whileDown: suspend LabNode.() -> Unit = {}) {
         val peers = shutdownLive()
         awaitPeersSettled(peers)
+        whileDown()
         timedBoot()
     }
 
@@ -2304,7 +2305,8 @@ class LabNode internal constructor(
             settings.status.first(),
             settings.openToChat.first(),
             settings.ownAvatarHash.first(),
-            settings.profileVersion.first(),
+            // The version peers hold: past the cleartext one when a badge-only change was published since (ADR 2026-10.r99s).
+            maxOf(settings.profileVersion.first(), badges.sealedVersion.first()),
         )
 
     /** The DM session with [peer] as Diagnostics lists it, or null when this node holds no row for them. */

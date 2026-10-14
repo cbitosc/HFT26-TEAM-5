@@ -4,6 +4,7 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import app.getknit.knit.badge.BadgeAskState
 import app.getknit.knit.badge.BadgeJournal
@@ -17,7 +18,8 @@ import java.util.Base64
 
 /**
  * The holder's side of the supporter badge (docs/SUPPORTER_BADGE.md §5, ADR 2026-10.r99s) over the settings DataStore,
- * beside the customer keys it is earned with. `badge_show` is a choice and rides a backup; `badge_held…` (the held
+ * beside the customer keys it is earned with. `badge_show` is a choice and rides a backup, as do `badge_sealed_version`
+ * and `badge_published` (the version a badge-only change was published under, and what it published); `badge_held…` (the held
  * badges and the ask state) is this phone's and never does ([SettingsKeys.TRANSIENT_PREFIXES]), so a restored phone
  * shows nothing until it asks again with a fresh `r`. A value that fails to parse reads as absent.
  */
@@ -50,6 +52,20 @@ class BadgeStore(
         dataStore.edit { it[STATE] = encodeState(state) }
     }
 
+    override val sealedVersion: Flow<Long> = dataStore.data.map { it[SEALED_VERSION] ?: 0L }.distinctUntilChanged()
+
+    override val publishedFingerprint: Flow<String?> = dataStore.data.map { it[PUBLISHED] }.distinctUntilChanged()
+
+    override suspend fun putSealed(
+        version: Long,
+        fingerprint: String,
+    ) {
+        dataStore.edit {
+            it[SEALED_VERSION] = version
+            it[PUBLISHED] = fingerprint
+        }
+    }
+
     /** Names nothing it holds. */
     override fun toString(): String = "BadgeStore"
 
@@ -69,6 +85,8 @@ class BadgeStore(
         val SHOW = booleanPreferencesKey(SettingsKeys.BADGE_SHOW)
         val HELD = stringPreferencesKey(SettingsKeys.BADGE_HELD)
         val STATE = stringPreferencesKey(SettingsKeys.BADGE_HELD_STATE)
+        val SEALED_VERSION = longPreferencesKey(SettingsKeys.BADGE_SEALED_VERSION)
+        val PUBLISHED = stringPreferencesKey(SettingsKeys.BADGE_PUBLISHED)
 
         private val json = Json { ignoreUnknownKeys = true }
         private val b64 = Base64.getEncoder()

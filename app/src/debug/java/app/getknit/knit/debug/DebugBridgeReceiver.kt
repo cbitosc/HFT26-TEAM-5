@@ -16,6 +16,9 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.core.graphics.createBitmap
 import app.getknit.knit.BuildConfig
+import app.getknit.knit.badge.BadgeKeys
+import app.getknit.knit.badge.Badges
+import app.getknit.knit.badge.PeerBadges
 import app.getknit.knit.call.CallAudioRoute
 import app.getknit.knit.call.CallKind
 import app.getknit.knit.call.CallManager
@@ -51,6 +54,7 @@ import app.getknit.knit.data.message.hiddenByFilter
 import app.getknit.knit.data.message.quoteHasAttachment
 import app.getknit.knit.data.message.quoteSnippet
 import app.getknit.knit.data.peer.PeerEntity
+import app.getknit.knit.data.settings.BadgeStore
 import app.getknit.knit.data.settings.KnitBoardSetup
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.data.settings.TicketKeyStore
@@ -325,6 +329,7 @@ class DebugBridgeReceiver :
     private val identity: Identity by inject()
     private val settings: SettingsStore by inject()
     private val ticketKeys: TicketKeyStore by inject()
+    private val badgeStore: BadgeStore by inject()
     private val contactCards: app.getknit.knit.contacts.ContactCards by inject()
     private val contactImporter: app.getknit.knit.contacts.ContactImporter by inject()
     private val commons: app.getknit.knit.data.commons.CommonsRepository by inject()
@@ -966,10 +971,36 @@ class DebugBridgeReceiver :
         val typing = JSONObject()
         mesh.typing.value.forEach { (conv, senders) -> typing.put(conv, JSONArray(senders.toList())) }
 
+        // Supporter badges (docs/SUPPORTER_BADGE.md, ADR 2026-10.r99s): each peer's verified ids and `exp` at this phone's
+        // clock, and our own switch and held badges' ids and `exp`. Never an `r`, a `sub` or a wrapper.
+        val pins = BadgeKeys.forBuild(BuildConfig.DEBUG)
+        val nowS = System.currentTimeMillis() / 1_000
+        val peerBadges = JSONObject()
+        PeerBadges.verifyAll(peers.observeBadges().first(), nowS, pins).forEach { (nodeId, shown) ->
+            peerBadges.put(nodeId, JSONArray(shown.map { JSONObject().put("b", it.b).put("exp", it.exp) }))
+        }
+        val ownBadge =
+            JSONObject()
+                .put("show", badgeStore.show.first())
+                .put(
+                    "held",
+                    JSONArray(
+                        badgeStore.held.first().map { held ->
+                            val claims = Badges.claimsOf(held.wrapper)
+                            JSONObject()
+                                .put("b", claims?.b ?: JSONObject.NULL)
+                                .put("exp", claims?.exp ?: JSONObject.NULL)
+                                .put("verifies", Badges.verify(held.wrapper, held.r, selfId, nowS, pins) != null)
+                        },
+                    ),
+                )
+
         val out =
             JSONObject()
                 .put("status", "ok")
                 .put("self", JSONObject().put("nodeId", selfId).put("name", selfName))
+                .put("badges", peerBadges)
+                .put("ownBadge", ownBadge)
                 .put("health", mesh.transportHealth.value.name)
                 // Per-radio, because the merged health hides a plane's own verdict behind a sibling that works —
                 // `ForegroundOnly` on Wi-Fi Aware reads `Healthy` above whenever Bluetooth is up (ADR 2026-09.535d).

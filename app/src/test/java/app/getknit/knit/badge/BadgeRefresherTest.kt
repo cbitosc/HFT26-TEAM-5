@@ -45,6 +45,17 @@ class BadgeRefresherTest {
         override suspend fun putAskState(state: BadgeAskState) {
             this.state.value = state
         }
+
+        override val sealedVersion: Flow<Long> = MutableStateFlow(0L)
+        override val publishedFingerprint: Flow<String?> = MutableStateFlow(null)
+
+        override suspend fun putSealed(
+            version: Long,
+            fingerprint: String,
+        ) {
+            (sealedVersion as MutableStateFlow).value = version
+            (publishedFingerprint as MutableStateFlow).value = fingerprint
+        }
     }
 
     /** Answers from [script]; a [Signed] answer signs each listed badge id over the `sub` it was sent. */

@@ -55,6 +55,20 @@ interface BadgeJournal {
     )
 
     suspend fun putAskState(state: BadgeAskState)
+
+    /**
+     * The profile version the last badge-only change was published under (0 before the first), and the fingerprint of
+     * the badge list it published (null before the first). A badge change moves only this version, never the cleartext
+     * profile's, so a carrier holding our cleartext frame never sees a version move with no field changed (ADR
+     * 2026-10.r99s). Both ride a backup, so a restored phone never re-uses a version its peers have seen.
+     */
+    val sealedVersion: Flow<Long>
+    val publishedFingerprint: Flow<String?>
+
+    suspend fun putSealed(
+        version: Long,
+        fingerprint: String,
+    )
 }
 
 /**
