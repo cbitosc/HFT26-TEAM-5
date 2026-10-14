@@ -93,7 +93,8 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   `DirectWifiLease` (ADR 2026-10.kxnw): every user holds a leased view, never `AndroidDirectWifi` itself.
 - **When touching `call/`, `MessageContent.CTL_CALL` / `cl`, `CallPayload`, `Protocol.CAP_CALL`,
   `MeshManager.extraCapabilities`, the spool's `turnreq`/`turncred` (`SpoolConnection.turnCredential`,
-  `ScopeSync.turnCredentials`), `di/CallWiring`, or `debug/call/`:** READ `docs/VOICE_CALLS.md` and ADR 2026-10.3tee
+  `ScopeSync.turnCredentials`), `di/CallWiring`, `data/settings/CallTombStore`, `SettingsStore.callsRelayAll`, or
+  `debug/call/`:** READ `docs/VOICE_CALLS.md` and ADR 2026-10.3tee
   (its 2026-10-07 amendment is this branch's minimal build). Experimental and debug-only: WebRTC is
   `debugImplementation`, so every `org.webrtc` import stays in `src/debug` and release advertises no `CAP_CALL`.
   `CallManager.onSignal` runs on the inbound path — never make it wait on TURN or the media — and a TURN credential is

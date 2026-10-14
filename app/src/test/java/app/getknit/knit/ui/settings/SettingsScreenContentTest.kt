@@ -61,6 +61,9 @@ class SettingsScreenContentTest {
         onSelectBluetoothDownloadLimit: (BluetoothDownloadLimit) -> Unit = {},
         linkPreviewsEnabled: Boolean = false,
         onToggleLinkPreviews: (Boolean) -> Unit = {},
+        relayAllCalls: Boolean = false,
+        onToggleRelayAllCalls: (Boolean) -> Unit = {},
+        showCallRelay: Boolean = true,
         dynamicColor: Boolean = false,
         onToggleDynamicColor: (Boolean) -> Unit = {},
         showDynamicColor: Boolean = true,
@@ -87,6 +90,7 @@ class SettingsScreenContentTest {
                             themeMode = themeMode,
                             bluetoothDownloadLimit = bluetoothDownloadLimit,
                             linkPreviewsEnabled = linkPreviewsEnabled,
+                            relayAllCalls = relayAllCalls,
                             dynamicColor = dynamicColor,
                             relay = relay,
                             lora = lora,
@@ -102,6 +106,8 @@ class SettingsScreenContentTest {
                     wifiAware = wifiAware,
                     onSelectBluetoothDownloadLimit = onSelectBluetoothDownloadLimit,
                     onToggleLinkPreviews = onToggleLinkPreviews,
+                    onToggleRelayAllCalls = onToggleRelayAllCalls,
+                    showCallRelay = showCallRelay,
                     onToggleDynamicColor = onToggleDynamicColor,
                     showDynamicColor = showDynamicColor,
                     onOpenRelays = onOpenRelays,
@@ -266,6 +272,38 @@ class SettingsScreenContentTest {
     fun theWallpaperColoursRowIsAbsentWhereThePlatformCannotDoIt() {
         render(showDynamicColor = false)
         compose.onNodeWithTag("settings_dynamic_color").assertDoesNotExist()
+    }
+
+    /** "Relay all calls" (C-3.7-3) is off until the person turns it on, and turns off again. */
+    @Test
+    fun theRelayCallsRowIsOffByDefaultAndToggles() {
+        var toggled: Boolean? = null
+        render(onToggleRelayAllCalls = { toggled = it })
+        compose.onNodeWithTag("settings_relay_calls").performScrollTo().assertIsOff()
+        compose.onNodeWithTag("settings_relay_calls").performClick()
+        assertEquals(true, toggled)
+    }
+
+    @Test
+    fun theRelayCallsRowTogglesOff() {
+        var toggled: Boolean? = null
+        render(relayAllCalls = true, onToggleRelayAllCalls = { toggled = it })
+        compose.onNodeWithTag("settings_relay_calls").performScrollTo().assertIsOn()
+        compose.onNodeWithTag("settings_relay_calls").performClick()
+        assertEquals(false, toggled)
+    }
+
+    /** A build with no calls (release), or with no Internet plane to relay them through, shows no row at all. */
+    @Test
+    fun theRelayCallsRowIsAbsentWithoutCallsOrTheInternetPlane() {
+        render(showCallRelay = false)
+        compose.onNodeWithTag("settings_relay_calls").assertDoesNotExist()
+    }
+
+    @Test
+    fun theRelayCallsRowIsAbsentWhenThePlaneIsDark() {
+        render(showInternetRelays = false)
+        compose.onNodeWithTag("settings_relay_calls").assertDoesNotExist()
     }
 
     @Test

@@ -464,6 +464,11 @@ Signaling rides store-and-forward paths, so a frame can arrive late, twice or ou
 | **C-3.4-2** | A stale `OFFER` for which no `CANCEL rsn=user` or `ANSWER` has been seen is recorded as a **missed call**. A `CANCEL rsn=user` that arrives first suppresses it.                                      |
 | **C-3.4-3** | A terminal phase (`DECLINE`, `CANCEL`, `END`) for an unknown `id` MUST be remembered as a tombstone, at least for the custody TTL and in a bounded set, so a later-arriving `OFFER` for that `id` never alerts. |
 
+> **Why the tombstones outlive the process.** A spool keeps a DM scope's frames for 48 h, and a carrier's custody keeps
+> them for 24 h, so a phone can pull a call's `OFFER` long after it heard the call end, and after a process death in
+> between. The Android client keeps its tombstones in a small journal for 48 h (ADR 2026-10.3tee's fifth amendment),
+> reads it before it judges its first signal, and never carries it in a backup.
+>
 > **Why `sentAt` and not a payload expiry.** `sentAt` is signed inside the `RelayEnvelope` and is what
 > `CTL_TRANSFER`'s `STALE_OFFER_MS` already reads. A payload `exp` would be the same sender clock with
 > a second field to keep consistent.
@@ -503,6 +508,10 @@ Each side sends an `OFFER` to the other before seeing the other's offer.
 | **C-3.7-3** | With "relay all calls" on, a client sets `iceTransportPolicy = relay` **and** MUST strip its own host and server-reflexive candidates from the SDP it sends. Otherwise its own IP still reaches the peer. |
 | **C-3.7-4** | Opus is mandatory; `bundle` and `rtcp-mux` are required.                                                                                                                                                 |
 
+> **"Relay all calls" on Android** is a switch in Settings, off by default, shown only by a build that wires calls. It
+> also keeps every call off a Wi-Fi Direct group (§3.10), whose pair would show a neighbour the phone's address, and
+> leaves the walkie (§3.11) alone, which carries no address. A call connects only where a spool issues TURN.
+>
 > **Why C-3.7-2 is the whole E2E argument.** The SDP is authenticated by the frame signature and the DM
 > ratchet, so its fingerprint is the peer's own. DTLS then proves that whoever terminates the media
 > holds the matching key. A TURN server, a spool or a network attacker can drop or delay a call, but
@@ -786,7 +795,16 @@ link down; its own sends were all delivered. Nothing steers a link off Coded whi
     reconnect and a same-`ps` ticket, and TURN on a files-only spool; `RelayReachTest` for `Locked`'s precedence; and
     `InternetPlaneLabTest`'s photo through a files-gated relay. knit-spool's side is `TicketFilesTest`,
     `TicketGatesTest` and the `ent-gates`, `files-ticket` and `files-receive` conformance checks.
-  - A `CallPayload` golden vector (with `dw`/`dx`).
+  - The `CallPayload` golden vectors: six `messageContentCall*` fixtures in `vectors/wire-v1.json`
+    (`GoldenVectorTest`) — an OFFER with `dw`, a RINGING with `dx`, a CANDS, a restart, a walkie OFFER with `ct` and
+    an END.
+  - Between real stacks: `CallLabTest`'s call across a relay, every phase a sealed DM that reaches the far call layer
+    and no thread, and its offer that reaches a relaunched process after the CANCEL it heard before the restart
+    (C-3.4-3).
+  - Tombstones across a process death (C-3.4-3): `CallManagerTest`'s restart cases over a fake journal (a cancel heard
+    before, a call ended before, one past its 48 h, a journal that cannot be read) and `CallTombStoreTest`.
+  - "Relay all calls" (C-3.7-3): the relay-only cases in `CallManagerTest`, and the row in
+    `SettingsScreenContentTest` and `SettingsViewModelTest`.
   - TURN pruning (C-7.6-26): `CallConfigurationTest` pins the prune policy beside continual gathering and relay-only,
     and `RelayTallyTest` the call log's `allocations gathered N, pruned M, held K`; a measured relay-only call gives
     the numbers.

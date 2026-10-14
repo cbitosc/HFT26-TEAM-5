@@ -42,6 +42,7 @@ class SettingsViewModelTest {
     private val avatarHashFlow = MutableStateFlow<String?>(null)
     private val filteringFlow = MutableStateFlow(true)
     private val linkPreviewsFlow = MutableStateFlow(false)
+    private val relayAllCallsFlow = MutableStateFlow(false)
     private val dynamicColorFlow = MutableStateFlow(false)
     private val themeModeFlow = MutableStateFlow(ThemeMode.System)
     private val loraEnabledFlow = MutableStateFlow(false)
@@ -58,6 +59,7 @@ class SettingsViewModelTest {
         every { settings.ownAvatarHash } returns avatarHashFlow
         every { settings.contentFilteringEnabled } returns filteringFlow
         every { settings.linkPreviewsEnabled } returns linkPreviewsFlow
+        every { settings.callsRelayAll } returns relayAllCallsFlow
         every { settings.dynamicColor } returns dynamicColorFlow
         every { settings.themeMode } returns themeModeFlow
         every { settings.loraEnabled } returns loraEnabledFlow
@@ -140,6 +142,23 @@ class SettingsViewModelTest {
             vm.setLinkPreviewsEnabled(false)
             advanceUntilIdle()
             coVerify { settings.setLinkPreviewsEnabled(false) }
+        }
+
+    /** "Relay all calls" (C-3.7-3): off until the user says otherwise, and a toggle writes straight through. */
+    @Test
+    fun relayAllCallsMirrorsTheStoreAndPersistsOnToggle() =
+        runTest {
+            val vm = vm()
+            backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.relayAllCalls.collect {} }
+            advanceUntilIdle()
+            assertFalse(vm.relayAllCalls.value)
+            relayAllCallsFlow.value = true
+            advanceUntilIdle()
+            assertTrue(vm.relayAllCalls.value)
+
+            vm.setRelayAllCalls(false)
+            advanceUntilIdle()
+            coVerify { settings.setCallsRelayAll(false) }
         }
 
     @Test

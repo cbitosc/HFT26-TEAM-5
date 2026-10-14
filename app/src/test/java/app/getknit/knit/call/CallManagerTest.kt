@@ -202,6 +202,22 @@ class CallManagerTest {
         override fun castTicketed() = ticketed
     }
 
+    /** The tombstones' journal (C-3.4-3) as a process death leaves it: what the last save wrote, and nothing else. */
+    private class FakeTombs(
+        var kept: List<CallTomb> = emptyList(),
+    ) : CallTombJournal {
+        var failLoad = false
+
+        override suspend fun load(): List<CallTomb> {
+            check(!failLoad) { "unreadable" }
+            return kept
+        }
+
+        override suspend fun save(tombs: List<CallTomb>) {
+            kept = tombs
+        }
+    }
+
     private class Net(
         private val scope: CoroutineScope,
         private val clock: () -> Long,
@@ -235,6 +251,9 @@ class CallManagerTest {
         var fail = false
         var turn: suspend (String) -> List<TurnServer> = { emptyList() }
 
+        // "Relay all calls" (C-3.7-3), as the manager reads it at each call.
+        var relay = false
+
         // What this side's connected spools advertise as STUN in their HELLOs (C-7.6-20).
         var stun: List<String> = emptyList()
 
@@ -247,6 +266,7 @@ class CallManagerTest {
         name: String,
         net: Net,
         dropToWalkie: Boolean = false,
+        tombs: CallTombJournal = CallTombJournal.None,
     ): Side {
         val sent = Collections.synchronizedList(mutableListOf<CallPayload>())
         val missed = Collections.synchronizedList(mutableListOf<MissedCall>())
@@ -282,6 +302,8 @@ class CallManagerTest {
                 direct = direct,
                 walkie = walkie,
                 dropToWalkie = dropToWalkie,
+                relayAll = { side.relay },
+                tombs = tombs,
             )
         side = Side(name, manager, media, sent, missed, logged, turnAsks, direct, walkie)
         net.nodes[name] = manager
@@ -451,6 +473,91 @@ class CallManagerTest {
             assertNull(bob.state)
             assertEquals(1, bob.missed.size)
             assertTrue(bob.sent.isEmpty())
+        }
+
+    /**
+     * C-3.4-3 across a process death: Bob heard Alice withdraw a call by hand before its offer reached him, and his
+     * process died. The relaunched one, over the same journal, still never rings for the offer when it arrives — nor
+     * calls it missed — while an offer it never heard the end of still rings.
+     */
+    @Test
+    fun aCancelHeardBeforeARestartStillKeepsItsLateOfferFromRinging() =
+        runTest {
+            val journal = FakeTombs()
+            val (net, _, bob) = pair()
+            val first = side(BOB, net, tombs = journal)
+            first.manager.onSignal(ALICE, CallPayload(id = "c1", ph = CallPayload.PHASE_CANCEL, rsn = CallPayload.REASON_USER), 0L)
+            runCurrent()
+            assertEquals(listOf("c1"), journal.kept.map { it.id })
+
+            val relaunched = side(BOB, net, tombs = journal)
+            val now = testScheduler.currentTime
+            relaunched.manager.onSignal(ALICE, CallPayload(id = "c1", ph = CallPayload.PHASE_OFFER, sdp = SDP), now)
+            runCurrent()
+            assertNull(relaunched.state)
+            assertTrue(relaunched.missed.isEmpty() && relaunched.logged.isEmpty() && relaunched.sent.isEmpty())
+
+            relaunched.manager.onSignal(ALICE, CallPayload(id = "c2", ph = CallPayload.PHASE_OFFER, sdp = SDP), now)
+            runCurrent()
+            assertEquals(CallPhase.Alerting, relaunched.state!!.phase)
+            assertNull("the first process's manager heard none of it", bob.state)
+        }
+
+    /**
+     * A call Bob declined, then a process death, then a second copy of its offer (a spool keeps a DM scope's frames for
+     * 48 h; the router's own dedup lasts ten minutes): the relaunched process neither rings nor logs it again.
+     */
+    @Test
+    fun aCallEndedBeforeARestartIsNotRungAgainByALateCopy() =
+        runTest {
+            val journal = FakeTombs()
+            val net = Net(backgroundScope) { testScheduler.currentTime }
+            val alice = side(ALICE, net)
+            side(BOB, net, tombs = journal).also { bob ->
+                alice.manager.start(BOB)
+                runCurrent()
+                bob.manager.decline(bob.state!!.id)
+                runCurrent()
+            }
+            val offer = alice.sent.first { it.ph == CallPayload.PHASE_OFFER }
+            // Ended here, so it is kept as ended, whichever phase told the peer.
+            assertEquals(CallPayload.PHASE_END, journal.kept.single { it.id == offer.id }.ph)
+
+            val relaunched = side(BOB, net, tombs = journal)
+            relaunched.manager.onSignal(ALICE, offer, testScheduler.currentTime)
+            runCurrent()
+            assertNull(relaunched.state)
+            assertTrue(relaunched.missed.isEmpty() && relaunched.logged.isEmpty())
+        }
+
+    /** A tombstone older than any late copy can be (48 h, a spool's DM scope) is not carried into a new process. */
+    @Test
+    fun aTombstonePastItsKeepIsLeftBehind() =
+        runTest {
+            val journal = FakeTombs(listOf(CallTomb("c1", CallPayload.PHASE_CANCEL, CallPayload.REASON_USER, at = 0L)))
+            advanceTimeBy(49 * HOUR_MS)
+            val (net, _, _) = pair()
+            val relaunched = side(BOB, net, tombs = journal)
+            relaunched.manager.onSignal(ALICE, CallPayload(id = "c1", ph = CallPayload.PHASE_OFFER, sdp = SDP), testScheduler.currentTime)
+            runCurrent()
+            assertEquals(CallPhase.Alerting, relaunched.state!!.phase)
+            // The next save drops it from the journal too.
+            relaunched.manager.decline(relaunched.state!!.id)
+            runCurrent()
+            assertEquals(listOf(CallPayload.PHASE_END), journal.kept.map { it.ph })
+        }
+
+    /** A journal that cannot be read costs the process its old tombstones and nothing else: calls still ring. */
+    @Test
+    fun anUnreadableJournalStopsNoCall() =
+        runTest {
+            val journal = FakeTombs().apply { failLoad = true }
+            val net = Net(backgroundScope) { testScheduler.currentTime }
+            val alice = side(ALICE, net)
+            val bob = side(BOB, net, tombs = journal)
+            alice.manager.start(BOB)
+            runCurrent()
+            assertEquals(CallPhase.Alerting, bob.state!!.phase)
         }
 
     /** The one record [this] side logged, as its outcome — the line its thread shows (§3.12). */
@@ -848,7 +955,7 @@ class CallManagerTest {
     fun aRelayOnlyRestartCarriesRelayCandidatesAlone() =
         runTest {
             val (_, alice, bob) = pair()
-            alice.manager.relayOnly = true
+            alice.relay = true
             assertNull(alice.manager.start(BOB))
             runCurrent()
             assertTrue(bob.manager.answer(bob.state!!.id))
@@ -895,7 +1002,7 @@ class CallManagerTest {
             val (_, alice, bob) = pair()
             val server = TurnServer(listOf("turn:lab.example:3478?transport=udp"), "1800000000:abc", "secret")
             alice.turn = { listOf(server) }
-            alice.manager.relayOnly = true
+            alice.relay = true
             alice.manager.start(BOB)
             runCurrent()
             assertEquals(listOf(server), alice.media.last.servers)
@@ -1155,7 +1262,7 @@ class CallManagerTest {
     fun relayOnlyOnEitherSideKeepsTheCallOffTheGroup() =
         runTest {
             val (_, alice, bob) = neighbours()
-            alice.manager.relayOnly = true
+            alice.relay = true
             alice.manager.start(BOB)
             runCurrent()
             // A group pair would show the peer our real address: no invite at all.
@@ -1165,8 +1272,8 @@ class CallManagerTest {
             alice.manager.hangUp()
             runCurrent()
 
-            alice.manager.relayOnly = false
-            bob.manager.relayOnly = true
+            alice.relay = false
+            bob.relay = true
             alice.sent.clear()
             alice.manager.start(BOB)
             runCurrent()
@@ -1678,6 +1785,7 @@ class CallManagerTest {
         const val ALICE = "alice"
         const val BOB = "bob"
         const val CAROL = "carol"
+        const val HOUR_MS = 60 * 60_000L
         const val RELAY_CAND = "candidate:3 1 udp 41885439 203.0.113.9 49170 typ relay raddr 0.0.0.0 rport 0"
 
         val SDP =

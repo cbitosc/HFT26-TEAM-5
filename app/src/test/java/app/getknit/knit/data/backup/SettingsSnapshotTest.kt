@@ -84,6 +84,22 @@ class SettingsSnapshotTest {
             assertTrue(restored[booleanPreferencesKey(SettingsKeys.RESTORE_PENDING)]!!)
         }
 
+    /** The calls this phone saw end are its own (C-3.4-3); "Relay all calls" is the person's choice, and rides. */
+    @Test
+    fun dropsTheCallsTombstonesAndCarriesRelayAllCalls() =
+        runTest {
+            val prefs =
+                preferencesOf(
+                    stringPreferencesKey("call_tombs") to "[{\"i\":\"c1\",\"p\":5,\"t\":1}]",
+                    booleanPreferencesKey("calls_relay_all") to true,
+                )
+            val out = ByteArrayOutputStream()
+            SettingsSnapshot.export(prefs, out)
+            val restored = SettingsSnapshot.forRestore(ByteArrayInputStream(out.toByteArray()))
+            assertTrue(restored[booleanPreferencesKey("calls_relay_all")]!!)
+            assertNull(restored[stringPreferencesKey("call_tombs")])
+        }
+
     @Test
     fun theExportItselfCarriesNoRestoreMark() =
         runTest {

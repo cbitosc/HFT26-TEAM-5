@@ -160,3 +160,30 @@ core-telecom, which owns its audio route: the earpiece, the loudspeaker, and a w
 A headset, a watch or a car can answer the call and hang it up. Our own `CallActivity` and CallStyle notifications
 stay, because a self-managed call draws its own. ADR 2026-10.wbua records it, and `docs/VOICE_CALLS.md` §3.13
 specifies it. The system call log is still not used: a call's line in its thread is §3.12's.
+
+## Amendment (2026-10-13): what the minimal build owed
+
+The first amendment named six things owed before the feature leaves the branch. Call history and ICE restart came with
+the second and third amendments. The other four are built now:
+
+- **Tombstones outlive the process** (C-3.4-3). `CallManager` writes each one it adds to a `call/CallTombJournal`,
+  whole and off the inbound path, and reads the journal once as it starts. `onSignal` waits for that read before its
+  first decision. The read is of a local file, once per process, and depends on nothing the inbound reader would have
+  to read. `data/settings/CallTombStore` keeps the list in the settings DataStore, under one `call_tombs` key
+  (`SettingsKeys.TRANSIENT_PREFIXES`, so never in a backup), for 48 h: the longer of a carrier's custody (24 h) and a
+  spool's DM scope (48 h). A journal that cannot be read costs only its tombstones. Without it, a phone that heard a
+  call end and then died rang for the call's offer, or logged a second missed call, when the offer arrived late.
+- **"Relay all calls" is a setting** (C-3.7-3): `SettingsStore.callsRelayAll`, a Settings row shown where `CALLS_WIRED`
+  and the Internet plane are, off by default. It rides a backup, since it is the person's choice. `CallManager` takes
+  it as a function read at each call (`relayAll`) rather than a field the bridge sets. Until the store's first read
+  lands, the wiring reads it as on: a call in that instant goes through TURN rather than showing the peer an address
+  the person hid. `…debug.CALL op=relay` now writes the setting.
+- **The golden vectors**: six `messageContentCall*` fixtures in `vectors/wire-v1.json`, on the named `MessageContent`
+  form the call ctl rides (`MessageContentV2` refuses `cl`). Additive: no other byte moved. knit-ios pins the file's
+  fixture count, so its next sync needs that count raised.
+- **A lab scenario**: each `LabNode` boots a real `CallManager` over its `MeshManager`, with `LabCallMedia` for the
+  media and its tombstones in the node's settings file. `CallLabTest` runs a call across a relay into the far call
+  layer and no thread, and the restart case end to end.
+
+Guards: the restart cases in `CallManagerTest`, `CallTombStoreTest`, `SettingsSnapshotTest`'s two keys,
+`SettingsScreenContentTest` and `SettingsViewModelTest`'s relay rows, `GoldenVectorTest`, and `CallLabTest`.

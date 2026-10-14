@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import app.getknit.knit.data.relay.RelayFacts
 import app.getknit.knit.data.settings.BluetoothDownloadLimit
 import app.getknit.knit.data.settings.SettingsStore
+import app.getknit.knit.di.CALLS_WIRED
 import app.getknit.knit.identity.Alias
 import app.getknit.knit.identity.Identity
 import app.getknit.knit.identity.displayNameFor
@@ -93,6 +94,11 @@ class SettingsViewModel(
         settings.linkPreviewsEnabled
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
+    /** Whether every call goes through a relay's TURN server (docs/VOICE_CALLS.md C-3.7-3). Off by default. */
+    val relayAllCalls: StateFlow<Boolean> =
+        settings.callsRelayAll
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
     /** Whether to colour the app from the wallpaper. Off by default; hidden entirely below API 31. */
     val dynamicColor: StateFlow<Boolean> =
         settings.dynamicColor
@@ -156,6 +162,12 @@ class SettingsViewModel(
 
     fun setBluetoothDownloadLimit(value: BluetoothDownloadLimit) {
         viewModelScope.launch { settings.setBluetoothDownloadLimit(value) }
+    }
+
+    /** A no-op in a build that wires no calls, where the row never shows. */
+    fun setRelayAllCalls(value: Boolean) {
+        if (!CALLS_WIRED) return
+        viewModelScope.launch { settings.setCallsRelayAll(value) }
     }
 
     fun setDynamicColor(value: Boolean) {

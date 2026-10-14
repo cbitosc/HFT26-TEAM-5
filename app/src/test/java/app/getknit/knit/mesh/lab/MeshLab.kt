@@ -11,6 +11,10 @@ import androidx.room3.useReaderConnection
 import androidx.room3.withWriteTransaction
 import androidx.test.core.app.ApplicationProvider
 import app.getknit.knit.TextLimits
+import app.getknit.knit.call.CallManager
+import app.getknit.knit.call.CallSignals
+import app.getknit.knit.call.TurnServer
+import app.getknit.knit.call.TurnSource
 import app.getknit.knit.contacts.ContactCards
 import app.getknit.knit.contacts.ContactImporter
 import app.getknit.knit.contacts.ContactRemover
@@ -47,6 +51,7 @@ import app.getknit.knit.data.ratchet.GroupRatchetRepository
 import app.getknit.knit.data.ratchet.GroupRootRepository
 import app.getknit.knit.data.ratchet.RatchetRepository
 import app.getknit.knit.data.relay.RelayInviteApplier
+import app.getknit.knit.data.settings.CallTombStore
 import app.getknit.knit.data.settings.ContributionTotals
 import app.getknit.knit.data.settings.SettingsKeys
 import app.getknit.knit.data.settings.SettingsStore
@@ -1052,6 +1057,21 @@ class LabNode internal constructor(
 
     /** Every walkie chunk's plaintext this node's pipeline opened and handed the call layer (§3.11). */
     val talks = CopyOnWriteArrayList<ByteArray>()
+
+    /**
+     * The call layer (docs/VOICE_CALLS.md §3), rebuilt by boot() as the debug build's DI builds it, minus the media
+     * ([LabCallMedia]), TURN, the Wi-Fi Direct leg and the walkie. Its tombstones go to the settings file, so a
+     * restart() carries them as a process death does (C-3.4-3).
+     */
+    lateinit var calls: CallManager
+        private set
+
+    /**
+     * Every line this boot's call layer logged: `call <id> from <peer>: …` is its decision oracle. Each boot starts a
+     * list only its own [calls] writes, so a line here is never the dead process's.
+     */
+    var callLog: List<String> = emptyList()
+        private set
     lateinit var manager: MeshManager
         private set
     lateinit var messages: MessageRepository
@@ -1262,7 +1282,25 @@ class LabNode internal constructor(
                 ingressBudget = IngressBudget(burst = limits.ingressBurst, perMinute = limits.ingressPerMinute, clock = now),
                 spoolDialer = spool,
                 commons = commons,
+                onCallSignal = { sender, payload, sentAt -> calls.onSignal(sender, payload, sentAt) },
                 onCallTalk = { _, chunk, _, _ -> talks += chunk },
+            )
+        val callLines = CopyOnWriteArrayList<String>().also { callLog = it }
+        calls =
+            CallManager(
+                signals = CallSignals { peerId, payload -> manager.sendCallSignal(peerId, payload) },
+                turn =
+                    object : TurnSource {
+                        override suspend fun turnServers(peerId: String): List<TurnServer> = emptyList()
+
+                        override fun stunUrls(): List<String> = emptyList()
+                    },
+                media = LabCallMedia(),
+                scope = scope,
+                selfId = { nodeId },
+                clock = now,
+                log = { callLines += it },
+                tombs = CallTombStore(dataStore),
             )
         manager.start()
         // The session's collectors subscribe asynchronously; a frame sent before that is emitted into nobody.
@@ -1409,6 +1447,9 @@ class LabNode internal constructor(
         text: String,
         replyTo: ReplyRef? = null,
     ): Boolean = spaced { manager.sendChat(text = text, replyTo = replyTo) }
+
+    /** The call ids whose end this node's call layer has written to its settings file (C-3.4-3). */
+    suspend fun savedCallTombs(): Set<String> = CallTombStore(dataStore).load().mapTo(HashSet()) { it.id }
 
     /** Runs the local-storage sweep the 10-minute prune loop runs, now. */
     suspend fun sweepLocalStorage() = manager.sweepLocalStorage()

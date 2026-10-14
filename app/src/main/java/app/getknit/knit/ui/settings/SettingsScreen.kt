@@ -62,6 +62,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.getknit.knit.BuildConfig
 import app.getknit.knit.R
 import app.getknit.knit.data.settings.BluetoothDownloadLimit
+import app.getknit.knit.di.CALLS_WIRED
 import app.getknit.knit.mesh.lora.BoardBattery
 import app.getknit.knit.mesh.lora.LoraPlane
 import app.getknit.knit.ui.BackgroundBattery
@@ -91,6 +92,8 @@ internal data class SettingsFormState(
     val themeMode: ThemeMode = ThemeMode.System,
     val bluetoothDownloadLimit: BluetoothDownloadLimit = BluetoothDownloadLimit.DEFAULT,
     val linkPreviewsEnabled: Boolean = false,
+    /** "Relay all calls" (docs/VOICE_CALLS.md C-3.7-3), shown only where calls are wired. */
+    val relayAllCalls: Boolean = false,
     val dynamicColor: Boolean = false,
     val relay: RelaySummary = RelaySummary(),
     val lora: LoraSummary = LoraSummary(),
@@ -120,6 +123,7 @@ fun SettingsScreen(
     val themeMode by viewModel.themeMode.collectAsStateWithLifecycle()
     val bluetoothDownloadLimit by viewModel.bluetoothDownloadLimit.collectAsStateWithLifecycle()
     val linkPreviewsEnabled by viewModel.linkPreviewsEnabled.collectAsStateWithLifecycle()
+    val relayAllCalls by viewModel.relayAllCalls.collectAsStateWithLifecycle()
     val dynamicColor by viewModel.dynamicColor.collectAsStateWithLifecycle()
     val relay by viewModel.relaySummary.collectAsStateWithLifecycle()
     val lora by viewModel.loraSummary.collectAsStateWithLifecycle()
@@ -145,6 +149,7 @@ fun SettingsScreen(
                 themeMode = themeMode,
                 bluetoothDownloadLimit = bluetoothDownloadLimit,
                 linkPreviewsEnabled = linkPreviewsEnabled,
+                relayAllCalls = relayAllCalls,
                 dynamicColor = dynamicColor,
                 relay = relay,
                 lora = lora,
@@ -159,6 +164,7 @@ fun SettingsScreen(
         onSelectThemeMode = viewModel::setThemeMode,
         onSelectBluetoothDownloadLimit = viewModel::setBluetoothDownloadLimit,
         onToggleLinkPreviews = viewModel::setLinkPreviewsEnabled,
+        onToggleRelayAllCalls = viewModel::setRelayAllCalls,
         onToggleDynamicColor = viewModel::setDynamicColor,
         onOpenRelays = onOpenRelays,
         onOpenLora = onOpenLora,
@@ -185,6 +191,7 @@ internal fun SettingsScreenContent(
     onSelectThemeMode: (ThemeMode) -> Unit = {},
     onSelectBluetoothDownloadLimit: (BluetoothDownloadLimit) -> Unit = {},
     onToggleLinkPreviews: (Boolean) -> Unit = {},
+    onToggleRelayAllCalls: (Boolean) -> Unit = {},
     onToggleDynamicColor: (Boolean) -> Unit = {},
     onOpenRelays: () -> Unit,
     onOpenLora: () -> Unit = {},
@@ -200,6 +207,8 @@ internal fun SettingsScreenContent(
     showInternetRelays: Boolean = BuildConfig.INTERNET_PLANE,
     // Same, for the LoRa plane.
     showLoraRadio: Boolean = BuildConfig.LORA_PLANE,
+    // Same, for calls (experimental): only a build that wires them (`CALLS_WIRED`, debug) has a call to relay.
+    showCallRelay: Boolean = CALLS_WIRED,
     // Whether the platform can do wallpaper colours at all (API 31+). A parameter for the same reason as
     // the two above: the hidden case stays previewable and testable rather than depending on the device.
     showDynamicColor: Boolean = DYNAMIC_COLOR_SUPPORTED,
@@ -351,6 +360,17 @@ internal fun SettingsScreenContent(
                     enabled = form.linkPreviewsEnabled,
                     onToggle = onToggleLinkPreviews,
                     modifier = Modifier.testTag("settings_link_previews"),
+                )
+            }
+
+            // A call's relay is a TURN server on one of the relays below, so the switch sits with the Internet plane.
+            if (showInternetRelays && showCallRelay) {
+                ToggleRow(
+                    title = stringResource(R.string.settings_relay_calls_title),
+                    subtitle = stringResource(R.string.settings_relay_calls_subtitle),
+                    enabled = form.relayAllCalls,
+                    onToggle = onToggleRelayAllCalls,
+                    modifier = Modifier.testTag("settings_relay_calls"),
                 )
             }
 
@@ -890,6 +910,8 @@ fun SettingsScreenPreview() =
             onToggleContentFiltering = {},
             onOpenRelays = {},
             onAllowBattery = {},
+            // The screen a shipped build shows: calls, and so their relay row, are the debug build's alone.
+            showCallRelay = false,
         )
     }
 
@@ -905,6 +927,7 @@ fun SettingsScreenClonePreview() =
             onToggleContentFiltering = {},
             onOpenRelays = {},
             onAllowBattery = {},
+            showCallRelay = false,
         )
     }
 
@@ -921,5 +944,6 @@ fun SettingsScreenNewUserPreview() =
             onToggleContentFiltering = {},
             onOpenRelays = {},
             onAllowBattery = {},
+            showCallRelay = false,
         )
     }

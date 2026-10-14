@@ -348,6 +348,35 @@ class GoldenVectorTest {
                             mime = "video/mp4",
                         ),
                 ).encode(),
+            // The sealed voice-call ctl plaintext (docs/VOICE_CALLS.md §3.2; experimental, CAP_CALL builds only): the
+            // additive `cl` beside the ctl marker, on the named form like the transfer's (MessageContentV2 refuses it).
+            // An OFFER naming the Wi-Fi Direct group its caller would host (§3.10), the callee's joining RINGING, the
+            // one CANDS, the caller's ICE restart (§3.8), a walkie session's OFFER with its cast flag (§3.11, §2.7),
+            // and an END with its reason.
+            "messageContentCallOffer" to
+                call(
+                    CallPayload(
+                        id = frameId(8),
+                        ph = CallPayload.PHASE_OFFER,
+                        sdp = CALL_SDP,
+                        dw = DirectInvite(s = "DIRECT-kn-call", p = "passphrase", o = 47_001, k = b64(bytes(32, 9))),
+                    ),
+                ),
+            "messageContentCallRingingJoining" to
+                call(CallPayload(id = frameId(8), ph = CallPayload.PHASE_RINGING, dx = CallPayload.DIRECT_JOINING)),
+            "messageContentCallCands" to
+                call(
+                    CallPayload(
+                        id = frameId(8),
+                        ph = CallPayload.PHASE_CANDS,
+                        cand = listOf("candidate:3 1 udp 41885439 203.0.113.9 49170 typ relay raddr 0.0.0.0 rport 0"),
+                    ),
+                ),
+            "messageContentCallRestart" to call(CallPayload(id = frameId(8), ph = CallPayload.PHASE_OFFER, gen = 1, sdp = CALL_SDP)),
+            "messageContentCallWalkieOffer" to
+                call(CallPayload(id = frameId(8), ph = CallPayload.PHASE_OFFER, m = CallPayload.MEDIA_WALKIE, ct = true)),
+            "messageContentCallEnd" to
+                call(CallPayload(id = frameId(8), ph = CallPayload.PHASE_END, rsn = CallPayload.REASON_NO_ROUTE)),
             // Crypto scheme v3 (ADR 059) — every fixture above stays byte-identical. The envelope is v2's DM
             // form with `v = 3` and an EMPTY nonce (`40`); the unsigned wire envelope carries `sig` as the
             // empty byte string; the compact plaintext is the labeled `MessageContentV2` layout with raw ids.
@@ -551,6 +580,8 @@ class GoldenVectorTest {
             "fixture must be compact-encodable"
         }
 
+    private fun call(payload: CallPayload): ByteArray = MessageContent(body = "", ctl = MessageContent.CTL_CALL, cl = payload).encode()
+
     private fun frameId(seed: Int): String = FrameId.fromBytes(bytes(16, seed))
 
     private fun nodeId(seed: Int): String = NodeId.fromBytes(bytes(16, seed))
@@ -614,6 +645,9 @@ class GoldenVectorTest {
 
     private companion object {
         const val FILE = "wire-v1.json"
+
+        // A call fixture's SDP: its bytes are what is pinned, not its sense; the real one is 2–5 KB (§3.6).
+        const val CALL_SDP = "v=0\r\no=- 1 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n"
         const val ABOUT =
             "Knit's frozen v1 wire: the definite-length CBOR of one fixed instance of every wire type, and the raw-key " +
                 "bundle probe. GoldenVectorTest builds each fixture and compares it with these bytes. See vectors/README.md."

@@ -38,6 +38,10 @@ object SettingsKeys {
 
     fun spoolKeyStateKey(host: String) = stringPreferencesKey(SPOOL_KEY_STATE_PREFIX + host)
 
+    // The calls this phone saw end (`CallTombStore`, docs/VOICE_CALLS.md C-3.4-3): about this phone's calls, so in
+    // [TRANSIENT_PREFIXES].
+    const val CALL_TOMBS = "call_tombs"
+
     /**
      * Keys a backup never carries: state about *this phone's* radios and ROM (the Aware give-up and
      * initiator-hold journals, the model poison-pill latch), and the paired LoRa board's address, names and
@@ -50,6 +54,7 @@ object SettingsKeys {
      * entitlement ticket (`spool_ticket…`, ADR 2026-10.xkp4) is a bearer grant to this phone for a day, and must not
      * ride a backup file anywhere; what the ticket refresher knows about its asks (`spool_key_state…`, ADR 2026-10.3sk7)
      * is this phone's schedule, so a restored phone asks at once. The customer key beside it rides, like a `?k=` token.
+     * The calls this phone saw end (`call_tombs`) are this phone's too: a restored phone holds new sessions.
      */
     val TRANSIENT_PREFIXES: List<String> =
         listOf(
@@ -66,5 +71,6 @@ object SettingsKeys {
             "debug_",
             "spool_ticket",
             "spool_key_state",
+            CALL_TOMBS,
         )
 }

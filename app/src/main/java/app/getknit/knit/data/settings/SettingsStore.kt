@@ -141,6 +141,14 @@ class SettingsStore(
         dataStore.data.map { BuildConfig.INTERNET_PLANE && (it[KEY_LINK_PREVIEWS] ?: false) }
 
     /**
+     * Relay all calls (experimental, docs/VOICE_CALLS.md C-3.7-3): every call goes through a relay's TURN server and
+     * nothing this phone sends a callee names its own address, so the peer never learns it. Off by default, read by
+     * `CallManager` as each call opens its media, and shown only by a build that wires calls (`CALLS_WIRED`). A choice
+     * the person made, so it rides a backup.
+     */
+    val callsRelayAll: Flow<Boolean> = dataStore.data.map { it[KEY_CALLS_RELAY_ALL] ?: false }
+
+    /**
      * Whether this phone keeps a field log (ADR 2026-10.a239): a bounded record of how its radios behaved,
      * kept on the phone and handed over only by the user. **Off by default**: recording is the user's choice, made
      * on the Field log screen, even though nothing leaves the phone unless they share it.
@@ -661,6 +669,8 @@ class SettingsStore(
 
     suspend fun setLinkPreviewsEnabled(value: Boolean) = dataStore.edit { it[KEY_LINK_PREVIEWS] = value }
 
+    suspend fun setCallsRelayAll(value: Boolean) = dataStore.edit { it[KEY_CALLS_RELAY_ALL] = value }
+
     suspend fun setFieldLogEnabled(value: Boolean) = dataStore.edit { it[KEY_FIELD_LOG] = value }
 
     suspend fun setOpenToChat(value: Boolean) = dataStore.edit { it[KEY_OPEN_TO_CHAT] = value }
@@ -1086,6 +1096,7 @@ class SettingsStore(
         val KEY_INTRO_GRACE = stringSetPreferencesKey("intro_grace")
         val KEY_CONTENT_FILTERING = booleanPreferencesKey("content_filtering_enabled")
         val KEY_LINK_PREVIEWS = booleanPreferencesKey("link_previews_enabled")
+        val KEY_CALLS_RELAY_ALL = booleanPreferencesKey("calls_relay_all")
         val KEY_FIELD_LOG = booleanPreferencesKey("field_log_enabled")
         val KEY_OPEN_TO_CHAT = booleanPreferencesKey("open_to_chat")
         val KEY_DYNAMIC_COLOR = booleanPreferencesKey("dynamic_color")

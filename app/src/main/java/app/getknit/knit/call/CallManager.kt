@@ -1,9 +1,11 @@
 package app.getknit.knit.call
 
+import app.getknit.knit.data.forward.ForwardRepository
 import app.getknit.knit.data.message.CallRecord
 import app.getknit.knit.mesh.protocol.CallPayload
 import app.getknit.knit.mesh.protocol.DirectInvite
 import app.getknit.knit.mesh.protocol.FrameId
+import app.getknit.knit.mesh.spool.ScopeRegistry
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
@@ -113,7 +115,11 @@ data class CallTimings(
  *
  * One call at a time. Signaling is a sealed `CTL_CALL` DM per phase, which can arrive late, twice or out of order, so
  * every phase is idempotent on `(id, ph, gen)`, an offer alerts only inside `sentAt ± 60 s`, and a terminal phase for
- * a call we never saw is remembered so its late offer never rings.
+ * a call we never saw is remembered so its late offer never rings. Those tombstones outlive the process through
+ * [tombs] (C-3.4-3): a spool keeps a DM scope's frames for 48 h, and a process death in between must not ring them.
+ *
+ * **[relayAll]** is the user's "Relay all calls" (C-3.7-3), read as each call opens its media: TURN only, no host or
+ * server-reflexive candidate in anything we send, and no Wi-Fi Direct leg, whose pair would show the peer our address.
  *
  * **[onSignal] never waits on the network or the media.** It runs on the inbound path — a spool connection's only
  * reader, or the router's single collector — so it decides under [mutex], sends the small replies (RINGING, a busy
@@ -151,6 +157,8 @@ class CallManager(
     private val direct: CallDirect = CallDirect.None,
     private val walkie: CallWalkie = CallWalkie.None,
     private val dropToWalkie: Boolean = false,
+    private val relayAll: () -> Boolean = { false },
+    private val tombs: CallTombJournal = CallTombJournal.None,
 ) : CallControl {
     private class Live(
         val id: String,
@@ -208,10 +216,11 @@ class CallManager(
         val payload: CallPayload,
     )
 
-    // A terminal phase seen for a call id (its own [CallPayload.ph] and reason).
+    // A terminal phase seen for a call id (its own [CallPayload.ph] and reason), and when on this phone's clock.
     private class Tomb(
         val ph: Int,
         val rsn: Int?,
+        val at: Long,
     )
 
     private val mutex = Mutex()
@@ -239,13 +248,6 @@ class CallManager(
     /** The peer's walkie chunks for the connected session (§3.11), for the one collector that plays them. */
     val talk: Flow<TalkIn> = talkIn.receiveAsFlow()
 
-    /**
-     * Relay every new call through TURN and send no host or server-reflexive candidate (C-3.7-3). A debug-bridge
-     * toggle on this branch, not a setting: in-memory, read when a call opens its media.
-     */
-    @Volatile
-    var relayOnly: Boolean = false
-
     /** When a call between neighbours raises its Wi-Fi Direct group (§3.10); a debug-bridge toggle, in memory. */
     @Volatile
     var directMode: DirectMode = DirectMode.PREWARM
@@ -254,10 +256,23 @@ class CallManager(
     @Volatile
     private var lastServers: List<TurnServer> = emptyList()
 
+    // C-3.4-3 across a process death: a tombstone added since the last save, for the one writer to [tombs].
+    private val tombsDirty = Channel<Unit>(Channel.CONFLATED)
+
+    // The tombstones [tombs] kept from an earlier process, merged in once. [onSignal] waits for it before its first
+    // decision, so a late OFFER for a call that ended before a restart is judged against them.
+    private val restored: Deferred<Unit> = scope.async { restoreTombs() }
+
     init {
         // What a call's lane carries in: the same signals as the mesh (deduplicated with their mesh copies), and the
         // peer's group candidates. Declared last, so the collector never sees a field before it is set.
         scope.launch { direct.inbound.collect { onLane(it) } }
+        if (tombs !== CallTombJournal.None) {
+            scope.launch {
+                restored.await()
+                for (ignored in tombsDirty) saveTombs()
+            }
+        }
     }
 
     // ---- user actions ----
@@ -355,13 +370,17 @@ class CallManager(
 
     // ---- the mesh's side ----
 
-    /** One `CTL_CALL` from [senderId], an accepted contact (the pipeline checks). Returns without waiting on anything slow. */
+    /**
+     * One `CTL_CALL` from [senderId], an accepted contact (the pipeline checks). Returns without waiting on anything
+     * slow: its one wait is the process's first, for the tombstones [tombs] kept, a read of a local file.
+     */
     suspend fun onSignal(
         senderId: String,
         payload: CallPayload,
         sentAt: Long,
     ) {
         val me = selfId()
+        restored.await()
         val sends =
             mutex.withLock {
                 // C-3.3-4: custody and the spool both re-deliver; the second copy changes nothing.
@@ -412,7 +431,7 @@ class CallManager(
         // §3.11: a walkie offer carries no media to vet; a build that runs no walkie declines it as one it cannot play.
         val media = if (isWalkieOnly(p)) walkie.enabled else p.m and CallPayload.MEDIA_AUDIO != 0 && sdp != null && SdpGuard.accepts(sdp)
         if (!media) {
-            tombstones[p.id] = Tomb(CallPayload.PHASE_DECLINE, CallPayload.REASON_MEDIA)
+            bury(p.id, CallPayload.PHASE_DECLINE, CallPayload.REASON_MEDIA)
             return listOf(Send(sender, CallPayload(id = p.id, ph = CallPayload.PHASE_DECLINE, rsn = CallPayload.REASON_MEDIA)))
         }
         live?.takeIf { it.phase != CallPhase.Ended }?.let { return onOfferWhileLive(it, sender, p, sdp, me, now) }
@@ -458,7 +477,7 @@ class CallManager(
     ): CallPayload = liveMedia(walkieOk).let { m -> p.copy(m = m, ct = castFlag(m)) }
 
     /** [p]'s Wi-Fi Direct invite, when this side may take it up at all and every part of it is usable. */
-    private fun directInviteOf(p: CallPayload): DirectInvite? = p.dw?.takeIf { !relayOnly && it.isUsable() }
+    private fun directInviteOf(p: CallPayload): DirectInvite? = p.dw?.takeIf { !relayAll() && it.isUsable() }
 
     /** The callee's side: joins [l]'s group now, when it was offered one and this phone can. True when it did. */
     private fun commitJoin(
@@ -511,7 +530,7 @@ class CallManager(
             missedCalls.trySend(MissedCall(sender, at))
             loggedCalls.trySend(CallLogged(sender, at, CallRecord(id = p.id, outgoing = false, walkie = isWalkieOnly(p), missed = true)))
         }
-        if (tomb == null) tombstones[p.id] = Tomb(CallPayload.PHASE_OFFER, null)
+        if (tomb == null) bury(p.id, CallPayload.PHASE_OFFER, null)
         log("call ${p.id} from $sender: ${if (tomb == null) "stale offer" else "offer after its end"}")
         return true
     }
@@ -529,12 +548,12 @@ class CallManager(
             current.outgoing && current.peerId == sender &&
                 (current.phase == CallPhase.Calling || current.phase == CallPhase.Ringing)
         if (!glare) {
-            tombstones[p.id] = Tomb(CallPayload.PHASE_DECLINE, CallPayload.REASON_BUSY)
+            bury(p.id, CallPayload.PHASE_DECLINE, CallPayload.REASON_BUSY)
             return listOf(Send(sender, CallPayload(id = p.id, ph = CallPayload.PHASE_DECLINE, rsn = CallPayload.REASON_BUSY)))
         }
         if (me < sender) {
             // Ours survives: the peer drops its own offer and answers ours.
-            tombstones[p.id] = Tomb(CallPayload.PHASE_OFFER, null)
+            bury(p.id, CallPayload.PHASE_OFFER, null)
             log("call ${p.id} from $sender: glare, ours (${current.id}) survives")
             return emptyList()
         }
@@ -660,7 +679,7 @@ class CallManager(
             return finish(l, p.rsn ?: CallPayload.REASON_USER, byPeer = true, missed = missed)
         }
         // A call we never saw, or one already replaced: remembered, so its late offer never rings (C-3.4-3).
-        if (p.id !in tombstones) tombstones[p.id] = Tomb(p.ph, p.rsn)
+        if (p.id !in tombstones) bury(p.id, p.ph, p.rsn)
         return emptyList()
     }
 
@@ -779,7 +798,7 @@ class CallManager(
     @Suppress("ReturnCount") // a ladder of exits: the call ended under each slow step
     private suspend fun dial(l: Live) {
         // §3.10: a group we would host for a neighbour. Minting raises nothing; the callee's "joining" does.
-        val invite = if (!relayOnly) direct.invite(l.id, l.peerId) else null
+        val invite = if (!relayAll()) direct.invite(l.id, l.peerId) else null
         // §3.11: offer the drop to a walkie to a peer that runs one; it takes effect only if its ANSWER echoes it.
         val offersWalkie = dropToWalkie && walkie.enabled && walkie.capable(l.peerId)
         mutex.withLock {
@@ -815,7 +834,7 @@ class CallManager(
             if (!current(l)) return
             // §3.10: a callee that did not join while it rang (answer mode, or a phone that may not join off screen)
             // joins now. A relay-only answer never does.
-            if (!relayOnly) commitJoin(l, prewarm = false)
+            if (!relayAll()) commitJoin(l, prewarm = false)
         }
         val servers = l.servers?.await() ?: servers(l.peerId)
         val session = openFor(l, servers) ?: return
@@ -880,7 +899,7 @@ class CallManager(
         l: Live,
         servers: List<TurnServer>,
     ): CallSession? {
-        val relay = relayOnly
+        val relay = relayAll()
         val goesDirect = !relay && mutex.withLock { l.invite != null }
         val session = media.open(servers, relay, goesDirect) { event -> scope.launch { onMedia(l, event) } }
         val kept =
@@ -1214,7 +1233,60 @@ class CallManager(
         l.session?.close()
         l.session = null
         direct.end(l.id, terminal)
-        if (l.id !in tombstones) tombstones[l.id] = Tomb(CallPayload.PHASE_END, null)
+        if (l.id !in tombstones) bury(l.id, CallPayload.PHASE_END, null)
+    }
+
+    /** Remembers the terminal phase [ph] of the call [id] (C-3.4-3), for this process and, through [tombs], the next. */
+    private fun bury(
+        id: String,
+        ph: Int,
+        rsn: Int?,
+    ) {
+        tombstones[id] = Tomb(ph, rsn, clock())
+        tombsDirty.trySend(Unit)
+    }
+
+    /**
+     * Merges in what [tombs] kept from an earlier process, once, as the manager starts: those younger than
+     * [TOMB_KEEP_MS], oldest first, ahead of any this process added meanwhile, so the bound evicts the oldest. A journal
+     * that cannot be read costs this process nothing but them.
+     */
+    private suspend fun restoreTombs() {
+        if (tombs === CallTombJournal.None) return
+        val kept =
+            try {
+                tombs.load()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (
+                @Suppress("TooGenericExceptionCaught") e: Exception, // a journal never stops a call ringing
+            ) {
+                log("call tombstones not read: ${e.javaClass.simpleName}")
+                emptyList()
+            }
+        val now = clock()
+        val fresh = kept.filter { now - it.at <= TOMB_KEEP_MS }.sortedBy { it.at }
+        mutex.withLock {
+            val since = tombstones.toList()
+            tombstones.clear()
+            fresh.forEach { tombstones[it.id] = Tomb(it.ph, it.rsn, it.at) }
+            since.forEach { (id, tomb) -> tombstones[id] = tomb }
+        }
+        if (fresh.isNotEmpty()) log("call tombstones: ${fresh.size} kept from before")
+    }
+
+    /** Writes every tombstone held to [tombs], whole; a failed write leaves the journal as it was. */
+    private suspend fun saveTombs() {
+        val all = mutex.withLock { tombstones.map { (id, t) -> CallTomb(id, t.ph, t.rsn, t.at) } }
+        try {
+            tombs.save(all)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (
+            @Suppress("TooGenericExceptionCaught") e: Exception, // a journal never stops a call
+        ) {
+            log("call tombstones not saved: ${e.javaClass.simpleName}")
+        }
     }
 
     private fun publish() {
@@ -1254,6 +1326,10 @@ class CallManager(
     private companion object {
         // How many call ids (and id/phase/gen keys) are remembered: far more than a phone sees inside a custody TTL.
         const val MAX_REMEMBERED = 256
+
+        // How long a kept tombstone outlives its process (C-3.4-3): as long as a late copy of the call's OFFER can still
+        // arrive, from a carrier's custody or a spool's copy of the DM scope.
+        val TOMB_KEEP_MS = maxOf(ForwardRepository.DEFAULT_TTL_MS, ScopeRegistry.DEFAULT_TTL_MS)
 
         // A CANDS can beat the peer's SDP being applied; this many lines wait for it.
         const val MAX_EARLY_CANDS = 64

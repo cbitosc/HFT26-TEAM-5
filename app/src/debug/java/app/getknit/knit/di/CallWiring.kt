@@ -18,6 +18,7 @@ import app.getknit.knit.call.TalkLink
 import app.getknit.knit.call.TurnSource
 import app.getknit.knit.data.MessageRepository
 import app.getknit.knit.data.PeerRepository
+import app.getknit.knit.data.settings.CallTombStore
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.debug.call.CallBarHost
 import app.getknit.knit.debug.call.CallController
@@ -49,6 +50,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import org.koin.android.ext.koin.androidContext
@@ -113,7 +115,15 @@ fun callModule(): Module? =
         }
         // The call screen reads the media's stats itself (its diagnostics card); the manager sees only the seam.
         single<CallMedia> { get<WebRtcCallMedia>() }
+        single { CallTombStore(get()) }
         single {
+            // C-3.7-3's "Relay all calls", read as each call opens its media. Until the store's first read lands it
+            // reads as on: a call in that instant goes through TURN rather than showing the peer an address it hides.
+            val relayAll =
+                get<SettingsStore>()
+                    .callsRelayAll
+                    .map<Boolean, Boolean?> { it }
+                    .stateIn(get<CoroutineScope>(), SharingStarted.Eagerly, null)
             CallManager(
                 signals = CallSignals { peerId, payload -> get<MeshManager>().sendCallSignal(peerId, payload) },
                 turn =
@@ -128,6 +138,8 @@ fun callModule(): Module? =
                 log = { Log.i(TAG, it) },
                 direct = get<DirectCallPath>(),
                 walkie = if (WALKIE_WIRED) walkieRoute() else CallWalkie.None,
+                relayAll = { relayAll.value ?: true },
+                tombs = get<CallTombStore>(),
             )
         }
         if (WALKIE_WIRED) {

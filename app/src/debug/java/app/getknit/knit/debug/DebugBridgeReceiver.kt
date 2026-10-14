@@ -2222,8 +2222,10 @@ class DebugBridgeReceiver :
             }
 
             "relay" -> {
-                calls.relayOnly = intent.getBooleanExtra("on", true)
-                return reply("ok", "relay-only ${calls.relayOnly}")
+                // Settings' "Relay all calls" (`SettingsStore.callsRelayAll`, C-3.7-3): persisted, and the row shows it.
+                val on = intent.getBooleanExtra("on", true)
+                getKoin().get<SettingsStore>().setCallsRelayAll(on)
+                return reply("ok", "relay-only $on (persisted)")
             }
 
             "direct" -> {
@@ -2318,7 +2320,7 @@ class DebugBridgeReceiver :
         return JSONObject()
             .put("status", "ok")
             .put("foreground", foreground)
-            .put("relayOnly", calls.relayOnly)
+            .put("relayOnly", getKoin().get<SettingsStore>().callsRelayAll.first())
             .put("pathPref", if (DefaultPath.enabled) "android" else "off")
             .put("turnTls", if (WebRtcCallMedia.turnTlsUnchecked) "unchecked" else "checked")
             .put("turnPrune", if (WebRtcCallMedia.turnPruneOff) "off" else "on")

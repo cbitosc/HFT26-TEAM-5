@@ -215,7 +215,8 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   `docs/VOICE_CALLS.md`). `--es op state` (the default) dumps the call, its phase, `reason` and the selected
   candidate pair as `route` (`host/host`, `relay/srflx`…), plus `relayOnly`. `--es op start --es peer <nodeId>`
   dials; `answer` opens the call screen, which answers; `decline` and `hangup` end it; `--es op relay --ez on true`
-  sends every new call through TURN (C-3.7-3); `--es op turn --es peer <nodeId>` asks the connected spools for a
+  sends every new call through TURN (C-3.7-3) — it writes Settings' "Relay all calls" (`SettingsStore.callsRelayAll`),
+  so it survives a restart and the row shows it; `--es op turn --es peer <nodeId>` asks the connected spools for a
   credential and reports its URLs and expiry, never the username or password, plus `stun`: the URLs a call would
   gather from beside them (the hellos' `stun` lists through `call/StunServers`, C-7.6-20). It spends a real
   issue at each spool asked.
