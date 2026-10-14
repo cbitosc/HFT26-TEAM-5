@@ -34,11 +34,14 @@ class PinnedBadgeKey(
  */
 object BadgeKeys {
     /**
-     * The production key. **A placeholder** until the maintainer runs `npm run anywhere -- keygen --badge` and hands
-     * over the public half and its `kid` (contract, release step 1). Until then it is null, so a release build trusts no
-     * key and shows no badge at all — the safe failure.
+     * The production key, from the maintainer's `npm run anywhere -- keygen --badge` (2026-10-14, handed over by the
+     * coordinator): raw public key `Ky3T0yKKHnX9wCcJ2DGti16wcEyYDKGxmtXNb5A8JUE` (unpadded base64url), kid `ea50a7de77a33985`.
      */
-    val PRODUCTION: PinnedBadgeKey? = null
+    val PRODUCTION: PinnedBadgeKey =
+        PinnedBadgeKey(
+            kid = "ea50a7de77a33985",
+            publicKey = hex("2b2dd3d3228a1e75fdc02709d831ad8b5eb0704c980ca1b19ad5cd6f903c2541"),
+        )
 
     /**
      * RFC 8032 §7.1 TEST 1's public key: what `npm run anywhere:dev` and the tests sign with. Pinned in debug builds
@@ -51,7 +54,7 @@ object BadgeKeys {
         )
 
     /** Every key a build trusts: production always, the RFC test key only where [debug]. */
-    fun forBuild(debug: Boolean): List<PinnedBadgeKey> = listOfNotNull(PRODUCTION, RFC8032_TEST1.takeIf { debug })
+    fun forBuild(debug: Boolean): List<PinnedBadgeKey> = if (debug) listOf(PRODUCTION, RFC8032_TEST1) else listOf(PRODUCTION)
 
     /** A key's id: `SHA-256(raw public key)[0..8]` as lowercase hex, the coordinator's `ticketKid` derivation. */
     fun kidOf(publicKey: ByteArray): String = hexOf(sha256(publicKey).copyOf(Badges.KID_BYTES))

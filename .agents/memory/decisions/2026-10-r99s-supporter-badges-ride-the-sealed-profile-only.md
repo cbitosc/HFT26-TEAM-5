@@ -45,7 +45,7 @@ Spec: `docs/SUPPORTER_BADGE.md`.
 - **Verified on display.** Rows are stored unverified and `PeerBadges` re-runs the six checks at the local clock on
   every change and at each window edge, so a badge lapses on an offline phone, and one under a key a later build pins
   shows without a resend.
-- **Pinned keys are a list.** `BadgeKeys`: production (a placeholder until the maintainer's `keygen --badge`) in every
+- **Pinned keys are a list.** `BadgeKeys`: production (kid `ea50a7de77a33985`, from the maintainer's `keygen --badge`) in every
   build, RFC 8032 TEST 1 in debug only. A new key ships in a release before it signs anything.
 - **Placements.** Profile sheet (mark, pill, sheet), DM chat header, contacts list, chat list row, group member list;
   not message-sender avatars, call screens or notifications. The mark is drawn outside the avatar's clip, so `Avatar`

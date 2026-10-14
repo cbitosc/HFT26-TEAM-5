@@ -60,8 +60,9 @@ not a wire change.
 
 ## 4. Pinned keys
 
-- **C-4-1** Every build pins the production badge key: its `kid` and raw public key. **Until the maintainer's key is
-  generated the production entry is absent**, so a release build shows no badge at all.
+- **C-4-1** Every build pins the production badge key: kid `ea50a7de77a33985`, raw public key
+  `Ky3T0yKKHnX9wCcJ2DGti16wcEyYDKGxmtXNb5A8JUE` (unpadded base64url), from the maintainer's `keygen --badge`
+  (2026-10-14).
 - **C-4-2** Debug builds also pin RFC 8032 §7.1 TEST 1 (`kid 21fe31dfa154a261`, public
   `11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo`), which a local issuer and the tests sign with.
 - **C-4-3** Adding a key is a list append (`BadgeKeys`), shipped in an app release before it signs anything.

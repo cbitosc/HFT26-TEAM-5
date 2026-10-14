@@ -13,6 +13,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.Base64
 
 /** The six checks of docs/SUPPORTER_BADGE.md §3, one failure each, and the vectors this repo owns. */
 class BadgesTest {
@@ -39,6 +40,21 @@ class BadgesTest {
     fun `the RFC 8032 TEST 1 key's kid`() {
         assertEquals("21fe31dfa154a261", BadgeKeys.kidOf(BadgeKeys.RFC8032_TEST1.publicKey))
         assertEquals(BadgeKeys.RFC8032_TEST1.kid, BadgeKeys.kidOf(BadgeKeys.RFC8032_TEST1.publicKey))
+    }
+
+    @Test
+    fun `the production key is pinned as the maintainer's keygen printed it`() {
+        val production = BadgeKeys.PRODUCTION
+        assertEquals("ea50a7de77a33985", production.kid)
+        assertEquals(production.kid, BadgeKeys.kidOf(production.publicKey))
+        assertEquals(
+            "Ky3T0yKKHnX9wCcJ2DGti16wcEyYDKGxmtXNb5A8JUE",
+            java.util.Base64
+                .getUrlEncoder()
+                .withoutPadding()
+                .encodeToString(production.publicKey),
+        )
+        assertEquals(listOf(production), BadgeKeys.forBuild(debug = false))
     }
 
     @Test
