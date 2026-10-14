@@ -490,3 +490,75 @@ only on a fallback dial that fails; a close peer's Coded connect lands fast and 
 few seconds after the experiment is switched off, a running Coded window can still refill `codedDeviceFor`, so a
 fallback dial there counts in `onBleCodedDial` with no `via=`. It is left counted: that dial does go to a Coded address
 and opens on Coded. Test: `DialPlanTest`.
+
+## Amendment 2026-10-14 — a link that flaps backs off its step-up, never its step-down (#169)
+
+Status: draft, pending review and the device trial below.
+
+**What was observed (#169).** A field log from an external user's Xiaomi (MT6769, Android 15, 2.9.0-alpha.0) covers
+43 h of one side of a link; the peer drove its PHY. It holds 27 step-downs and 22 step-ups, in bursts: 14 steps in
+33 min, 6 in 15 min, 9 in 75 min. Two step-downs came 21–22 s after a step-up. That is `minSwitchGapMs` (20 s) plus
+one 2 s edge read: `weakReads` keeps counting during the gap, so the step-down fires as soon as the gap runs out.
+
+The two ends did not read the link 20 dB apart. This side's `bt_phy` RSSI lags (5 s reads above −75, an EWMA at
+α 0.5), and its own `bt_link` samples read −83 to −98 shortly after the driver's "strong" step-downs. One step-down
+at −67 read −93 nine seconds later, and the link was lost 18 s after the step. The driver's reads were early, not
+wrong: the link really dipped. Tripping three weak smoothed reads takes roughly 10 s at about −90, and dips of 6–8 s
+to −95 do not trip the rule.
+
+Some step-downs in those bursts were the start of a real walk-away that lost the link within minutes. At the edge a
+late step-down costs the link. A late step-up costs throughput and airtime, never the link: S=8 moves about a fifth of
+1M. So the fix backs off the step-up alone, and the step-down is never later than three weak reads and the 20 s gap.
+
+**What changed.**
+
+- A **reversal** is a step-down to Coded that lands less than `PhyTuning.flapWindowMs` (5 min) after the link's last
+  step-up. Both edges are taken from the controller's reports (`PhyStepper.onPhy`), not from the requests.
+- Each reversal doubles `PhyStepper.stepUpBackoffMs`, the least time the link must spend on Coded since that step-down
+  before AUTO may step up. It starts at the minimum gap (20 s), so a link that has not flapped steps exactly as
+  before. It then goes 40 s, 80 s, 160 s, and stops at `PhyTuning.stepUpBackoffMaxMs` (5 min).
+- A step-down a whole window after the last step-up (the link stayed fast a while) resets the backoff to 20 s.
+- The step-up holds are unchanged (30 s at −72, 10 s at −62) and may run during the backoff, so a link that is
+  plainly back in range steps up on the first read once the backoff has run.
+- Step-downs, the `coded` / `1m` modes, the request timeout and give-up, and the read cadence are untouched.
+- The backoff belongs to one link's stepper, so a relink starts at 20 s. A link that opened on Coded has no backoff.
+- `BlePhyControl` logs `bt phy <id> reversal <n>: step-up backoff <s>s (drives=…)` on each reversal, and
+  `bt phy <id> step-up backoff reset to 20s (drives=…)` when a fast stretch resets it, in whole seconds so a script
+  can parse them. The watching side logs the same lines with `drives=false`, from the PHY updates it is sent, so a
+  trial counts one side. No field event was added.
+- `…debug.PHY` sets the new fields with `--ei flapWindowMs N` and `--ei stepUpBackoffMaxMs N`, and the reply's `tuning`
+  shows them.
+
+The modelled series is a link at −58 that dips to −90 for 10 s every 2 min, with reads at the stepper's own cadence and
+one decision per read. Today's rule takes 16 steps in 30 min and 30 in an hour. With the backoff it takes 11 and 19.
+Every other dip trips the rule, and a link held on Coded for 5 min sits out the trip between. At the cap a cycle lasts
+at least 5 min on Coded plus 20 s on 1M/2M, so at most 2 steps per 5 min 20 s. The minimum gap alone allowed 2 steps
+per 40 s.
+
+**Not taken.**
+
+- *Doubling `minSwitchGapMs` both ways*, the issue's first option. It delays the step-down that begins a walk-away, and
+  at the edge that costs the link.
+- *Multiplying the step-up holds.* A 5 min hold has to be contiguous, and a link that dips every 2 min never meets
+  one, so it would stay on Coded for as long as it flaps. A minimum time on Coded bounds the cycle rate and still lets
+  the link back up.
+- *A faster or less smoothed `bt_phy` reading on the watching side.* The driver's reads were early, not wrong. A
+  steadier record would not have changed the steps.
+
+**What it costs.** A link that flapped and then settled in range waits up to 5 min on Coded before stepping up, at
+about a fifth of 1M's throughput. Each byte also holds the air about 8× as long as on 1M. That air is shared with
+the scanner, the phone's other LE links and Wi-Fi coexistence, so the wait costs radio-on time and contention too.
+That cost is unmeasured on these phones, and no link is lost by it. The flap window sets what counts as a flap. A link whose fast stretches last longer
+than 5 min resets each time, so it can still step twice per stretch. The field bursts had shorter stretches. A flap
+that runs through relinks also starts over each time.
+
+Tests: `PhyStepUpBackoffTest` covers the dip series, a single walk-away and return stepping as today, a second walk-away
+whose step-down is not delayed, the backoff doubling to its cap and resetting, a link that opened on Coded, and the
+pinned modes. **Device trial owed:** two Coded-capable lab phones in AUTO for at least 20 min: about 15 min of swinging,
+then the walk-away, since the 300s level first appears around minute 7. Hold the driver (the larger id) in a hand swung
+between body-blocked and clear, with its screen off for part of the run. Count on the driver's logcat only
+(`drives=true`): its `bt phy <id> …→…` lines and its `bt phy <id> reversal <n>: step-up backoff <s>s (drives=true)`
+lines. The trial passes if the reversals' backoffs climb 40s, 80s, 160s, 300s, each `CODED→` step-up after a reversal
+comes no sooner than its backoff after the step-down before it, and from the fourth reversal on the link steps at most
+twice in any 5 min 20 s. A walk-away at the end of the trial must still step down on today's rule: three weak reads,
+never inside 20 s of the last step.

@@ -16,6 +16,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.time.Duration.Companion.milliseconds
 
 /** One link's PHY as the bridge reports it (ADR 2026-10.yvn6). */
 data class PhyLinkStatus(
@@ -192,9 +193,12 @@ internal class BlePhyControl(
     ) {
         val before = stepper.phy
         val wasGivenUp = stepper.gaveUp
+        val reversalsBefore = stepper.reversals
+        val backoffBefore = stepper.stepUpBackoffMs
         val changed = stepper.onPhy(linkPhyOf(txPhy), status == BluetoothGatt.GATT_SUCCESS, now())
         if (changed) {
             Log.i(TAG, "bt phy $nodeId $before→${stepper.phy} rssi=${stepper.smoothedRssi?.toInt()} (${mode().wire})")
+            logBackoff(reversalsBefore, backoffBefore)
             onStep(stepper.phy == LinkPhy.CODED)
         } else if (!update) {
             Log.i(TAG, "bt phy $nodeId on ${stepper.phy} (drives=$drives)")
@@ -204,6 +208,29 @@ internal class BlePhyControl(
             onGiveUp()
         }
         onPhyKnown()
+    }
+
+    /**
+     * Logs a step-down that moved the step-up backoff (#169): a reversal (a step-down soon after a step-up) with the
+     * backoff it set, or a reset after a link that held fast a while. A trial counts reversals from these lines, on the
+     * driver's logcat (`drives=true`): the watching side logs the same steps from the updates it is sent.
+     */
+    private fun logBackoff(
+        reversalsBefore: Int,
+        backoffBefore: Long,
+    ) {
+        val backoff = stepper.stepUpBackoffMs
+        // Whole seconds, so a trial script can parse the number (Duration's own text reads `1m 20s`).
+        val seconds = backoff.milliseconds.inWholeSeconds
+        when {
+            stepper.reversals != reversalsBefore -> {
+                Log.i(TAG, "bt phy $nodeId reversal ${stepper.reversals}: step-up backoff ${seconds}s (drives=$drives)")
+            }
+
+            backoff < backoffBefore -> {
+                Log.i(TAG, "bt phy $nodeId step-up backoff reset to ${seconds}s (drives=$drives)")
+            }
+        }
     }
 
     private val callback =

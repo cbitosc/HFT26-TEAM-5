@@ -221,7 +221,8 @@ import java.nio.ByteBuffer
  * - [ACTION_PHY] — the **BLE Coded PHY experiment** (ADR 2026-10.yvn6; `BuildConfig.BLE_CODED_PHY`, else an error).
  *   `--es mode off|auto|coded|1m` stores the mode (`SettingsStore.debugBlePhyMode`, applied live), `--es txpower
  *   high|medium` re-raises the Coded advert, and `--ei stepDown|stepUp|stepDownReads|minGapMs|stepUpHoldMs N` and
- *   `--ei stepUpFast|stepUpFastHoldMs N` (−62, 10000) override the step thresholds, `--ei credit N` the dB a Coded
+ *   `--ei stepUpFast|stepUpFastHoldMs N` (−62, 10000) and `--ei flapWindowMs|stepUpBackoffMaxMs N` (300000, 300000:
+ *   the step-up backoff of a link that flaps, #169) override the step thresholds, `--ei credit N` the dB a Coded
  *   advert reading gains on the 1M scale (12), `--ei fastAdvertMs|fastHoldMs N` the Coded advert's interval after a
  *   link at range drops (250) and how long it holds (180000) — on the dialing side, how long the scan hunts the lost
  *   peer — with `--ei huntInUseHoldMs N` that hunt's bound while Knit is open on a lit screen (1800000), `--ei codedPace|codedChunk N` a file's feed rate in B/s
@@ -2286,6 +2287,8 @@ class DebugBridgeReceiver :
                 stepUpHoldMs = int("stepUpHoldMs")?.toLong() ?: t.stepUpHoldMs,
                 stepUpFastDbm = int("stepUpFast") ?: t.stepUpFastDbm,
                 stepUpFastHoldMs = int("stepUpFastHoldMs")?.toLong() ?: t.stepUpFastHoldMs,
+                flapWindowMs = int("flapWindowMs")?.toLong() ?: t.flapWindowMs,
+                stepUpBackoffMaxMs = int("stepUpBackoffMaxMs")?.toLong() ?: t.stepUpBackoffMaxMs,
                 codedCreditDb = int("credit")?.toDouble() ?: t.codedCreditDb,
                 fastAdvertMs = int("fastAdvertMs") ?: t.fastAdvertMs,
                 fastHoldMs = int("fastHoldMs")?.toLong() ?: t.fastHoldMs,
@@ -2315,6 +2318,8 @@ class DebugBridgeReceiver :
                     .put("stepUpFast", tuned.stepUpFastDbm)
                     .put("stepUpFastHoldMs", tuned.stepUpFastHoldMs)
                     .put("minGapMs", tuned.minSwitchGapMs)
+                    .put("flapWindowMs", tuned.flapWindowMs)
+                    .put("stepUpBackoffMaxMs", tuned.stepUpBackoffMaxMs)
                     .put("credit", tuned.codedCreditDb.toInt())
                     .put("fastAdvertMs", tuned.fastAdvertMs)
                     .put("fastHoldMs", tuned.fastHoldMs)

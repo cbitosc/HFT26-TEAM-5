@@ -66,6 +66,20 @@ data class PhyTuning(
     val stepUpFastHoldMs: Long = 10_000,
     /** No automatic switch sooner than this after the last one, so a link at the boundary cannot flap. */
     val minSwitchGapMs: Long = 20_000,
+    /**
+     * A step-down to Coded this soon after the link's last step-up is a reversal, and doubles AUTO's step-up backoff;
+     * a later one (the link stayed fast a while) resets it ([PhyStepper.stepUpBackoffMs], #169).
+     */
+    val flapWindowMs: Long = 300_000,
+    /**
+     * The most the step-up backoff grows to: the longest a link that flaps is held on Coded after a step-down before
+     * AUTO may step it up again. Only the step-up backs off, never the step-down: a link flapping in a hand swung between
+     * a body-blocked and a clear path stepped 14 times in 33 min (#169), and some of those step-downs began a real
+     * walk-away that lost the link minutes later. A late step-down at the edge costs the link; a late step-up costs
+     * throughput and airtime (S=8 moves about a fifth of 1M, and keeps the shared 2.4 GHz radio on about 8× as long per
+     * byte), never the link.
+     */
+    val stepUpBackoffMaxMs: Long = 300_000,
     /** A request no PHY update answered by then is given up for the link (a controller without Coded answers nothing). */
     val requestTimeoutMs: Long = 3_000,
     /** The link-RSSI read cadence, tightened to [edgeReadMs] once the link is at or under [edgeDbm]. */
@@ -438,6 +452,20 @@ class PhyStepper(
     var smoothedRssi: Double? = null
         private set
 
+    /** Step-downs to Coded within [PhyTuning.flapWindowMs] of the link's last step-up, over the link's life. */
+    @get:Synchronized
+    var reversals: Int = 0
+        private set
+
+    /**
+     * The least time a link must have spent on Coded since its last step-down before AUTO steps it up (#169):
+     * [PhyTuning.minSwitchGapMs] until the link has flapped — today's rule, which [decide]'s minimum gap already holds
+     * — doubled by each reversal, up to [PhyTuning.stepUpBackoffMaxMs]. The step-up holds still apply on top, and may
+     * run during it. Per link: a relink starts over.
+     */
+    @get:Synchronized
+    val stepUpBackoffMs: Long get() = backoffMs(tuning(), backoffLevel)
+
     // The PHYs that answer the request in flight, null when none is.
     private var pending: Set<LinkPhy>? = null
     private var pendingAt = 0L
@@ -445,6 +473,11 @@ class PhyStepper(
     private var weakReads = 0
     private var strongSince: Long? = null
     private var fastSince: Long? = null
+
+    // When the link last moved off Coded, and last moved onto it (null while it opened there and never left).
+    private var steppedUpAt: Long? = null
+    private var steppedDownAt: Long? = null
+    private var backoffLevel = 0
 
     /**
      * The controller reported [reported] (a read, an update this side asked for, or one the peer asked for). An
@@ -465,6 +498,11 @@ class PhyStepper(
         }
         val changed = succeeded && reported != phy && phy != LinkPhy.UNKNOWN
         if (changed) {
+            if (reported == LinkPhy.CODED) {
+                onSteppedDown(now)
+            } else if (phy == LinkPhy.CODED) {
+                steppedUpAt = now
+            }
             switches++
             lastSwitchAt = now
             weakReads = 0
@@ -473,6 +511,22 @@ class PhyStepper(
         }
         if (succeeded) phy = reported
         return changed
+    }
+
+    /**
+     * The link moved onto Coded at [now]: a reversal if it left Coded less than [PhyTuning.flapWindowMs] ago, which
+     * doubles the step-up backoff (up to its cap); otherwise the link held fast a while, and the backoff starts over.
+     */
+    private fun onSteppedDown(now: Long) {
+        val t = tuning()
+        val up = steppedUpAt
+        if (up != null && now - up < t.flapWindowMs) {
+            reversals++
+            if (backoffLevel < MAX_BACKOFF_LEVEL && backoffMs(t, backoffLevel) < t.stepUpBackoffMaxMs) backoffLevel++
+        } else {
+            backoffLevel = 0
+        }
+        steppedDownAt = now
     }
 
     /**
@@ -553,7 +607,8 @@ class PhyStepper(
     /**
      * AUTO's step rule. A Coded link steps up after either hold: [PhyTuning.stepUpFastHoldMs] at
      * [PhyTuning.stepUpFastDbm] or stronger, [PhyTuning.stepUpHoldMs] at [PhyTuning.stepUpDbm]. [decide] runs once per
-     * read (every 5 s above [PhyTuning.edgeDbm]), so a 10 s hold is met on the third strong read.
+     * read (every 5 s above [PhyTuning.edgeDbm]), so a 10 s hold is met on the third strong read. A link that has
+     * flapped waits out [stepUpBackoffMs] on Coded first (#169); the step-down never waits on it.
      */
     private fun autoTarget(
         t: PhyTuning,
@@ -561,9 +616,15 @@ class PhyStepper(
     ): Action? =
         when {
             phy != LinkPhy.CODED && weakReads >= t.stepDownReads -> Action.REQUEST_CODED
-            phy == LinkPhy.CODED && heldStrong(t, now) -> Action.REQUEST_FAST
+            phy == LinkPhy.CODED && heldStrong(t, now) && backedOff(t, now) -> Action.REQUEST_FAST
             else -> null
         }
+
+    /** Whether the link has been on Coded for [stepUpBackoffMs] since its last step-down; true if it opened there. */
+    private fun backedOff(
+        t: PhyTuning,
+        now: Long,
+    ): Boolean = steppedDownAt == null || held(steppedDownAt, backoffMs(t, backoffLevel), now)
 
     private fun heldStrong(
         t: PhyTuning,
@@ -582,5 +643,21 @@ class PhyStepper(
         val t = tuning()
         val s = smoothedRssi
         return if (s != null && s <= t.edgeDbm) t.edgeReadMs else t.readMs
+    }
+
+    private companion object {
+        // Bounds the doublings: under a zero minimum gap (a debug tuning) the backoff never reaches its cap.
+        const val MAX_BACKOFF_LEVEL = 16
+
+        /** The step-up backoff at [level] reversals: the minimum gap, doubled per level, capped at the tuning's maximum. */
+        fun backoffMs(
+            t: PhyTuning,
+            level: Int,
+        ): Long =
+            if (level == 0) {
+                t.minSwitchGapMs
+            } else {
+                minOf(t.minSwitchGapMs shl level, maxOf(t.stepUpBackoffMaxMs, t.minSwitchGapMs))
+            }
     }
 }

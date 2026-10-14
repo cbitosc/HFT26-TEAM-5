@@ -315,7 +315,8 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   an error; also a segmented row under Diagnostics' Transports). `--es mode off|auto|coded|1m` stores the mode
   (applied live, persists — a `debug_` key), `--es txpower high|medium` re-raises the Coded advert, `--ei stepDown
   N` / `stepUp` / `stepDownReads` / `minGapMs` / `stepUpHoldMs` / `stepUpFast` / `stepUpFastHoldMs` (the fast step-up
-  tier, −62 held 10 s) override the step thresholds and `--ei credit N` the
+  tier, −62 held 10 s) / `flapWindowMs` / `stepUpBackoffMaxMs` (the step-up backoff of a link that flaps, 5 min each,
+  #169) override the step thresholds and `--ei credit N` the
   dB a Coded advert reading gains on the 1M scale (default 12, what every −90 floor reads), and `--ei fastAdvertMs N`
   / `fastHoldMs N` the Coded advert's interval after a link at range drops (250) and how long it holds (180000) — on
   the dialing side, how long the scan hunts the lost peer — and `--ei huntInUseHoldMs N` that hunt's bound while Knit
@@ -331,7 +332,7 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   `peers[]` (`nodeId`, `rssi` on the 1M scale, `oneMSeenAgoMs`, `codedSeenAgoMs`, each PHY's own `rssi1m` /
   `rssiCoded`, and `codedLagMs`: the 1M listening its Coded hits outlast its 1M ones by, over 8000 meaning Coded alone),
   then `hunting` (the last scan window hunted) and `hunted` (the peers lost at range it hunts). Oracle for a step: `links[].phy` plus `bt phy <id> ONE_M→CODED` in logcat (and the PHY chip on the
-  Diagnostics row). Oracle for a file's pace: `file …/… <N>B in <ms>ms @<B/s> → <id>` on the sender (`@1024` on
+  Diagnostics row); for a flap, `bt phy <id> reversal <n>: step-up backoff <s>s (drives=true)` on the driver (the watching side logs the same with `drives=false`; count one side). Oracle for a file's pace: `file …/… <N>B in <ms>ms @<B/s> → <id>` on the sender (`@1024` on
   Coded, `@<share>` otherwise), which times only the hand-off to the stack; what the air drained is the receiver's
   `rx …/… <N>B in <ms>ms ← <id>`, and `bt file pace budget=… feeding=… share=… chunk=…` marks each change of the
   split. A walk's record is logcat: `bt coded heard <id> hits=… rssi=a..b 1m=… eff=… dwell=… promotable=…

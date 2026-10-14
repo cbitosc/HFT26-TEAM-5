@@ -31,7 +31,9 @@ Bluetooth-adjacent routing that stays in `AGENTS.md`, because another subsystem 
   2026-10.yvn6 and the Coded PHY section of `.agents/context/mesh-transport.md`. On in release since 2026-10-08: a
   second presence set on Coded (the legacy advert stays), an all-PHY scan, a Coded sighting scored on the 1M scale
   (+12 dB) so every −90 floor is untouched, and per-link 1M ↔ Coded S=8 steps driven by the larger id through a GATT
-  handle on the link's ACL. Capability is inferred from hearing the Coded advert — no flags-byte bit. A dialer heard on
+  handle on the link's ACL; a link that flaps backs off its step-up, never its step-down (`PhyStepper.stepUpBackoffMs`,
+  `PhyTuning.flapWindowMs` / `stepUpBackoffMaxMs`, #169 — the 2026-10-14 amendment: a late step-down at the edge costs
+  the link, a late step-up only throughput). Capability is inferred from hearing the Coded advert — no flags-byte bit. A dialer heard on
   Coded alone is admitted as unsighted (shzv's tie-break holds for 1M), and OFF leaves a link on its PHY. A Coded dial
   gets a 25 s watchdog, and a link that drops at range makes the dialed side's Coded advert fast for 3 min, its
   interval moved in place (`CodedAdvertPace`, `BleAdvertiser.setInterval`; the amendment of 2026-10-02), while the

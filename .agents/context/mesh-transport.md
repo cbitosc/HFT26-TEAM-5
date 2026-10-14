@@ -630,7 +630,9 @@ that reports `isLeCodedPhySupported`:
 - **`BlePhyControl` per capable link** — a GATT client on the link's ACL, the `BleDoorbell` pattern — reads link
   RSSI and asks `PhyStepper` (pure, JVM-tested) to step down to Coded S=8 and back up to 1M or 2M — the step-up
   passes both masks and the controller picks, so a link that visited Coded is never pinned to 1M; only the `1m`
-  mode asks for 1M alone. The larger id drives. A request unanswered in
+  mode asks for 1M alone. A link that flaps backs off its step-up, never its step-down: a step-down within 5 min of
+  the last step-up doubles the time AUTO holds the link on Coded before it may step up (20 s to a 5 min cap,
+  `PhyStepper.stepUpBackoffMs`; #169, the ADR's 2026-10-14 amendment). The larger id drives. A request unanswered in
   3 s, or answered with another PHY, gives up for the link (a controller without Coded answers nothing at all).
   Mode OFF lets the handles go and leaves each link on its PHY: asking a far Coded link back to 1M drops it.
 - **A file is paced by the link's PHY** (#114) **and by how many links share the radio** (#117, ADR 2026-10.8jwn).
