@@ -93,6 +93,8 @@ internal class CallController(
                 .Builder(context, CallNotifications.CHANNEL_RING)
                 .setSmallIcon(R.drawable.ic_stat_mesh)
                 .setContentTitle(face.name)
+                // As the ongoing call's: CallStyle sets no large icon, and a watch's card draws only that.
+                .setLargeIcon(face.icon.toIcon(context))
                 .setContentText(if (state.walkie) "Knit walkie-talkie" else "Knit voice call")
                 .setCategory(NotificationCompat.CATEGORY_CALL)
                 .setPriority(NotificationCompat.PRIORITY_MAX)

@@ -109,6 +109,9 @@ class CallService :
                         CallActionReceiver.pending(this, CallActionReceiver.ACTION_HANGUP, id),
                     ),
                 ).apply {
+                    // The platform's CallStyle draws the person's face but sets no large icon, and a watch's card of the
+                    // notification draws the large icon only.
+                    face?.let { setLargeIcon(it.icon.toIcon(this@CallService)) }
                     state?.connectedAt?.let {
                         setWhen(it)
                         setShowWhen(true)
