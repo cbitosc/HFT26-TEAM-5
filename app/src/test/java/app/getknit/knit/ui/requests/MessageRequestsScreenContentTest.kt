@@ -87,6 +87,40 @@ class MessageRequestsScreenContentTest {
         assertEquals("stranger-1", opened)
     }
 
+    // Two rows, two Accepts and two overflow buttons: each must name its own request, or a screen reader
+    // hears identical controls (the a11y suite's DuplicateSpeakableTextCheck warning on the seeded inbox).
+    @Test
+    fun eachRowsActionsNameTheirRequest() {
+        var accepted: String? = null
+        compose.setContent {
+            KnitTheme {
+                MessageRequestsScreenContent(
+                    requests =
+                        listOf("Stranger", "Visitor").map { name ->
+                            RequestRow(
+                                conversationId = name.lowercase(),
+                                title = name,
+                                avatarHash = null,
+                                isGroup = false,
+                                lastPreview = null,
+                                lastMessageAt = 0L,
+                            )
+                        },
+                    onAccept = { accepted = it },
+                    onBlock = {},
+                    onDelete = {},
+                    onOpenProfile = {},
+                    onBack = {},
+                )
+            }
+        }
+
+        compose.onNodeWithContentDescription("More options for Stranger").assertIsDisplayed()
+        compose.onNodeWithContentDescription("More options for Visitor").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Accept request from Visitor").performClick()
+        assertEquals("visitor", accepted)
+    }
+
     @Test
     fun emptyStateShownWhenNoRequests() {
         compose.setContent {

@@ -242,6 +242,10 @@ android {
         // DB. Paired with testOptions.execution below; on Firebase Test Lab pass the same via
         // `--use-orchestrator --environment-variables clearPackageData=true` (see .agents/context/testing.md).
         testInstrumentationRunnerArguments["clearPackageData"] = "true"
+        // TestStorage output (the a11y reports, test screenshots): AGP creates the test-services output
+        // directory before the run and pulls it into additional_test_output after. Without it every
+        // TestStorage.openOutputFile fails locally with "No parent directory"; FTL provides its own.
+        testInstrumentationRunnerArguments["useTestStorageService"] = "true"
 
         // Demo-screenshot mode: when built with `-PseedDemo=true`, the app seeds a realistic data set
         // and swaps in a no-op transport so every screen renders populated on an emulator (no real

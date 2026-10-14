@@ -440,7 +440,14 @@ private fun PeerHeader(
             textStyle = MaterialTheme.typography.displaySmall,
             // Tappable only when a photo is set: a default (initials) avatar has nothing to enlarge,
             // so onClick stays null and Avatar renders non-interactive (no ripple / no touch target).
-            contentDescription = if (state.avatarHash != null) state.displayName else null,
+            // Named as the photo, not the person: the name heading below already reads the name, and a
+            // control announced as just "Dani Cho" says nothing about what tapping it does.
+            contentDescription =
+                if (state.avatarHash != null) {
+                    stringResource(R.string.profile_details_photo_desc, state.displayName)
+                } else {
+                    null
+                },
             onClickLabel = stringResource(R.string.profile_details_view_photo),
             onClick = if (state.avatarHash != null) onViewPhoto else null,
         )

@@ -453,6 +453,8 @@
     <string name="message_requests_title">Message requests</string>
     <string name="message_requests_empty">No message requests</string>
     <string name="message_requests_accept">Accept</string>
+    <string name="message_requests_accept_desc">Accept request from %1$s</string>
+    <string name="message_requests_more_desc">More options for %1$s</string>
     <string name="message_requests_block">Block</string>
     <string name="message_requests_block_confirm_title">Block this person?</string>
     <string name="message_requests_block_confirm_body">You won\'t receive messages from them, and this request is removed.</string>
@@ -627,6 +629,7 @@
     <string name="profile_details_offline">Offline</string>
     <string name="profile_details_open_to_chat">Open to chat</string>
     <string name="profile_details_view_photo">View photo</string>
+    <string name="profile_details_photo_desc">%1$s\'s profile photo</string>
     <string name="profile_details_lora_label">LoRa radio</string>
     <string name="profile_details_blocked">Blocked</string>
     <string name="profile_details_section_in_common">In common</string>

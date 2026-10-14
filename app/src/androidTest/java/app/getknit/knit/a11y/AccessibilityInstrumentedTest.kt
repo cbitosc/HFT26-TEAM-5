@@ -13,6 +13,7 @@ import androidx.test.filters.SdkSuppress
 import androidx.test.services.storage.TestStorage
 import app.getknit.knit.ui.SeededUiTest
 import com.google.android.apps.common.testing.accessibility.framework.AccessibilityCheckResult.AccessibilityCheckResultType
+import com.google.android.apps.common.testing.accessibility.framework.AccessibilityViewCheckResult
 import com.google.android.apps.common.testing.accessibility.framework.integrations.espresso.AccessibilityValidator
 import org.junit.Before
 import org.junit.Rule
@@ -46,7 +47,8 @@ import java.util.Locale
  * throws (fails the test) only for [AccessibilityCheckResultType.ERROR] — the Play-blocking class. The
  * [addCheckListener][AccessibilityValidator.addCheckListener] logs every WARNING/INFO to logcat under
  * [A11Y_TAG] and [writeReport] dumps the screen's actionable findings to a `a11y-<screen>.txt` file via
- * [TestStorage] (collected by FTL, mirrored locally under `app/build/.../additional_output/`). Tune the gate
+ * [TestStorage] (collected by FTL; pulled locally into `app/build/intermediates/…_android_test_additional_output/`
+ * through the `useTestStorageService` runner argument). Tune the gate
  * with `setThrowExceptionFor(...)`; silence a known-acceptable finding with `setSuppressingResultMatcher(...)`.
  *
  * **Contrast needs real pixels.** ATF's text/image contrast checks read a screenshot. On the headless
@@ -78,7 +80,9 @@ class AccessibilityInstrumentedTest : SeededUiTest() {
                 .addCheckListener(
                     AccessibilityValidator.AccessibilityCheckListener { _, viewResults ->
                         viewResults.forEach { result ->
-                            val line = "${result.type}: ${result.getMessage(Locale.getDefault())}"
+                            val line =
+                                "${result.type} [${result.sourceCheckClass.simpleName} @ ${where(result)}]: " +
+                                    result.getMessage(Locale.getDefault())
                             results += line
                             // Log the actionable tiers (ERROR/WARNING/INFO); NOT_RUN/SUPPRESSED are noise.
                             if (result.type != AccessibilityCheckResultType.NOT_RUN &&
@@ -243,6 +247,16 @@ class AccessibilityInstrumentedTest : SeededUiTest() {
         runCatching {
             TestStorage().openOutputFile("a11y-${a11yTestName.methodName}.txt").use { it.write(body.toByteArray()) }
         }.onFailure { Log.w(A11Y_TAG, "a11y report write for '${a11yTestName.methodName}' failed", it) }
+    }
+
+    /**
+     * Names the element a finding is about — its test tag when it has one, else its class — plus its screen
+     * bounds, so a duplicate-label finding says *which* items collide rather than only how many.
+     */
+    private fun where(result: AccessibilityViewCheckResult): String {
+        val element = result.element ?: return "screen"
+        val name = element.testTag?.toString()?.takeIf { it.isNotEmpty() } ?: element.className?.toString()
+        return "$name ${element.boundsInScreen}"
     }
 
     /** A Gradle-managed / FTL emulator (ranchu/goldfish) — where `takeScreenshot()` can't be trusted. */

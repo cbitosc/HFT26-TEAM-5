@@ -40,6 +40,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -185,15 +187,24 @@ private fun RequestRowItem(
             }
         }
         Spacer(Modifier.width(4.dp))
+        // Every row has an Accept and a More options, so each names its request: announced bare, a
+        // screen reader user hears the same two buttons once per row with nothing to tell them apart.
+        val acceptLabel = stringResource(R.string.message_requests_accept_desc, row.title)
         TextButton(
             onClick = onAccept,
-            modifier = Modifier.testTag("request_accept_${row.conversationId}"),
+            modifier =
+                Modifier
+                    .testTag("request_accept_${row.conversationId}")
+                    .semantics { contentDescription = acceptLabel },
         ) {
             Text(stringResource(R.string.message_requests_accept))
         }
         Box {
             IconButton(onClick = { menuOpen = true }) {
-                Icon(Icons.Filled.MoreVert, contentDescription = stringResource(R.string.chat_more_options))
+                Icon(
+                    Icons.Filled.MoreVert,
+                    contentDescription = stringResource(R.string.message_requests_more_desc, row.title),
+                )
             }
             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                 // Block targets the DM peer (conversationId == node id); it has no meaning for a group.

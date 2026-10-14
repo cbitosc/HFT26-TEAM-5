@@ -762,8 +762,12 @@ pulls ATF transitively: `compose.enableAccessibilityChecks(validator)` +
 - **Severity policy: errors fail, warnings logged, all findings reported.** The `AccessibilityValidator`
   throws (fails the test) only for `AccessibilityCheckResultType.ERROR`; an `addCheckListener` logs every
   WARNING/INFO to logcat under tag `A11y`, and each test writes its actionable findings to a
-  `a11y-<screen>.txt` file via `TestStorage` (collected by FTL, mirrored locally under
-  `app/build/.../additional_output/` — plus AGP's per-test `logcat-<test>.txt`). Suppress a known-acceptable
+  `a11y-<screen>.txt` file via `TestStorage` — each finding names its check and its element (test tag or
+  class, plus screen bounds). FTL collects them; locally AGP pulls them, because the runner argument
+  `useTestStorageService` is set, into
+  `app/build/intermediates/managed_device_android_test_additional_output/…/pixel8api34DebugAndroidTest/`
+  (`connected_android_test_additional_output/` for a connected device), beside AGP's per-test
+  `logcat-<test>.txt`. Suppress a known-acceptable
   finding with `setSuppressingResultMatcher(...)`; widen the gate with `setThrowExceptionFor(...)`.
 - **Contrast needs real pixels, so screenshot capture is hardware-gated.** ATF's text/image contrast checks
   read a screenshot; on the headless emulator `UiAutomation.takeScreenshot()` races the UI thread and
