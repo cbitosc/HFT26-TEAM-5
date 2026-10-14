@@ -156,10 +156,10 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   `call/SttModel.kt` (the pins, `SttModelInstaller`), `ui/call/stt/`, `TalkPlayer`'s `TalkPcmTap`,
   `WalkieTranscriptCard`, `ModelLoadGuard.STT`, the `sherpaOnnx` pin or `scripts/stt-model.py`:** READ ADR
   2026-10.nz3g and `docs/VOICE_CALLS.md` C-3.11-9 — the receiver writes each heard burst out as text, behind
-  `BuildConfig.CALLS` and never on the wire; the model (Moonshine tiny EN v2 via sherpa-onnx) is a tap-to-download from getknit.app pinned by
+  `BuildConfig.CALLS` and never on the wire; the model (Moonshine EN v2 tiny or base, or Whisper small.en, via sherpa-onnx) is a tap-to-download from getknit.app pinned by
   size and SHA-256 (never hand-edit the pins: the script derives them), fetched with `Network.openConnection` on the
   gate's network, not okhttp; Moonshine v2 returns nothing past ~9 s, so a burst is cut at its quiet points
-  (`SEGMENT_MAX_MS` stays ≤ 8 s).
+  (`SEGMENT_MAX_MS` stays ≤ 8 s; Whisper's own cut is 28 s, under its 30 s window).
 - **When touching `badge/`, `ProfilePayload.badges` / `BadgeEntry` / `ProfileV2` label 8, `peer_badges` /
   `PeerBadgeEntity`, `data/settings/BadgeStore`, `OkHttpTicketIssuer.issueBadge`, `ui/components/BadgeVisuals` (`BadgeMark`) or
   `Avatar`'s `badge`:** READ `docs/SUPPORTER_BADGE.md` and ADR 2026-10.r99s (knit-spool-coordinator owns the

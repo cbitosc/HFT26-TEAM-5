@@ -52,8 +52,30 @@ C-3.11-9). It is debug-only, as the walkie is, and nothing reaches the wire.
   - `BurstPcmTest` and `WalkieTranscriberTest` pin the cut.
 - **A spent lease.** A lease whose load failed stays spent for the process. `SherpaSpeech` makes a fresh lease
   when the store's `generation` moves, so a reinstall gets its own try.
-- **What it does not cover.** English only. Release builds have none of this. Our own outgoing bursts are not
-  transcribed.
+- **What it does not cover.** English only. Release builds have none of this.
+- **Amendment 2026-10-09: the sender's own bursts.** Each burst spoken is also transcribed, from `TalkRecorder`'s PCM
+  before the encoder, as a `mine` line in the same transcript (a second open slot: talking holds the playback
+  mid-burst, it does not end it). It is there to measure: the sender's line against the receiver's for the same
+  burst shows what 8 kbps Opus costs the model, apart from the model's own errors. The bridge's `loop` op writes
+  both lines from one file.
+- **Amendment 2026-10-09: Moonshine base beside tiny.** On the phones, the sender's clean line was only a little
+  better than the receiver's, so the codec was not the bottleneck; the model was. Moonshine base EN v2 (int8 ORT, MIT,
+  same package family) is offered beside tiny on the card's picker (`SttModel.ALL`, the pick kept in
+  `models/stt-model`, each model in its own directory). It costs 141 MB to fetch and about 170 MB of native heap while
+  held (emulator: 208 → 35 MB on unload), against tiny's 44 MB and 60 MB. It shares the ~9 s empty-output limit (an
+  ORT broadcast error inside sherpa's v2 decoder, swallowed as an empty result), so the same ≤ 8 s cut applies. On the
+  desktop it read clean LibriSpeech as well as or a little better than tiny, but returned nothing on an old, noisy
+  recording that tiny handled, so it is a choice, not a replacement. Its files go under
+  `https://getknit.app/models/stt/moonshine-base-en-2026-02-27/` (`scripts/stt-model.py --model base --out`).
+- **Amendment 2026-10-09: Whisper small.en as a third pick.** Base on the P3 and the Moto G was better, but not good
+  enough. Whisper small.en (int8 ONNX, sherpa-onnx's 2024-07-13 package; MIT, its licence fetched from OpenAI's
+  repository at a pinned commit, since the package carries none) is the third choice: `SttModel.engine` says how the
+  files are wired, and each model carries its own cut (`SttModel.segmentMaxMs`; Whisper reads 30 s, so 20–28 s, and
+  every stretch costs a full 30 s encode however short). It read every desktop and emulator clip best, including the
+  noisy one base returned nothing for, and it named a Spanish clip `[SPEAKING SPANISH]` instead of inventing English.
+  The cost is 375 MB to fetch, ~920 MB of native heap while held (emulator), and 1.5–3.5 s a burst at emulator
+  (desktop) speed. That is far past what a release could ship to a budget phone; it is here to learn what accuracy
+  the walkie needs.
 - **Hosting.** The files must be uploaded, unchanged, to `https://getknit.app/models/stt/moonshine-tiny-en-2026-02-27/`.
   Until they are, the download fails with "answered 404". The bridge's `STT --es op sideload` installs from pushed
   files through the same pins.

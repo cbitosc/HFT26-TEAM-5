@@ -17,8 +17,10 @@ import java.nio.ByteOrder
 
 /**
  * The walkie's transcript (docs/VOICE_CALLS.md §3.11, C-3.11-9): each burst this phone hears is written out as text on
- * the call screen by a speech model run here, on the receiver, after the burst has played. Nothing about it is on the
- * wire: the sender sends the same frames, and the text never leaves the phone or outlives the session.
+ * the call screen by a speech model run here, on the receiver, after the burst has played — and each burst this phone
+ * speaks, from the microphone's PCM before Opus, so the two phones' lines side by side show what the codec cost the
+ * model. Nothing about it is on the wire: the sender sends the same frames, and the text never leaves the phone or
+ * outlives the session.
  */
 object SttPolicy {
     /** What the model takes: 16 kHz mono, as the burst was captured before Opus. */
@@ -45,9 +47,10 @@ object SttPolicy {
 }
 
 /**
- * The player's decoded PCM, as it goes to the speaker: 16-bit native-order samples in [pcm] between its position and
- * its limit, at [rate] Hz over [channels] interleaved channels. Called on the player's thread; the buffer is the
- * receiver's to read, never to keep.
+ * PCM on its way through the walkie — the player's decoded audio as it goes to the speaker, or the recorder's as it
+ * goes to the encoder: 16-bit native-order samples in [pcm] between its position and its limit, at [rate] Hz over
+ * [channels] interleaved channels. Called on the player's or the recorder's thread; the buffer is the receiver's to
+ * read, never to keep.
  */
 fun interface TalkPcmTap {
     fun pcm(
@@ -60,6 +63,9 @@ fun interface TalkPcmTap {
 /** A speech model: [SttPolicy.SAMPLE_RATE] mono samples in −1..1 to their text, or null when it could not run. */
 fun interface SpeechToText {
     suspend fun transcribe(samples: FloatArray): String?
+
+    /** Where a burst is cut for this model ([segments]): the stretches it is handed one at a time. */
+    fun cut(samples: FloatArray): List<IntRange> = segments(samples)
 }
 
 /**
@@ -186,7 +192,11 @@ fun segments(
 
 private const val MS_PER_SECOND = 1_000L
 
-/** One burst heard, as the transcript shows it: [burst] is the sender's number, [heardAt] when it began to play. */
+/**
+ * One burst, as the transcript shows it: [burst] is the sender's number, [heardAt] when it began to play — or, [mine],
+ * a burst this phone spoke, numbered by its own count and stamped when the button went down, transcribed from the
+ * microphone before Opus touched it.
+ */
 data class TranscriptLine(
     val burst: Int,
     val heardAt: Long,
@@ -194,9 +204,10 @@ data class TranscriptLine(
     // The burst's audio and the model's time over it, for the diagnostics; 0 until known.
     val audioMs: Long = 0,
     val tookMs: Long = 0,
+    val mine: Boolean = false,
 ) {
     sealed interface State {
-        /** The burst is playing. */
+        /** The burst is playing, or being spoken. */
         data object Listening : State
 
         /** Played; the model has it. */
@@ -223,10 +234,13 @@ fun withLine(
     line: TranscriptLine,
     max: Int = SttPolicy.MAX_LINES,
 ): List<TranscriptLine> {
-    val at = lines.indexOfFirst { it.burst == line.burst }
+    val at = lines.indexOfFirst { it.sameBurst(line) }
     val next = if (at >= 0) lines.toMutableList().also { it[at] = line } else lines + line
     return if (next.size > max) next.takeLast(max) else next
 }
+
+// Each side numbers its own bursts, so a burst is its number and whose it is.
+private fun TranscriptLine.sameBurst(other: TranscriptLine) = burst == other.burst && mine == other.mine
 
 /**
  * Writes the peer's walkie bursts out as text (C-3.11-9). The player's loop opens a burst ([begin]) as it starts to
@@ -235,9 +249,14 @@ fun withLine(
  * lock, since the model suspends), so a long one never holds up the playback of the next. [ready] says whether the
  * model is on the phone; a burst that ends without it is marked [TranscriptLine.State.NoModel] and its audio dropped.
  *
+ * The bursts this phone speaks go the same way through [mic], the recorder's tap, opened and ended with `mine = true`
+ * — the microphone's PCM before the encoder, so set beside the other phone's line for the same burst it shows what
+ * Opus cost the model and what the model gets wrong on its own. One of each can be open at once: talking holds the
+ * playback mid-burst, it does not end it.
+ *
  * A session ([reset]) starts the transcript afresh; a burst still with the model from the last one is abandoned. The
  * text is held here and nowhere else: it is never logged, stored or sent. Thread-safe: [pcm] comes on the player's
- * thread, the rest from the player's loop and the call screen.
+ * thread and [mic] on the recorder's, the rest from the player's loop, the talk button and the call screen.
  */
 class WalkieTranscriber(
     private val speech: SpeechToText,
@@ -257,29 +276,49 @@ class WalkieTranscriber(
     private val lock = Any()
     private val serial = Mutex()
 
-    // The burst playing now and its audio; the session's number, which a finished transcription must still match.
-    private var open: Int? = null
-    private var audio: BurstPcm? = null
+    /** The burst open on one side and its audio so far. */
+    private class Slot {
+        var open: Int? = null
+        var audio: BurstPcm? = null
+
+        fun clear() {
+            open = null
+            audio = null
+        }
+    }
+
+    // The burst playing now, the one being spoken, and the session's number, which a finished transcription must still
+    // match.
+    private val heard = Slot()
+    private val spoken = Slot()
     private var session = 0
+
+    private fun slot(mine: Boolean) = if (mine) spoken else heard
+
+    /** The recorder's tap: the microphone's PCM for the burst being spoken. */
+    val mic = TalkPcmTap { pcm, rate, channels -> synchronized(lock) { spoken.audio?.add(pcm, rate, channels) } }
 
     /** A new session: an empty transcript, and nothing from the last one still to come. */
     fun reset() {
         synchronized(lock) {
             session++
-            open = null
-            audio = null
+            heard.clear()
+            spoken.clear()
         }
         work.cancelChildren()
         _lines.value = emptyList()
     }
 
-    /** The burst [burst] has begun to play. */
-    fun begin(burst: Int) {
+    /** The burst [burst] has begun to play, or ([mine]) to be spoken. */
+    fun begin(
+        burst: Int,
+        mine: Boolean = false,
+    ) {
         synchronized(lock) {
-            open = burst
-            audio = BurstPcm()
+            slot(mine).open = burst
+            slot(mine).audio = BurstPcm()
         }
-        _lines.update { withLine(it, TranscriptLine(burst, clock(), TranscriptLine.State.Listening)) }
+        _lines.update { withLine(it, TranscriptLine(burst, clock(), TranscriptLine.State.Listening, mine = mine)) }
     }
 
     override fun pcm(
@@ -287,20 +326,23 @@ class WalkieTranscriber(
         rate: Int,
         channels: Int,
     ) {
-        synchronized(lock) { audio?.add(pcm, rate, channels) }
+        synchronized(lock) { heard.audio?.add(pcm, rate, channels) }
     }
 
-    /** The burst [burst] has played to its end: to the model with it. */
-    fun end(burst: Int) {
+    /** The burst [burst] has played, or ([mine]) been spoken, to its end: to the model with it. */
+    fun end(
+        burst: Int,
+        mine: Boolean = false,
+    ) {
         val (held, gen) =
             synchronized(lock) {
-                if (open != burst) return
-                val held = audio
-                open = null
-                audio = null
+                val slot = slot(mine)
+                if (slot.open != burst) return
+                val held = slot.audio
+                slot.clear()
                 held to session
             }
-        val line = _lines.value.firstOrNull { it.burst == burst } ?: return
+        val line = _lines.value.firstOrNull { it.burst == burst && it.mine == mine } ?: return
         val samples = held?.samples() ?: FloatArray(0)
         val audioMs = held?.audioMs ?: 0L
         val state =
@@ -314,16 +356,18 @@ class WalkieTranscriber(
         workScope.launch(dispatcher) { serial.withLock { transcribe(line.copy(audioMs = audioMs), samples, gen) } }
     }
 
-    /** The session ended with a burst still playing: drop it, and its line with it. */
-    fun abandon() {
+    /** The session ended with a burst still playing, or ([mine]) a spoken one was dropped: drop it, and its line with it. */
+    fun abandon(mine: Boolean = false) {
         val burst =
             synchronized(lock) {
-                val burst = open ?: return
-                open = null
-                audio = null
+                val slot = slot(mine)
+                val burst = slot.open ?: return
+                slot.clear()
                 burst
             }
-        _lines.update { lines -> lines.filterNot { it.burst == burst && it.state == TranscriptLine.State.Listening } }
+        _lines.update { lines ->
+            lines.filterNot { it.burst == burst && it.mine == mine && it.state == TranscriptLine.State.Listening }
+        }
     }
 
     private suspend fun transcribe(
@@ -332,7 +376,7 @@ class WalkieTranscriber(
         gen: Int,
     ) {
         val began = clock()
-        val parts = segments(samples)
+        val parts = speech.cut(samples)
         val texts = mutableListOf<String>()
         var failed = false
         for (range in parts) {
@@ -351,11 +395,14 @@ class WalkieTranscriber(
                 else -> TranscriptLine.State.Text(texts.joinToString(" "))
             }
         // Timings only: the text itself is never logged.
-        log("walkie: transcribed burst ${line.burst}: ${line.audioMs} ms of audio in $took ms, ${parts.size} part(s), ${state.label()}")
+        log(
+            "walkie: transcribed ${if (line.mine) "spoken" else "heard"} burst ${line.burst}: " +
+                "${line.audioMs} ms of audio in $took ms, ${parts.size} part(s), ${state.label()}",
+        )
         synchronized(lock) { if (gen != session) return }
         // A line that fell off the top meanwhile stays off: put back, it would land out of order.
         _lines.update { lines ->
-            if (lines.none { it.burst == line.burst }) lines else withLine(lines, line.copy(state = state, tookMs = took))
+            if (lines.none { it.sameBurst(line) }) lines else withLine(lines, line.copy(state = state, tookMs = took))
         }
     }
 

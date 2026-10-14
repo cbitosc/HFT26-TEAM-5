@@ -1,7 +1,10 @@
 package app.getknit.knit.ui.call.stt
 
 import app.getknit.knit.call.SpeechToText
+import app.getknit.knit.call.SttEngine
+import app.getknit.knit.call.SttModel
 import app.getknit.knit.call.SttPolicy
+import app.getknit.knit.call.segments
 import app.getknit.knit.moderation.ModelLease
 import app.getknit.knit.moderation.ModelLoadGuard
 import com.k2fsa.sherpa.onnx.FeatureConfig
@@ -9,13 +12,15 @@ import com.k2fsa.sherpa.onnx.OfflineModelConfig
 import com.k2fsa.sherpa.onnx.OfflineMoonshineModelConfig
 import com.k2fsa.sherpa.onnx.OfflineRecognizer
 import com.k2fsa.sherpa.onnx.OfflineRecognizerConfig
+import com.k2fsa.sherpa.onnx.OfflineWhisperModelConfig
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import java.io.File
 
 /**
- * The walkie transcript's speech model (docs/VOICE_CALLS.md C-3.11-9): Moonshine tiny EN v2 through sherpa-onnx's
- * ONNX Runtime, built over the files [SttModelStore] holds. The recognizer lives on a [ModelLease] like the moderation
+ * The walkie transcript's speech model (docs/VOICE_CALLS.md C-3.11-9): Moonshine EN v2 (tiny or base) or Whisper
+ * small.en, through sherpa-onnx's ONNX Runtime, built over the files of the model [SttModelStore] has in use (a switch is a new
+ * generation, so a new lease). The recognizer lives on a [ModelLease] like the moderation
  * models (ADR 2026-09.cq9z) — built on the first burst, released after [SttPolicy.IDLE_UNLOAD_MS] without one — and every
  * build, a probe decode included, runs under [ModelLoadGuard] (ADR 037), so a runtime that faults natively on this phone
  * is latched off instead of taking the process down on every burst. A model installed afresh gets a fresh lease: a lease
@@ -30,6 +35,10 @@ internal class SherpaSpeech(
     private val lock = Any()
     private var lease: ModelLease<OfflineRecognizer>? = null
     private var leaseGeneration = -1
+
+    // Each model's own window: Moonshine's ~9 s, Whisper's 30 s.
+    override fun cut(samples: FloatArray): List<IntRange> =
+        store.model.let { segments(samples, minMs = it.segmentMinMs, maxMs = it.segmentMaxMs) }
 
     override suspend fun transcribe(samples: FloatArray): String? {
         val current = current() ?: return null
@@ -46,8 +55,9 @@ internal class SherpaSpeech(
 
     // The lease over the model on disk now, made afresh when the store's files changed; null with no model there.
     private fun current(): ModelLease<OfflineRecognizer>? {
-        val files = store.paths() ?: return null
         val generation = store.generation
+        val files = store.paths() ?: return null
+        val model = store.model
         val (fresh, stale) =
             synchronized(lock) {
                 val held = lease
@@ -56,7 +66,7 @@ internal class SherpaSpeech(
                     ModelLease(
                         scope = scope,
                         idleMs = SttPolicy.IDLE_UNLOAD_MS,
-                        load = { guard.guard(ModelLoadGuard.STT) { build(files) } },
+                        load = { guard.guard(ModelLoadGuard.STT) { build(model, files) } },
                         close = { it.release() },
                     )
                 lease = made
@@ -69,32 +79,63 @@ internal class SherpaSpeech(
 
     // Under the guard: the recognizer and one probe decode, which is where a runtime that faults on this phone faults.
     @Suppress("TooGenericExceptionCaught") // the native runtime throws what it likes, a missing .so as an Error
-    private fun build(files: Map<String, File>): OfflineRecognizer? {
+    private fun build(
+        model: SttModel,
+        files: Map<String, File>,
+    ): OfflineRecognizer? {
         val started = System.currentTimeMillis()
         return try {
             val config =
                 OfflineRecognizerConfig(
                     featConfig = FeatureConfig(sampleRate = SttPolicy.SAMPLE_RATE, featureDim = FEATURE_DIM),
-                    modelConfig =
-                        OfflineModelConfig(
-                            moonshine =
-                                OfflineMoonshineModelConfig(
-                                    encoder = files.getValue(ENCODER).path,
-                                    mergedDecoder = files.getValue(DECODER).path,
-                                ),
-                            tokens = files.getValue(TOKENS).path,
-                            numThreads = THREADS,
-                            provider = "cpu",
-                        ),
+                    modelConfig = modelConfig(model.engine, files),
                     decodingMethod = "greedy_search",
                 )
             val recognizer = OfflineRecognizer(null, config)
             decode(recognizer, FloatArray(PROBE_SAMPLES))
-            log("walkie stt: recognizer built in ${System.currentTimeMillis() - started} ms")
+            log("walkie stt: recognizer for ${model.id} built in ${System.currentTimeMillis() - started} ms")
             recognizer
         } catch (e: Throwable) {
             log("walkie stt: recognizer not built: ${e.javaClass.simpleName}: ${e.message}")
             null
+        }
+    }
+
+    // The files by their part: the encoder, the decoder and the tokens, whatever each model's package names them.
+    private fun modelConfig(
+        engine: SttEngine,
+        files: Map<String, File>,
+    ): OfflineModelConfig {
+        fun part(name: String) =
+            files.entries
+                .first { (file, _) -> name in file }
+                .value.path
+        val tokens = part(TOKENS)
+        return when (engine) {
+            SttEngine.MOONSHINE -> {
+                OfflineModelConfig(
+                    moonshine = OfflineMoonshineModelConfig(encoder = part(ENCODER), mergedDecoder = part(DECODER)),
+                    tokens = tokens,
+                    numThreads = THREADS,
+                    provider = "cpu",
+                )
+            }
+
+            SttEngine.WHISPER -> {
+                OfflineModelConfig(
+                    whisper =
+                        OfflineWhisperModelConfig(
+                            encoder = part(ENCODER),
+                            decoder = part(DECODER),
+                            language = "en",
+                            task = "transcribe",
+                        ),
+                    tokens = tokens,
+                    numThreads = THREADS,
+                    provider = "cpu",
+                    modelType = "whisper",
+                )
+            }
         }
     }
 
@@ -126,9 +167,10 @@ internal class SherpaSpeech(
     }
 
     private companion object {
-        const val ENCODER = "encoder_model.ort"
-        const val DECODER = "decoder_model_merged.ort"
-        const val TOKENS = "tokens.txt"
+        // What each part's file name holds, in either family's package.
+        const val ENCODER = "encoder"
+        const val DECODER = "decoder"
+        const val TOKENS = "tokens"
         const val FEATURE_DIM = 80
 
         // Two threads, as the moderation models run (TfLiteModels): half the wall time of one, for about the same energy.

@@ -15,6 +15,15 @@ data class SttFile(
     val sha256: String,
 )
 
+/** The runtime family a speech model belongs to: how its files are wired into the engine. */
+enum class SttEngine {
+    /** Moonshine v2: an encoder, a merged decoder and tokens. Reads at most about 9 s at once. */
+    MOONSHINE,
+
+    /** Whisper: an encoder, a decoder and tokens. Pads every input to 30 s, and reads no more than that. */
+    WHISPER,
+}
+
 /**
  * A speech model the walkie's transcript can download (C-3.11-9): its files, fetched by name under [baseUrl] and
  * pinned by size and hash here, so the host is trusted with nothing — a byte it changes is a download that fails.
@@ -24,6 +33,12 @@ class SttModel(
     val id: String,
     val baseUrl: String,
     val files: List<SttFile>,
+    // What the call screen's picker calls it.
+    val label: String = id,
+    val engine: SttEngine = SttEngine.MOONSHINE,
+    // The longest stretch it is handed at once, and the shortest a long burst is cut into (`segments`).
+    val segmentMaxMs: Long = SttPolicy.SEGMENT_MAX_MS,
+    val segmentMinMs: Long = SttPolicy.SEGMENT_MIN_MS,
 ) {
     init {
         require(baseUrl.startsWith("https://") && baseUrl.endsWith("/")) { "a model is fetched over https, from a directory" }
@@ -54,7 +69,67 @@ class SttModel(
                         SttFile("tokens.txt", 549_350, "2870d843e14c1e187bf1913a521562a63b53933814bd7f2145120468f494a049"),
                         SttFile("LICENSE", 13_344, "6148d7574a6554b7379b633cfd4c4fe5840c3f548d13bc83e00b52dc6fa00abd"),
                     ),
+                label = "Tiny",
             )
+
+        /**
+         * Moonshine base, English, v2 (int8, ORT; `sherpa-onnx-moonshine-base-en-quantized-2026-02-27`, MIT): about three
+         * times tiny's size, for a better guess. It shares tiny's ~9 s limit, so it is cut the same way. Pins as for tiny.
+         */
+        val MOONSHINE_BASE_EN_V2 =
+            SttModel(
+                id = "moonshine-base-en-2026-02-27",
+                baseUrl = "https://getknit.app/models/stt/moonshine-base-en-2026-02-27/",
+                files =
+                    listOf(
+                        SttFile("encoder_model.ort", 31_326_816, "7c66495948d0d08ec1af454cd4b5514862ae6511e94712a60e6d83eaec8dc8cf"),
+                        SttFile(
+                            "decoder_model_merged.ort",
+                            109_424_400,
+                            "d9d7b333af34bc552580576ddcf248a1c6c839e0d3b43b09afb9376ed009899d",
+                        ),
+                        SttFile("tokens.txt", 549_350, "2870d843e14c1e187bf1913a521562a63b53933814bd7f2145120468f494a049"),
+                        SttFile("LICENSE", 13_344, "6148d7574a6554b7379b633cfd4c4fe5840c3f548d13bc83e00b52dc6fa00abd"),
+                    ),
+                label = "Base",
+            )
+
+        /**
+         * Whisper small, English only (int8 ONNX; `sherpa-onnx-whisper-small.en`, MIT, its licence from OpenAI's
+         * repository at a pinned commit): 375 MB and far slower than Moonshine — every stretch costs a 30 s encode — but
+         * the best reader of the three. It reads up to 30 s, so a burst is cut only past 28 s.
+         */
+        val WHISPER_SMALL_EN =
+            SttModel(
+                id = "whisper-small-en-2024-07-13",
+                baseUrl = "https://getknit.app/models/stt/whisper-small-en-2024-07-13/",
+                files =
+                    listOf(
+                        SttFile(
+                            "small.en-encoder.int8.onnx",
+                            112_442_483,
+                            "8bdac288f369aa94ee2194059238c465ed82ea9d47ee8fa4a8c0a891873e462f",
+                        ),
+                        SttFile(
+                            "small.en-decoder.int8.onnx",
+                            262_223_042,
+                            "710ccf890e10f3faa15f51ec346081a2723c9f3adb6e4da81c6573a5a6f877fb",
+                        ),
+                        SttFile("small.en-tokens.txt", 835_554, "306cd27f03c1a714eca7108e03d66b7dc042abe8c258b44c199a7ed9838dd930"),
+                        SttFile("LICENSE", 1_063, "b5d65a59060e68c4ff940e1eddfa6f94b2d68fdf58ed7f4dd57721c997e35e9d"),
+                    ),
+                label = "Whisper",
+                engine = SttEngine.WHISPER,
+                segmentMaxMs = WHISPER_SEGMENT_MAX_MS,
+                segmentMinMs = WHISPER_SEGMENT_MIN_MS,
+            )
+
+        /** The models the user picks between, the default first. */
+        val ALL = listOf(MOONSHINE_TINY_EN_V2, MOONSHINE_BASE_EN_V2, WHISPER_SMALL_EN)
+
+        // Whisper's window is 30 s; a little short of it, and cut at a pause from 20 s on.
+        private const val WHISPER_SEGMENT_MAX_MS = 28_000L
+        private const val WHISPER_SEGMENT_MIN_MS = 20_000L
     }
 }
 

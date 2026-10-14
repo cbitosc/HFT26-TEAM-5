@@ -35,6 +35,7 @@ class WalkieTranscriptScreenTest {
 
     private var downloads = 0
     private var cancels = 0
+    private val picked = mutableListOf<String>()
 
     private fun render(
         transcript: TranscriptUi,
@@ -67,6 +68,7 @@ class WalkieTranscriptScreenTest {
                     transcript = transcript,
                     onSttDownload = { downloads++ },
                     onSttCancel = { cancels++ },
+                    onSttModel = { picked += it },
                     statsShown = true,
                 )
             }
@@ -115,6 +117,26 @@ class WalkieTranscriptScreenTest {
         compose.onNodeWithText("No Internet connection", substring = true).assertIsDisplayed()
         compose.onNodeWithText("Try again").performClick()
         assertEquals(1, downloads)
+    }
+
+    @Test
+    fun theCardOffersTheModelsAndSaysWhichAreHere() {
+        render(
+            ui(model = SttModelState.Absent).copy(
+                choices =
+                    listOf(
+                        SttChoice("tiny", "Tiny", 44_256_550, installed = true),
+                        SttChoice("base", "Base", 141_314_910, installed = false),
+                        SttChoice("whisper", "Whisper", 375_502_142, installed = false),
+                    ),
+                chosen = "tiny",
+            ),
+        )
+        compose.onNodeWithContentDescription("Show transcript").performClick()
+        compose.onNodeWithText("on phone").assertIsDisplayed()
+        compose.onNodeWithText("376 MB").assertIsDisplayed()
+        compose.onNodeWithText("Base").performClick()
+        assertEquals(listOf("base"), picked)
     }
 
     @Test

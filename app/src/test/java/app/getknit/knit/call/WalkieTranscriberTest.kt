@@ -212,6 +212,42 @@ class WalkieTranscriberTest {
         }
 
     @Test
+    fun aSpokenBurstIsTranscribedFromTheMicBesideOneHeardUnderTheSameNumber() =
+        runTest {
+            val t = transcriber()
+            t.begin(0)
+            t.pcm(pcm(ms = 1_000), 48_000, 1)
+            // Talking holds the playback mid-burst: both are open at once, and each keeps its own audio.
+            t.begin(0, mine = true)
+            t.mic.pcm(pcm(ms = 2_000, rate = 16_000), 16_000, 1)
+            t.end(0, mine = true)
+            t.end(0)
+            advanceUntilIdle()
+            assertEquals(
+                listOf(false to "words 16000", true to "words 32000"),
+                t.lines.value.map { it.mine to (it.state as TranscriptLine.State.Text).text },
+            )
+        }
+
+    @Test
+    fun aCancelledSpokenBurstLeavesTheHeardOneAlone() =
+        runTest {
+            val t = transcriber()
+            t.begin(3)
+            t.begin(3, mine = true)
+            t.mic.pcm(pcm(ms = 1_000, rate = 16_000), 16_000, 1)
+            t.abandon(mine = true)
+            t.end(3, mine = true)
+            assertEquals(listOf(false), t.lines.value.map { it.mine })
+            assertEquals(
+                TranscriptLine.State.Listening,
+                t.lines.value
+                    .single()
+                    .state,
+            )
+        }
+
+    @Test
     fun theTranscriptKeepsItsNewestLines() {
         var lines = emptyList<TranscriptLine>()
         for (b in 0 until 60) lines = withLine(lines, TranscriptLine(b, b.toLong(), TranscriptLine.State.Pending), max = 50)
@@ -222,9 +258,12 @@ class WalkieTranscriberTest {
         assertEquals(TranscriptLine.State.NoSpeech, lines[10].state)
     }
 
-    // [ms] of a quiet tone at 48 kHz, as the player's tap hands it on.
-    private fun pcm(ms: Int): ByteBuffer {
-        val samples = 48 * ms
+    // [ms] of a quiet tone at [rate], as the player's tap (48 kHz) or the recorder's (16 kHz) hands it on.
+    private fun pcm(
+        ms: Int,
+        rate: Int = 48_000,
+    ): ByteBuffer {
+        val samples = rate / 1_000 * ms
         return ByteBuffer.allocateDirect(samples * 2).order(ByteOrder.nativeOrder()).apply {
             val shorts = asShortBuffer()
             for (i in 0 until samples) shorts.put(((i % 48) * 100 - 2_400).toShort())

@@ -9,6 +9,7 @@ import android.media.MediaFormat
 import android.media.MediaRecorder
 import android.util.Log
 import app.getknit.knit.call.TalkGain
+import app.getknit.knit.call.TalkPcmTap
 import app.getknit.knit.call.WalkiePolicy
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -16,6 +17,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import java.io.File
 import java.io.InputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.Locale
 import kotlin.math.abs
 
@@ -31,9 +34,13 @@ import kotlin.math.abs
  *
  * [nextFrom] is the debug bridge's stand-in for a voice: the next burst reads that file of raw PCM, paced as the
  * microphone would deliver it, so a trial can send the same known sentence every time (the transcript, C-3.11-9).
+ *
+ * [tap] sees each read of PCM before it goes to the encoder, so the transcript can write out what was spoken as the
+ * model hears it without Opus (C-3.11-9); a tap that throws costs the transcript, never the burst.
  */
 internal class TalkRecorder(
     private val scope: CoroutineScope,
+    private val tap: TalkPcmTap? = null,
 ) {
     private var job: Job? = null
 
@@ -122,6 +129,7 @@ internal class TalkRecorder(
                 if (n == 0) continue
                 gain.apply(pcm, n)
                 peak = maxOf(peak, peakOf(pcm, n))
+                tapped(pcm, n)
                 if (!queue(codec, pcm, n, ptsUs, 0)) break
                 ptsUs += n / PCM_BYTES * US_PER_S / WalkiePolicy.SAMPLE_RATE
                 drain(codec, info, onPacket, untilEnd = false)
@@ -142,6 +150,15 @@ internal class TalkRecorder(
             runCatching { codec.stop() }
             runCatching { codec.release() }
         }
+    }
+
+    private fun tapped(
+        pcm: ByteArray,
+        size: Int,
+    ) {
+        val t = tap ?: return
+        runCatching { t.pcm(ByteBuffer.wrap(pcm, 0, size).order(ByteOrder.LITTLE_ENDIAN), WalkiePolicy.SAMPLE_RATE, 1) }
+            .onFailure { Log.w(TAG, "walkie transcript mic tap failed: ${it.javaClass.simpleName}") }
     }
 
     private fun queue(

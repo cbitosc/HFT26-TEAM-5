@@ -22,6 +22,9 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -51,13 +54,25 @@ internal data class TranscriptUi(
     // What the model costs to fetch, and whether the route a fetch would take now is mobile data or under Data Saver.
     val modelBytes: Long,
     val metered: Boolean,
+    // The models to pick between (none drawn for fewer than two) and the id of the one in use.
+    val choices: List<SttChoice> = emptyList(),
+    val chosen: String? = null,
+)
+
+/** A speech model the card offers: what it is called, what it costs to fetch, and whether it is already here. */
+internal data class SttChoice(
+    val id: String,
+    val label: String,
+    val bytes: Long,
+    val installed: Boolean,
 )
 
 /**
  * The walkie session's transcript (docs/VOICE_CALLS.md C-3.11-9), in the call screen's card slot while the header's
- * diagnostics toggle is off: each burst from [name] as text once it has played, newest at the bottom, and while the
- * speech model is not on the phone, what it costs and the button that fetches it. Experimental, debug only. The text
- * is the model's guess at 8 kbps speech, made on this phone; nothing here leaves it.
+ * diagnostics toggle is off: each burst from [name] as text once it has played, and each burst spoken here as the
+ * model heard it from the microphone, before Opus — newest at the bottom — and while the speech model is not on the
+ * phone, what it costs and the button that fetches it. Experimental, debug only: a spoken line set beside the other
+ * phone's for the same burst shows what the codec cost the model. Nothing here leaves the phone.
  */
 @Composable
 internal fun WalkieTranscript(
@@ -66,6 +81,7 @@ internal fun WalkieTranscript(
     onDownload: () -> Unit,
     onCancel: () -> Unit,
     modifier: Modifier = Modifier,
+    onModel: (String) -> Unit = {},
     zone: ZoneId = ZoneId.systemDefault(),
 ) {
     val ready = ui.model == SttModelState.Ready
@@ -95,6 +111,7 @@ internal fun WalkieTranscript(
                 contentPadding = PaddingValues(start = 16.dp, top = 12.dp, end = 16.dp, bottom = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
+                if (ui.choices.size > 1) item(key = "models") { ModelPicker(ui, onModel) }
                 transcriptItems(ui, name, ready, times, onDownload, onCancel)
             }
         }
@@ -119,18 +136,21 @@ private fun LazyListScope.transcriptItems(
     } else if (ui.lines.isEmpty()) {
         item(key = "empty") {
             Text(
-                "What ${name.ifBlank { "the other phone" }} says shows here as text, once each burst has played.",
+                "What you and ${name.ifBlank { "the other phone" }} say shows here as text, once each burst has ended.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }
-    items(ui.lines, key = { it.burst }) { line -> Line(line, times.format(Instant.ofEpochMilli(line.heardAt))) }
+    items(ui.lines, key = { "${if (it.mine) "s" else "h"}${it.burst}" }) { line ->
+        Line(line, if (line.mine) "You" else name.ifBlank { "Them" }, times.format(Instant.ofEpochMilli(line.heardAt)))
+    }
 }
 
 @Composable
 private fun Line(
     line: TranscriptLine,
+    who: String,
     time: String,
 ) {
     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -140,37 +160,82 @@ private fun Line(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.width(TimeWidth).padding(top = 3.dp),
         )
-        when (val state = line.state) {
-            is TranscriptLine.State.Text -> {
-                // Read out as it lands, for a user who cannot hear the burst.
-                Text(
-                    state.text,
-                    style = MaterialTheme.typography.bodyLarge,
-                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
-                )
-            }
+        Column(Modifier.weight(1f)) {
+            // Who spoke; a line of this phone's own is the microphone's audio, before Opus.
+            Text(
+                if (line.mine) "$who · mic, before Opus" else who,
+                style = MaterialTheme.typography.labelMedium,
+                color = if (line.mine) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Said(line)
+        }
+    }
+}
 
-            else -> {
-                Text(
-                    noteOf(state),
-                    style = MaterialTheme.typography.bodyMedium.copy(fontStyle = FontStyle.Italic),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
+@Composable
+private fun Said(line: TranscriptLine) {
+    when (val state = line.state) {
+        is TranscriptLine.State.Text -> {
+            // Read out as it lands, for a user who cannot hear the burst; their own words they know.
+            Text(
+                state.text,
+                style = MaterialTheme.typography.bodyLarge,
+                modifier = if (line.mine) Modifier else Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+            )
+        }
+
+        else -> {
+            Text(
+                noteOf(state, line.mine),
+                style = MaterialTheme.typography.bodyMedium.copy(fontStyle = FontStyle.Italic),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
 
 // What a line without text says.
-private fun noteOf(state: TranscriptLine.State): String =
+private fun noteOf(
+    state: TranscriptLine.State,
+    mine: Boolean,
+): String =
     when (state) {
-        TranscriptLine.State.Listening -> "Listening…"
+        TranscriptLine.State.Listening -> if (mine) "Recording…" else "Listening…"
         TranscriptLine.State.Pending -> "Transcribing…"
         TranscriptLine.State.NoSpeech -> "No speech heard"
         TranscriptLine.State.NoModel -> "Not transcribed: the speech model isn't on this phone"
         TranscriptLine.State.Failed -> "Couldn't transcribe this one"
         is TranscriptLine.State.Text -> state.text
     }
+
+/** Which speech model transcribes: a pick between the models on offer, each with its size or "on phone". */
+@Composable
+private fun ModelPicker(
+    ui: TranscriptUi,
+    onModel: (String) -> Unit,
+) {
+    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+        ui.choices.forEachIndexed { index, choice ->
+            SegmentedButton(
+                selected = choice.id == ui.chosen,
+                onClick = { onModel(choice.id) },
+                shape = SegmentedButtonDefaults.itemShape(index = index, count = ui.choices.size),
+                label = {
+                    // The name, and under it what it costs: three side by side leave no room for one line.
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(choice.label, maxLines = 1, style = MaterialTheme.typography.labelLarge)
+                        Text(
+                            if (choice.installed) "on phone" else mb(choice.bytes),
+                            maxLines = 1,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                },
+            )
+        }
+    }
+}
 
 /** Where the speech model stands, with the one action that moves it on. */
 @Composable
@@ -186,7 +251,7 @@ private fun ModelPanel(
 
             SttModelState.Absent -> {
                 Text(
-                    "Turn the bursts you hear into text, on this phone. The speech model is a one-time ${mb(ui.modelBytes)} " +
+                    "Turn the bursts you hear and speak into text, on this phone. The speech model is a one-time ${mb(ui.modelBytes)} " +
                         "download from getknit.app.",
                     style = MaterialTheme.typography.bodyMedium,
                 )

@@ -110,7 +110,9 @@ internal enum class TalkPath(
  * screen off; `CallService` holds the microphone's foreground state meanwhile.
  *
  * [transcript], where wired, writes each burst heard out as text (C-3.11-9): this loop tells it where a burst begins and
- * ends, and the player's tap hands it the audio between.
+ * ends, and the player's tap hands it the audio between. Each burst spoken goes the same way from the recorder's tap,
+ * opened at the press and ended at the release, so the sender's line shows what the model makes of the voice before
+ * Opus.
  */
 internal class WalkieTalk(
     private val calls: CallManager,
@@ -146,6 +148,7 @@ internal class WalkieTalk(
 
     /** The burst being spoken: its bytes on their way to [streamer], and whether its end sends ([kept]) or drops it. */
     private class Outgoing(
+        val burst: Int,
         val ticker: Job,
         val bytes: Channel<ByteArray>,
         val kept: CompletableDeferred<Boolean>,
@@ -233,14 +236,19 @@ internal class WalkieTalk(
             // Half duplex: what plays waits for the release.
             player.hold(true)
             val bytes = Channel<ByteArray>(Channel.UNLIMITED)
+            val b = burst
+            // Open before the microphone, whose first read comes on its own thread.
+            transcript?.begin(b, mine = true)
             if (!recorder.start(headset()) { bytes.trySend(it) }) {
+                transcript?.abandon(mine = true)
                 player.hold(false)
                 _talk.value = Talk.Idle(Talk.Note.NO_MIC)
                 return@withLock false
             }
+            burst++
             lastActivity = clock()
             val kept = CompletableDeferred<Boolean>()
-            val streamer = scope.async(Dispatchers.Default) { stream(call, burst++, bytes, kept) }
+            val streamer = scope.async(Dispatchers.Default) { stream(call, b, bytes, kept) }
             val ticker =
                 scope.launch {
                     while (true) {
@@ -253,7 +261,7 @@ internal class WalkieTalk(
                         delay(TICK_MS)
                     }
                 }
-            outgoing = Outgoing(ticker, bytes, kept, streamer)
+            outgoing = Outgoing(b, ticker, bytes, kept, streamer)
             true
         }
 
@@ -267,6 +275,8 @@ internal class WalkieTalk(
                 _talk.value = Talk.Sending
                 // Joins the drain, so every byte recorded has reached the streamer before its channel closes.
                 recorder.stop()
+                // Every sample spoken has been through the tap: sent or not, the model hears it.
+                transcript?.end(o.burst, mine = true)
                 o
             }
         o.bytes.close()
@@ -285,6 +295,7 @@ internal class WalkieTalk(
                 outgoing = null
                 o.ticker.cancel()
                 recorder.cancel()
+                transcript?.abandon(mine = true)
                 o
             }
         if (o != null) {

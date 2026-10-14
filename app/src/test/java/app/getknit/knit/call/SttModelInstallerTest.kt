@@ -151,14 +151,26 @@ class SttModelInstallerTest {
 
     @Test
     fun theShippedPinsAreWellFormed() {
-        val shipped = SttModel.MOONSHINE_TINY_EN_V2
-        assertTrue(shipped.baseUrl.startsWith("https://getknit.app/"))
-        assertTrue(shipped.baseUrl.contains(shipped.id))
-        assertTrue(shipped.files.all { it.sha256.matches(Regex("[0-9a-f]{64}")) && it.bytes > 0 })
+        assertEquals(SttModel.MOONSHINE_TINY_EN_V2, SttModel.ALL.first())
         assertEquals(
-            setOf("encoder_model.ort", "decoder_model_merged.ort", "tokens.txt", "LICENSE"),
-            shipped.files.map { it.name }.toSet(),
+            SttModel.ALL.size,
+            SttModel.ALL
+                .map { it.id }
+                .toSet()
+                .size,
         )
+        for (shipped in SttModel.ALL) {
+            assertTrue(shipped.baseUrl.startsWith("https://getknit.app/"))
+            assertTrue(shipped.baseUrl.contains(shipped.id))
+            assertTrue(shipped.files.all { it.sha256.matches(Regex("[0-9a-f]{64}")) && it.bytes > 0 })
+            // One file for each part the engine is wired with (found by name), and the licence.
+            val names = shipped.files.map { it.name }
+            for (part in listOf("encoder", "decoder", "tokens")) assertEquals(shipped.id, 1, names.count { part in it })
+            assertTrue(shipped.id, "LICENSE" in names)
+            // Moonshine returns nothing past about 9 s; Whisper reads no more than 30.
+            val window = if (shipped.engine == SttEngine.MOONSHINE) 9_000L else 30_000L
+            assertTrue(shipped.id, shipped.segmentMinMs < shipped.segmentMaxMs && shipped.segmentMaxMs < window)
+        }
     }
 
     private fun pin(

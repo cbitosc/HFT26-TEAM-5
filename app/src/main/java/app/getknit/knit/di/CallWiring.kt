@@ -222,7 +222,7 @@ private fun callGraph(): Module =
                 )
             }
             single { TalkPlayer(tap = get<WalkieTranscriber>()) }
-            single { TalkRecorder(get<CoroutineScope>()) }
+            single { TalkRecorder(get<CoroutineScope>(), tap = get<WalkieTranscriber>().mic) }
             single {
                 WalkieTalk(
                     calls = get(),

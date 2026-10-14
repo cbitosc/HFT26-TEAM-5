@@ -776,8 +776,14 @@ an experiment behind `BuildConfig.WALKIE` (`-Pwalkie=`, on in debug and off in r
   - **The audio.** The player's decoded PCM (48 kHz mono s16) is tapped on its way to the track
     (`TalkPlayer`'s `TalkPcmTap`), averaged down to 16 kHz (`BurstPcm`), capped at the burst's 60 s. A burst under
     300 ms is no speech, and never reaches the model.
-  - **The model.** Moonshine tiny EN v2 (int8, ORT; MIT) through sherpa-onnx 1.13.8's ONNX Runtime, packaged
-    only where calls are, like libwebrtc. It reads at most about 9 s at once, so a longer burst is cut at its quietest 50 ms
+  - **The sender's own.** Each burst this phone speaks is transcribed the same way from the recorder's PCM before
+    the encoder (`TalkRecorder`'s tap, 16 kHz already), opened at the press and ended at the release — sent or not —
+    and shown as the user's own line. Set beside the other phone's line for the same burst, it separates what Opus
+    at 8 kbps cost the model from what the model gets wrong on clean audio. A cancelled burst drops its line.
+  - **The model.** Moonshine EN v2 (int8, ORT; MIT) through sherpa-onnx 1.13.8's ONNX Runtime, packaged
+    only where calls are, like libwebrtc: tiny (44 MB, the default) or base (141 MB, about 170 MB of native heap while held) — or
+    Whisper small.en (375 MB, ~920 MB of native heap, several times slower; cut at 20–28 s, not 5–8) — the user's pick
+    on the card. Each is fetched and kept on its own; the transcript uses the one picked. It reads at most about 9 s at once, so a longer burst is cut at its quietest 50 ms
     between 5 s and 8 s from each cut (`segments`) and the parts' text joined. Bursts go to it one at a time, in the
     order they ended, off the player's loop. Its recognizer is held on a `ModelLease` (released after 2 min idle;
     about 60 MB of native heap while held) and built under `ModelLoadGuard` as `stt`, a probe decode included.

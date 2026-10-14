@@ -348,14 +348,18 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   - `download` fetches the model from getknit.app as the card's button does (refused with no validated route);
     `sideload --es dir <dir>` installs it from its four files pushed there (`scripts/stt-model.py --out` stages
     them; `chmod 755` the directory and `644` the files), each checked against the same pins; `cancel`; `delete`;
-    `unload` releases the recognizer now (otherwise 2 min idle).
+    `unload` releases the recognizer now (otherwise 2 min idle). `use --es model tiny|base|whisper` (a label or an id) puts
+    that model in use, as the card's picker does; the other ops act on the model in use, and `status` names it
+    (`model`) and lists the ids on the phone (`installed`).
   - `pcm --es path <file>` runs the model over a raw 16 kHz mono s16le file, cut as a burst is, and replies with
     `text`, `audioMs`, `tookMs` and `parts`: the engine alone, no call.
   - `loop --es path <file>` sends the file the whole walkie way but the radio (the recorder's Opus encoder at 8 kbps,
     the player's decoder and tap, the transcriber) as burst 0 of a fresh transcript, and replies at once; poll
-    `status`. It plays aloud and refuses during a walkie call. This is the single-device check of the audio path.
+    `status`. It plays aloud and refuses during a walkie call. This is the single-device check of the audio path, and
+    the codec's cost in one go: the transcript gets two lines, `mine: true` (the file as the recorder's tap saw it,
+    before Opus) and `mine: false` (as the player decoded it).
   - Logcat (`KnitCall`): `walkie stt: <what> of <model> (<bytes> B)`, `… installed` or `… failed: …`, `walkie stt:
-    recognizer built in <ms> ms`, and per burst `walkie: transcribed burst <b>: <ms> ms of audio in <ms> ms, <n>
+    recognizer built in <ms> ms`, and per burst `walkie: transcribed heard|spoken burst <b>: <ms> ms of audio in <ms> ms, <n>
     part(s), <n> chars`. A recognizer that won't build latches `stt` under `…debug.MODEL` like the moderation models.
 - `…debug.RATCHET` — dumps the **DM ratchet's per-peer state** and, with `--es reset <peerNodeId>`, forces a
   session reset past the heuristic that guards it. Exists because every gate in the recovery path returns

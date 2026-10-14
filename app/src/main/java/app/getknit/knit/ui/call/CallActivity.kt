@@ -265,6 +265,8 @@ class CallActivity :
         val model by (stt?.state ?: NO_MODEL).collectAsState()
         // Read again as the model's state moves: a tap on Download is when the route matters.
         val metered = remember(model) { stt?.metered() == true }
+        // Which models are on the phone, read again as the one in use moves or lands.
+        val installed = remember(model) { stt?.installedIds().orEmpty() }
         CallScreen(
             state = state,
             name = name,
@@ -291,9 +293,20 @@ class CallActivity :
             onTalkSend = { lifecycleScope.launch { walkie?.release() } },
             onTalkCancel = { lifecycleScope.launch { walkie?.cancel() } },
             walkieStats = walkieStats.takeIf { walkieUp },
-            transcript = stt?.let { TranscriptUi(lines, model, it.model.bytes, metered) },
+            transcript =
+                stt?.let { store ->
+                    TranscriptUi(
+                        lines,
+                        model,
+                        store.model.bytes,
+                        metered,
+                        choices = store.models.map { SttChoice(it.id, it.label, it.bytes, it.id in installed) },
+                        chosen = store.model.id,
+                    )
+                },
             onSttDownload = { stt?.download() },
             onSttCancel = { stt?.cancel() },
+            onSttModel = { id -> lifecycleScope.launch { stt?.select(id) } },
         )
     }
 
@@ -421,6 +434,7 @@ internal fun CallScreen(
     transcript: TranscriptUi? = null,
     onSttDownload: () -> Unit = {},
     onSttCancel: () -> Unit = {},
+    onSttModel: (String) -> Unit = {},
 ) {
     val phase = state?.phase
     var showStats by rememberSaveable { mutableStateOf(statsShown) }
@@ -458,7 +472,7 @@ internal fun CallScreen(
                 if (transcribed != null) {
                     // The transcript scrolls itself, to keep its newest line in view.
                     Box(Modifier.weight(1f).fillMaxWidth().padding(vertical = 16.dp)) {
-                        WalkieTranscript(transcribed, name, onSttDownload, onSttCancel, Modifier.fillMaxSize())
+                        WalkieTranscript(transcribed, name, onSttDownload, onSttCancel, Modifier.fillMaxSize(), onSttModel)
                     }
                 } else if (diagnostics != null) {
                     // The room between the face and the controls; a short screen scrolls the card rather than clip it.
@@ -1502,6 +1516,7 @@ fun CallScreenWalkieTranscriptPreview() =
                 lines =
                     listOf(
                         TranscriptLine(0, PREVIEW_NOW - 64_000, TranscriptLine.State.Text("Are you at the north gate yet?")),
+                        TranscriptLine(0, PREVIEW_NOW - 52_000, TranscriptLine.State.Text("Almost, I'm by the food trucks."), mine = true),
                         TranscriptLine(1, PREVIEW_NOW - 41_000, TranscriptLine.State.NoSpeech),
                         TranscriptLine(
                             2,
@@ -1529,6 +1544,13 @@ fun CallScreenWalkieTranscriptNoModelPreview() =
                 model = SttModelState.Absent,
                 modelBytes = PREVIEW_MODEL_BYTES,
                 metered = true,
+                choices =
+                    listOf(
+                        SttChoice("tiny", "Tiny", PREVIEW_MODEL_BYTES, installed = false),
+                        SttChoice("base", "Base", 141_314_910, installed = false),
+                        SttChoice("whisper", "Whisper", 375_502_142, installed = false),
+                    ),
+                chosen = "tiny",
             ),
     )
 
