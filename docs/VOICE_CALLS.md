@@ -820,8 +820,9 @@ link down; its own sends were all delivered. Nothing steers a link off Coded whi
     walkie's correction; `CallAudioPolicyTest` for the start, the correction, the notification's target and
     when the screen goes dark at the ear.
   - The microphone (C-3.13-12, C-3.13-13): `CaptureHealthTest` for the profile a call opens on, the learned verdict
-    and the watch (zeros, a mute, a silenced client, a record error), `CallStatsReaderTest` for the two audio levels,
-    and `SystemImageTest` for the image that opens on the fallback.
+    and the watch (zeros, a mute, a silenced client, a record error), `CaptureTapTest` for the buffers between a call's
+    end and the module's stop, `CallStatsReaderTest` for the two audio levels, and `SystemImageTest` for the image that
+    opens on the fallback.
   - A phone that may not host (C-3.10-1, ADR 2026-10.w3dw): `DirectHostGuardTest`, `DirectWifiLeaseTest` and
     `DirectCallPathTest`'s non-hosting caller.
   - Stale `OFFER` → missed call; `CANCEL` before `OFFER` → no alert.

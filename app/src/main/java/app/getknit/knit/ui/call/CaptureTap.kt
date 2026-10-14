@@ -59,7 +59,11 @@ internal class CaptureTap(
     /** A trial's dead microphone (`…debug.CALL --es op capture --es fault silence`): the module's own buffers zeroed. */
     @Volatile var faultSilence = false
 
+    // The module records nothing itself and this tap fills its buffers: from a switch until the next call re-enables it.
     @Volatile private var external = false
+
+    // Between begin() and end(). end() runs before the module stops recording, so the buffers in between belong to no call.
+    @Volatile private var calling = false
 
     // The tap's own recorder after a switch; opened and read on the record thread only, released under [lock].
     private var record: AudioRecord? = null
@@ -81,15 +85,23 @@ internal class CaptureTap(
             muted = false
             profile = profileName
             watch = CaptureWatch(canSwitch)
+            calling = true
         }
         module?.setAudioRecordEnabled(true)
         publish()
     }
 
-    /** The call ended: give the tap's recorder back, and stop reporting. */
+    /**
+     * The call ended: give the tap's recorder back, and stop reporting. It runs before the module stops recording, so
+     * [calling] is cleared under the lock: a buffer already waiting on it must find the call over, or it opens a
+     * recorder again. [external] stays: after a switch the module still records nothing itself, and the tap paces its
+     * thread until it stops.
+     */
     fun end() {
-        synchronized(lock) { closeRecord() }
-        external = false
+        synchronized(lock) {
+            calling = false
+            closeRecord()
+        }
         _status.value = null
     }
 
@@ -106,6 +118,8 @@ internal class CaptureTap(
         } else if (faultSilence) {
             zero(buffer)
         }
+        // A buffer between end() and the module's stop is no call's: judged, it would read as a dead microphone.
+        if (!calling) return captureTimestampNs
         val frameMs = frameMs(buffer.capacity(), channelCount, sampleRate)
         watch.frame(peakOf(buffer), frameMs, muted, ::excuse)?.let(::changed)
         return captureTimestampNs
@@ -128,6 +142,7 @@ internal class CaptureTap(
 
     private fun recordFailed(why: String) {
         log("call capture: record error ($why)")
+        if (!calling) return
         watch.failed(::excuse)?.let(::changed)
     }
 
@@ -148,22 +163,31 @@ internal class CaptureTap(
         _status.value = CaptureStatus(watch.health, profile, watch.switched)
     }
 
-    /** Fills [buffer] from the tap's own recorder, opened on first use; zeros (paced) while none will open. */
+    /**
+     * Fills [buffer] from the tap's own recorder, opened on first use; zeros (paced) while none will open, and once the
+     * call has ended, opening nothing.
+     */
     private fun readOwn(
         buffer: ByteBuffer,
         audioFormat: Int,
         channelCount: Int,
         sampleRate: Int,
     ) {
-        synchronized(lock) {
-            val own = record ?: openRecord(audioFormat, channelCount, sampleRate).also { record = it }
-            buffer.clear()
-            val read = own?.read(buffer, buffer.capacity(), AudioRecord.READ_BLOCKING) ?: -1
-            if (read < buffer.capacity()) {
-                for (i in maxOf(read, 0) until buffer.capacity()) buffer.put(i, 0)
+        val paced =
+            synchronized(lock) {
+                if (!calling) {
+                    zero(buffer)
+                    return@synchronized false
+                }
+                val own = record ?: openRecord(audioFormat, channelCount, sampleRate).also { record = it }
+                buffer.clear()
+                val read = own?.read(buffer, buffer.capacity(), AudioRecord.READ_BLOCKING) ?: -1
+                if (read < buffer.capacity()) {
+                    for (i in maxOf(read, 0) until buffer.capacity()) buffer.put(i, 0)
+                }
+                read >= 0
             }
-            if (read < 0) Thread.sleep(frameMs(buffer.capacity(), channelCount, sampleRate).toLong())
-        }
+        if (!paced) Thread.sleep(frameMs(buffer.capacity(), channelCount, sampleRate).toLong())
     }
 
     @SuppressLint("MissingPermission") // a call's media opens only with RECORD_AUDIO held (CallActivity.answer, dial)

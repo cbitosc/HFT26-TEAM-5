@@ -50,6 +50,9 @@ when the module reported a hardware one, and that is fixed for the session. On t
 itself back until the call ends. The fallback's source may not follow a Bluetooth headset's microphone the way
 `VOICE_COMMUNICATION` does. A walkie with a headset still records from `VOICE_COMMUNICATION` (C-3.13-7), unchanged
 here. The three-second window is a judgement: a route change's gap is shorter, a caller's patience longer. Tests:
-`CaptureHealthTest` (policy, store, watch), `CallStatsReaderTest.theMicrophoneAndTheHeardLevelsAreRead`. Owed: the
-Moto heard on a live call on the fallback, and a Pixel switching mid-call under `…debug.CALL --es op capture --es
-fault silence`.
+`CaptureHealthTest` (policy, store, watch), `CaptureTapTest` (a call's end), `CallStatsReaderTest.theMicrophoneAndTheHeardLevelsAreRead`.
+Device trial 2026-10-14, Moto + Pixel 9: the Moto's live call on the fallback reached the Pixel at −76 to −39 dB, and
+the Pixel switched about 3 s into `…debug.CALL --es op capture --es fault silence` and was heard again. The trial found
+that `end()` runs before the module stops recording: a switched call's hang-up reopened the tap's recorder and spun the
+record thread into a stale DEAD. The tap now keeps the call (`calling`) apart from the switch (`external`), opens
+nothing and judges nothing past the end, and paces the module's thread until it stops.
