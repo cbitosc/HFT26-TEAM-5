@@ -80,3 +80,18 @@ started on the speaker at both ends: on the P9, Telecom first entered the earpie
 speaker within 20 ms, before any audio. Bursts on the watch played out over `bluetooth sco` and were recorded from
 source 7 there. A user's earpiece pick was kept. A headset-hook key press answered a backgrounded call and hung it up.
 Owed: earbuds unplugged mid-walkie (C-3.13-6), and the Pixel 3's `ConnectionService` path.
+
+## Amendment 2026-10-13: the screen goes dark at the ear
+
+A self-managed call gets nothing of the system's in-call UI, and the dialer's proximity handling lives there, so a
+live call kept the screen lit against the cheek (the call screen also sets `FLAG_KEEP_SCREEN_ON`), where a touch could
+mute or hang up. Knit now does what the dialer does (C-3.13-11): `CallAudioPolicy.screenOffNearEar` decides, and
+`debug/call/ProximityLock` holds `PROXIMITY_SCREEN_OFF_WAKE_LOCK` while it says so — a live call off-hook (dialing to
+reconnecting, never while an incoming call rings) on the earpiece, never a walkie. A route off the earpiece releases it
+at once; the call's end releases it with `RELEASE_FLAG_WAIT_FOR_NO_PROXIMITY`, so a far-end hang-up does not light the
+screen at the ear.
+
+`CallService` holds it, not `CallActivity`: the service lives exactly as long as the call's microphone, including a
+call answered from a headset or a watch (C-3.13-10) and a call the user left for the chat, which the dialer keeps dark
+too. The lock touches nothing of Telecom's route, mode or focus (C-3.13-7). Owed: a device trial (ring-out, connect,
+speaker toggle at the ear, a headset, a far-end hang-up, a walkie).

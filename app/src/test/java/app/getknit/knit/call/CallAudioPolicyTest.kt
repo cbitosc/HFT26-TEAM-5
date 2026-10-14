@@ -2,12 +2,14 @@ package app.getknit.knit.call
 
 import app.getknit.knit.call.CallAudioRoute.Kind
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
  * The route rules both call kinds share (docs/VOICE_CALLS.md §3.13): where a walkie starts and goes back to, and the
- * notification's target.
+ * notification's target, and when the screen goes dark at the ear.
  */
 class CallAudioPolicyTest {
     private val earpiece = CallAudioRoute(Kind.EARPIECE, "Earpiece", "e")
@@ -65,5 +67,46 @@ class CallAudioPolicyTest {
     fun theNotificationHasNowhereToGoWithoutASecondRoute() {
         assertNull(CallAudioPolicy.notificationTarget(CallRouting(speaker, listOf(speaker))))
         assertNull(CallAudioPolicy.notificationTarget(CallRouting(earpiece, listOf(earpiece))))
+    }
+
+    private fun call(
+        phase: CallPhase,
+        walkie: Boolean = false,
+    ) = CallState(id = "c", peerId = "p", outgoing = true, phase = phase, startedAt = 0, walkie = walkie)
+
+    @Test
+    fun aLiveCallOnTheEarpieceDarkensTheScreenFromDialingToReconnecting() {
+        val routing = CallRouting(earpiece, listOf(earpiece, speaker))
+        for (phase in listOf(CallPhase.Calling, CallPhase.Ringing, CallPhase.Connecting, CallPhase.Connected, CallPhase.Reconnecting)) {
+            assertTrue(phase.name, CallAudioPolicy.screenOffNearEar(call(phase), routing))
+        }
+    }
+
+    @Test
+    fun anIncomingRingAnEndedCallAndNoCallKeepTheScreen() {
+        val routing = CallRouting(earpiece, listOf(earpiece, speaker))
+        assertFalse(CallAudioPolicy.screenOffNearEar(call(CallPhase.Alerting), routing))
+        assertFalse(CallAudioPolicy.screenOffNearEar(call(CallPhase.Ended), routing))
+        assertFalse(CallAudioPolicy.screenOffNearEar(null, routing))
+    }
+
+    @Test
+    fun aWalkieKeepsTheScreenEvenOnTheEarpiece() {
+        assertFalse(CallAudioPolicy.screenOffNearEar(call(CallPhase.Connected, walkie = true), CallRouting(earpiece, listOf(earpiece))))
+    }
+
+    @Test
+    fun everyRouteButTheEarpieceKeepsTheScreen() {
+        val all = listOf(earpiece, speaker, buds, wired)
+        for (route in listOf(speaker, buds, wired)) {
+            assertFalse(route.name, CallAudioPolicy.screenOffNearEar(call(CallPhase.Connected), CallRouting(route, all)))
+        }
+    }
+
+    @Test
+    fun beforeTheSystemNamesARouteTheEarpieceIsAssumedUnlessAHeadsetIsThere() {
+        assertTrue(CallAudioPolicy.screenOffNearEar(call(CallPhase.Calling), CallRouting(null, listOf(earpiece, speaker))))
+        assertTrue(CallAudioPolicy.screenOffNearEar(call(CallPhase.Calling), null))
+        assertFalse(CallAudioPolicy.screenOffNearEar(call(CallPhase.Calling), CallRouting(null, listOf(earpiece, speaker, buds))))
     }
 }

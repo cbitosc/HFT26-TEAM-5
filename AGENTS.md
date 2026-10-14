@@ -100,8 +100,9 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   never logged or put in a frame. A call's line in its thread (`data/message/CallRecord`, `MessageEntity.KIND_CALL`,
   `call/CallLog`) is §3.12: a record this phone writes when the call ends, never sent, saved off the inbound path.
   **Before touching `call/SystemCalls` (`SystemCallSync`, `CallControl`), `call/CallAudioRoute` (`CallAudioPolicy`),
-  `debug/call/TelecomCalls`, `AudioRouteButton`, the call notification's route action, `TalkPlayer`'s usage or
-  `TalkRecorder`'s sources:** READ ADR 2026-10.wbua and `docs/VOICE_CALLS.md` §3.13. Every call, live or walkie, is
+  `debug/call/TelecomCalls`, `AudioRouteButton`, the call notification's route action, `TalkPlayer`'s usage,
+  `TalkRecorder`'s sources or `debug/call/ProximityLock` (`CallAudioPolicy.screenOffNearEar`):** READ ADR 2026-10.wbua
+  and `docs/VOICE_CALLS.md` §3.13. Every call, live or walkie, is
   a self-managed Telecom call through core-telecom (`debugImplementation`, an RC by a recorded exception in
   `context/toolchain.md`), and Telecom owns its route, mode and focus. Never set a route beside it
   (`setCommunicationDevice`, `startBluetoothSco`, a track's preferred device). A walkie differs only in starting on

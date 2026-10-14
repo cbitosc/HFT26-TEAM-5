@@ -750,6 +750,7 @@ scope, never on the inbound path. `debug/call/TelecomCalls` is the one importer 
 | **C-3.13-8** | The call screen's route control is the loudspeaker toggle while the earpiece and the loudspeaker are the only routes. With a third route it names the current one and lists them all. The notification's one route action goes onto the loudspeaker, or off it to a Bluetooth headset, then a wired one, then the earpiece. It carries that route's key, so a stale tap never moves the call anywhere unseen. |
 | **C-3.13-9** | A mute set from a car or a watch reaches the call. The first value the system reports is only where it starts, and is not acted on.                                                                                                                                             |
 | **C-3.13-10** | A call the system answered starts the call's microphone service from inside the system's answer, because the call screen may never open. Without the service, a backgrounded call's microphone is silenced. Android allowed that background start on the trial phone (a Pixel 9, API 37). |
+| **C-3.13-11** | A live call on the earpiece, from dialing to reconnecting, holds the proximity wake lock, so the screen goes dark and ignores touches while the phone is at the ear, wherever the user left the call screen. It never does while an incoming call rings, for a walkie, or on any other route; leaving the earpiece gives the screen back at once. A call that ends keeps a dark screen dark until the phone leaves the ear. |
 
 The system shows the peer's label as the call's name, and `knit:<node id>` as its address. VoIP calls stay out of the
 system call log. A call's line in its thread is §3.12's.
@@ -795,7 +796,8 @@ link down; its own sends were all delivered. Nothing steers a link off Coded whi
   - Call records (§3.12): `CallRecordTest` for the outcome table and the row, the record cases in `CallManagerTest`,
     `CallLogTest`, and the call line in `ChatScreenContentTest` and `ChatListTransferPreviewTest`.
   - The audio route (§3.13): `SystemCallSyncTest` for the system call's lifecycle, glare, refusals, mute and the
-    walkie's correction; `CallAudioPolicyTest` for the start, the correction and the notification's target.
+    walkie's correction; `CallAudioPolicyTest` for the start, the correction, the notification's target and
+    when the screen goes dark at the ear.
   - Stale `OFFER` → missed call; `CANCEL` before `OFFER` → no alert.
   - Glare resolution; idempotent duplicates.
   - Relay-only SDP stripping, and fingerprint mismatch → call refused.

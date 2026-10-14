@@ -39,6 +39,8 @@ import org.koin.core.component.inject
  * stands (the timer once connected), Hang up, Mute (a live call's only) and one route action — onto the loudspeaker,
  * or off it to the headset or the earpiece ([CallAudioPolicy.notificationTarget]) — each naming what a tap will do. It
  * is posted again on every change of [CallManager.state] and of the route, so those always show the call as it is.
+ * While the call is on the earpiece it also holds the [ProximityLock], so the screen goes dark at the ear wherever the
+ * user left the call screen.
  */
 class CallService :
     LifecycleService(),
@@ -46,6 +48,7 @@ class CallService :
     private val calls: CallManager by inject()
     private val system: SystemCallSync by inject()
     private val faces: CallFaces by inject()
+    private val proximity by lazy { ProximityLock(this) }
     private var watching = false
 
     override fun onStartCommand(
@@ -61,15 +64,23 @@ class CallService :
             lifecycleScope.launch {
                 combine(calls.state, system.routing, ::Pair).collect { (state, routing) ->
                     if (state == null || state.phase == CallPhase.Ended) {
+                        proximity.end()
                         ServiceCompat.stopForeground(this@CallService, ServiceCompat.STOP_FOREGROUND_REMOVE)
                         stopSelf()
                     } else {
+                        // The screen goes dark at the ear while the call is on the earpiece (C-3.13-11).
+                        proximity.hold(CallAudioPolicy.screenOffNearEar(state, routing))
                         claim(state, faces.of(state.peerId), routing)
                     }
                 }
             }
         }
         return START_NOT_STICKY
+    }
+
+    override fun onDestroy() {
+        proximity.end()
+        super.onDestroy()
     }
 
     private fun claim(

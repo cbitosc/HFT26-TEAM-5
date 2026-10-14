@@ -64,6 +64,26 @@ object CallAudioPolicy {
             routing.available.firstOrNull { it.kind == CallAudioRoute.Kind.SPEAKER }
         }
 
+    /**
+     * Whether the screen goes dark while something is near it (C-3.13-11): a live call held on the earpiece, from
+     * dialing to reconnecting, as the system dialer does for its own calls (a self-managed call gets none of that).
+     * Never while an incoming call rings (its Answer must stay reachable), never for a walkie (heard aloud, held to
+     * talk) and never on another route. Before the system names a route, the earpiece is assumed unless a headset is
+     * connected, since that is where a live call starts (C-3.13-5).
+     */
+    fun screenOffNearEar(
+        state: CallState?,
+        routing: CallRouting?,
+    ): Boolean {
+        if (state == null || state.walkie || state.phase !in OFF_HOOK) return false
+        val current = routing?.current ?: return routing?.available.orEmpty().none { it.headset }
+        return current.kind == CallAudioRoute.Kind.EARPIECE
+    }
+
+    // A call this phone is holding to the ear: placed or answered, not yet over.
+    private val OFF_HOOK =
+        setOf(CallPhase.Calling, CallPhase.Ringing, CallPhase.Connecting, CallPhase.Connected, CallPhase.Reconnecting)
+
     // Off the speaker, best first.
     private val OFF_SPEAKER =
         listOf(CallAudioRoute.Kind.BLUETOOTH, CallAudioRoute.Kind.WIRED, CallAudioRoute.Kind.EARPIECE, CallAudioRoute.Kind.OTHER)
