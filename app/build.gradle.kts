@@ -144,11 +144,23 @@ val bleFeedWindow = (project.findProperty("bleFeedWindow") as? String)?.toBoolea
 // `if (WEAR_STATUS)` branch), and the defaults live in source so F-Droid's -P-free rebuild stays identical.
 val wearStatus = (project.findProperty("wearStatus") as? String)?.toBoolean()
 
+// Voice calls (docs/VOICE_CALLS.md, ADR 2026-10.3tee) — an experiment: ON in debug, OFF in a shipped artifact,
+// overridable with `-Pcalls=true|false`. Unlike the switches above it decides what is packaged, not only what is wired:
+// libwebrtc is ~48 MB of native code across the four ABIs, and core-telecom's manifest brings an exported
+// ConnectionService and MANAGE_OWN_CALLS. So the code lives in main and compiles everywhere against `compileOnly`
+// WebRTC and core-telecom, and a variant gets their runtime, `src/calls/AndroidManifest.xml` (the call screen, its
+// service, receiver and permissions) and `src/calls/keepRules` only where the flag is on. Off, `di/CallWiring` builds
+// nothing and R8 drops every `ui/call` class. The debug build keeps the runtime even under `-Pcalls=false` (it is
+// locked); a release-shaped build under `-Pcalls=true` is a maintainer's, so its runtime classpaths go unlocked
+// (`dependencyLocking` below). The defaults live in source so F-Droid's -P-free rebuild stays identical.
+val calls = (project.findProperty("calls") as? String)?.toBoolean()
+val callsInDebug = calls ?: true
+val callsInRelease = calls ?: false
+
 // The walkie-talkie (docs/VOICE_CALLS.md §3.11, ADR 2026-10.79yb): a call with no live path becomes hold-to-talk voice
 // notes over the mesh — ON in debug, OFF in a shipped artifact, overridable with `-Pwalkie=true|false` (say, to keep it
-// out of a marketing build). It gates the one seam, `di/CallWiring.WALKIE_WIRED`; release wires no calls at all yet, so
-// its value is inert there until calls ship. Not a code strip, and the defaults live in source so F-Droid's -P-free
-// rebuild stays identical.
+// out of a marketing build). It gates the one seam, `di/CallWiring.WALKIE_WIRED`, which is off wherever calls are
+// (`calls` above). Not a code strip, and the defaults live in source so F-Droid's -P-free rebuild stays identical.
 val walkie = (project.findProperty("walkie") as? String)?.toBoolean()
 
 // ABIs packaged into the **debug** APK. Debug is unminified and carries both tflite models, so it is
@@ -304,6 +316,8 @@ android {
         buildConfigField("boolean", "BLE_FEED_WINDOW", (bleFeedWindow ?: true).toString())
         // The Wear OS status service is ON in debug so a lab phone serves a paired watch; see `wearStatus` above.
         buildConfigField("boolean", "WEAR_STATUS", (wearStatus ?: true).toString())
+        // Voice calls are ON in debug so a lab build can call; see `calls` above.
+        buildConfigField("boolean", "CALLS", callsInDebug.toString())
         // The walkie-talkie is ON in debug so a lab build can talk over the mesh; see `walkie` above.
         buildConfigField("boolean", "WALKIE", (walkie ?: true).toString())
         // Fault injection for the model poison-pill's acceptance test (ADR 037):
@@ -414,7 +428,9 @@ android {
             buildConfigField("boolean", "BLE_FEED_WINDOW", (bleFeedWindow ?: true).toString())
             // The Wear OS status service is a prototype: dark in a shipped artifact.
             buildConfigField("boolean", "WEAR_STATUS", (wearStatus ?: false).toString())
-            // The walkie-talkie is an experiment on calls, which release does not wire: dark in a shipped artifact.
+            // Voice calls are an experiment: dark in a shipped artifact, and not packaged there (see `calls` above).
+            buildConfigField("boolean", "CALLS", callsInRelease.toString())
+            // The walkie-talkie is an experiment on calls: dark in a shipped artifact.
             buildConfigField("boolean", "WALKIE", (walkie ?: false).toString())
             // Never ship a fault injector, whatever `-PmodelFaultOnLoad` said.
             buildConfigField("String", "MODEL_FAULT_ON_LOAD", "\"\"")
@@ -674,6 +690,14 @@ androidComponents {
             gitShortSha.map { BuildConfigField("String", "\"$it\"", "Short commit of the checkout; debug only") },
         )
     }
+    // What a build with voice calls adds beyond main (see `calls` up top): the call screen's manifest entries and the
+    // keep rules libwebrtc's native half needs. The runtime is the dependencies block's; these follow the same flag.
+    onVariants { variant ->
+        if (if (variant.buildType == "debug") callsInDebug else callsInRelease) {
+            variant.sources.manifests.addStaticManifestFile("src/calls/AndroidManifest.xml")
+            variant.sources.keepRules?.addStaticSourceDirectory("src/calls/keepRules")
+        }
+    }
 }
 
 // Guards against building an APK whose moderation models are Git LFS pointer stubs (or otherwise
@@ -907,14 +931,15 @@ kover {
                     // The debug source set (src/debug/java) outside the two packages below — the release
                     // twin of DemoWiring is a no-op stub, and the report is the debug variant's.
                     "app.getknit.knit.di.DemoWiring*",
-                    "app.getknit.knit.di.CallWiring*", // the voice calls' variant seam; its surfaces sit under `debug`
+                    "app.getknit.knit.di.CallWiring*", // voice calls: not in a shipped artifact (`calls` up top)
                     "app.getknit.knit.mesh.DemoTransport*",
                     "app.getknit.knit.mesh.DemoLoraPlane*",
                     "app.getknit.knit.mesh.DemoBoardDirectory*", // declared in DemoLoraPlane.kt
                 )
                 // The debug bridge and the demo seeder/director (src/debug/java), plus main's DemoComposer —
                 // inert unless the debug director emits, and stripped by R8 from release.
-                packages("app.getknit.knit.debug", "app.getknit.knit.demo")
+                // The call surfaces (`ui/call`) are the same: built only where `BuildConfig.CALLS` is on.
+                packages("app.getknit.knit.debug", "app.getknit.knit.demo", "app.getknit.knit.ui.call")
             }
         }
     }
@@ -948,6 +973,15 @@ dependencyLocking {
     // dependency manifest to scan — there is no other lockfile/SBOM. Native Gradle, no plugin. Regenerate
     // with `./gradlew :app:dependencies --write-locks` after bumping versions in libs.versions.toml.
     lockAllConfigurations()
+}
+
+// A release-shaped build with voice calls (`-Pcalls=true`) is a maintainer's: it adds WebRTC and core-telecom to the
+// runtime classpaths a shipped artifact's lock state omits, so those go unlocked rather than lock a second runtime.
+// The versions still come from the catalog; a -P-free build is never affected.
+if (callsInRelease) {
+    configurations.configureEach {
+        if (name.endsWith("RuntimeClasspath") && !name.startsWith("debug")) resolutionStrategy.deactivateDependencyLocking()
+    }
 }
 
 dependencies {
@@ -1067,10 +1101,19 @@ dependencies {
     androidTestUtil(libs.androidx.test.services)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     debugImplementation(libs.androidx.compose.ui.tooling)
-    // Experimental voice calls' media (docs/VOICE_CALLS.md): debug only, behind di/CallWiring.
+    // Experimental voice calls' media (docs/VOICE_CALLS.md) and the Telecom integration that owns a call's audio route
+    // (§3.13): compiled against everywhere, packaged only where `calls` is on (see the flag up top). Debug carries them
+    // whatever the flag says, so its lock state never moves.
+    compileOnly(libs.webrtc.android)
+    compileOnly(libs.androidx.core.telecom)
     debugImplementation(libs.webrtc.android)
-    // …and the Telecom integration that owns a call's audio route (§3.13): debug only, behind di/CallWiring.
     debugImplementation(libs.androidx.core.telecom)
+    if (callsInRelease) {
+        android.buildTypes.names.filter { it != "debug" }.forEach { buildType ->
+            add("${buildType}RuntimeOnly", libs.webrtc.android)
+            add("${buildType}RuntimeOnly", libs.androidx.core.telecom)
+        }
+    }
     // Compose Preview Screenshot Testing: `@PreviewTest` plus the preview renderer's tooling, for the
     // `screenshotTest` source set only. See .agents/context/testing.md.
     screenshotTestImplementation(libs.compose.screenshot.validation.api)

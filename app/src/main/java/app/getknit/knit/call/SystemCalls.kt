@@ -12,7 +12,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 
-/** How a call ended, as the system is told it (Telecom's `DisconnectCause` codes in the debug build). */
+/** How a call ended, as the system is told it (Telecom's `DisconnectCause` codes where calls are wired). */
 enum class SystemEnd { LOCAL, REMOTE, REJECTED, MISSED, BUSY, ERROR }
 
 /** What a call is registered with the system as: who it is with, which way it was placed, and whether it is a walkie. */
@@ -41,7 +41,7 @@ interface SystemCall {
 }
 
 /**
- * The platform's side of calls (§3.13): Telecom through core-telecom in the debug build (`debug/call/TelecomCalls`),
+ * The platform's side of calls (§3.13): Telecom through core-telecom where calls are wired (`ui/call/TelecomCalls`),
  * a fake under test. Registering a call hands the system its audio route — earpiece, loudspeaker, a wired or Bluetooth
  * headset — and lets a headset's button, a watch or a car answer and hang it up.
  */

@@ -270,7 +270,7 @@
     <string name="chat_attachment_photo">Photo</string>
     <string name="chat_attachment_voice">Voice message</string>
 
-    <!-- Voice calls (call/; experimental, debug builds only): the chat's call button and why it refused -->
+    <!-- Voice calls (call/; experimental, `BuildConfig.CALLS` builds only): the chat's call button and why it refused -->
     <string name="chat_call">Voice call</string>
     <string name="chat_call_needs_dm">Calls work in a one-to-one chat</string>
     <string name="chat_call_peer_too_old">They need a build of Knit with calls to take one</string>

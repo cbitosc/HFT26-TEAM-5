@@ -187,3 +187,36 @@ the second and third amendments. The other four are built now:
 
 Guards: the restart cases in `CallManagerTest`, `CallTombStoreTest`, `SettingsSnapshotTest`'s two keys,
 `SettingsScreenContentTest` and `SettingsViewModelTest`'s relay rows, `GoldenVectorTest`, and `CallLabTest`.
+
+## Amendment (2026-10-14): calls leave `src/debug`, behind a build flag
+
+The first amendment kept every call surface in `src/debug`, beside a `debugImplementation` WebRTC. The surfaces now
+live in main, in `ui/call` beside `ui/voice`, and one flag decides whether a build has calls: `BuildConfig.CALLS`, on in
+debug, off in a shipped artifact, overridden by `-Pcalls=true|false`. `di/CallWiring` reads it once as `CALLS_WIRED`,
+and `WALKIE_WIRED` needs it too. Off, no call graph is built or started, no bar is drawn and no `CAP_CALL` goes out,
+as before.
+
+Unlike `COMMONS` or `WALKIE`, this flag decides what is packaged, not only what is wired. libwebrtc is about 48 MB of
+native code across the four ABIs, and core-telecom's manifest declares an exported `ConnectionService`, a receiver and
+`MANAGE_OWN_CALLS`. R8 drops dead classes, but not those. So:
+
+- **WebRTC and core-telecom are `compileOnly` everywhere**, which lets main compile in every variant. The debug runtime
+  always carries them, so its lock state never moves. A release-shaped build gets them only under `-Pcalls=true`. That
+  build is a maintainer's, so its runtime classpaths go unlocked instead of holding a second lock state.
+- **Two overlays follow the flag through the variant API.** `app/src/calls/AndroidManifest.xml` holds the call screen,
+  its service and receiver, and the call permissions. `app/src/calls/keepRules` pins `org.webrtc`, because the AAR
+  ships no consumer rules and libwebrtc's native half finds its Java half by name.
+- **The six `ic_call_*` icons are main resources.** A build without calls shrinks them out, but their IDs stay
+  allocated.
+
+Checked against the commit before it: a release APK built with no `-P` flag carries no `ui/call`, `org.webrtc` or
+`androidx.core.telecom` class, no `libjingle_peerconnection_so.so`, and no call component or permission. It differs
+from the previous release APK only in the six shifted drawable IDs and in `WithCallBar`'s Compose code. Under
+`-Pcalls=true`, `assembleRelease` packages the library, the components and the permissions; under `-Pcalls=false`, a
+debug build has no overlay. No minified build with calls has run on a phone yet, so it may still owe keep rules beyond
+`org.webrtc`.
+
+The moved previews are screenshot tests now (`CallScreenshots.kt`), and detekt covers the moved code. Four pure tests
+moved to `src/test`. The two that build `org.webrtc` objects stay in `testDebug`, where the library runs.
+
+Guards: `KoinGraphVerifyTest`, the `ui.call` tests, and the call screenshots.

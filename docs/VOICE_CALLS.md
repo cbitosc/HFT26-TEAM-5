@@ -736,7 +736,7 @@ direct transfer's card already uses. ADR 2026-10.3tee's second amendment records
 A record is a status notice in every list that filters on `kind`: it gets no delivery tick and no unread count, and
 search never finds it. The chat list is the exception, as it is for a transfer. A record speaks for its thread there, as
 the same sentence without the time, and with no "You: " in front of it, because the sentence already says who did
-what. A missed call is notified on its own (`debug/call/CallController`), so the badge does not count it twice.
+what. A missed call is notified on its own (`ui/call/CallController`), so the badge does not count it twice.
 
 ### 3.13 The audio route
 
@@ -745,7 +745,7 @@ builds only). Telecom owns where its audio goes: the earpiece, the loudspeaker, 
 ways. A headset's button, a watch or a car can answer the call and hang it up. ADR 2026-10.wbua records why.
 
 `call/SystemCallSync` keeps the system's call in step with `CallManager`'s. It follows the manager's state on the app
-scope, never on the inbound path. `debug/call/TelecomCalls` is the one importer of the library.
+scope, never on the inbound path. `ui/call/TelecomCalls` is the one importer of the library.
 
 | ID           | Requirement                                                                                                                                                                                                                                                                       |
 |--------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|

@@ -211,7 +211,7 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   - A force-stop mid-transfer really does strand a group on air (`dumpsys wifip2p` shows
     `curState=GroupCreatedState` with the app dead). `--ez sweep true` is the same sweep the app runs 8 s into
     launch, on demand — the way to prove a leftover is gone without waiting out a restart.
-- `…debug.CALL` — drives an **experimental voice call** (`call/CallManager`, debug builds only;
+- `…debug.CALL` — drives an **experimental voice call** (`call/CallManager`, a debug build with `BuildConfig.CALLS`;
   `docs/VOICE_CALLS.md`). `--es op state` (the default) dumps the call, its phase, `reason` and the selected
   candidate pair as `route` (`host/host`, `relay/srflx`…), plus `relayOnly`. `--es op start --es peer <nodeId>`
   dials; `answer` opens the call screen, which answers; `decline` and `hangup` end it; `--es op relay --ez on true`

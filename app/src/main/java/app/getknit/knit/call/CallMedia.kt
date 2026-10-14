@@ -1,7 +1,7 @@
 package app.getknit.knit.call
 
 /**
- * The media seam of a voice call: WebRTC in the debug build (`debug/call/WebRtcCallMedia`), a fake under test.
+ * The media seam of a voice call: WebRTC where calls are wired (`ui/call/WebRtcCallMedia`), a fake under test.
  * Opus over DTLS-SRTP, audio only (docs/VOICE_CALLS.md §3.7). [CallManager] owns every decision; this only moves
  * audio and reports what ICE did.
  */

@@ -36,8 +36,9 @@ SRC = os.path.join(ROOT, "app/src/main/java")
 OUT = os.path.join(ROOT, "app/src/screenshotTest/kotlin/app/getknit/knit/screenshot")
 HAND_WRITTEN = {"ScreenshotPreviews.kt"}
 
-# A preview whose body calls one of these draws a whole screen; the onboarding pages fill one too.
-SCREEN_CALLS = re.compile(r"\b(\w+ScreenContent|DonateScreen|StorageUnavailableScreen|FullscreenImageViewer)\(")
+# A preview whose body calls one of these draws a whole screen; the onboarding pages fill one too, and the call
+# screen's previews draw it through `PreviewCall`.
+SCREEN_CALLS = re.compile(r"\b(\w+ScreenContent|DonateScreen|StorageUnavailableScreen|FullscreenImageViewer|PreviewCall)\(")
 
 # File stem per UI package, where capitalising the package name would read wrong.
 FILE_NAMES = {
@@ -55,6 +56,18 @@ CUSTOM = {
     "ChatSkeletonPreview": [
         '@Preview(name = "Light", showBackground = true, heightDp = 420)',
         '@Preview(name = "Dark", showBackground = true, heightDp = 420, uiMode = Configuration.UI_MODE_NIGHT_YES)',
+    ],
+    # The caller's context is the one call screen main also checks on a small phone, where it competes with the
+    # answer buttons for height.
+    "CallScreenCallerContextPreview": [
+        '@Preview(name = "Light", showBackground = true, device = "spec:width=411dp,height=891dp")',
+        '@Preview(',
+        '    name = "Dark",',
+        '    showBackground = true,',
+        '    device = "spec:width=411dp,height=891dp",',
+        '    uiMode = Configuration.UI_MODE_NIGHT_YES,',
+        ')',
+        '@Preview(name = "Small", showBackground = true, device = "spec:width=360dp,height=640dp")',
     ],
 }
 

@@ -94,7 +94,7 @@ class MainActivity : ComponentActivity() {
             KnitTheme(dynamicColor = dynamicColor) {
                 when (val state = storage) {
                     StorageGate.State.Ready -> {
-                        // Debug builds put a way back to a live call above every screen (experimental voice calls).
+                        // A build with calls puts a way back to a live call above every screen (experimental voice calls).
                         WithCallBar { KnitApp(startRoute = startRoute) }
                     }
 

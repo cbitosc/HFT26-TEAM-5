@@ -53,11 +53,6 @@ import app.getknit.knit.data.settings.KnitBoardSetup
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.data.settings.TicketKeyStore
 import app.getknit.knit.data.webp.WebpTranscode
-import app.getknit.knit.debug.call.CallActivity
-import app.getknit.knit.debug.call.DefaultPath
-import app.getknit.knit.debug.call.DirectNetworkDetector
-import app.getknit.knit.debug.call.WalkieTalk
-import app.getknit.knit.debug.call.WebRtcCallMedia
 import app.getknit.knit.identity.Identity
 import app.getknit.knit.identity.displayNameFor
 import app.getknit.knit.mesh.ForwardStore
@@ -115,6 +110,11 @@ import app.getknit.knit.review.ReviewPromptPolicy
 import app.getknit.knit.review.ReviewPrompter
 import app.getknit.knit.transfer.OfferOutcome
 import app.getknit.knit.transfer.TransferManager
+import app.getknit.knit.ui.call.CallActivity
+import app.getknit.knit.ui.call.DefaultPath
+import app.getknit.knit.ui.call.DirectNetworkDetector
+import app.getknit.knit.ui.call.WalkieTalk
+import app.getknit.knit.ui.call.WebRtcCallMedia
 import app.getknit.knit.ui.chat.ChatWindow
 import app.getknit.knit.ui.chat.quoteLabels
 import app.getknit.knit.ui.invite.prepareKnitApk

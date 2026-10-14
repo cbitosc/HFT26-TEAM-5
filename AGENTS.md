@@ -93,22 +93,25 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   `DirectWifiLease` (ADR 2026-10.kxnw): every user holds a leased view, never `AndroidDirectWifi` itself.
 - **When touching `call/`, `MessageContent.CTL_CALL` / `cl`, `CallPayload`, `Protocol.CAP_CALL`,
   `MeshManager.extraCapabilities`, the spool's `turnreq`/`turncred` (`SpoolConnection.turnCredential`,
-  `ScopeSync.turnCredentials`), `di/CallWiring`, `data/settings/CallTombStore`, `SettingsStore.callsRelayAll`, or
-  `debug/call/`:** READ `docs/VOICE_CALLS.md` and ADR 2026-10.3tee
-  (its 2026-10-07 amendment is this branch's minimal build). Experimental and debug-only: WebRTC is
-  `debugImplementation`, so every `org.webrtc` import stays in `src/debug` and release advertises no `CAP_CALL`.
+  `ScopeSync.turnCredentials`), `di/CallWiring`, `data/settings/CallTombStore`, `SettingsStore.callsRelayAll`,
+  `ui/call/`, `app/src/calls/` or the `calls` flag in `app/build.gradle.kts`:** READ `docs/VOICE_CALLS.md` and ADR
+  2026-10.3tee (its 2026-10-07 amendment is this branch's minimal build; its 2026-10-14 one is the flag).
+  Experimental, behind `BuildConfig.CALLS` (on in debug, off in release, `-Pcalls=` overrides), read once as
+  `CallWiring.CALLS_WIRED`: WebRTC and core-telecom are `compileOnly`, and only a build with calls packages them,
+  `app/src/calls/AndroidManifest.xml` and `app/src/calls/keepRules` — so release ships no call code, no `libjingle`,
+  no call permission and advertises no `CAP_CALL`. Never make either library `implementation`.
   `CallManager.onSignal` runs on the inbound path — never make it wait on TURN or the media — and a TURN credential is
   never logged or put in a frame. A call's line in its thread (`data/message/CallRecord`, `MessageEntity.KIND_CALL`,
   `call/CallLog`) is §3.12: a record this phone writes when the call ends, never sent, saved off the inbound path.
   **Before touching `call/SystemCalls` (`SystemCallSync`, `CallControl`), `call/CallAudioRoute` (`CallAudioPolicy`),
-  `debug/call/TelecomCalls`, `AudioRouteButton`, the call notification's route action, `TalkPlayer`'s usage,
-  `TalkRecorder`'s sources or `debug/call/ProximityLock` (`CallAudioPolicy.screenOffNearEar`):** READ ADR 2026-10.wbua
+  `ui/call/TelecomCalls`, `AudioRouteButton`, the call notification's route action, `TalkPlayer`'s usage,
+  `TalkRecorder`'s sources or `ui/call/ProximityLock` (`CallAudioPolicy.screenOffNearEar`):** READ ADR 2026-10.wbua
   and `docs/VOICE_CALLS.md` §3.13. Every call, live or walkie, is
-  a self-managed Telecom call through core-telecom (`debugImplementation`, an RC by a recorded exception in
+  a self-managed Telecom call through core-telecom (packaged only with calls, an RC by a recorded exception in
   `context/toolchain.md`), and Telecom owns its route, mode and focus. Never set a route beside it
   (`setCommunicationDevice`, `startBluetoothSco`, a track's preferred device). A walkie differs only in starting on
   the loudspeaker. The sync follows `CallManager.state` and is never on the inbound path. **Before touching `CallPayload.dw` / `dx`, `call/CallDirect`, `DirectCallPath`,
-  `CallLane`, `MediaEvent.DirectCandidates`, `debug/call/DirectNetworkDetector`, `transfer/DirectWifiLease` or
+  `CallLane`, `MediaEvent.DirectCandidates`, `ui/call/DirectNetworkDetector`, `transfer/DirectWifiLease` or
   `DirectWifi.join`'s `ipv4`:** READ ADR 2026-10.kxnw and `docs/VOICE_CALLS.md` §3.10 — a call to a mesh neighbour
   rides a Wi-Fi Direct group: the caller offers, the callee says it is joining (and joins while it rings, with an
   IPv4 lease), the caller hosts only then; the group reaches libwebrtc through our own detector as an Ethernet-typed
@@ -125,7 +128,7 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   `CallPayload.MEDIA_WALKIE`, `FrameType.TALK`, `mesh/protocol/TalkSeal`, `MeshManager.sendCallTalk`,
   `InboundPipeline.handleTalk` / `isTalkShape`, `Protocol.CAP_WALKIE`, `CallManager`'s `fallback` / `walkieOk` /
   `onTalk`, `MeshTransport.sendLive` / `holdLink`, `mesh/wifiaware/NanLinkHold` (the hold in `superviseLink`), `TalkLink`,
-  `debug/call/WalkieTalk` / `TalkRecorder` / `TalkPlayer` or `BuildConfig.WALKIE`:** READ ADR 2026-10.79yb and
+  `ui/call/WalkieTalk` / `TalkRecorder` / `TalkPlayer` or `BuildConfig.WALKIE`:** READ ADR 2026-10.79yb and
   `docs/VOICE_CALLS.md` §3.11 — a call with no live path is a media-less walkie session whose bursts stream as Opus in
   unsigned, compactly sealed `talk` frames nobody custodies, sized for Coded PHY (a pin in `TalkSealTest`), so nothing
   lands in the thread; a live call drops to one, without a frame, only when both OFFER and ANSWER carried the walkie

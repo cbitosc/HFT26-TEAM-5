@@ -207,7 +207,7 @@ internal fun SettingsScreenContent(
     showInternetRelays: Boolean = BuildConfig.INTERNET_PLANE,
     // Same, for the LoRa plane.
     showLoraRadio: Boolean = BuildConfig.LORA_PLANE,
-    // Same, for calls (experimental): only a build that wires them (`CALLS_WIRED`, debug) has a call to relay.
+    // Same, for calls (experimental): only a build that wires them (`CALLS_WIRED`) has a call to relay.
     showCallRelay: Boolean = CALLS_WIRED,
     // Whether the platform can do wallpaper colours at all (API 31+). A parameter for the same reason as
     // the two above: the hidden case stays previewable and testable rather than depending on the device.
@@ -910,7 +910,7 @@ fun SettingsScreenPreview() =
             onToggleContentFiltering = {},
             onOpenRelays = {},
             onAllowBattery = {},
-            // The screen a shipped build shows: calls, and so their relay row, are the debug build's alone.
+            // The screen a shipped build shows: it has no calls (`CALLS_WIRED` off), and so no relay row for them.
             showCallRelay = false,
         )
     }

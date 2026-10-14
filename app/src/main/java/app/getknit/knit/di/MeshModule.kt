@@ -363,7 +363,7 @@ val meshModule =
                 online = get<InternetGate>()::isOnline,
                 publicChannel = { body -> get<PublicChannelSink>().postToPublicChannel(body) },
                 onTransferSignal = { sender, payload, sentAt -> get<TransferManager>().onSignal(sender, payload, sentAt) },
-                // Voice calls (experimental, debug only — di/CallWiring): resolved late like the transfer hook, and
+                // Voice calls (experimental, `CALLS_WIRED` — di/CallWiring): resolved late like the transfer hook, and
                 // never allowed to throw into the inbound path (rules/mesh.md). Null in a build that wires no calls.
                 onCallSignal = { sender, payload, sentAt ->
                     runCatching { getKoin().getOrNull<CallManager>()?.onSignal(sender, payload, sentAt) }

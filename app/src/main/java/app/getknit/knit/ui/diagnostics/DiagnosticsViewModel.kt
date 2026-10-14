@@ -202,7 +202,7 @@ class DiagnosticsViewModel(
         viewModelScope.launch { settings.setDebugNanOff(off) }
     }
 
-    /** Whether this build offers the Wi-Fi Direct calls switch — debug builds, which are the only ones with calls. */
+    /** Whether this build offers the Wi-Fi Direct calls switch — a debug build with calls. */
     val directCallsSwitchOffered: Boolean = BuildConfig.DEBUG && CALLS_WIRED
 
     /** Whether the debug switch keeps calls off Wi-Fi Direct (ADR 2026-10.kxnw), so they go over STUN/TURN. */
