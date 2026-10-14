@@ -5,6 +5,7 @@
 package app.getknit.knit.ui.profile
 
 import android.content.ClipData
+import android.content.res.Configuration
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -108,6 +109,7 @@ fun ProfileScreen(
     val avatarHash by viewModel.avatarHash.collectAsStateWithLifecycle()
     val cropTarget by viewModel.cropTarget.collectAsStateWithLifecycle()
     val openToChat by viewModel.openToChat.collectAsStateWithLifecycle()
+    val badgeRow by viewModel.badgeRow.collectAsStateWithLifecycle()
     val isDirty by viewModel.isDirty.collectAsStateWithLifecycle()
 
     // Navigate back only once Save has finished persisting (the write outlives this composition because
@@ -166,6 +168,8 @@ fun ProfileScreen(
         onStatusChange = viewModel::setStatus,
         onStatusCommit = viewModel::commitStatus,
         onToggleOpenToChat = viewModel::setOpenToChat,
+        badgeRow = badgeRow,
+        onToggleBadge = viewModel::setShowBadge,
         onPickPhoto = {
             picker.launch(
                 PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
@@ -187,6 +191,8 @@ internal fun ProfileScreenContent(
     onStatusChange: (String) -> Unit,
     onStatusCommit: () -> Unit,
     onToggleOpenToChat: (Boolean) -> Unit = {},
+    badgeRow: OwnBadgeRow? = null,
+    onToggleBadge: (Boolean) -> Unit = {},
     onPickPhoto: () -> Unit,
     onClearPhoto: () -> Unit,
     onSave: () -> Unit,
@@ -296,6 +302,8 @@ internal fun ProfileScreenContent(
                     enabled = form.openToChat,
                     onToggle = onToggleOpenToChat,
                 )
+                // The supporter badge: a profile field too, carried only to contacts, and only while on.
+                badgeRow?.let { SupporterBadgeRow(row = it, onToggle = onToggleBadge) }
             }
 
             // The node id names the device, not the person, so it gets its own heading rather than
@@ -395,6 +403,56 @@ private fun OpenToChatRow(
         Switch(checked = enabled, onCheckedChange = null)
     }
 }
+
+/** "Show my supporter badge": off until turned on, persisted on toggle like [OpenToChatRow]. */
+@Composable
+private fun SupporterBadgeRow(
+    row: OwnBadgeRow,
+    onToggle: (Boolean) -> Unit,
+) {
+    Row(
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .toggleable(value = row.on, onValueChange = onToggle, role = Role.Switch)
+                .padding(top = 8.dp)
+                .testTag("profile_supporter_badge"),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(text = stringResource(R.string.profile_badge_toggle), style = MaterialTheme.typography.titleMedium)
+            Text(
+                text =
+                    stringResource(
+                        if (row.on &&
+                            row.showing == null
+                        ) {
+                            R.string.profile_badge_lapsed
+                        } else {
+                            R.string.profile_badge_toggle_summary
+                        },
+                    ),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Spacer(Modifier.width(12.dp))
+        Switch(checked = row.on, onCheckedChange = null)
+    }
+}
+
+/** The badge switch off, on and showing, and on but lapsed. */
+@Preview(showBackground = true)
+@Preview(showBackground = true, uiMode = Configuration.UI_MODE_NIGHT_YES)
+@Composable
+fun SupporterBadgeRowPreview() =
+    KnitPreview {
+        Column {
+            SupporterBadgeRow(row = OwnBadgeRow(on = false, showing = null), onToggle = {})
+            SupporterBadgeRow(row = OwnBadgeRow(on = true, showing = "supporter"), onToggle = {})
+            SupporterBadgeRow(row = OwnBadgeRow(on = true, showing = null), onToggle = {})
+        }
+    }
 
 @Preview(showBackground = true)
 @Composable

@@ -1,6 +1,7 @@
 package app.getknit.knit.di
 
 import app.getknit.knit.BuildConfig
+import app.getknit.knit.badge.BadgeKeys
 import app.getknit.knit.call.CallManager
 import app.getknit.knit.data.AttachmentIdentities
 import app.getknit.knit.data.KnitDatabase
@@ -9,6 +10,7 @@ import app.getknit.knit.data.commons.CommonsRepository
 import app.getknit.knit.data.crypto.IdentityKeyStore
 import app.getknit.knit.data.forward.ForwardRepository
 import app.getknit.knit.data.relay.RelayStatusRepository
+import app.getknit.knit.data.settings.BadgeStore
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.data.settings.TicketKeyStore
 import app.getknit.knit.linkpreview.LinkPreviewService
@@ -127,7 +129,18 @@ val uiModule =
         // Your mesh: the plain-words companion to Diagnostics. Reads the concrete ForwardRepository for its
         // "carrying now" count — a UI projection deliberately kept off the ForwardStore seam.
         viewModel { YourMeshViewModel(get(), get(), get(), get<ForwardRepository>(), get()) }
-        viewModel { ProfileViewModel(get(), get(), get(), get(), get<CoroutineScope>()) }
+        viewModel {
+            ProfileViewModel(
+                get(),
+                get(),
+                get(),
+                get(),
+                get<CoroutineScope>(),
+                badges = get<BadgeStore>(),
+                ticketKeys = get<TicketKeyStore>(),
+                pins = BadgeKeys.forBuild(BuildConfig.DEBUG),
+            )
+        }
         viewModel { OnboardingViewModel(get(), get()) }
         viewModel {
             SettingsViewModel(get(), get(), get<RelayStatusRepository>().facts, get<LoraStatusRepository>().facts)

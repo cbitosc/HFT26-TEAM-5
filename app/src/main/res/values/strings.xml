@@ -1554,4 +1554,11 @@
     <!-- Row content descriptions: a section header is not announced with the rows under it -->
     <string name="message_details_recipient_delivered">%1$s, delivered %2$s</string>
     <string name="message_details_recipient_waiting">%1$s, not delivered yet</string>
+    <!-- The supporter badge (docs/SUPPORTER_BADGE.md §7). No product name, price, link or call to action (contract's copy rules). -->
+    <string name="badge_supporter">Supporter</string>
+    <string name="badge_supporter_mark">Supporter badge</string>
+    <string name="badge_supporter_sheet">%1$s supports Knit.</string>
+    <string name="profile_badge_toggle">Show my supporter badge</string>
+    <string name="profile_badge_toggle_summary">Adds a small mark to your photo that only your contacts see.</string>
+    <string name="profile_badge_lapsed">Your badge has lapsed, so contacts don\'t see it. It returns once it\'s renewed.</string>
 </resources>

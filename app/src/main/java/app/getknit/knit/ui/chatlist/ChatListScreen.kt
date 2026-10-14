@@ -100,6 +100,7 @@ import app.getknit.knit.ui.components.ConnectionStatusRow
 import app.getknit.knit.ui.components.GroupAvatar
 import app.getknit.knit.ui.components.PeerNameText
 import app.getknit.knit.ui.components.RoomAvatar
+import app.getknit.knit.ui.components.peerBadge
 import app.getknit.knit.ui.components.skeletonBlockColor
 import app.getknit.knit.ui.components.skeletonPulseAlpha
 import app.getknit.knit.ui.icons.KnitIcons
@@ -828,7 +829,7 @@ private fun LeadingVisual(row: ConversationRow) {
 
         else -> {
             // A DM's conversation id is the peer's node id.
-            Avatar(avatarHash = row.avatarHash, name = row.title, nodeId = row.id, size = size)
+            Avatar(avatarHash = row.avatarHash, name = row.title, nodeId = row.id, size = size, badge = peerBadge(row.id))
         }
     }
 }

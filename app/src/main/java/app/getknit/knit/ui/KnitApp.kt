@@ -9,6 +9,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -33,6 +34,7 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import app.getknit.knit.BuildConfig
 import app.getknit.knit.R
+import app.getknit.knit.badge.PeerBadges
 import app.getknit.knit.data.message.Conversations
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.legal.License
@@ -52,6 +54,7 @@ import app.getknit.knit.ui.blocked.BlockedUsersScreen
 import app.getknit.knit.ui.chat.ChatScreen
 import app.getknit.knit.ui.chat.MessageDetailsScreen
 import app.getknit.knit.ui.chatlist.ChatListScreen
+import app.getknit.knit.ui.components.LocalPeerBadges
 import app.getknit.knit.ui.contacts.ContactsScreen
 import app.getknit.knit.ui.diagnostics.CrashLogScreen
 import app.getknit.knit.ui.diagnostics.DiagnosticsScreen
@@ -346,297 +349,302 @@ fun KnitApp(startRoute: String? = null) {
         } else {
             fadeOut(animationSpec = fade) + slideOutHorizontally(animationSpec = slide) { it / NAV_SLIDE_DIVISOR }
         }
-    NavHost(
-        navController = navController,
-        startDestination = start,
-        // Surface Compose testTags as uiautomator resource-ids across the whole screen graph, so an
-        // automation agent can locate elements (send button, message input, conversation rows) by a
-        // stable id instead of pixel bounds. Set once at the root; the whole subtree inherits it.
-        modifier = Modifier.semantics { testTagsAsResourceId = true },
-        enterTransition = { enter },
-        exitTransition = { exit },
-        popEnterTransition = { popEnter },
-        popExitTransition = { popExit },
-    ) {
-        composable(Routes.ONBOARDING) {
-            OnboardingScreen(
-                onReady = {
-                    navController.navigate(Routes.CHAT_LIST) {
-                        popUpTo(Routes.ONBOARDING) { inclusive = true }
-                    }
-                },
-                onRestore = { navController.navigate(Routes.backup(restoreOnly = true)) },
-            )
-        }
-        composable(
-            Routes.BACKUP,
-            arguments = listOf(navArgument("restore") { defaultValue = "false" }),
-        ) { entry ->
-            BackupScreen(
-                onBack = { navController.popBackStack() },
-                restoreOnly = entry.arguments?.getString("restore") == "true",
-            )
-        }
-        composable(Routes.CHAT_LIST) {
-            // Rate/review prompt: evaluated on each landing on the chat list — including returning from a
-            // thread, right after the mesh visibly worked — and never mid-conversation. ReviewPrompter
-            // self-gates (engagement policy, once per process, demo builds) and signals ReviewPromptInbox,
-            // which surfaces RateReviewDialog at the app root below.
-            LaunchedEffect(Unit) { reviewPrompter.maybePrompt() }
-            ChatListScreen(
-                onOpenConversation = { id -> navController.navigate(Routes.chat(id)) },
-                onSearch = { navController.navigate(Routes.SEARCH) },
-                onNewMessage = { navController.navigate(Routes.CONTACTS) },
-                onOpenSettings = { navController.navigate(Routes.SETTINGS) },
-                onOpenYourMesh = { navController.navigate(Routes.YOUR_MESH) },
-                onOpenDiagnostics = { navController.navigate(Routes.DIAGNOSTICS) },
-                onOpenMessageRequests = { navController.navigate(Routes.MESSAGE_REQUESTS) },
-                onOpenDonate = { navController.navigate(Routes.DONATE) },
-                onOpenAddContact = { navController.navigate(Routes.ADD_CONTACT) },
-                onOpenWhatsNew = { navController.navigate(Routes.WHATS_NEW) },
-            )
-        }
-        composable(Routes.CONTACTS) {
-            ContactsScreen(
-                onBack = { navController.popBackStack() },
-                onAddContact = { navController.navigate(Routes.ADD_CONTACT) },
-                // Open the chosen conversation (a peer's node id for a DM, or a freshly created group's
-                // id) and drop the picker from the back stack, so Back from the chat returns to the list.
-                onPick = { conversationId ->
-                    navController.navigate(Routes.chat(conversationId)) {
-                        popUpTo(Routes.CONTACTS) { inclusive = true }
-                    }
-                },
-            )
-        }
-        composable(Routes.SHARE) {
-            ShareTargetScreen(
-                // Abandoning the share clears the inbox so it can't prefill a later chat; the picker
-                // always sits over the chat list, so popping returns there.
-                onBack = {
-                    shareInbox.clear()
-                    navController.popBackStack()
-                },
-                // Open the chosen conversation and drop the picker; ChatScreen drains the inbox into
-                // its draft on arrival.
-                onPick = { conversationId ->
-                    navController.navigate(Routes.chat(conversationId)) {
-                        popUpTo(Routes.SHARE) { inclusive = true }
-                    }
-                },
-            )
-        }
-        composable(Routes.SEARCH) {
-            SearchScreen(
-                onBack = { navController.popBackStack() },
-                // A plain navigate on purpose: the search entry — and its ViewModel, which holds the query —
-                // stays under the thread, so Back returns to the results as they were. No launchSingleTop,
-                // for the reason spelled out on the notification deep link above.
-                onOpenConversation = { id -> navController.navigate(Routes.chat(id)) },
-                onOpenMessage = { id, messageId -> navController.navigate(Routes.chat(id, messageId)) },
-            )
-        }
-        composable(
-            route = Routes.CHAT,
-            arguments =
-                listOf(
-                    navArgument("conversationId") { type = NavType.StringType },
-                    navArgument("messageId") {
-                        type = NavType.StringType
-                        nullable = true
-                        defaultValue = null
-                    },
-                ),
-        ) { backStackEntry ->
-            // conversationId is the Nearby room, a peer's node id (a 1:1 DM), or a group id.
-            val conversationId =
-                backStackEntry.arguments?.getString("conversationId") ?: Conversations.NEARBY
-            ChatScreen(
-                conversationId = conversationId,
-                // Navigation hands the value back decoded.
-                jumpToMessageId = backStackEntry.arguments?.getString("messageId"),
-                onBack = { navController.popBackStack() },
-                onOpenProfile = { id -> navController.navigate(Routes.profileDetails(id)) },
-                onOpenGroupDetails = { id -> navController.navigate(Routes.groupDetails(id)) },
-                onOpenMessageDetails = { id -> navController.navigate(Routes.messageDetails(id)) },
-            )
-        }
-        composable(
-            route = Routes.MESSAGE_DETAILS,
-            arguments = listOf(navArgument("messageId") { type = NavType.StringType }),
-        ) { backStackEntry ->
-            val messageId = backStackEntry.arguments?.getString("messageId") ?: return@composable
-            MessageDetailsScreen(
-                messageId = messageId,
-                onBack = { navController.popBackStack() },
-                onOpenProfile = { id -> navController.navigate(Routes.profileDetails(id)) },
-            )
-        }
-        composable(
-            route = Routes.PROFILE_DETAILS,
-            arguments = listOf(navArgument("nodeId") { type = NavType.StringType }),
-        ) { backStackEntry ->
-            val nodeId = backStackEntry.arguments?.getString("nodeId") ?: return@composable
-            ProfileDetailsScreen(
-                nodeId = nodeId,
-                onBack = { navController.popBackStack() },
-                onMessage = { id ->
-                    // Nearby, groups, and DMs all share the chat/{conversationId} destination, so
-                    // launchSingleTop here would reuse whatever chat sits under this profile — its
-                    // retained ChatViewModel is still bound to that conversation — instead of opening
-                    // the peer's DM (the reported "Message just returns to Nearby" bug). If we arrived
-                    // straight from this peer's own DM, just return to it so we don't stack a duplicate;
-                    // otherwise open it, replacing the profile so Back lands on the chat we came from.
-                    if (navController.parentIsDmWith(id)) {
-                        navController.popBackStack()
-                    } else {
-                        navController.navigate(Routes.chat(id)) {
-                            popUpTo(Routes.PROFILE_DETAILS) { inclusive = true }
+    // Every verified badge, by node id, for the avatars that show one (docs/SUPPORTER_BADGE.md §7): one process-wide
+    // flow, re-verified at the local clock as it moves, handed down rather than collected per screen.
+    val peerBadges by koinInject<PeerBadges>().shown.collectAsStateWithLifecycle()
+    CompositionLocalProvider(LocalPeerBadges provides peerBadges) {
+        NavHost(
+            navController = navController,
+            startDestination = start,
+            // Surface Compose testTags as uiautomator resource-ids across the whole screen graph, so an
+            // automation agent can locate elements (send button, message input, conversation rows) by a
+            // stable id instead of pixel bounds. Set once at the root; the whole subtree inherits it.
+            modifier = Modifier.semantics { testTagsAsResourceId = true },
+            enterTransition = { enter },
+            exitTransition = { exit },
+            popEnterTransition = { popEnter },
+            popExitTransition = { popExit },
+        ) {
+            composable(Routes.ONBOARDING) {
+                OnboardingScreen(
+                    onReady = {
+                        navController.navigate(Routes.CHAT_LIST) {
+                            popUpTo(Routes.ONBOARDING) { inclusive = true }
                         }
-                    }
-                },
-                // A shared group opens its details, stacked on this profile — unlike Message, which
-                // replaces it: you came here about the person, and Back should return to them.
-                onOpenGroup = { groupId -> navController.navigate(Routes.groupDetails(groupId)) },
-                // Removing the contact deleted their DM (ADR 2026-09.adgd). When that DM is the screen below,
-                // pop past it too, as Leave pops past a left group's chat; otherwise just return.
-                onRemoved = {
-                    if (navController.parentIsDmWith(nodeId)) {
-                        navController.popBackStack(Routes.CHAT, inclusive = true)
-                    } else {
+                    },
+                    onRestore = { navController.navigate(Routes.backup(restoreOnly = true)) },
+                )
+            }
+            composable(
+                Routes.BACKUP,
+                arguments = listOf(navArgument("restore") { defaultValue = "false" }),
+            ) { entry ->
+                BackupScreen(
+                    onBack = { navController.popBackStack() },
+                    restoreOnly = entry.arguments?.getString("restore") == "true",
+                )
+            }
+            composable(Routes.CHAT_LIST) {
+                // Rate/review prompt: evaluated on each landing on the chat list — including returning from a
+                // thread, right after the mesh visibly worked — and never mid-conversation. ReviewPrompter
+                // self-gates (engagement policy, once per process, demo builds) and signals ReviewPromptInbox,
+                // which surfaces RateReviewDialog at the app root below.
+                LaunchedEffect(Unit) { reviewPrompter.maybePrompt() }
+                ChatListScreen(
+                    onOpenConversation = { id -> navController.navigate(Routes.chat(id)) },
+                    onSearch = { navController.navigate(Routes.SEARCH) },
+                    onNewMessage = { navController.navigate(Routes.CONTACTS) },
+                    onOpenSettings = { navController.navigate(Routes.SETTINGS) },
+                    onOpenYourMesh = { navController.navigate(Routes.YOUR_MESH) },
+                    onOpenDiagnostics = { navController.navigate(Routes.DIAGNOSTICS) },
+                    onOpenMessageRequests = { navController.navigate(Routes.MESSAGE_REQUESTS) },
+                    onOpenDonate = { navController.navigate(Routes.DONATE) },
+                    onOpenAddContact = { navController.navigate(Routes.ADD_CONTACT) },
+                    onOpenWhatsNew = { navController.navigate(Routes.WHATS_NEW) },
+                )
+            }
+            composable(Routes.CONTACTS) {
+                ContactsScreen(
+                    onBack = { navController.popBackStack() },
+                    onAddContact = { navController.navigate(Routes.ADD_CONTACT) },
+                    // Open the chosen conversation (a peer's node id for a DM, or a freshly created group's
+                    // id) and drop the picker from the back stack, so Back from the chat returns to the list.
+                    onPick = { conversationId ->
+                        navController.navigate(Routes.chat(conversationId)) {
+                            popUpTo(Routes.CONTACTS) { inclusive = true }
+                        }
+                    },
+                )
+            }
+            composable(Routes.SHARE) {
+                ShareTargetScreen(
+                    // Abandoning the share clears the inbox so it can't prefill a later chat; the picker
+                    // always sits over the chat list, so popping returns there.
+                    onBack = {
+                        shareInbox.clear()
                         navController.popBackStack()
-                    }
-                },
-            )
-        }
-        composable(
-            route = Routes.GROUP_DETAILS,
-            arguments = listOf(navArgument("groupId") { type = NavType.StringType }),
-        ) { backStackEntry ->
-            val groupId = backStackEntry.arguments?.getString("groupId") ?: return@composable
-            GroupDetailsScreen(
-                groupId = groupId,
-                onBack = { navController.popBackStack() },
-                onOpenMemberProfile = { id -> navController.navigate(Routes.profileDetails(id)) },
-                // Leaving deletes the thread, so pop past this screen AND the chat, back to the list.
-                onLeft = { navController.popBackStack(Routes.CHAT_LIST, inclusive = false) },
-            )
-        }
-        composable(Routes.SETTINGS) {
-            SettingsScreen(
-                onBack = { navController.popBackStack() },
-                onOpenProfile = { navController.navigate(Routes.PROFILE) },
-                onOpenRelays = { navController.navigate(Routes.INTERNET_RELAYS) },
-                onOpenLora = { navController.navigate(Routes.LORA_RADIO) },
-                onOpenAbout = { navController.navigate(Routes.ABOUT) },
-                onOpenLicenses = { navController.navigate(Routes.LICENSES) },
-                onOpenBackup = { navController.navigate(Routes.backup()) },
-                onOpenBlockedUsers = { navController.navigate(Routes.BLOCKED_USERS) },
-                onOpenWhatsNew = { navController.navigate(Routes.WHATS_NEW) },
-            )
-        }
-        composable(Routes.WHATS_NEW) {
-            // Reading the screen reads the newest announcement, whichever door it came through.
-            val settings = koinInject<SettingsStore>()
-            LaunchedEffect(Unit) { WhatsNew.latest?.let { settings.markWhatsNewSeen(it.id) } }
-            val context = LocalContext.current
-            WhatsNewScreen(onBack = { navController.popBackStack() }, onOpenUrl = { openUrl(context, it) })
-        }
-        composable(Routes.PROFILE) {
-            ProfileScreen(onBack = { navController.popBackStack() })
-        }
-        composable(Routes.ABOUT) {
-            AboutScreen(
-                onBack = { navController.popBackStack() },
-                onOpenLicenses = { navController.navigate(Routes.LICENSES) },
-                onOpenLicense = { navController.navigate(Routes.license(it)) },
-            )
-        }
-        composable(Routes.LICENSES) {
-            LicensesScreen(
-                onBack = { navController.popBackStack() },
-                onOpenLicense = { navController.navigate(Routes.license(it)) },
-            )
-        }
-        composable(
-            route = Routes.LICENSE,
-            arguments = listOf(navArgument("licenseId") { type = NavType.StringType }),
-        ) { backStackEntry ->
-            val license =
-                backStackEntry.arguments?.getString("licenseId")?.let(License::fromRouteId) ?: return@composable
-            LicenseTextScreen(license = license, onBack = { navController.popBackStack() })
-        }
-        // The Internet-relay plane's editor exists only in builds that introduce the feature — the route
-        // is not registered at all when it is dark, so nothing (a restored back stack, a future deep
-        // link) can reach a screen whose switch would be inert anyway. Settings hides its row on the same
-        // flag, so nothing navigates here. See app/build.gradle.kts for what INTERNET_PLANE gates.
-        if (BuildConfig.INTERNET_PLANE) {
-            composable(Routes.INTERNET_RELAYS) {
-                InternetRelayScreen(onBack = { navController.popBackStack() })
+                    },
+                    // Open the chosen conversation and drop the picker; ChatScreen drains the inbox into
+                    // its draft on arrival.
+                    onPick = { conversationId ->
+                        navController.navigate(Routes.chat(conversationId)) {
+                            popUpTo(Routes.SHARE) { inclusive = true }
+                        }
+                    },
+                )
             }
-        }
-        // The LoRa radio screen exists only in builds that introduce the feature; the route is not
-        // registered when the flag is off, and Settings hides its row on the same flag.
-        if (BuildConfig.LORA_PLANE) {
-            composable(Routes.LORA_RADIO) {
-                LoraRadioScreen(onBack = { navController.popBackStack() })
+            composable(Routes.SEARCH) {
+                SearchScreen(
+                    onBack = { navController.popBackStack() },
+                    // A plain navigate on purpose: the search entry — and its ViewModel, which holds the query —
+                    // stays under the thread, so Back returns to the results as they were. No launchSingleTop,
+                    // for the reason spelled out on the notification deep link above.
+                    onOpenConversation = { id -> navController.navigate(Routes.chat(id)) },
+                    onOpenMessage = { id, messageId -> navController.navigate(Routes.chat(id, messageId)) },
+                )
             }
-        }
-        composable(Routes.DIAGNOSTICS) {
-            DiagnosticsScreen(
-                onBack = { navController.popBackStack() },
-                onOpenCrashLog = { navController.navigate(Routes.CRASH_LOG) },
-                onOpenFieldLog = { navController.navigate(Routes.FIELD_LOG) },
-            )
-        }
-        composable(Routes.CRASH_LOG) {
-            CrashLogScreen(onBack = { navController.popBackStack() })
-        }
-        composable(Routes.FIELD_LOG) {
-            FieldLogScreen(onBack = { navController.popBackStack() })
-        }
-        composable(Routes.YOUR_MESH) {
-            YourMeshScreen(
-                onBack = { navController.popBackStack() },
-                onOpenDiagnostics = { navController.navigate(Routes.DIAGNOSTICS) },
-            )
-        }
-        composable(Routes.BLOCKED_USERS) {
-            BlockedUsersScreen(onBack = { navController.popBackStack() })
-        }
-        composable(Routes.MESSAGE_REQUESTS) {
-            MessageRequestsScreen(
-                onBack = { navController.popBackStack() },
-                // Tapping a request's avatar opens the sender's profile; its Message action accepts the
-                // request and opens the DM (see ProfileDetailsScreen.onMessage).
-                onOpenProfile = { navController.navigate(Routes.profileDetails(it)) },
-                // Accepting drops the user straight into the thread they just accepted — the row is gone
-                // from the inbox anyway, so the inbox leaves the back stack and Back lands on the chat
-                // list (reachable again via its badge for any remaining requests).
-                onOpenConversation = { id ->
-                    navController.navigate(Routes.chat(id)) {
-                        popUpTo(Routes.MESSAGE_REQUESTS) { inclusive = true }
-                    }
-                },
-            )
-        }
-        composable(Routes.DONATE) {
-            DonateScreen(
-                onBack = { navController.popBackStack() },
-                rateUrl = remember { reviewPrompter.rateUrl() },
-            )
-        }
-        composable(Routes.ADD_CONTACT) {
-            AddContactScreen(
-                onBack = { navController.popBackStack() },
-                // Land on the new contact's profile — it shows the intro's progress and the Message button —
-                // and drop this screen, so Back returns to wherever the user came from.
-                onImported = { id ->
-                    navController.navigate(Routes.profileDetails(id)) {
-                        popUpTo(Routes.ADD_CONTACT) { inclusive = true }
-                    }
-                },
-            )
+            composable(
+                route = Routes.CHAT,
+                arguments =
+                    listOf(
+                        navArgument("conversationId") { type = NavType.StringType },
+                        navArgument("messageId") {
+                            type = NavType.StringType
+                            nullable = true
+                            defaultValue = null
+                        },
+                    ),
+            ) { backStackEntry ->
+                // conversationId is the Nearby room, a peer's node id (a 1:1 DM), or a group id.
+                val conversationId =
+                    backStackEntry.arguments?.getString("conversationId") ?: Conversations.NEARBY
+                ChatScreen(
+                    conversationId = conversationId,
+                    // Navigation hands the value back decoded.
+                    jumpToMessageId = backStackEntry.arguments?.getString("messageId"),
+                    onBack = { navController.popBackStack() },
+                    onOpenProfile = { id -> navController.navigate(Routes.profileDetails(id)) },
+                    onOpenGroupDetails = { id -> navController.navigate(Routes.groupDetails(id)) },
+                    onOpenMessageDetails = { id -> navController.navigate(Routes.messageDetails(id)) },
+                )
+            }
+            composable(
+                route = Routes.MESSAGE_DETAILS,
+                arguments = listOf(navArgument("messageId") { type = NavType.StringType }),
+            ) { backStackEntry ->
+                val messageId = backStackEntry.arguments?.getString("messageId") ?: return@composable
+                MessageDetailsScreen(
+                    messageId = messageId,
+                    onBack = { navController.popBackStack() },
+                    onOpenProfile = { id -> navController.navigate(Routes.profileDetails(id)) },
+                )
+            }
+            composable(
+                route = Routes.PROFILE_DETAILS,
+                arguments = listOf(navArgument("nodeId") { type = NavType.StringType }),
+            ) { backStackEntry ->
+                val nodeId = backStackEntry.arguments?.getString("nodeId") ?: return@composable
+                ProfileDetailsScreen(
+                    nodeId = nodeId,
+                    onBack = { navController.popBackStack() },
+                    onMessage = { id ->
+                        // Nearby, groups, and DMs all share the chat/{conversationId} destination, so
+                        // launchSingleTop here would reuse whatever chat sits under this profile — its
+                        // retained ChatViewModel is still bound to that conversation — instead of opening
+                        // the peer's DM (the reported "Message just returns to Nearby" bug). If we arrived
+                        // straight from this peer's own DM, just return to it so we don't stack a duplicate;
+                        // otherwise open it, replacing the profile so Back lands on the chat we came from.
+                        if (navController.parentIsDmWith(id)) {
+                            navController.popBackStack()
+                        } else {
+                            navController.navigate(Routes.chat(id)) {
+                                popUpTo(Routes.PROFILE_DETAILS) { inclusive = true }
+                            }
+                        }
+                    },
+                    // A shared group opens its details, stacked on this profile — unlike Message, which
+                    // replaces it: you came here about the person, and Back should return to them.
+                    onOpenGroup = { groupId -> navController.navigate(Routes.groupDetails(groupId)) },
+                    // Removing the contact deleted their DM (ADR 2026-09.adgd). When that DM is the screen below,
+                    // pop past it too, as Leave pops past a left group's chat; otherwise just return.
+                    onRemoved = {
+                        if (navController.parentIsDmWith(nodeId)) {
+                            navController.popBackStack(Routes.CHAT, inclusive = true)
+                        } else {
+                            navController.popBackStack()
+                        }
+                    },
+                )
+            }
+            composable(
+                route = Routes.GROUP_DETAILS,
+                arguments = listOf(navArgument("groupId") { type = NavType.StringType }),
+            ) { backStackEntry ->
+                val groupId = backStackEntry.arguments?.getString("groupId") ?: return@composable
+                GroupDetailsScreen(
+                    groupId = groupId,
+                    onBack = { navController.popBackStack() },
+                    onOpenMemberProfile = { id -> navController.navigate(Routes.profileDetails(id)) },
+                    // Leaving deletes the thread, so pop past this screen AND the chat, back to the list.
+                    onLeft = { navController.popBackStack(Routes.CHAT_LIST, inclusive = false) },
+                )
+            }
+            composable(Routes.SETTINGS) {
+                SettingsScreen(
+                    onBack = { navController.popBackStack() },
+                    onOpenProfile = { navController.navigate(Routes.PROFILE) },
+                    onOpenRelays = { navController.navigate(Routes.INTERNET_RELAYS) },
+                    onOpenLora = { navController.navigate(Routes.LORA_RADIO) },
+                    onOpenAbout = { navController.navigate(Routes.ABOUT) },
+                    onOpenLicenses = { navController.navigate(Routes.LICENSES) },
+                    onOpenBackup = { navController.navigate(Routes.backup()) },
+                    onOpenBlockedUsers = { navController.navigate(Routes.BLOCKED_USERS) },
+                    onOpenWhatsNew = { navController.navigate(Routes.WHATS_NEW) },
+                )
+            }
+            composable(Routes.WHATS_NEW) {
+                // Reading the screen reads the newest announcement, whichever door it came through.
+                val settings = koinInject<SettingsStore>()
+                LaunchedEffect(Unit) { WhatsNew.latest?.let { settings.markWhatsNewSeen(it.id) } }
+                val context = LocalContext.current
+                WhatsNewScreen(onBack = { navController.popBackStack() }, onOpenUrl = { openUrl(context, it) })
+            }
+            composable(Routes.PROFILE) {
+                ProfileScreen(onBack = { navController.popBackStack() })
+            }
+            composable(Routes.ABOUT) {
+                AboutScreen(
+                    onBack = { navController.popBackStack() },
+                    onOpenLicenses = { navController.navigate(Routes.LICENSES) },
+                    onOpenLicense = { navController.navigate(Routes.license(it)) },
+                )
+            }
+            composable(Routes.LICENSES) {
+                LicensesScreen(
+                    onBack = { navController.popBackStack() },
+                    onOpenLicense = { navController.navigate(Routes.license(it)) },
+                )
+            }
+            composable(
+                route = Routes.LICENSE,
+                arguments = listOf(navArgument("licenseId") { type = NavType.StringType }),
+            ) { backStackEntry ->
+                val license =
+                    backStackEntry.arguments?.getString("licenseId")?.let(License::fromRouteId) ?: return@composable
+                LicenseTextScreen(license = license, onBack = { navController.popBackStack() })
+            }
+            // The Internet-relay plane's editor exists only in builds that introduce the feature — the route
+            // is not registered at all when it is dark, so nothing (a restored back stack, a future deep
+            // link) can reach a screen whose switch would be inert anyway. Settings hides its row on the same
+            // flag, so nothing navigates here. See app/build.gradle.kts for what INTERNET_PLANE gates.
+            if (BuildConfig.INTERNET_PLANE) {
+                composable(Routes.INTERNET_RELAYS) {
+                    InternetRelayScreen(onBack = { navController.popBackStack() })
+                }
+            }
+            // The LoRa radio screen exists only in builds that introduce the feature; the route is not
+            // registered when the flag is off, and Settings hides its row on the same flag.
+            if (BuildConfig.LORA_PLANE) {
+                composable(Routes.LORA_RADIO) {
+                    LoraRadioScreen(onBack = { navController.popBackStack() })
+                }
+            }
+            composable(Routes.DIAGNOSTICS) {
+                DiagnosticsScreen(
+                    onBack = { navController.popBackStack() },
+                    onOpenCrashLog = { navController.navigate(Routes.CRASH_LOG) },
+                    onOpenFieldLog = { navController.navigate(Routes.FIELD_LOG) },
+                )
+            }
+            composable(Routes.CRASH_LOG) {
+                CrashLogScreen(onBack = { navController.popBackStack() })
+            }
+            composable(Routes.FIELD_LOG) {
+                FieldLogScreen(onBack = { navController.popBackStack() })
+            }
+            composable(Routes.YOUR_MESH) {
+                YourMeshScreen(
+                    onBack = { navController.popBackStack() },
+                    onOpenDiagnostics = { navController.navigate(Routes.DIAGNOSTICS) },
+                )
+            }
+            composable(Routes.BLOCKED_USERS) {
+                BlockedUsersScreen(onBack = { navController.popBackStack() })
+            }
+            composable(Routes.MESSAGE_REQUESTS) {
+                MessageRequestsScreen(
+                    onBack = { navController.popBackStack() },
+                    // Tapping a request's avatar opens the sender's profile; its Message action accepts the
+                    // request and opens the DM (see ProfileDetailsScreen.onMessage).
+                    onOpenProfile = { navController.navigate(Routes.profileDetails(it)) },
+                    // Accepting drops the user straight into the thread they just accepted — the row is gone
+                    // from the inbox anyway, so the inbox leaves the back stack and Back lands on the chat
+                    // list (reachable again via its badge for any remaining requests).
+                    onOpenConversation = { id ->
+                        navController.navigate(Routes.chat(id)) {
+                            popUpTo(Routes.MESSAGE_REQUESTS) { inclusive = true }
+                        }
+                    },
+                )
+            }
+            composable(Routes.DONATE) {
+                DonateScreen(
+                    onBack = { navController.popBackStack() },
+                    rateUrl = remember { reviewPrompter.rateUrl() },
+                )
+            }
+            composable(Routes.ADD_CONTACT) {
+                AddContactScreen(
+                    onBack = { navController.popBackStack() },
+                    // Land on the new contact's profile — it shows the intro's progress and the Message button —
+                    // and drop this screen, so Back returns to wherever the user came from.
+                    onImported = { id ->
+                        navController.navigate(Routes.profileDetails(id)) {
+                            popUpTo(Routes.ADD_CONTACT) { inclusive = true }
+                        }
+                    },
+                )
+            }
         }
     }
 

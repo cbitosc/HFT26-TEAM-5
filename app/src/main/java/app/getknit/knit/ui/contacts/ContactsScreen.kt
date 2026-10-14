@@ -56,6 +56,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.getknit.knit.R
 import app.getknit.knit.ui.components.Avatar
 import app.getknit.knit.ui.components.PeerNameText
+import app.getknit.knit.ui.components.peerBadge
 import app.getknit.knit.ui.components.skeletonBlockColor
 import app.getknit.knit.ui.components.skeletonPulseAlpha
 import app.getknit.knit.ui.preview.KnitPreview
@@ -276,7 +277,13 @@ private fun ContactRow(
                 .padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Avatar(avatarHash = contact.avatarHash, name = contact.displayName, nodeId = contact.nodeId, size = 48.dp)
+        Avatar(
+            avatarHash = contact.avatarHash,
+            name = contact.displayName,
+            nodeId = contact.nodeId,
+            size = 48.dp,
+            badge = peerBadge(contact.nodeId),
+        )
         Spacer(Modifier.width(12.dp))
         PeerNameText(
             text = contact.displayName,

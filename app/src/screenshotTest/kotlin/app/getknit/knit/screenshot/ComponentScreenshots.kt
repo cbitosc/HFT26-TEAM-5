@@ -1,6 +1,7 @@
 package app.getknit.knit.screenshot
 
 import androidx.compose.runtime.Composable
+import app.getknit.knit.ui.components.AvatarBadgeSizesPreview
 import app.getknit.knit.ui.components.AvatarInitialPreview
 import app.getknit.knit.ui.components.AvatarLargeEmojiPreview
 import app.getknit.knit.ui.components.AvatarPalettePreview
@@ -44,6 +45,11 @@ fun AvatarLargeEmoji() = AvatarLargeEmojiPreview()
 @ComponentShots
 @Composable
 fun AvatarPalette() = AvatarPalettePreview()
+
+@PreviewTest
+@ComponentShots
+@Composable
+fun AvatarBadgeSizes() = AvatarBadgeSizesPreview()
 
 @PreviewTest
 @ComponentShots

@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -64,6 +65,10 @@ import java.text.BreakIterator
  * the avatar an accessible name (do this when [onClick] is set, so the tappable target is
  * announced). When [onClick] is set the touch target grows to the 48dp minimum without enlarging
  * the visible circle, and [onClickLabel] describes the action (e.g. "view profile").
+ *
+ * [badge] is a verified badge id to mark the avatar with ([BadgeMark], docs/SUPPORTER_BADGE.md §7): drawn at the
+ * circle's lower end, outside its clip, so the avatar is a box around the circle rather than the circle itself.
+ * [onBadgeClick] makes the mark its own tap target; without it the mark is part of the avatar.
  */
 @Composable
 fun Avatar(
@@ -76,6 +81,8 @@ fun Avatar(
     contentDescription: String? = null,
     onClick: (() -> Unit)? = null,
     onClickLabel: String? = null,
+    badge: String? = null,
+    onBadgeClick: (() -> Unit)? = null,
 ) {
     val tint = MaterialTheme.knitColors.avatarTint(nodeId ?: name)
     // An avatar is a tap target with no container of its own, so a ripple alone is easy to miss on a
@@ -97,7 +104,39 @@ fun Avatar(
             modifier
                 .then(if (onClick != null) Modifier.minimumInteractiveComponentSize() else Modifier)
                 .then(press)
-                .size(size)
+                .size(size),
+    ) {
+        AvatarCircle(avatarHash, name, size, textStyle, contentDescription, onClick, onClickLabel, interaction, tint)
+        if (badge != null) {
+            BadgeMark(
+                badge = badge,
+                avatarSize = size,
+                onClick = onBadgeClick,
+                // Its centre on the circle's edge at the lower end, the way a presence dot sits.
+                modifier = Modifier.align(Alignment.BottomEnd).offset(x = markSize(size) / 6, y = markSize(size) / 6),
+            )
+        }
+    }
+}
+
+/** The clipped disc itself: the photo or the initial, with the tap and the accessible name. */
+@Composable
+@Suppress("LongParameterList") // Avatar's own parameters, passed through
+private fun AvatarCircle(
+    avatarHash: String?,
+    name: String,
+    size: Dp,
+    textStyle: TextStyle,
+    contentDescription: String?,
+    onClick: (() -> Unit)?,
+    onClickLabel: String?,
+    interaction: MutableInteractionSource,
+    tint: AvatarTint,
+) {
+    Box(
+        modifier =
+            Modifier
+                .fillMaxSize()
                 .clip(CircleShape)
                 .background(tint.container)
                 .then(

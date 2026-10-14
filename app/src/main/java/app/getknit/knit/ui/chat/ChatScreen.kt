@@ -240,6 +240,7 @@ import app.getknit.knit.ui.components.PeerNameText
 import app.getknit.knit.ui.components.PermissionDeniedDialog
 import app.getknit.knit.ui.components.RoomAvatar
 import app.getknit.knit.ui.components.noAutofillMenu
+import app.getknit.knit.ui.components.peerBadge
 import app.getknit.knit.ui.components.skeletonBlockColor
 import app.getknit.knit.ui.components.skeletonPulseAlpha
 import app.getknit.knit.ui.icons.KnitIcons
@@ -1050,6 +1051,7 @@ internal fun ChatScreenContent(
                                     size = 36.dp,
                                     contentDescription = stringResource(R.string.chat_view_profile, state.title),
                                     onClick = { onOpenProfile(conversationId) },
+                                    badge = peerBadge(conversationId),
                                 )
                                 Spacer(Modifier.width(10.dp))
                                 PeerNameText(

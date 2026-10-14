@@ -6,12 +6,16 @@ import androidx.compose.ui.geometry.Offset
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.getknit.knit.TextLimits
+import app.getknit.knit.badge.BadgeJournal
+import app.getknit.knit.badge.Badges
+import app.getknit.knit.badge.PinnedBadgeKey
 import app.getknit.knit.clampToUtf16
 import app.getknit.knit.data.AvatarStore
 import app.getknit.knit.data.BlobRepository
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.identity.Alias
 import app.getknit.knit.identity.Identity
+import app.getknit.knit.mesh.spool.TicketKeyJournal
 import app.getknit.knit.normalizeSingleLine
 import app.getknit.knit.ui.util.computeAvatarCrop
 import kotlinx.coroutines.CoroutineScope
@@ -23,6 +27,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -37,6 +42,12 @@ class ProfileViewModel(
      * encode and blob insert landed cancelled it and the photo was silently lost (issue #26).
      */
     private val appScope: CoroutineScope,
+    // The supporter badge's toggle (docs/SUPPORTER_BADGE.md §5): the holder's journal, the customer keys whose presence
+    // offers it, and the keys a held badge must verify under. Null in tests that don't exercise it, which hides the row.
+    private val badges: BadgeJournal? = null,
+    ticketKeys: TicketKeyJournal? = null,
+    pins: List<PinnedBadgeKey> = emptyList(),
+    clock: () -> Long = System::currentTimeMillis,
 ) : ViewModel() {
     val nodeId = MutableStateFlow("")
 
@@ -93,6 +104,29 @@ class ProfileViewModel(
     val openToChat: StateFlow<Boolean> =
         settings.openToChat
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
+    /**
+     * "Show my supporter badge" (C-5-1), or null while it is not offered: shown only while this phone holds a customer
+     * key or still holds a badge that verifies for it. [OwnBadgeRow.showing] is null when the switch is on and nothing
+     * held verifies — the lapsed line.
+     */
+    val badgeRow: StateFlow<OwnBadgeRow?> =
+        if (badges == null) {
+            MutableStateFlow(null)
+        } else {
+            combine(badges.show, badges.held, ticketKeys?.keys ?: flowOf(emptyMap()), nodeId) { on, held, keys, me ->
+                if (me.isEmpty()) return@combine null
+                val nowS = clock() / MS_PER_S
+                val verified = held.firstNotNullOfOrNull { Badges.verify(it.wrapper, it.r, me, nowS, pins) }
+                if (keys.isEmpty() && verified == null) null else OwnBadgeRow(on = on, showing = verified?.b)
+            }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+        }
+
+    fun setShowBadge(on: Boolean) {
+        val journal = badges ?: return
+        // On the app scope, like the photo: the write is what republishes the profile, and a Back must not cancel it.
+        appScope.launch { journal.setShow(on) }
+    }
 
     init {
         viewModelScope.launch {
@@ -231,3 +265,11 @@ enum class PhotoChange { UPDATED, REMOVED, REFUSED }
 
 /** Tokens of the owner's phrase the Profile screen reads: the alias plus the one continuation it shows. */
 private const val OWNER_TOKENS = 2
+
+/** The own-profile badge row: whether the switch is on, and the badge id showing now (null while on = lapsed). */
+data class OwnBadgeRow(
+    val on: Boolean,
+    val showing: String?,
+)
+
+private const val MS_PER_S = 1_000L

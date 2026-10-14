@@ -64,6 +64,7 @@ import app.getknit.knit.ui.components.FullscreenImageViewer
 import app.getknit.knit.ui.components.GroupAvatar
 import app.getknit.knit.ui.components.PeerNameText
 import app.getknit.knit.ui.components.noAutofillMenu
+import app.getknit.knit.ui.components.peerBadge
 import app.getknit.knit.ui.image.BlobImage
 import app.getknit.knit.ui.preview.KnitPreview
 import app.getknit.knit.ui.profile.AvatarCropDialog
@@ -334,7 +335,13 @@ private fun MemberRow(
                 .padding(horizontal = 4.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Avatar(avatarHash = member.avatarHash, name = member.displayName, nodeId = member.nodeId, size = 48.dp)
+        Avatar(
+            avatarHash = member.avatarHash,
+            name = member.displayName,
+            nodeId = member.nodeId,
+            size = 48.dp,
+            badge = peerBadge(member.nodeId),
+        )
         Spacer(Modifier.width(12.dp))
         PeerNameText(
             text = member.displayName,

@@ -1,6 +1,7 @@
 package app.getknit.knit.ui.profile
 
 import android.content.ClipData
+import android.content.res.Configuration
 import android.os.Build
 import android.text.format.DateUtils
 import androidx.compose.foundation.background
@@ -38,6 +39,7 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -46,6 +48,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -74,16 +77,22 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.getknit.knit.BuildConfig
 import app.getknit.knit.R
+import app.getknit.knit.badge.Badges
+import app.getknit.knit.badge.VerifiedBadge
 import app.getknit.knit.data.message.GroupFace
 import app.getknit.knit.mesh.IntroState
 import app.getknit.knit.ui.Reach
 import app.getknit.knit.ui.components.Avatar
+import app.getknit.knit.ui.components.BadgeMark
+import app.getknit.knit.ui.components.BadgeVisuals
 import app.getknit.knit.ui.components.DetailCard
 import app.getknit.knit.ui.components.DetailRow
 import app.getknit.knit.ui.components.FullscreenImageViewer
 import app.getknit.knit.ui.components.GroupAvatar
+import app.getknit.knit.ui.components.LocalPeerBadges
 import app.getknit.knit.ui.components.PeerNameText
 import app.getknit.knit.ui.components.SectionHeader
+import app.getknit.knit.ui.components.peerBadge
 import app.getknit.knit.ui.image.BlobImage
 import app.getknit.knit.ui.preview.KnitPreview
 import app.getknit.knit.ui.scan.QrScanner
@@ -466,6 +475,12 @@ private fun PeerHeader(
     state: ProfileDetailsUiState,
     onViewPhoto: () -> Unit,
 ) {
+    // A verified badge only: [peerBadge] reads the display-time check's output (docs/SUPPORTER_BADGE.md C-3-3).
+    val badge = peerBadge(state.nodeId)
+    var badgeSheet by remember { mutableStateOf(false) }
+    if (badgeSheet && badge != null) {
+        BadgeSheet(badge = badge, name = state.displayName, onDismiss = { badgeSheet = false })
+    }
     Column(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -489,6 +504,8 @@ private fun PeerHeader(
                 },
             onClickLabel = stringResource(R.string.profile_details_view_photo),
             onClick = if (state.avatarHash != null) onViewPhoto else null,
+            badge = badge,
+            onBadgeClick = { badgeSheet = true },
         )
 
         PeerNameText(
@@ -549,6 +566,17 @@ private fun PeerHeader(
                     iconTint = MaterialTheme.knitColors.positive,
                     modifier = Modifier.testTag("profile_details_verified"),
                 )
+            }
+
+            // A badge they chose to show their contacts, verified on this phone just now. Tapping says what it means.
+            if (badge != null) {
+                BadgeVisuals.labelFor(badge)?.let { label ->
+                    ProfileBadge(
+                        label = stringResource(label),
+                        modifier = Modifier.testTag("profile_details_badge").clip(CircleShape).clickable { badgeSheet = true },
+                        leading = { BadgeMark(badge = badge, avatarSize = 0.dp) },
+                    )
+                }
             }
 
             // Their declared availability. Shown whether or not they are online — it is what they declared.
@@ -922,6 +950,41 @@ fun ProfileDetailsScreenViaRelayPreview() =
         )
     }
 
+/** A contact who shows a supporter badge: the mark on the avatar and the "Supporter" pill (docs/SUPPORTER_BADGE.md §7). */
+@Preview(showBackground = true)
+@Preview(showBackground = true, uiMode = Configuration.UI_MODE_NIGHT_YES)
+@Composable
+fun ProfileDetailsScreenSupporterPreview() =
+    KnitPreview {
+        CompositionLocalProvider(LocalPeerBadges provides mapOf("c3d4e5f6a1b2" to listOf(VerifiedBadge(Badges.SUPPORTER, 0)))) {
+            ProfileDetailsScreenContent(
+                state =
+                    ProfileDetailsUiState(
+                        nodeId = "c3d4e5f6a1b2",
+                        displayName = "Dani Cho",
+                        status = "",
+                        avatarHash = null,
+                        reach = Reach.Direct,
+                        isBlocked = false,
+                        hasKey = true,
+                        verified = true,
+                        safetyNumber = "12345 67890 12345 67890 12345 67890",
+                        myQrPayload = "knit:verify:dani",
+                    ),
+                snackbarHostState = remember { SnackbarHostState() },
+                onBack = {},
+                onMessage = {},
+                onOpenGroup = {},
+                onScan = {},
+                onBlock = {},
+                onUnblock = {},
+                onRemoveContact = {},
+                onMarkVerified = {},
+                onClearVerification = {},
+            )
+        }
+    }
+
 // Exercises the hasKey = false branch: no safety number / QR, just the "no key yet" notice.
 @Preview(showBackground = true)
 @Composable
@@ -1010,3 +1073,39 @@ private val PREVIEW_FACES =
 // Fixed stamps so the met rows render the same date on every preview refresh.
 private const val PREVIEW_FIRST_MET = 1_755_000_000_000L
 private const val PREVIEW_LAST_MET = 1_757_900_000_000L
+
+/** What a badge means, said once and plainly: "<Name> supports Knit." No link, no price, nothing to do. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun BadgeSheet(
+    badge: String,
+    name: String,
+    onDismiss: () -> Unit,
+) {
+    ModalBottomSheet(onDismissRequest = onDismiss) { BadgeSheetContent(badge, name) }
+}
+
+@Composable
+internal fun BadgeSheetContent(
+    badge: String,
+    name: String,
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(bottom = 32.dp, top = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        BadgeMark(badge = badge, avatarSize = 96.dp)
+        Text(
+            text = stringResource(R.string.badge_supporter_sheet, name),
+            style = MaterialTheme.typography.titleMedium,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.testTag("badge_sheet_text"),
+        )
+    }
+}
+
+@Preview(showBackground = true)
+@Preview(showBackground = true, uiMode = Configuration.UI_MODE_NIGHT_YES)
+@Composable
+fun BadgeSheetContentPreview() = KnitPreview { BadgeSheetContent(Badges.SUPPORTER, "Dani Cho") }
