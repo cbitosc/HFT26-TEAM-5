@@ -225,7 +225,7 @@ private fun Scope.talkLinks(): TalkLinks =
         override fun raise(peerId: String): Boolean = get<MeshTransport>().holdLink(peerId)
 
         // sendCallTalk's order: the peer's own link, a Wi-Fi Aware one first (sendLive), else a flood over any link,
-        // and a cast through a relay for a peer the mesh has no path to.
+        // and a cast through a relay for a peer the mesh has no path to, or beside the peer's own link when it fades.
         override fun pathTo(
             peerId: String,
             peerTicketed: Boolean,
@@ -239,6 +239,7 @@ private fun Scope.talkLinks(): TalkLinks =
                 linked.isEmpty() -> TalkPath.NONE
                 transport.bulkRouteTo(peerId) == BulkRoute.Linked -> TalkPath.WIFI_AWARE
                 linked.none { it.nodeId == peerId } -> TalkPath.FLOODED
+                transport.liveLinkFading(peerId) && get<MeshManager>().canCastTalk(peerId, peerTicketed) -> TalkPath.FADING
                 transport.slowLinkTo(peerId) -> TalkPath.BLUETOOTH_CODED
                 else -> TalkPath.BLUETOOTH
             }

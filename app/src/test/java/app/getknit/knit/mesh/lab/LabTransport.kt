@@ -416,6 +416,9 @@ class LabTransport(
     /** Peers a scenario declares as linked on a slow (Coded) link ([slowLinkTo]). */
     val slowLinks: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
+    /** Peers a scenario declares as linked over a link near its floor ([liveLinkFading]). */
+    val fadingLinks: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
     /** How many files a scenario declares this node is feeding ([feedingLoad]) — a `blobhas` answer's load. */
     @Volatile
     var feeding: Int = 0
@@ -653,6 +656,8 @@ class LabTransport(
     override fun bulkRouteTo(nodeId: String): BulkRoute = bulkRoutes[nodeId] ?: BulkRoute.None
 
     override fun slowLinkTo(nodeId: String): Boolean = nodeId in slowLinks
+
+    override fun liveLinkFading(nodeId: String): Boolean = nodeId in fadingLinks
 
     override fun feedingLoad(nodeId: String): Int = feeding
 

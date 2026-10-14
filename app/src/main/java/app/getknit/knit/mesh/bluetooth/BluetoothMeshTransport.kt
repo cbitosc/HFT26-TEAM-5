@@ -859,6 +859,13 @@ class BluetoothMeshTransport(
 
     override fun slowLinkTo(nodeId: String): Boolean = links[nodeId]?.let { linkPhy[it] == LinkPhy.CODED } ?: false
 
+    /**
+     * Whether the link to [nodeId] is near its floor, by its PHY handle's link-RSSI reads ([LinkFade], ADR 2026-10.79yb's
+     * ninth amendment). Asked per walkie chunk on the send path, so it only reads: two short monitors, no I/O. A link
+     * with no PHY handle (the experiment off, or a peer never heard on Coded, an iPhone among them) cannot tell: false.
+     */
+    override fun liveLinkFading(nodeId: String): Boolean = links[nodeId]?.let { phyControls[it]?.fading() } ?: false
+
     override suspend fun sendDigest(
         to: Peer,
         ids: List<String>,
@@ -2912,9 +2919,16 @@ class BluetoothMeshTransport(
                 ) +
                 (if (gattPeers) gattDiag() else "") +
                 (if (codedOn()) " phy=${codedMode.wire} coded=$codedAdvert phyLinks=${phyControls.size} hunt=$hunting" else "") +
+                (if (codedOn()) fadeDiag() else "") +
                 (sideChannel?.let { " ${it.diag()} $sideDecision" } ?: "") +
                 " linkScores=${links.values.joinToString(",") { "${it.nodeId}:${linkScore(it, rssiByNode).toInt()}" }}",
         )
+    }
+
+    /** The links whose PHY handle calls them fading ([LinkFade]), for the `bt state` line; empty when none is. */
+    private fun fadeDiag(): String {
+        val fading = phyControls.filter { (_, control) -> control.fading() }.map { (link, _) -> link.nodeId }
+        return if (fading.isEmpty()) "" else " fade=$fading"
     }
 
     /** The GATT payload reads' part of the `bt state` line; `gattPayloads=` / `gattReads=` are read by the iOS harness. */

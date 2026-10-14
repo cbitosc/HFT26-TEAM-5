@@ -88,6 +88,20 @@ data class PhyTuning(
     val edgeDbm: Int = EDGE_DBM,
     /** EWMA weight on each link-RSSI read. */
     val rssiAlpha: Double = 0.5,
+    /**
+     * A link is fading ([LinkFade], ADR 2026-10.79yb's ninth amendment) once its smoothed link RSSI is at or under this,
+     * or once [fadeStaleReads] reads in a row went unanswered (counted, never timed: a sleeping CPU stops the reads,
+     * not the clock). Link RSSI, the scale the step thresholds read: −95 sits under the step-down, near where the
+     * 2026-10-13 Coded link dropped (−103 at its end). `…debug.PHY --ei fade`.
+     */
+    val fadeDbm: Int = FADE_DBM,
+    val fadeStaleReads: Int = 3,
+    /**
+     * A fading link stops fading only after answered reads have held its smoothed link RSSI at or over this for
+     * [fadeExitHoldMs]: sticky on purpose, since what a fade buys (a walkie chunk also sent through a relay) is cheap.
+     */
+    val fadeExitDbm: Int = FADE_EXIT_DBM,
+    val fadeExitHoldMs: Long = 10_000,
     /** What a Coded advert reading is worth on the 1M scale ([CodedPhyPolicy.effectiveRssi]); `…debug.PHY --ei credit`. */
     val codedCreditDb: Double = CodedPhyPolicy.CODED_RSSI_CREDIT_DB,
     /** The Coded advert's interval while a far peer that just dropped is wanted back ([CodedAdvertPace]). */
@@ -146,6 +160,8 @@ data class PhyTuning(
         const val STEP_UP_DBM = -72
         const val STEP_UP_FAST_DBM = -62
         const val EDGE_DBM = -75
+        const val FADE_DBM = -95
+        const val FADE_EXIT_DBM = -90
     }
 }
 

@@ -27,6 +27,8 @@ data class PhyLinkStatus(
     val attached: Boolean,
     val switches: Int,
     val gaveUp: Boolean,
+    /** The link is near its floor ([LinkFade], ADR 2026-10.79yb's ninth amendment): a walkie chunk also takes a relay. */
+    val fading: Boolean = false,
 )
 
 /**
@@ -41,6 +43,10 @@ data class PhyLinkStatus(
  * too, to read and report what the link is on. One coroutine reads the RSSI and asks [PhyStepper]; the controller's
  * reports arrive on a binder thread and go straight into the stepper, which is synchronized.
  *
+ * Every read's outcome also goes to [LinkFade], answered or not (a refused call, a failed callback, the 1 s timeout),
+ * so a link whose reads stop answering is called fading rather than read silently at its last value; [status] carries
+ * the verdict to `BluetoothMeshTransport.liveLinkFading`.
+ *
  * Device-verified only — there is no host GATT stack; the rules are [PhyStepper]'s, which are JVM-tested.
  */
 @SuppressLint("MissingPermission")
@@ -52,7 +58,7 @@ internal class BlePhyControl(
     private val scope: CoroutineScope,
     private val isLive: () -> Boolean,
     private val mode: () -> CodedPhyMode,
-    tuning: () -> PhyTuning,
+    private val tuning: () -> PhyTuning,
     private val onStep: (toCoded: Boolean) -> Unit,
     private val onGiveUp: () -> Unit,
     private val now: () -> Long,
@@ -60,8 +66,11 @@ internal class BlePhyControl(
     private val onPhyKnown: () -> Unit = {},
 ) {
     private val stepper = PhyStepper(tuning)
+    private val fade = LinkFade(tuning)
     private val pokes = Channel<Unit>(Channel.CONFLATED)
-    private val rssiReads = Channel<Int>(Channel.CONFLATED)
+
+    // A read's answer: its RSSI, or null for a callback that answered with a failure status.
+    private val rssiReads = Channel<Int?>(Channel.CONFLATED)
     private val attachedSignal = CompletableDeferred<Boolean>()
     private var job: Job? = null
 
@@ -98,7 +107,17 @@ internal class BlePhyControl(
             attached = attached,
             switches = stepper.switches,
             gaveUp = stepper.gaveUp,
+            fading = fading(),
         )
+
+    /**
+     * Whether the link is fading now ([LinkFade]): `BluetoothMeshTransport.liveLinkFading` asks it per walkie chunk, so
+     * it reads two volatile-or-monitored fields and nothing else. Only while the reader is attached: a control whose
+     * GATT client went away stays in the transport's map (its last PHY and RSSI decide the range hunt when the link
+     * drops, yvn6's 2026-10-02 and 2026-10-04 amendments) but has no reads to judge by, so it reports no fade rather
+     * than a last verdict nothing can clear.
+     */
+    fun fading(): Boolean = attached && fade.fading
 
     @Suppress("DEPRECATION") // compileSdk 37.1 deprecates connectGatt(Context, …); see BleDoorbell.Client.open
     private suspend fun loop() {
@@ -121,10 +140,7 @@ internal class BlePhyControl(
                 if (drives) act(g, stepper.decide(mode(), now()))
                 // stretches: the RSSI cadence (yvn6, dark): step-down counts reads, but a step-up hold spans a sleep on two reads (open).
                 withTimeoutOrNull(stepper.nextReadMs()) { pokes.receive() }
-                if (runCatching { g.readRemoteRssi() }.getOrNull() == true) {
-                    // stretches: give-up on one RSSI read.
-                    withTimeoutOrNull(RSSI_TIMEOUT_MS) { rssiReads.receive() }?.let { onRssi(it) }
-                }
+                if (!disconnected) readRssi(g)
             }
         } finally {
             attached = false
@@ -137,11 +153,62 @@ internal class BlePhyControl(
         }
     }
 
-    /** Feeds a read to the stepper, logging the step-up hold a Coded link moves into: the link RSSI of a walk back in. */
+    /**
+     * One link-RSSI read, its outcome fed on: an answer to [onRssi]; a call the stack refused, a callback that answered
+     * with a failure, or nothing back within [RSSI_TIMEOUT_MS] to [onUnanswered]. A read that a disconnect overtook is
+     * neither: the loop ends, and with it the fade verdict ([fading]).
+     */
+    private suspend fun readRssi(g: BluetoothGatt) {
+        rssiReads.tryReceive() // drop an answer that came back after its own read timed out
+        val sent = runCatching { g.readRemoteRssi() }.getOrNull() == true
+        // stretches: give-up on one RSSI read; LinkFade counts unanswered reads, so a sleep inside it is not a fade.
+        val answer = if (sent) withTimeoutOrNull(RSSI_TIMEOUT_MS) { rssiReads.receive() ?: REFUSED } else null
+        if (disconnected) return
+        when {
+            answer == null -> onUnanswered(if (sent) "timeout" else "not sent")
+            answer == REFUSED -> onUnanswered("refused")
+            else -> onRssi(answer)
+        }
+    }
+
+    /**
+     * Feeds a read to the stepper, logging the step-up hold a Coded link moves into (the link RSSI of a walk back in),
+     * then to [fade]. At or under the edge each read is logged raw and smoothed: the 2026-10-13 walkie drop left a
+     * smoothed −82 on one side at its end, and without the raw reads nobody could say whether they had stopped
+     * changing.
+     */
     private fun onRssi(rssi: Int) {
-        val hold = stepper.onRssi(rssi, now()) ?: return
-        if (stepper.phy == LinkPhy.CODED) {
-            Log.i(TAG, "bt phy $nodeId step-up hold ${hold.name.lowercase()} (rssi=${stepper.smoothedRssi?.toInt()})")
+        val at = now()
+        val hold = stepper.onRssi(rssi, at)
+        val smoothed = stepper.smoothedRssi ?: rssi.toDouble()
+        if (hold != null && stepper.phy == LinkPhy.CODED) {
+            Log.i(TAG, "bt phy $nodeId step-up hold ${hold.name.lowercase()} (rssi=${smoothed.toInt()})")
+        }
+        if (smoothed <= tuning().edgeDbm) Log.d(TAG, "bt phy $nodeId rssi=$rssi smoothed=${smoothed.toInt()}")
+        logFade(fade.onRead(smoothed, at))
+    }
+
+    /** A read that did not answer — [why] in the log — counted toward [fade]'s staleness instead of dropped. */
+    private fun onUnanswered(why: String) {
+        val edge = fade.onUnanswered()
+        Log.d(TAG, "bt phy $nodeId rssi read unanswered (${fade.unansweredInRow} in a row, $why)")
+        logFade(edge)
+    }
+
+    /** One line per fade edge, at info (the step lines' level), so a walk's logcat has it without debug lines on. */
+    private fun logFade(edge: LinkFade.Edge?) {
+        val rssi = stepper.smoothedRssi?.toInt()
+        when (edge) {
+            LinkFade.Edge.ON -> {
+                val since = fade.sinceAnsweredMs(now())?.let { "${it}ms ago" } ?: "none"
+                Log.i(TAG, "bt fade $nodeId on (rssi=$rssi, unanswered=${fade.unansweredInRow}, last answer $since)")
+            }
+
+            LinkFade.Edge.OFF -> {
+                Log.i(TAG, "bt fade $nodeId off (rssi=$rssi)")
+            }
+
+            null -> {}
         }
     }
 
@@ -272,7 +339,7 @@ internal class BlePhyControl(
                 rssi: Int,
                 status: Int,
             ) {
-                if (status == BluetoothGatt.GATT_SUCCESS) rssiReads.trySend(rssi)
+                rssiReads.trySend(rssi.takeIf { status == BluetoothGatt.GATT_SUCCESS })
             }
         }
 
@@ -283,7 +350,10 @@ internal class BlePhyControl(
         const val ATTACH_TIMEOUT_MS = 2_000L
 
         // A link-RSSI read is one HCI command; one not back by now is skipped, not waited on.
-        const val RSSI_TIMEOUT_MS = 1_000L
+        const val RSSI_TIMEOUT_MS = LinkFade.READ_TIMEOUT_MS
+
+        // A read the stack's callback answered with a failure status; no RSSI reads this.
+        const val REFUSED = Int.MIN_VALUE
     }
 }
 

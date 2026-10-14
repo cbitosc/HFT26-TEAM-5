@@ -3,6 +3,7 @@ package app.getknit.knit.mesh.lab
 import app.getknit.knit.call.TalkChunk
 import app.getknit.knit.call.TalkWire
 import app.getknit.knit.mesh.protocol.FrameType
+import app.getknit.knit.mesh.protocol.WireCodec
 import app.getknit.knit.mesh.spool.FakeSpool
 import app.getknit.knit.mesh.spool.SpoolCastInfo
 import kotlinx.coroutines.runBlocking
@@ -208,6 +209,42 @@ class WalkieTalkLabTest {
             lab.await(CHUNKS) { bob.chunksHeard().size }
             assertEquals(CHUNKS, alice.talkSends().size)
             assertTrue("a neighbour's chunks were cast: ${spool.casts}", spool.casts.isEmpty())
+        }
+
+    /**
+     * A neighbour whose link is dying but not yet down (ADR 2026-10.79yb's ninth amendment): the link still counts as a
+     * path, and every frame over it is lost, as for the ~20 s before a Bluetooth supervision timeout. Its transport says
+     * the link fades, so each chunk is cast beside its radio copy, and the burst arrives through the relay. The other
+     * way, over a link that does not fade, nothing is cast.
+     */
+    @Test
+    fun aNeighbourWhoseLinkFadesIsCastBesideTheRadio() =
+        runBlocking {
+            val spool = FakeSpool(cast = CAST_BOUNDS)
+            val alice = lab.node("alice", spool = spool).apply { setDisplayName("Alice") }
+            val bob = lab.node("bob", spool = spool).apply { setDisplayName("Bob") }
+            lab.link(alice, bob)
+            lab.awaitAcquainted(alice, bob)
+            trade(alice, bob, carriers = emptyList())
+            lab.awaitDmScope(alice, bob)
+            lab.awaitDmScope(bob, alice)
+
+            // Bob's side of the link still hears him; his chunks go over it, and none is cast.
+            burst(bob, alice)
+            lab.await(CHUNKS) { alice.chunksHeard().size }
+            assertTrue("a chunk over a sound link was cast: ${spool.casts}", spool.casts.isEmpty())
+
+            alice.transport.fadingLinks += bob.nodeId
+            alice.transport.lossy(bob.transport) { true }
+            burst(alice, bob)
+            lab.await(CHUNKS) { bob.chunksHeard().size }
+            assertEquals((0 until CHUNKS).toSet(), bob.chunksHeard())
+            // The send log is written at the far end, so a radio copy the air lost shows in `lost` instead.
+            val talkLost = alice.transport.lost.count { WireCodec.decodeEnvelope(it.signed)?.type == FrameType.TALK }
+            assertEquals("the radio copies still went", CHUNKS, talkLost)
+            // The spool counts a cast before it fans it out, so Alice's are all in by now. Exactly hers: a cast of Bob's
+            // over the sound link (which the empty check above may have run ahead of) would show here as more.
+            assertEquals("Alice's chunks, and only hers, were cast", CHUNKS, spool.casts.size)
         }
 
     private companion object {

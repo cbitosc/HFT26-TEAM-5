@@ -669,8 +669,11 @@ an experiment behind `BuildConfig.WALKIE` (`-Pwalkie=`, on in debug and off in r
   - **Reach.** No node custodies it, parks it, re-serves it or fans it onto the coordination plane or LoRa, and no
     spool stores it. A neighbour of the sender gets it alone, with `ttl = 0`. A peer heard through the mesh gets a
     flood of at most `ttl = 3` relays. A peer the mesh has no path to gets it **cast** through every connected spool
-    that would carry it (§2.7), signed, and beside the blind flood when this phone has links at all. A build that does
-    not know the type relays it like any unknown type and delivers nothing.
+    that would carry it (§2.7), signed, and beside the blind flood when this phone has links at all. A neighbour whose
+    live link is near its floor (`MeshTransport.liveLinkFading`: its link RSSI at or under −95, or three reads in a row
+    unanswered) gets the cast beside its radio copy, because a dying link counts as a path until its supervision timeout
+    closes it, about 20 s later. A build that does not know the type relays it like any unknown type and delivers
+    nothing.
   - **Receipt.** The addressee admits the frame unsigned only in this shape: addressed to it, by someone else, in no
     group, and admits the signed copy a spool casts through the ordinary signed door. It hands the opened plaintext to
     the call layer only from an accepted contact, and a failed open is never a reset trigger, signed or not. Only a connected walkie session with the sender, under the chunk's tag, takes the chunk.
@@ -696,7 +699,9 @@ an experiment behind `BuildConfig.WALKIE` (`-Pwalkie=`, on in debug and off in r
   keeps the Bluetooth-first order.
 
   The call screen shows how a chunk would reach the peer (`TalkLink`):
-  - **direct:** over a link of this phone's own; nothing is shown;
+  - **direct:** over a link of this phone's own; nothing is shown. Over a fading link with a relay that would cast,
+    the chunks also go through the relay; nothing more is shown, and the diagnostics path reads
+    `Bluetooth · fading, relay too`;
   - **through the mesh:** no link of its own, but the peer's frames reached it through another phone lately; a notice
     says the chunks go through other phones;
   - **through the relay:** no mesh path, but a connected relay would cast the chunks (§2.7); a notice says so;

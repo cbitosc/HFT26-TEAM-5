@@ -71,7 +71,8 @@ internal interface TalkLinks {
     /**
      * The way a chunk to [peerId] goes now, by the links `MeshManager.sendCallTalk` sends on: [TalkLink] reads the
      * peers this phone hears, a peer heard but not linked gets its chunks flooded through the links there are, and one
-     * with no mesh path at all gets them cast through a relay when one carries them ([peerTicketed] as for [linkTo]).
+     * with no mesh path at all gets them cast through a relay when one carries them ([peerTicketed] as for [linkTo]), as
+     * does a linked peer whose link fades, beside its radio copy.
      */
     fun pathTo(
         peerId: String,
@@ -86,6 +87,7 @@ internal enum class TalkPath(
     WIFI_AWARE("Wi-Fi Aware · direct"),
     BLUETOOTH_CODED("Bluetooth Coded · direct"),
     BLUETOOTH("Bluetooth · direct"),
+    FADING("Bluetooth · fading, relay too"),
     FLOODED("Through a neighbour · flooded"),
     SPOOL("Through the relay · cast"),
     NONE("No link"),
@@ -341,7 +343,8 @@ internal class WalkieTalk(
         if (q == 0) return Talk.Note.TOO_SHORT
         out(if (keep) chunker.flush() else ByteArray(0), end = true)
         log(
-            "walkie: burst $b of ${chunker.totalMs}ms to ${call.peerId} in $q chunks ($bytesOut B before the seal), $delivered sealed; " +
+            "walkie: burst $b of ${chunker.totalMs}ms to ${call.peerId} in $q chunks ($bytesOut B before the seal), $delivered sealed, " +
+                "via ${pathTo(call.peerId) ?: "?"}; " +
                 "cut>sent ms ${timings.joinToString(
                     " ",
                 )}",

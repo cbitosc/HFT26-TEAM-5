@@ -533,9 +533,17 @@ class CompositeMeshTransport(
         wire: WireEnvelope,
         to: Peer,
     ) {
-        val fast = children.firstOrNull { c -> c.highThroughput && c.neighbors.value.any { it.nodeId == to.nodeId } }
+        val fast = liveChildFor(to.nodeId)
         if (fast != null) fast.send(wire, to) else send(wire, to)
     }
+
+    /** The answer of the child [sendLive] would use, not the Bluetooth-first holder [slowLinkTo] asks. */
+    override fun liveLinkFading(nodeId: String): Boolean =
+        (liveChildFor(nodeId) ?: childHoldingLinkTo(nodeId))?.liveLinkFading(nodeId) ?: false
+
+    /** The [highThroughput] child holding a live link to [nodeId], which a live frame prefers; null when none does. */
+    private fun liveChildFor(nodeId: String): MeshTransport? =
+        children.firstOrNull { c -> c.highThroughput && c.neighbors.value.any { it.nodeId == nodeId } }
 
     /** First child (preference order) that currently holds a live data-path link to [nodeId], or null. */
     private fun childHoldingLinkTo(nodeId: String): MeshTransport? =

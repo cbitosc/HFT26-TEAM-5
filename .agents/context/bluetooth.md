@@ -41,6 +41,11 @@ Bluetooth-adjacent routing that stays in `AGENTS.md`, because another subsystem 
   3 min, or up to 30 while Knit is open on a lit screen, which hunts on its own too (`RangeHunt`, the 2026-10-04
   amendment). CHECK
   `.agents/memory/roadmap.md` for the trials it still owes.
+- **When touching `LinkFade`, `PhyLinkStatus.fading`, the `PhyTuning` fade fields, `BlePhyControl`'s read accounting,
+  or `liveLinkFading` (`BluetoothMeshTransport`, `CompositeMeshTransport`, `MeshTransport`):** READ ADR 2026-10.79yb's
+  ninth amendment. A link fades at a smoothed link RSSI of −95 or on three unanswered reads in a row (counted, never
+  timed: the read wait stops across a CPU sleep), and recovers only after answered reads hold −90 or better for 10 s. While it fades, a walkie chunk goes through the relay beside its radio copy. The answer
+  must stay cheap: it is asked per chunk, twice a second, on the send path. A link with no PHY handle never fades.
 - **When touching `CodedPhyPolicy.pace`, `PhyTuning.filePaceBytesPerSec` / `BLE_PACE_BYTES_PER_SEC`, `PaceConfig` /
   `PaceWindow` / `TransferPacePolicy`, `BluetoothMeshTransport.paceFor`, or `FramedLink`'s `pace`:** READ ADR
   2026-10.8jwn. **Before touching `FeedWindow`, `PaceConfig.windowed`, `BluetoothMeshTransport.windowed`,

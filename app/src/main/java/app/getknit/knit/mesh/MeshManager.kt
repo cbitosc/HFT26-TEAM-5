@@ -3199,7 +3199,9 @@ class MeshManager(
      * spool that needs a cast ticket, ours or the peer's ([peerTicketed], from its walkie signal). The cast copy is
      * signed, as every frame the Internet plane carries is; the radio copy stays unsigned for Coded PHY's sake. Both
      * carry the same id, so the peer keeps whichever arrives first. With links but no path to the peer, the blind flood
-     * still goes beside the cast.
+     * still goes beside the cast. A neighbour whose live link is near its floor ([MeshTransport.liveLinkFading]) gets
+     * the cast beside its radio copy too (ADR 2026-10.79yb's ninth amendment): a dying link keeps counting as a path
+     * until its supervision timeout, about 20 s in which every chunk over it is lost.
      *
      * The frame's size (its envelope's bytes), or null when nothing could be sealed, or there is neither a link nor a
      * spool to hand it to (nothing is sealed then, so the ratchet does not move).
@@ -3211,7 +3213,7 @@ class MeshManager(
     ): Int? {
         val links = transport.neighbors.value
         val neighbour = links.firstOrNull { it.nodeId == peerId }
-        val cast = !meshPathTo(peerId, links) && canCastTalk(peerId, peerTicketed)
+        val cast = castsTalk(peerId, links, peerTicketed)
         if (links.isEmpty() && !cast) return null
         val peer = peers.find(peerId)
         val bundle = peer?.pubKey?.let { PublicKeyBundle.decode(it) } ?: return null
@@ -3228,6 +3230,19 @@ class MeshManager(
         if (links.isNotEmpty()) router.sendOwn(wire, id, neighbour, live = true)
         val castTook = if (cast) castTalk(peerId, peerTicketed, env, wire) else 0
         return wire.signed.size.takeIf { links.isNotEmpty() || castTook > 0 }
+    }
+
+    /**
+     * Whether a chunk to [peerId] is cast too: the mesh has no path to it, or its own live link is near its floor
+     * ([MeshTransport.liveLinkFading]); and a connected spool would carry the cast.
+     */
+    private fun castsTalk(
+        peerId: String,
+        links: Set<Peer>,
+        peerTicketed: Boolean,
+    ): Boolean {
+        val fading = links.any { it.nodeId == peerId } && transport.liveLinkFading(peerId)
+        return (fading || !meshPathTo(peerId, links)) && canCastTalk(peerId, peerTicketed)
     }
 
     /** Whether a chunk to [peerId] has a mesh path from these [links]: the peer is one, or was heard through one lately. */

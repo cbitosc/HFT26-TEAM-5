@@ -405,3 +405,67 @@ half-duplex burst.
 Owed: a by-ear comparison against a live call on the two phones. Each burst logs `walkie gain: speech at … dBFS, gain
 … dB, … frame(s) limited` under `KnitCall`, for tuning the target.
 
+
+## Amendment 2026-10-13 (9): a fading direct link is cast beside
+
+A field test (the user, 2026-10-13, the P9 and the P7 apart on cellular, the walkie over Bluetooth Coded) lost one
+burst each way at the edge of range. From about 15:57:16 chunks sent 480 ms apart landed 2–3 s apart. By 15:58:02 the
+P9 heard no advert from the P7 (`linkScores …:-127`), yet the link stayed in `links` until the controller's supervision
+timeout closed it: `link dropped on CODED rssi=-103 (eof)` at 15:58:26 on the P9, `rssi=-82` at 15:58:31 on the P7.
+Amendment (6) casts only for a peer with no mesh path, and a dying link is a path until it closes. Every chunk sent over
+it in those ~20 s was lost. Once it closed, the next five bursts crossed the relay whole both ways. Android offers no
+public way to shorten an LE supervision timeout, so the fix is on our side.
+
+- **A neighbour whose live link fades gets the cast too.** `MeshManager.sendCallTalk` casts when
+  `MeshTransport.liveLinkFading` holds for the peer, as well as when it has no mesh path, wherever `ScopeSync.canCast`
+  holds. The radio copy still goes out. Both copies carry one id, so the receiver keeps the first (C-7.7-15).
+- **The seam.** `liveLinkFading` answers for the link `sendLive` would use. In `CompositeMeshTransport` that is the
+  Wi-Fi Aware child when it holds a link, which never fades, else the Bluetooth-first holder. It does not reuse
+  `slowLinkTo`, which always asks the Bluetooth holder.
+- **Bluetooth's verdict.** `mesh/bluetooth/LinkFade`, fed by `BlePhyControl`'s link-RSSI reads, says a link fades when:
+  - its smoothed link RSSI is at or under −95,
+  - or three reads in a row go unanswered (the call refused, the callback failed, or no answer within 1 s).
+
+  It stops fading only on an answered read, once answered reads have held −90 or better for 10 s; a weaker read or an
+  unanswered one restarts that hold. The verdict is sticky on purpose, because a hedge costs little.
+  - **Reads that fail now count.** An unanswered read (not sent, refused, or timed out) used to be dropped silently.
+    Each is now counted toward the stale-read rule.
+  - **Reads are counted, never timed.** The read loop's wait stops while the CPU sleeps and the elapsed clock does not,
+    and nothing on the walkie path holds a wake lock, so a rule on time since the last answer would fade a link after
+    any sleep (the reviewer's finding). Only a run of unanswered reads counts.
+  - **A reader that ended has no verdict.** A PHY handle whose GATT client is gone reports no fade rather than a stuck
+    one. It stays in place, because the drop-at-range bookkeeping reads it at teardown (the range hunt, the fast Coded
+    advert).
+  - **Where it can't tell.** A link with no PHY handle (Coded off, or a peer never heard on Coded) takes no reads, so it
+    never fades.
+  - **Tuning.** The thresholds are `PhyTuning` fields that `…debug.PHY` tunes.
+- **Seen in the logs.**
+  - Bluetooth logs `bt fade <id> on (rssi=…, unanswered=…, last answer …)` and `bt fade <id> off` at each edge, and every read at the edge (`bt phy <id> rssi=… smoothed=…`).
+  - The walkie's burst line names its path, `via …`. The new path reads `Bluetooth · fading, relay too`.
+  - `TalkLink` stays direct, since the radio still carries the chunk. The user is shown nothing new.
+
+Rejected:
+
+- **Casting whenever the link is on Coded.** That would have covered the P7's side below, but in this test the link was
+  on Coded from the first second, so the whole seven minutes would have been cast. The user chose to hedge near the
+  floor only.
+- **Casting instead of the radio copy.** The radio copy costs nothing, and the link may still carry it.
+- **A keepalive on the Bluetooth link to detect silence.** The P7 and an iPhone would need a new record, and the
+  walkie's own silence between bursts is normal.
+- **A shorter supervision timeout.** There is no public API for it.
+
+What it costs and what it misses:
+
+- **Data.** About 1.7 KB/s through the relay, only while the link fades and someone talks.
+- **The asymmetric edge.** The P7's own smoothed link RSSI still read −82 when its link closed, so the floor alone would
+  not have hedged the P7's sends. The stale-read rule catches that side only if its reads stopped answering, which was
+  never logged. The edge-read log is what the next walk-apart reads to set the threshold and to settle this.
+- **Reads that may never fail.** HCI Read RSSI is answered by the local controller from the last packet it received.
+  With no packets arriving it may keep answering a frozen value, and then only the floor can fire. A run of identical
+  raw reads before a drop in the edge-read log would show it, and "k identical raw reads count as stale" would be the
+  follow-up.
+- **A deep but steady Coded link.** Coded links have held at −96 to −99, so a walkie over one hedges for its whole
+  length. That follows from choosing the floor.
+
+Owed: a P9 ↔ P7 walk-apart on Coded, both phones with a relay. `bt fade … on` should come before the eof, the burst
+lines should read `via Bluetooth · fading, relay too`, and no burst should be lost across the drop.

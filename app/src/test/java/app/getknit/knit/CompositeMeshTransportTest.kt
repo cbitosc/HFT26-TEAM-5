@@ -57,6 +57,11 @@ class CompositeMeshTransportTest {
 
         override fun slowLinkTo(nodeId: String): Boolean = nodeId in slow
 
+        /** What [liveLinkFading] reports. */
+        val fading = mutableSetOf<String>()
+
+        override fun liveLinkFading(nodeId: String): Boolean = nodeId in fading
+
         val expectBulkCalls = mutableListOf<String>()
         private val _neighbors = MutableStateFlow<Set<Peer>>(emptySet())
         override val neighbors = _neighbors.asStateFlow()
@@ -538,6 +543,20 @@ class CompositeMeshTransportTest {
             assertEquals(0, composite.feedingLoad("nobody"))
             assertTrue(composite.slowLinkTo("bt"))
             assertTrue(!composite.slowLinkTo("both"))
+        }
+
+    @Test
+    fun aLiveLinksFadeIsTheAnswerOfTheChildSendLiveUses() =
+        runTest(UnconfinedTestDispatcher()) {
+            val bt = FakeChild().apply { fading += setOf("both", "bt") }
+            val nan = FakeChild(highThroughput = true)
+            val composite = CompositeMeshTransport(listOf(bt, nan), backgroundScope)
+            bt.setNeighbors(Peer("both"), Peer("bt"))
+            nan.setNeighbors(Peer("both"))
+            advanceUntilIdle()
+            assertTrue("only Bluetooth holds it, and its link fades", composite.liveLinkFading("bt"))
+            assertTrue("a live chunk rides the Wi-Fi Aware link, which does not", !composite.liveLinkFading("both"))
+            assertTrue("no link, no fade", !composite.liveLinkFading("nobody"))
         }
 
     @Test

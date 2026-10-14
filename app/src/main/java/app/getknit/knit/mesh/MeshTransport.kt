@@ -570,6 +570,14 @@ interface MeshTransport {
     ) = send(wire, to)
 
     /**
+     * True while the link [sendLive] would carry a frame to [nodeId] on is near its floor: its link-RSSI reads put it at
+     * the fade threshold, or they stopped answering. A walkie chunk then goes through a relay as well as over that link
+     * (docs/VOICE_CALLS.md §3.11, ADR 2026-10.79yb's ninth amendment), since a dying link keeps counting as a path until
+     * its supervision timeout. False with no such link, or on a plane that cannot tell. Default false.
+     */
+    fun liveLinkFading(nodeId: String): Boolean = false
+
+    /**
      * Best-effort **coordination-plane** fan-out of [wire] to every neighbor at once, with **no data path** —
      * a fast path for a frame small enough to ride the tiny Wi-Fi Aware message channel (~255 B/message;
      * toward capable peers the Wi-Fi Aware transport compacts/deflates the framing and can split one frame

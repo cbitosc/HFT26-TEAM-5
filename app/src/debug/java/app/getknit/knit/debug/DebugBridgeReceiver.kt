@@ -261,9 +261,10 @@ import java.nio.ByteBuffer
  *   and chunk on a link on Coded (1024, 2048; a windowed feed's fallback there), `--ei codedWindowChunk N` a windowed
  *   feed's smallest chunk on Coded, which sizes the window's floors (1024; 1024 to 8192 — ADR 2026-10.5buf's Coded amendment), and `--ei filePace N` the file budget the links on 1M or 2M share, split
  *   among those feeding (4096; 0 unbounded; a share's chunk is two seconds of it, 2048 to 16384 — ADR 2026-10.8jwn),
- *   until the process dies (`--ez resetTuning true` restores them). The reply: `mode`, `supported`, `advert`
+ *   and `--ei fade|fadeExit|fadeExitHoldMs|fadeStaleReads N` when a link counts as fading (−95, −90, 10000, 3 — ADR
+ *   2026-10.79yb's ninth amendment), until the process dies (`--ez resetTuning true` restores them). The reply: `mode`, `supported`, `advert`
  *   (off|starting|live|dark <status>), `txPower`, the tuning (with `fileChunk`, a lone 1M/2M feed's chunk), `links[]`
- *   (nodeId, phy, linkRssi, drives, attached, switches, gaveUp) and `peers[]` (nodeId, rssi on the 1M scale,
+ *   (nodeId, phy, linkRssi, drives, attached, switches, gaveUp, fading) and `peers[]` (nodeId, rssi on the 1M scale,
  *   oneMSeenAgoMs, codedSeenAgoMs, each PHY's own rssi1m / rssiCoded, and codedLagMs — the 1M listening its Coded hits
  *   outlast its 1M ones by; over 8000 is Coded alone), then `hunting` (whether the last scan window hunted) and
  *   `hunted` (the peers lost at range it is hunting).
@@ -2742,6 +2743,10 @@ class DebugBridgeReceiver :
                 codedWindowChunkBytes =
                     int("codedWindowChunk")?.coerceIn(MIN_CODED_WINDOW_CHUNK, MAX_CODED_WINDOW_CHUNK) ?: t.codedWindowChunkBytes,
                 filePaceBytesPerSec = int("filePace") ?: t.filePaceBytesPerSec,
+                fadeDbm = int("fade") ?: t.fadeDbm,
+                fadeExitDbm = int("fadeExit") ?: t.fadeExitDbm,
+                fadeExitHoldMs = int("fadeExitHoldMs")?.toLong() ?: t.fadeExitHoldMs,
+                fadeStaleReads = int("fadeStaleReads")?.coerceAtLeast(1) ?: t.fadeStaleReads,
             )
         delay(PHY_SETTLE_MS) // the transport collects the stored mode; let it land before reading the status back
         val status = CodedPhyDiag.status?.invoke() ?: return reply("error", "Bluetooth transport is not running")
@@ -2772,7 +2777,11 @@ class DebugBridgeReceiver :
                     .put("codedChunk", tuned.codedChunkBytes)
                     .put("codedWindowChunk", tuned.codedWindowChunkBytes)
                     .put("filePace", tuned.filePaceBytesPerSec)
-                    .put("fileChunk", CodedPhyPolicy.pace(LinkPhy.ONE_M, tuned).chunkBytes),
+                    .put("fileChunk", CodedPhyPolicy.pace(LinkPhy.ONE_M, tuned).chunkBytes)
+                    .put("fade", tuned.fadeDbm)
+                    .put("fadeExit", tuned.fadeExitDbm)
+                    .put("fadeExitHoldMs", tuned.fadeExitHoldMs)
+                    .put("fadeStaleReads", tuned.fadeStaleReads),
             ).put(
                 "links",
                 JSONArray(
@@ -2785,6 +2794,7 @@ class DebugBridgeReceiver :
                             .put("attached", it.attached)
                             .put("switches", it.switches)
                             .put("gaveUp", it.gaveUp)
+                            .put("fading", it.fading)
                     },
                 ),
             ).put(

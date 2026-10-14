@@ -294,7 +294,7 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
     - Logcat: `call <id>: no live path; a walkie session now`, then `walkie: session …`, and `walkie: Wi-Fi Aware
       link to … asked for` (or `not available now`) each time the call's hold changes its answer. A held link's end
       logs `sync with … done (… call=true)`: its window, not idleness. Each burst sent logs
-      `walkie: burst <b> of <n>ms to … in <q> chunks (<B> B before the seal), <k> sealed; cut>sent ms …` (when each chunk was cut and its send
+      `walkie: burst <b> of <n>ms to … in <q> chunks (<B> B before the seal), <k> sealed, via <path>; cut>sent ms …` (when each chunk was cut and its send
       returned, from the press). Each burst heard logs `walkie: heard burst <b>: <q> chunks, <s> skipped, arrivals +…
       ms, began +<ms>` (arrivals from the first chunk's, and when playback began). Read the pair across both phones to
       place a gap at the sender, the link or the player.
@@ -440,11 +440,14 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   `--ei codedPace N` / `codedChunk N` a file's feed rate in B/s (1024; 0 unbounded) and chunk (2048, capped at 16384)
   on a link on Coded (#114; a windowed feed's fallback there), `--ei codedWindowChunk N` a windowed feed's smallest
   chunk on Coded, which sizes the window's floors (1024; 1024 to 8192 — ADR 2026-10.5buf's Coded amendment), and `--ei filePace N` the file budget the links on 1M or 2M share, split evenly among those
-  feeding a file (4096; 0 unbounded; a share's chunk is two seconds of it, 2048 to 16384 — #117, ADR 2026-10.8jwn), until the process dies (`--ez resetTuning true` restores them); no
+  feeding a file (4096; 0 unbounded; a share's chunk is two seconds of it, 2048 to 16384 — #117, ADR 2026-10.8jwn), and
+  `--ei fade N` / `fadeExit N` / `fadeExitHoldMs N` / `fadeStaleReads N` the link-fade verdict that casts a walkie
+  chunk beside a dying link (−95 link RSSI to enter, −90 held 10 s to leave, 3 unanswered reads in a row — ADR
+  2026-10.79yb's ninth amendment), until the process dies (`--ez resetTuning true` restores them); no
   extras reads. The reply: `mode`, `supported`
   (the controller has Coded and extended advertising), `advert` (`off` / `starting` / `live` / `refused <status>` /
   `retrying` / `dark <status>`), `txPower`, `tuning` (with `fileChunk`, the chunk of a 1M/2M link feeding alone),
-  `links[]` (`nodeId`, `phy` ONE_M|TWO_M|CODED|UNKNOWN, `linkRssi`, `drives`, `attached`, `switches`, `gaveUp`) and
+  `links[]` (`nodeId`, `phy` ONE_M|TWO_M|CODED|UNKNOWN, `linkRssi`, `drives`, `attached`, `switches`, `gaveUp`, `fading`) and
   `peers[]` (`nodeId`, `rssi` on the 1M scale, `oneMSeenAgoMs`, `codedSeenAgoMs`, each PHY's own `rssi1m` /
   `rssiCoded`, and `codedLagMs`: the 1M listening its Coded hits outlast its 1M ones by, over 8000 meaning Coded alone),
   then `hunting` (the last scan window hunted) and `hunted` (the peers lost at range it hunts). Oracle for a step: `links[].phy` plus `bt phy <id> ONE_M→CODED` in logcat (and the PHY chip on the
