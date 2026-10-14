@@ -33,6 +33,9 @@ enum class CallOutcome {
     /** Theirs, and we turned it down. */
     DeclinedByUs,
 
+    /** Ours, withdrawn because nothing this phone could see reached the peer (C-3.3-5). */
+    Unreachable,
+
     /** It never connected for a reason neither person chose: no route, media refused, an error. */
     Failed,
 }
@@ -43,7 +46,8 @@ enum class CallOutcome {
  * call-records amendment, docs/VOICE_CALLS.md §3.12).
  *
  * It keeps facts, not a sentence: [reason] (a `CallPayload.REASON_*`), [byPeer] (the peer's terminal phase ended
- * it, not this phone), [missed] (the manager's own C-3.4-2 verdict) and the two timestamps. [outcome] reads them.
+ * it, not this phone), [missed] (the manager's own C-3.4-2 verdict), [unreached] (C-3.3-5) and the two timestamps.
+ * [outcome] reads them.
  * Written once, when the call ends here, and local to each phone: the peer keeps its own record of the same call
  * under the same id, and nothing about it crosses the wire. Never carries an SDP, a candidate or a TURN credential.
  */
@@ -57,6 +61,8 @@ data class CallRecord(
     val missed: Boolean = false,
     val connectedAt: Long? = null,
     val endedAt: Long? = null,
+    // Ours, ended no_route because nothing this phone could see reached the peer (C-3.3-5), not a failed connect.
+    val unreached: Boolean = false,
 ) {
     fun encode(): String = json.encodeToString(this)
 
@@ -70,6 +76,7 @@ data class CallRecord(
                 !outgoing -> CallOutcome.Failed
                 byPeer && reason == CallPayload.REASON_BUSY -> CallOutcome.Busy
                 byPeer && reason == CallPayload.REASON_USER -> CallOutcome.Declined
+                outgoing && unreached -> CallOutcome.Unreachable
                 reason == CallPayload.REASON_TIMEOUT -> CallOutcome.NoAnswer
                 !byPeer && reason == CallPayload.REASON_USER -> CallOutcome.Cancelled
                 else -> CallOutcome.Failed

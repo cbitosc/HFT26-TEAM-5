@@ -254,6 +254,9 @@ class CallManagerTest {
         // "Relay all calls" (C-3.7-3), as the manager reads it at each call.
         var relay = false
 
+        // C-3.3-5: whether anything this side can see reaches the peer, as the manager looks while it has no RINGING.
+        var reachable = true
+
         // What this side's connected spools advertise as STUN in their HELLOs (C-7.6-20).
         var stun: List<String> = emptyList()
 
@@ -304,6 +307,7 @@ class CallManagerTest {
                 dropToWalkie = dropToWalkie,
                 relayAll = { side.relay },
                 tombs = tombs,
+                reach = { side.reachable },
             )
         side = Side(name, manager, media, sent, missed, logged, turnAsks, direct, walkie)
         net.nodes[name] = manager
@@ -402,6 +406,82 @@ class CallManagerTest {
             assertEquals(CallPayload.PHASE_CANCEL, alice.sent.last().ph)
             assertEquals(CallPhase.Ended, bob.state!!.phase)
             assertEquals(listOf(ALICE), bob.missed.map { it.peerId })
+        }
+
+    @Test
+    fun aCallNothingReachesSaysSoAndEndsNoRouteLongBeforeItsRingOut() =
+        runTest {
+            val (net, alice, bob) = pair()
+            // The peer is off every link and on no relay we share: the OFFER goes nowhere and no RINGING comes back.
+            alice.reachable = false
+            net.drop = { from, _ -> from == ALICE }
+            alice.manager.start(BOB)
+            runCurrent()
+            // C-3.3-5: the screen says so at once, while the call is still trying.
+            assertEquals(CallPhase.Calling, alice.state!!.phase)
+            assertTrue(alice.state!!.unreachable)
+            advanceTimeBy(TIMINGS.unreachMs - 1)
+            runCurrent()
+            assertEquals(CallPhase.Calling, alice.state!!.phase)
+            advanceTimeBy(TIMINGS.reachLookMs + 1)
+            runCurrent()
+            assertEquals(CallPhase.Ended, alice.state!!.phase)
+            assertEquals(CallPayload.REASON_NO_ROUTE, alice.state!!.reason)
+            assertTrue(alice.state!!.unreachable)
+            // Withdrawn like a ring-out, so an OFFER a carrier brings later reads as missed, not as a ring.
+            assertEquals(CallPayload.PHASE_CANCEL, alice.sent.last().ph)
+            assertEquals(CallPayload.REASON_NO_ROUTE, alice.sent.last().rsn)
+            assertTrue(alice.media.last.closed)
+            assertEquals(CallOutcome.Unreachable, alice.onlyOutcome())
+            assertNull(bob.state)
+        }
+
+    @Test
+    fun aRingingProvesTheCallReachesThePeerWhateverTheMeshSays() =
+        runTest {
+            val (_, alice, _) = pair()
+            // Nothing this phone can see reaches Bob, yet the OFFER got there (a quiet subscriber on a shared relay).
+            alice.reachable = false
+            alice.manager.start(BOB)
+            runCurrent()
+            assertEquals(CallPhase.Ringing, alice.state!!.phase)
+            assertFalse(alice.state!!.unreachable)
+            advanceTimeBy(TIMINGS.unreachMs * 2)
+            runCurrent()
+            assertEquals(CallPhase.Ringing, alice.state!!.phase)
+            advanceTimeBy(TIMINGS.ringOutMs)
+            runCurrent()
+            assertEquals(CallPayload.REASON_TIMEOUT, alice.state!!.reason)
+            assertEquals(CallOutcome.NoAnswer, alice.onlyOutcome())
+        }
+
+    @Test
+    fun aPeerThatComesWithinReachKeepsTheCallTryingUntilItsRingOut() =
+        runTest {
+            val (net, alice, _) = pair()
+            alice.reachable = false
+            net.drop = { from, _ -> from == ALICE }
+            alice.manager.start(BOB)
+            runCurrent()
+            assertTrue(alice.state!!.unreachable)
+            advanceTimeBy(TIMINGS.unreachMs / 2)
+            // A link to Bob comes up before the window runs out: the flag goes, and so does the early end.
+            alice.reachable = true
+            advanceTimeBy(TIMINGS.reachLookMs + 1)
+            runCurrent()
+            assertFalse(alice.state!!.unreachable)
+            advanceTimeBy(TIMINGS.unreachMs)
+            runCurrent()
+            assertEquals(CallPhase.Calling, alice.state!!.phase)
+            // Losing it again starts the window over rather than ending at once.
+            alice.reachable = false
+            advanceTimeBy(TIMINGS.reachLookMs + 1)
+            runCurrent()
+            assertTrue(alice.state!!.unreachable)
+            assertEquals(CallPhase.Calling, alice.state!!.phase)
+            advanceTimeBy(TIMINGS.ringOutMs)
+            runCurrent()
+            assertEquals(CallPhase.Ended, alice.state!!.phase)
         }
 
     @Test

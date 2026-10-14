@@ -3261,12 +3261,21 @@ class MeshManager(
 
     /**
      * Whether a walkie chunk to [peerId] could be cast through a connected spool now (§2.7), with the peer's ticket
-     * flag [peerTicketed] — what the call screen's link reads beside the radios. False without the plane.
+     * flag [peerTicketed] — what [sendCallTalk] casts on. False without the plane.
      */
     fun canCastTalk(
         peerId: String,
         peerTicketed: Boolean,
     ): Boolean = scopeSync?.canCast(peerId, peerTicketed) == true
+
+    /**
+     * Whether a cast to [peerId] would reach it: [canCastTalk] on a spool the peer was lately seen on
+     * ([ScopeSync.castCovers]). The call screen's label for a relay path; [sendCallTalk] casts on [canCastTalk] alone.
+     */
+    fun castCoversTalk(
+        peerId: String,
+        peerTicketed: Boolean,
+    ): Boolean = scopeSync?.castCovers(peerId, peerTicketed) == true
 
     /** Whether this phone holds a cast ticket on a connected spool that carries casts — what its walkie signal says. */
     fun castTicketed(): Boolean = scopeSync?.castTicketed() == true

@@ -90,6 +90,8 @@ internal enum class TalkPath(
     FADING("Bluetooth · fading, relay too"),
     FLOODED("Through a neighbour · flooded"),
     SPOOL("Through the relay · cast"),
+    // Cast through a relay the peer was never lately seen on (C-3.3-5): it goes out, to nobody we know of.
+    CAST_UNSEEN("Relay cast · peer not seen on it"),
     NONE("No link"),
 }
 

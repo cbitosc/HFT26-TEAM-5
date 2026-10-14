@@ -466,7 +466,8 @@ private fun StackedFace(
         RingingAvatar(
             size = size,
             reach = if (compact) CompactRingReach else RingReach,
-            pulsing = phase in RINGING,
+            // A call nothing reaches is not ringing anywhere (C-3.3-5), so the face doesn't pulse as if it were.
+            pulsing = phase in RINGING && state?.unreachable != true,
             dimmed = phase == CallPhase.Ended,
         ) {
             Avatar(
@@ -507,8 +508,15 @@ private fun StackedFace(
         )
         // One slot for the reason or the route, held empty otherwise so the face doesn't jump as the call moves on.
         Box(Modifier.heightIn(min = 48.dp), contentAlignment = Alignment.Center) {
-            if (phase == CallPhase.Ended) {
-                (if (state.dropped) "The connection was lost" else reasonOf(state.reason))?.let {
+            if (phase == CallPhase.Calling && state.unreachable) {
+                Text(
+                    unreachableNote(name),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error,
+                    textAlign = TextAlign.Center,
+                )
+            } else if (phase == CallPhase.Ended) {
+                (if (state.dropped) "The connection was lost" else endedNote(state, name))?.let {
                     Text(
                         it,
                         style = MaterialTheme.typography.bodyMedium,
@@ -565,7 +573,15 @@ private fun InlineFace(
                 style = MaterialTheme.typography.titleSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            if (state?.phase == CallPhase.Connected && state.walkie) {
+            if (state?.phase == CallPhase.Calling && state.unreachable) {
+                Text(
+                    unreachableNote(name),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            } else if (state?.phase == CallPhase.Connected && state.walkie) {
                 WalkiePill()
             } else if (state?.phase == CallPhase.Connected && route != null) {
                 RoutePill(route)
@@ -1122,6 +1138,15 @@ internal fun statusOf(
     }
 }
 
+/** C-3.3-5: an outgoing call with no RINGING back, and nothing this phone can see reaches [name]. */
+private fun unreachableNote(name: String): String = "Can't reach $name right now"
+
+/** Why [state] ended, when it is anything but somebody hanging up: [reasonOf], or that nothing reached [name]. */
+private fun endedNote(
+    state: CallState,
+    name: String,
+): String? = if (state.unreachable && state.reason == CallPayload.REASON_NO_ROUTE) "Couldn't reach $name" else reasonOf(state.reason)
+
 /** Why it ended, when it is anything but somebody hanging up. */
 private fun reasonOf(reason: Int?): String? =
     when (reason) {
@@ -1161,6 +1186,7 @@ private fun PreviewCall(
     locked: Boolean = false,
     statsShown: Boolean = stats != null || walkieStats != null,
     connected: Boolean = phase == CallPhase.Connected || phase == CallPhase.Reconnecting,
+    unreachable: Boolean = false,
 ) = KnitPreview {
     CallScreen(
         state =
@@ -1175,6 +1201,7 @@ private fun PreviewCall(
                 reason = reason,
                 walkie = walkie,
                 degraded = degraded,
+                unreachable = unreachable,
             ),
         name = name,
         avatarHash = null,
@@ -1340,6 +1367,10 @@ fun CallScreenDiagnosticsPreview() =
                 remoteCandidates = 4,
             ),
     )
+
+@Preview(name = "Calling, unreachable", widthDp = 411, heightDp = 891)
+@Composable
+fun CallScreenUnreachablePreview() = PreviewCall(CallPhase.Calling, unreachable = true)
 
 @Preview(name = "Ended", widthDp = 411, heightDp = 891)
 @Composable

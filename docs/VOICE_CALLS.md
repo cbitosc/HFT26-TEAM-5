@@ -453,6 +453,23 @@ both:   Connected ─path lost→ Reconnecting ─ICE ok→ Connected
 | **C-3.3-2** | A callee already in a call answers a new `OFFER` with `DECLINE rsn=busy` and does not alert.                                                                           |
 | **C-3.3-3** | Connecting that does not reach ICE `connected` within 20 s ends with `END rsn=no_route`.                                                                               |
 | **C-3.3-4** | Every phase is idempotent on `(id, ph, gen)`. Custody and the spool can deliver a frame twice, and the second copy MUST change nothing.                                |
+| **C-3.3-5** | Until a `RINGING` (or an `ANSWER`) comes back, a caller looks every 2 s at whether anything it can see reaches the peer, and says so on the call screen while nothing does. It withdraws with `CANCEL rsn=no_route` once nothing has for 15 s. |
+
+> **What counts as reaching the peer (C-3.3-5).** Any one of these, read off state already in memory (`call/CallReach`,
+> `CallReachRule`), never on the inbound path:
+>
+> - a live link to the peer;
+> - the peer's own frames heard through other phones lately, with a link of this phone's own to flood on;
+> - a Wi-Fi Aware sighting a link can be raised on (`MeshTransport.bulkRouteTo`);
+> - the peer's own recent traffic on a connected spool we share a scope with (`spoolPresentPeers`, the presence dot's
+>   45 min), so a relay the peer is not on never counts.
+>
+> A LoRa board's reach does not count: a live OFFER's SDP is far past the plane's three-packet ceiling, and a walkie
+> chunk never rides it. A quiet peer on a shared relay leaves no evidence, but its RINGING comes back within seconds,
+> and a RINGING ends the look. Device-observed 2026-10-14: a P9 on one relay called a Moto on another, with the Moto's
+> Bluetooth wedged and no Wi-Fi Aware on its image. The call rang out its full 45 s, and the walkie path read "Through
+> the relay". The withdrawal is a CANCEL, so an OFFER a carrier brings the peer later is recorded as missed (C-3.4-2),
+> and the caller's record reads "Couldn't reach them" (§3.12).
 
 ### 3.4 Staleness and ordering
 
@@ -714,7 +731,10 @@ an experiment behind `BuildConfig.WALKIE` (`-Pwalkie=`, on in debug and off in r
     `Bluetooth · fading, relay too`;
   - **through the mesh:** no link of its own, but the peer's frames reached it through another phone lately; a notice
     says the chunks go through other phones;
-  - **through the relay:** no mesh path, but a connected relay would cast the chunks (§2.7); a notice says so;
+  - **through the relay:** no mesh path, but a connected relay the peer was lately seen on would cast the chunks
+    (§2.7, `ScopeSync.castCovers`); a notice says so. A relay that would take the cast but never saw the peer still
+    gets it, since a quiet subscriber leaves no evidence, but the screen reads **none** and the diagnostics path
+    `Relay cast · peer not seen on it`;
   - **none:** no link it can see; a warning says it is linking.
 
   With neither a link nor a relay that would cast, nothing is sealed, and the burst says it did not go.
@@ -729,7 +749,7 @@ direct transfer's card already uses. ADR 2026-10.3tee's second amendment records
 | ID           | Requirement                                                                                                                                                                                                                                                      |
 |--------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | **C-3.12-1** | A record is written once, when the call ends on this phone (`CallManager.logged`), and never sent. Each side keeps its own record of the same call under the same id (`call:<id>`), so a second write for one call replaces the row.                           |
-| **C-3.12-2** | A record holds facts, not a sentence: who placed the call, its reason, whether the peer's terminal phase ended it, the manager's missed verdict (C-3.4-2), and when it connected and ended. The line's wording (`CallRecord.outcome`) is derived when it is drawn: a call that connected and then ended `no_route` reads "Call dropped" (§3.8). |
+| **C-3.12-2** | A record holds facts, not a sentence: who placed the call, its reason, whether the peer's terminal phase ended it, the manager's missed verdict (C-3.4-2), whether nothing reached the peer (C-3.3-5), and when it connected and ended. The line's wording (`CallRecord.outcome`) is derived when it is drawn: a call that connected and then ended `no_route` reads "Call dropped" (§3.8), and one withdrawn under C-3.3-5 reads "Couldn't reach them". |
 | **C-3.12-3** | An offer that never rang (C-3.4-1) and was not withdrawn by hand is recorded as missed under its own call id, at its `sentAt` or now, whichever is earlier. A busy DECLINE (C-3.3-2) and a glare loser's dropped offer (C-3.5-1) leave no record.              |
 | **C-3.12-4** | The signaling hook never writes the record. The manager hands it over on a channel and `call/CallLog` saves it on the app scope, so a closed or refusing database (ADR 2026-10.47rw) costs that one line and never delays `onSignal`.                          |
 | **C-3.12-5** | A record never carries an SDP, a candidate, a Wi-Fi Direct credential or a TURN credential.                                                                                                                                                                       |

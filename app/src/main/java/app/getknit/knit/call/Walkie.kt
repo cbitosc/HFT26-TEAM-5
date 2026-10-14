@@ -41,8 +41,9 @@ interface CallWalkie {
 /**
  * Where a walkie chunk to a peer would go now (§3.11), for the call screen's notice: over a live link of this phone's
  * own ([DIRECT]); through other phones, with recent evidence a path exists ([MESH]: the peer's own frames reached us
- * through one); with no mesh path, through a spool that casts it (§2.7, [SPOOL]); or nowhere this phone can see
- * ([NONE]).
+ * through one); with no mesh path, through a spool that casts it (§2.7) and the peer was lately seen on
+ * ([SPOOL]); or nowhere this phone can see ([NONE]) — a relay the peer was never seen on fans a cast out to nobody
+ * we know of.
  */
 enum class TalkLink {
     DIRECT,
@@ -54,8 +55,8 @@ enum class TalkLink {
     companion object {
         /**
          * [peerId]'s link, given this phone's live [neighbours], the peers [heardIndirectly] through one of them, and
-         * whether a connected spool would [cast] to it. The order is `MeshManager.sendCallTalk`'s: the spool only where
-         * the mesh has no path.
+         * whether a connected spool the peer was lately seen on would [cast] to it (`MeshManager.castCoversTalk`). The
+         * order is `MeshManager.sendCallTalk`'s: the spool only where the mesh has no path.
          */
         fun of(
             peerId: String,

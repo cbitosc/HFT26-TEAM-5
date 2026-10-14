@@ -74,6 +74,10 @@ fun callNoticeText(record: CallRecord): Int =
             R.string.chat_call_record_declined_by_you
         }
 
+        CallOutcome.Unreachable -> {
+            R.string.chat_call_record_unreachable
+        }
+
         CallOutcome.Failed -> {
             R.string.chat_call_record_failed
         }
@@ -159,7 +163,7 @@ fun CallNotice(
 private fun callIcon(record: CallRecord): ImageVector =
     when (record.outcome) {
         CallOutcome.Missed -> Icons.AutoMirrored.Filled.CallMissed
-        CallOutcome.Failed, CallOutcome.Dropped -> Icons.Filled.PhoneDisabled
+        CallOutcome.Failed, CallOutcome.Dropped, CallOutcome.Unreachable -> Icons.Filled.PhoneDisabled
         else -> if (record.outgoing) Icons.AutoMirrored.Filled.CallMade else Icons.AutoMirrored.Filled.CallReceived
     }
 

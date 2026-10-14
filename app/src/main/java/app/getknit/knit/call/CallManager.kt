@@ -51,6 +51,9 @@ data class CallState(
     val degraded: Boolean = false,
     // §2.7: the peer's OFFER or ANSWER said it holds a cast ticket, so a spool that sells casts carries ours too.
     val peerCastTicketed: Boolean = false,
+    // C-3.3-5: an outgoing call with no RINGING back, and nothing this phone can see reaches the peer ([CallReach]).
+    // Held once the call ends for that reason, so the screen can say why.
+    val unreachable: Boolean = false,
 )
 
 /**
@@ -88,6 +91,11 @@ class CallLogged(
 data class CallTimings(
     // C-3.3-1: the caller withdraws with CANCEL timeout after this long without an ANSWER.
     val ringOutMs: Long = 45_000L,
+    // C-3.3-5: a caller with no RINGING that has seen nothing reach the peer for this long withdraws with CANCEL no_route.
+    // Long enough for a spool to fan an OFFER out and a RINGING back, or a Bluetooth dial to land.
+    val unreachMs: Long = 15_000L,
+    // C-3.3-5: how often a caller with no RINGING looks again at whether anything reaches the peer.
+    val reachLookMs: Long = 2_000L,
     // How long the callee alerts on its own: the caller's CANCEL can be lost, so a ring never outlives this.
     val alertMs: Long = 50_000L,
     // C-3.3-3: Connecting that has not reached ICE connected by now ends with END no_route.
@@ -138,12 +146,18 @@ data class CallTimings(
  * That drop is parked behind [dropToWalkie] (off): a peer off every radio got a session that could carry nothing, so
  * a lost live call ends no_route, and neither OFFER nor ANSWER carries the bit.
  *
+ * **A call to a peer nothing reaches says so** ([reach], C-3.3-5): until a RINGING comes back, the caller looks every
+ * [CallTimings.reachLookMs] at whether any link, mesh path, Wi-Fi Aware sighting or shared spool reaches the peer, flags
+ * the call [CallState.unreachable] while none does, and withdraws it with `CANCEL no_route` once none has for
+ * [CallTimings.unreachMs] — never on the inbound path, and a RINGING ends the watch.
+ *
  * **A connected call whose path is lost reconnects by ICE restart** (§3.8): it is [CallPhase.Reconnecting] for
  * [CallTimings.reconnectWindowMs], in which the caller — only the caller, so two restarts never cross — sends
  * `OFFER gen+1` twice at most, and the callee answers each under the same call id without ringing. A dead peer, a
  * reset session and a dead network all end the same way: the window runs out and the call ends no_route.
  */
-@Suppress("LargeClass") // one call's whole state machine, its direct leg's four decisions included; pure and two-sided tested
+// One call's whole state machine, its direct leg's four decisions and its reach watch included; pure and two-sided tested.
+@Suppress("LargeClass", "TooManyFunctions")
 class CallManager(
     private val signals: CallSignals,
     private val turn: TurnSource,
@@ -159,6 +173,7 @@ class CallManager(
     private val dropToWalkie: Boolean = false,
     private val relayAll: () -> Boolean = { false },
     private val tombs: CallTombJournal = CallTombJournal.None,
+    private val reach: CallReach = CallReach.Assumed,
 ) : CallControl {
     private class Live(
         val id: String,
@@ -209,6 +224,10 @@ class CallManager(
 
         // §2.7: the peer's last OFFER or ANSWER carried `ct`.
         var peerCastTicketed = false
+
+        // C-3.3-5: the caller's look at whether anything reaches the peer, until a RINGING; and what it last saw.
+        var reachWatch: Job? = null
+        var unreachable = false
     }
 
     private class Send(
@@ -299,6 +318,7 @@ class CallManager(
                     it.walkie = asWalkie
                     live = it
                     armRingOut(it)
+                    watchReach(it)
                     publish()
                 }
             }
@@ -586,6 +606,7 @@ class CallManager(
         if (l.phase == CallPhase.Ended) return emptyList()
         if (l.phase == CallPhase.Calling) {
             l.phase = CallPhase.Ringing
+            stopReachWatch(l)
             publish()
         }
         commitHost(l, p, sentAt)
@@ -600,6 +621,8 @@ class CallManager(
         val l = live?.takeIf { it.id == p.id && it.peerId == sender && it.outgoing } ?: return emptyList()
         if (p.gen != 0) return onRestartAnswer(l, p)
         if (l.phase != CallPhase.Calling && l.phase != CallPhase.Ringing) return emptyList()
+        // An ANSWER whose RINGING was lost proves the peer reachable just the same.
+        stopReachWatch(l)
         l.peerCastTicketed = p.ct
         if (l.walkie) {
             if (p.m and CallPayload.MEDIA_WALKIE == 0) return finish(l, CallPayload.REASON_MEDIA, CallPayload.PHASE_END)
@@ -1093,6 +1116,53 @@ class CallManager(
             }
         }
 
+    /**
+     * C-3.3-5: while [l] is [CallPhase.Calling], looks every [CallTimings.reachLookMs] at whether anything reaches its
+     * peer ([reach], read off the lock), publishes what it saw, and withdraws the call `CANCEL no_route` once nothing has
+     * for [CallTimings.unreachMs]. Ends with the phase: a RINGING, an ANSWER or the end stop it. Like a phase timer, the
+     * slot is cleared before [finish], so the CANCEL is never cancelled with the coroutine that sends it.
+     */
+    private fun watchReach(l: Live) {
+        l.reachWatch?.cancel()
+        l.reachWatch =
+            scope.launch {
+                var lostSince: Long? = null
+                while (true) {
+                    if (!mutex.withLock { calling(l) }) return@launch
+                    val reached = reach.reachable(l.peerId)
+                    val now = clock()
+                    lostSince = if (reached) null else lostSince ?: now
+                    val sends =
+                        mutex.withLock {
+                            if (!calling(l)) return@launch
+                            if (l.unreachable == reached) {
+                                l.unreachable = !reached
+                                log("call ${l.id}: ${if (reached) "the peer is reachable" else "nothing reaches the peer"}")
+                                publish()
+                            }
+                            val since = lostSince ?: return@withLock null
+                            if (now - since < timings.unreachMs) return@withLock null
+                            l.reachWatch = null
+                            finish(l, CallPayload.REASON_NO_ROUTE, CallPayload.PHASE_CANCEL)
+                        }
+                    if (sends != null) {
+                        deliver(sends)
+                        return@launch
+                    }
+                    delay(timings.reachLookMs)
+                }
+            }
+    }
+
+    private fun calling(l: Live): Boolean = current(l) && l.phase == CallPhase.Calling
+
+    /** A RINGING proved the peer reachable: no more looks, and no flag. */
+    private fun stopReachWatch(l: Live) {
+        l.reachWatch?.cancel()
+        l.reachWatch = null
+        l.unreachable = false
+    }
+
     private fun armConnect(l: Live) =
         armTimer(l, if (l.directCommitted || (!l.outgoing && l.invite != null)) timings.directConnectMs else timings.connectMs) {
             if (it.phase == CallPhase.Connecting) fallback(it) else emptyList()
@@ -1212,6 +1282,7 @@ class CallManager(
                 missed = missed,
                 connectedAt = l.connectedAt,
                 endedAt = clock(),
+                unreached = l.unreachable && reason == CallPayload.REASON_NO_ROUTE,
             )
         loggedCalls.trySend(CallLogged(l.peerId, l.startedAt, record))
         log("call ${l.id}: ended ($reason${tellPhase?.let { ", telling the peer with $it" }.orEmpty()})")
@@ -1229,6 +1300,8 @@ class CallManager(
     ) {
         l.timer?.cancel()
         l.timer = null
+        l.reachWatch?.cancel()
+        l.reachWatch = null
         l.servers?.cancel()
         l.session?.close()
         l.session = null
@@ -1306,6 +1379,7 @@ class CallManager(
                     walkie = it.walkie,
                     degraded = it.degraded,
                     peerCastTicketed = it.peerCastTicketed,
+                    unreachable = it.unreachable,
                 )
             }
     }

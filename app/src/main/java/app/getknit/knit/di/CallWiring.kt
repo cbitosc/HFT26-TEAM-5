@@ -8,6 +8,8 @@ import app.getknit.knit.call.CallControl
 import app.getknit.knit.call.CallLog
 import app.getknit.knit.call.CallManager
 import app.getknit.knit.call.CallMedia
+import app.getknit.knit.call.CallReach
+import app.getknit.knit.call.CallReachRule
 import app.getknit.knit.call.CallSignals
 import app.getknit.knit.call.CallTimings
 import app.getknit.knit.call.CallWalkie
@@ -29,8 +31,10 @@ import app.getknit.knit.mesh.BulkRoute
 import app.getknit.knit.mesh.MeshController
 import app.getknit.knit.mesh.MeshManager
 import app.getknit.knit.mesh.MeshTransport
+import app.getknit.knit.mesh.indirectPeers
 import app.getknit.knit.mesh.power.AppVisibility
 import app.getknit.knit.mesh.protocol.Protocol
+import app.getknit.knit.mesh.spool.spoolPresentPeers
 import app.getknit.knit.moderation.modelGuardStamp
 import app.getknit.knit.net.InternetGate
 import app.getknit.knit.transfer.DirectWifiLease
@@ -168,6 +172,7 @@ private fun callGraph(): Module =
                 walkie = if (WALKIE_WIRED) walkieRoute() else CallWalkie.None,
                 relayAll = { relayAll.value ?: true },
                 tombs = get<CallTombStore>(),
+                reach = callReach(),
             )
         }
         if (WALKIE_WIRED) {
@@ -240,6 +245,24 @@ private fun Scope.walkieRoute(): CallWalkie =
     }
 
 /**
+ * C-3.3-5's evidence that a call's signals can reach a peer, read off the mesh's own sets by [CallReachRule]: a live
+ * link, the peer heard through one, a Wi-Fi Aware sighting ([MeshTransport.bulkRouteTo]), or a spool we share a scope on
+ * that the peer's own traffic reached (`spoolPresentPeers`, the presence dot's window). All in memory.
+ */
+private fun Scope.callReach(): CallReach =
+    CallReach { peerId ->
+        val mesh = get<MeshController>()
+        val now = System.currentTimeMillis()
+        CallReachRule.reachable(
+            peerId,
+            neighbours = mesh.neighbors.value.mapTo(HashSet()) { it.nodeId },
+            heardIndirectly = indirectPeers(mesh.heardIndirectly.value, now).keys,
+            sighted = get<MeshTransport>().bulkRouteTo(peerId) != BulkRoute.None,
+            spoolPresent = spoolPresentPeers(mesh.spoolStatus(), now),
+        )
+    }
+
+/**
  * The walkie's view of the mesh (§3.11): a chunk's link to a peer, from the live links, the peers heard through them
  * and whether a relay would cast to it (§2.7), and the call's hold on a Wi-Fi Aware link to it (`MeshTransport.holdLink`).
  */
@@ -251,12 +274,13 @@ private fun Scope.talkLinks(): TalkLinks =
         ): Flow<TalkLink> {
             val mesh = get<MeshController>()
             val manager = get<MeshManager>()
-            // A relay's hello, its SUB's answer and a ticket's verdict arrive on no flow the walkie can watch, so the
-            // spool half is looked at again every few seconds; the radios' half moves the moment they do.
+            // A relay's hello, its SUB's answer, a ticket's verdict and the peer's traffic arrive on no flow the walkie can
+            // watch, so the spool half is looked at again every few seconds; the radios' half moves the moment they do. A
+            // relay counts only where the peer was lately seen: one it never was on fans the cast out to nobody.
             val castable =
                 flow {
                     while (true) {
-                        emit(manager.canCastTalk(peerId, peerTicketed()))
+                        emit(manager.castCoversTalk(peerId, peerTicketed()))
                         delay(CAST_LOOK_MS)
                     }
                 }
@@ -277,12 +301,14 @@ private fun Scope.talkLinks(): TalkLinks =
             val linked = transport.neighbors.value
             val meshPath =
                 linked.any { it.nodeId == peerId } || (linked.isNotEmpty() && peerId in get<MeshController>().heardIndirectly.value)
+            val manager = get<MeshManager>()
             return when {
-                !meshPath && get<MeshManager>().canCastTalk(peerId, peerTicketed) -> TalkPath.SPOOL
+                !meshPath && manager.canCastTalk(peerId, peerTicketed) ->
+                    if (manager.castCoversTalk(peerId, peerTicketed)) TalkPath.SPOOL else TalkPath.CAST_UNSEEN
                 linked.isEmpty() -> TalkPath.NONE
                 transport.bulkRouteTo(peerId) == BulkRoute.Linked -> TalkPath.WIFI_AWARE
                 linked.none { it.nodeId == peerId } -> TalkPath.FLOODED
-                transport.liveLinkFading(peerId) && get<MeshManager>().canCastTalk(peerId, peerTicketed) -> TalkPath.FADING
+                transport.liveLinkFading(peerId) && manager.canCastTalk(peerId, peerTicketed) -> TalkPath.FADING
                 transport.slowLinkTo(peerId) -> TalkPath.BLUETOOTH_CODED
                 else -> TalkPath.BLUETOOTH
             }

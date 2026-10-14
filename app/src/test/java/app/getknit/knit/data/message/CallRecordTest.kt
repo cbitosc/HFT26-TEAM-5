@@ -83,6 +83,11 @@ class CallRecordTest {
         assertEquals(CallOutcome.NoAnswer, ours(CallPayload.REASON_TIMEOUT, byPeer = false))
         assertEquals(CallOutcome.Cancelled, ours(CallPayload.REASON_USER, byPeer = false))
         assertEquals(CallOutcome.Failed, ours(CallPayload.REASON_NO_ROUTE, byPeer = false))
+        // C-3.3-5: withdrawn because nothing reached the peer — not a connect that failed.
+        assertEquals(
+            CallOutcome.Unreachable,
+            CallRecord(id = "c", outgoing = true, reason = CallPayload.REASON_NO_ROUTE, unreached = true).outcome,
+        )
         assertEquals(CallOutcome.Failed, ours(CallPayload.REASON_MEDIA, byPeer = true))
 
         assertEquals(CallOutcome.Missed, theirs(CallPayload.REASON_TIMEOUT, byPeer = false, missed = true))

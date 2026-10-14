@@ -3,6 +3,7 @@ package app.getknit.knit.mesh.spool
 import app.getknit.knit.mesh.CarriedFrame
 import app.getknit.knit.mesh.ForwardStore
 import app.getknit.knit.mesh.MeshMetrics
+import app.getknit.knit.mesh.PRESENCE_LINGER_MS
 import app.getknit.knit.mesh.SPOOL_COVER_MS
 import app.getknit.knit.mesh.crypto.scope.ScopeCrypto
 import app.getknit.knit.mesh.crypto.scope.SpoolPow
@@ -417,6 +418,23 @@ class ScopeSync(
     ): Boolean {
         val scope = castScope(peerId) ?: return false
         return workers.values.any { it.canCast(scope, peerTicketed) }
+    }
+
+    /**
+     * Whether a cast to [peerId] would reach it (docs/VOICE_CALLS.md §2.7, C-3.11-8's notice): [canCast] on a spool the
+     * peer's own recent traffic reached within [lingerMs] (its `peerSeenAt`, as `spoolPresentPeers` reads it). A spool
+     * fans a cast out only to the scope's live subscribers, so one the peer was never seen on carries it to nobody we
+     * know of. What the call screen labels a relay path by; never a gate on the cast itself, since a quiet subscriber
+     * leaves no evidence.
+     */
+    fun castCovers(
+        peerId: String,
+        peerTicketed: Boolean,
+        lingerMs: Long = PRESENCE_LINGER_MS,
+    ): Boolean {
+        val scope = castScope(peerId) ?: return false
+        val now = clock()
+        return workers.values.any { it.canCast(scope, peerTicketed) && it.peerSeenWithin(scope, now, lingerMs) }
     }
 
     /**
@@ -880,6 +898,13 @@ class ScopeSync(
             val conn = connection ?: return false
             return scope.belongsAt(url) && spoolDigests.containsKey(scope.idHex) && conn.canCast(scope.idHex, peerTicketed)
         }
+
+        /** Whether [scope]'s own peer put something recent into it on this spool within [lingerMs] of [now]. */
+        fun peerSeenWithin(
+            scope: Scope,
+            now: Long,
+            lingerMs: Long,
+        ): Boolean = peerSeenAt[scope.idHex]?.let { now - it <= lingerMs } == true
 
         /** Whether this phone's own ticket unlocks casts on this worker's live connection. */
         fun castTicketed(): Boolean = connection?.takeIf { it.isReady && it.cast != null }?.ticketedCast == true

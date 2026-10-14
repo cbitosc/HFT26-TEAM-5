@@ -20,6 +20,7 @@ import app.getknit.knit.ui.call.CallScreenReconnectingPreview
 import app.getknit.knit.ui.call.CallScreenRelayDiagnosticsPreview
 import app.getknit.knit.ui.call.CallScreenRingingPreview
 import app.getknit.knit.ui.call.CallScreenStrangerPreview
+import app.getknit.knit.ui.call.CallScreenUnreachablePreview
 import app.getknit.knit.ui.call.CallScreenWalkieDiagnosticsPreview
 import app.getknit.knit.ui.call.CallScreenWalkieMeshPreview
 import app.getknit.knit.ui.call.CallScreenWalkiePreview
@@ -89,6 +90,11 @@ fun CallScreenRelayDiagnostics() = CallScreenRelayDiagnosticsPreview()
 @ScreenShots
 @Composable
 fun CallScreenDiagnostics() = CallScreenDiagnosticsPreview()
+
+@PreviewTest
+@ScreenShots
+@Composable
+fun CallScreenUnreachable() = CallScreenUnreachablePreview()
 
 @PreviewTest
 @ScreenShots

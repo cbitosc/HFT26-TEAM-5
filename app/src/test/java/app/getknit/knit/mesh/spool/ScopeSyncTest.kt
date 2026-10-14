@@ -3028,6 +3028,29 @@ class ScopeSyncTest {
         }
 
     @Test
+    fun `a spool that would cast covers the peer only once the peer was seen on it`() =
+        runTest {
+            // C-3.3-5: the walkie's "through the relay" needs the peer on that relay; a cast it would take but fan out to
+            // nobody (two phones on disjoint relays, device-observed 2026-10-14) is still cast, but labelled for what it is.
+            val spool = FakeSpool(cast = castBounds)
+            val sender = member(spool, alice, bob)
+            val receiver = member(spool, bob, alice)
+            sender.sync.start(backgroundScope)
+            receiver.sync.start(backgroundScope)
+            pump()
+            assertTrue(sender.sync.canCast(bob, peerTicketed = false))
+            assertFalse("subscribed and converged says nothing about bob", sender.sync.castCovers(bob, peerTicketed = false))
+
+            receiver.custody.store(dmFrame("m1", from = bob, to = alice, sentAt = now), ForwardStore.ORIGIN_SELF, now)
+            receiver.sync.onCustodyChanged()
+            pump()
+            assertTrue("bob's own fresh frame came through this spool", sender.sync.castCovers(bob, peerTicketed = false))
+            assertFalse(sender.sync.castCovers("nobody", peerTicketed = false))
+            sender.sync.stop()
+            receiver.sync.stop()
+        }
+
+    @Test
     fun `a cast goes to every spool that carries it`() =
         runTest {
             val one = FakeSpool(cast = castBounds)

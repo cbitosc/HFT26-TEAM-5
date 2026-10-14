@@ -291,6 +291,7 @@
     <string name="chat_call_record_cancelled">Cancelled call</string>
     <string name="chat_call_record_declined_by_you">You declined a call</string>
     <string name="chat_call_record_failed">Call failed</string>
+    <string name="chat_call_record_unreachable">Couldn\'t reach them</string>
     <string name="chat_call_record_dropped">Call dropped</string>
     <!-- A call's sentence, then a detail: its length, or the time it was placed. -->
     <string name="chat_call_record_with_detail">%1$s · %2$s</string>
