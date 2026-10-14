@@ -104,6 +104,7 @@ import app.getknit.knit.call.CallPhase
 import app.getknit.knit.call.CallRouting
 import app.getknit.knit.call.CallState
 import app.getknit.knit.call.CaptureWatch
+import app.getknit.knit.call.SttModel
 import app.getknit.knit.call.SttModelState
 import app.getknit.knit.call.SystemCallSync
 import app.getknit.knit.call.TalkLink
@@ -263,10 +264,12 @@ class CallActivity :
         val routing by system.routing.collectAsState()
         val lines by (transcriber?.lines ?: NO_LINES).collectAsState()
         val model by (stt?.state ?: NO_MODEL).collectAsState()
+        // The pick, collected on its own: switching between two models in the same state moves nothing in [model].
+        val picked by (stt?.selected ?: NO_PICK).collectAsState()
         // Read again as the model's state moves: a tap on Download is when the route matters.
         val metered = remember(model) { stt?.metered() == true }
         // Which models are on the phone, read again as the one in use moves or lands.
-        val installed = remember(model) { stt?.installedIds().orEmpty() }
+        val installed = remember(model, picked) { stt?.installedIds().orEmpty() }
         CallScreen(
             state = state,
             name = name,
@@ -298,10 +301,10 @@ class CallActivity :
                     TranscriptUi(
                         lines,
                         model,
-                        store.model.bytes,
+                        picked?.bytes ?: store.model.bytes,
                         metered,
                         choices = store.models.map { SttChoice(it.id, it.label, it.bytes, it.id in installed) },
-                        chosen = store.model.id,
+                        chosen = picked?.id ?: store.model.id,
                     )
                 },
             onSttDownload = { stt?.download() },
@@ -381,6 +384,7 @@ private val NO_TALK = MutableStateFlow<Talk>(Talk.Idle())
 private val NO_LINK = MutableStateFlow<TalkLink?>(null)
 private val NO_LINES = MutableStateFlow<List<TranscriptLine>>(emptyList())
 private val NO_MODEL = MutableStateFlow<SttModelState>(SttModelState.Absent)
+private val NO_PICK = MutableStateFlow<SttModel?>(null)
 internal val ToggleSize = 64.dp
 private const val RING_MS = 1_800
 private const val RING_ALPHA = 0.28f

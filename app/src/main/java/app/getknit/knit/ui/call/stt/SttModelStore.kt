@@ -51,10 +51,20 @@ internal class SttModelStore(
     private val lock = Any()
     private var job: Job? = null
 
+    private val _selected = MutableStateFlow(models.first())
+
+    /**
+     * The model in use, as a flow: the card redraws on a pick even where [state] stays put (two models both on the
+     * phone, or both not).
+     */
+    val selected: StateFlow<SttModel> = _selected.asStateFlow()
+
     /** The model in use: the user's pick, the first of [models] until there is one. */
-    @Volatile
-    var model: SttModel = models.first()
-        private set
+    var model: SttModel
+        get() = _selected.value
+        private set(value) {
+            _selected.value = value
+        }
 
     private val installer: SttModelInstaller get() = installerOf(model)
 
