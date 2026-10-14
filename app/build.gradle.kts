@@ -900,6 +900,8 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.lifecycle.service)
+    // ProcessLifecycleOwner, for AppVisibility (#170). Already shipped transitively and initialised by androidx.startup.
+    implementation(libs.androidx.lifecycle.process)
 
     // Coroutines
     implementation(libs.kotlinx.coroutines.android)

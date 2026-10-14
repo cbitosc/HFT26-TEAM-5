@@ -397,8 +397,10 @@ about 100 m out. All three ran main @47485429 in AUTO. Logs: `~/knit-trials/2026
   - except under Bluetooth audio: A2DP keeps the scan at its floor, a hunt included, as it does everywhere else. The
     lost peer stays held, so the hunt resumes when the audio stops, inside its hold.
   The window length and scan mode still follow the screen.
-- **Knit in use hunts harder and longer.** "In use" is Knit's UI on screen (`AppVisibility`, which `MainActivity` sets
-  between `onStart` and `onStop`) with the screen lit.
+- **Knit in use hunts harder and longer.** "In use" is Knit's UI on screen (`AppVisibility`: any Knit activity started,
+  as `ProcessLifecycleOwner` counts them) with the screen lit. `MainActivity`'s own `onStart` and `onStop` set it at
+  first, and read false on a lit screen whenever a new instance replaced an old one, because the old one's stop lands
+  after the new one's start (#170).
   - A phone in that state hunts with nobody lost.
   - A lost peer stays hunted for up to `PhyTuning.huntInUseHoldMs` (30 min) from the drop, not `fastHoldMs` (3 min).
   - `RangeHunt` keeps the drop time, not a deadline. Opening Knit two minutes after a drop picks the hunt up, and

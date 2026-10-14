@@ -2,6 +2,7 @@ package app.getknit.knit
 
 import android.app.Application
 import android.util.Log
+import androidx.lifecycle.ProcessLifecycleOwner
 import app.getknit.knit.crash.CrashHandler
 import app.getknit.knit.crash.crashStore
 import app.getknit.knit.crash.currentCrashEnvironment
@@ -16,6 +17,7 @@ import app.getknit.knit.di.moderationModule
 import app.getknit.knit.di.seedDemoIfEnabled
 import app.getknit.knit.di.startDemoDirectorIfEnabled
 import app.getknit.knit.di.uiModule
+import app.getknit.knit.mesh.power.AppVisibility
 import app.getknit.knit.notifications.ConversationShortcutSync
 import app.getknit.knit.notifications.Notifier
 import app.getknit.knit.transfer.DirectWifi
@@ -77,6 +79,11 @@ class KnitApplication :
         // what actually begins the DataStore collect; MainActivity then reads an already-warmed value and
         // the app does not repaint from coral to the wallpaper palette a frame into launch.
         koinApp.koin.get<ThemePreferences>()
+
+        // Knit is on screen while any of its activities is started, as the process lifecycle counts them (#170): one
+        // activity's own onStart/onStop read false on a lit screen whenever a new MainActivity replaced an old one.
+        // Here, on the main thread, because addObserver insists on it and the mesh graph resolves off it.
+        ProcessLifecycleOwner.get().lifecycle.addObserver(koinApp.koin.get<AppVisibility>())
 
         // Seed the shipped default spools once (res/values/spools.xml). Opens no socket by itself — the
         // Internet plane stays off until the user turns it on — and a later removal sticks. A no-op while

@@ -43,6 +43,8 @@ document:
 - With an internet relay switched on, Knit could stutter for up to half a minute after it started, reconnected
   to a relay or passed midnight UTC. It now skips that work for chats the relay already holds, and a new
   chat's setup no longer holds up the screen or a call.
+- When Knit updated while it was open, it searched for phones gone out of Bluetooth range as if it were in the
+  background, until you switched away and back. It now searches harder whenever Knit is on screen.
 
 ## [2.9.0](https://github.com/getknit/knit/releases/tag/v2.9.0) — 2026-10-12T23:11:38Z
 

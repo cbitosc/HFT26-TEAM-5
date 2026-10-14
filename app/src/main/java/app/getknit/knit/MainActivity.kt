@@ -18,7 +18,6 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
-import app.getknit.knit.mesh.power.AppVisibility
 import app.getknit.knit.notifications.ConversationShortcutSync
 import app.getknit.knit.ui.KnitApp
 import app.getknit.knit.ui.RouteInbox
@@ -60,9 +59,6 @@ class MainActivity : ComponentActivity() {
 
     // Keeps the launcher's conversation shortcuts inside the chat list's universe (ADR 2026-10.jbsa).
     private val shortcutSync: ConversationShortcutSync by inject()
-
-    // Tells the Bluetooth scan Knit is on screen, so it hunts harder while the person is using it (ADR 2026-10.yvn6).
-    private val appVisibility: AppVisibility by inject()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -218,17 +214,9 @@ class MainActivity : ComponentActivity() {
 
     // Leaving the app is when the launcher can show its long-press menu again, so every removal made in here — a
     // deleted chat, a block, a left group — reaches the conversation shortcuts now. A rotation is not leaving.
-    override fun onStart() {
-        super.onStart()
-        appVisibility.set(true)
-    }
-
     override fun onStop() {
         super.onStop()
-        if (!isChangingConfigurations) {
-            shortcutSync.requestPass()
-            appVisibility.set(false)
-        }
+        if (!isChangingConfigurations) shortcutSync.requestPass()
     }
 
     // Share into an already-running instance (launchMode=singleTask). Re-stage into the inbox; KnitApp

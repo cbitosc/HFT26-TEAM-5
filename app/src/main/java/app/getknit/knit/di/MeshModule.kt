@@ -99,7 +99,8 @@ val meshModule =
         single { StoreDigest() }
         // Tracks screen/charge/battery state and feeds it to the transport's discovery duty cycle.
         single { PowerStateSource() }
-        // Whether Knit's UI is on screen (MainActivity writes it); the BLE scan hunts harder while Knit is in use.
+        // Whether Knit's UI is on screen (KnitApplication attaches it to the process lifecycle); the BLE scan hunts
+        // harder while Knit is in use.
         single { AppVisibility() }
         // Lets the Meshtastic board GATT dial pause the mesh BLE scan for its connect window (shared singleton).
         single { BleConnectArbiter() }
