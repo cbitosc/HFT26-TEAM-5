@@ -2,6 +2,7 @@ package app.getknit.knit.a11y
 
 import android.os.Build
 import android.util.Log
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.test.junit4.accessibility.enableAccessibilityChecks
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onRoot
@@ -12,9 +13,15 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.filters.SdkSuppress
 import androidx.test.services.storage.TestStorage
 import app.getknit.knit.ui.SeededUiTest
+import app.getknit.knit.ui.chat.emojiOnlyCount
+import app.getknit.knit.ui.theme.OutlineDark
+import app.getknit.knit.ui.theme.OutlineLight
 import com.google.android.apps.common.testing.accessibility.framework.AccessibilityCheckResult.AccessibilityCheckResultType
 import com.google.android.apps.common.testing.accessibility.framework.AccessibilityViewCheckResult
+import com.google.android.apps.common.testing.accessibility.framework.checks.TextContrastCheck
 import com.google.android.apps.common.testing.accessibility.framework.integrations.espresso.AccessibilityValidator
+import org.hamcrest.BaseMatcher
+import org.hamcrest.Description
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -77,6 +84,7 @@ class AccessibilityInstrumentedTest : SeededUiTest() {
                 // real hardware (FTL); locally the contrast checks report NOT_RUN while every structural check
                 // (labels, touch targets, traversal, duplicate/redundant descriptions) still runs.
                 .setCaptureScreenshots(!isEmulator())
+                .setSuppressingResultMatcher(ContrastMisreads)
                 .addCheckListener(
                     AccessibilityValidator.AccessibilityCheckListener { _, viewResults ->
                         viewResults.forEach { result ->
@@ -267,6 +275,37 @@ class AccessibilityInstrumentedTest : SeededUiTest() {
             Build.FINGERPRINT.contains("generic") ||
             Build.PRODUCT.contains("sdk") ||
             Build.PRODUCT.contains("atd")
+    }
+
+    /**
+     * The contrast findings that measure something other than the text — each case below was a WARNING on
+     * the FTL hardware pass, and each is exact, so a real low-contrast label still reports:
+     *
+     * - **Emoji.** A reaction glyph's "text colour" is its artwork (the yellow of 😂, the red of ❤️);
+     *   contrast is not defined for a colour bitmap.
+     * - **Disabled controls.** WCAG 1.4.3 exempts an inactive component, and ATF skips one itself
+     *   (`RESULT_ID_NOT_ENABLED`) — but Compose exposes a disabled button's label as its own text node that
+     *   carries no enabled state, so ATF measures the greyed label. The disabled state is on an ancestor.
+     * - **An outlined field's border.** An empty or short field is mostly 1dp stroke by pixel count, so the
+     *   heuristic picks the theme's `outline` as the "foreground". The stroke is a component boundary
+     *   (WCAG 1.4.11, 3:1, which it passes); the field's own text is drawn in `onSurface`.
+     */
+    private object ContrastMisreads : BaseMatcher<AccessibilityViewCheckResult>() {
+        private val outlines = setOf(OutlineLight.toArgb(), OutlineDark.toArgb())
+
+        override fun matches(item: Any?): Boolean {
+            val result = item as? AccessibilityViewCheckResult ?: return false
+            if (result.sourceCheckClass != TextContrastCheck::class.java) return false
+            val element = result.element ?: return false
+            val text = element.text?.toString().orEmpty()
+            return (text.isNotBlank() && emojiOnlyCount(text) > 0) ||
+                generateSequence(element) { it.parentView }.any { !it.isEnabled } ||
+                (element.isEditable == true && result.metadata?.getInt(TextContrastCheck.KEY_FOREGROUND_COLOR, 0) in outlines)
+        }
+
+        override fun describeTo(description: Description) {
+            description.appendText("a text-contrast finding on emoji, a disabled control or a field border")
+        }
     }
 
     private companion object {

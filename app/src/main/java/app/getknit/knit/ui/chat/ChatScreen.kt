@@ -139,6 +139,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -245,6 +246,7 @@ import app.getknit.knit.ui.preview.PREVIEW_NOW
 import app.getknit.knit.ui.share.ShareInbox
 import app.getknit.knit.ui.theme.KnitMotion
 import app.getknit.knit.ui.theme.knitColors
+import app.getknit.knit.ui.theme.readableOn
 import app.getknit.knit.ui.theme.rememberPressScale
 import app.getknit.knit.ui.util.rememberCurrentTimeMillis
 import app.getknit.knit.ui.voice.VoiceNoteBubble
@@ -2095,6 +2097,15 @@ private fun MessageBubble(
         animationSpec = tween(durationMillis = if (highlighted) 120 else 600),
         label = "quoteHighlight",
     )
+    val bubbleColor =
+        lerp(
+            if (row.mine) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+            MaterialTheme.colorScheme.primary,
+            0.22f * highlight,
+        )
+    // The coral that names a person, a mention or a link, as dark as this bubble needs it: light `primary`
+    // makes 4.1:1 on either fill, under the 4.5:1 small text needs (the FTL accessibility pass).
+    val accentText = MaterialTheme.colorScheme.primary.readableOn(bubbleColor)
     Row(
         modifier = modifier.fillMaxWidth(),
         horizontalArrangement = if (row.mine) Arrangement.End else Arrangement.Start,
@@ -2144,16 +2155,7 @@ private fun MessageBubble(
         Column(horizontalAlignment = if (row.mine) Alignment.End else Alignment.Start) {
             Box {
                 Surface(
-                    color =
-                        lerp(
-                            if (row.mine) {
-                                MaterialTheme.colorScheme.primaryContainer
-                            } else {
-                                MaterialTheme.colorScheme.surfaceVariant
-                            },
-                            MaterialTheme.colorScheme.primary,
-                            0.22f * highlight,
-                        ),
+                    color = bubbleColor,
                     contentColor =
                         if (row.mine) {
                             MaterialTheme.colorScheme.onPrimaryContainer
@@ -2189,7 +2191,7 @@ private fun MessageBubble(
                                         if (row.origin != null && !row.origin.verified) {
                                             MaterialTheme.colorScheme.onSurfaceVariant
                                         } else {
-                                            MaterialTheme.colorScheme.primary
+                                            accentText
                                         },
                                     // As in the header: weight (fill = false) lets a long name ellipsize
                                     // rather than push the shield beside it out of the bubble, while a short
@@ -2230,6 +2232,7 @@ private fun MessageBubble(
                             QuotedMessage(
                                 quote = quote,
                                 mine = row.mine,
+                                bubbleColor = bubbleColor,
                                 collapsed = collapsed,
                                 bodyShown = shownBody.isNotBlank(),
                                 onClick =
@@ -2366,12 +2369,12 @@ private fun MessageBubble(
                             } else {
                                 val mentionStyle =
                                     SpanStyle(
-                                        color = MaterialTheme.colorScheme.primary,
+                                        color = accentText,
                                         fontWeight = FontWeight.SemiBold,
                                     )
                                 val linkStyle =
                                     SpanStyle(
-                                        color = MaterialTheme.colorScheme.primary,
+                                        color = accentText,
                                         textDecoration = TextDecoration.Underline,
                                     )
                                 // A short emoji-only message renders enlarged (Signal-style), scaling
@@ -2601,11 +2604,16 @@ private fun MessageBubble(
 private fun QuotedMessage(
     quote: QuoteView,
     mine: Boolean,
+    bubbleColor: Color,
     collapsed: Boolean,
     bodyShown: Boolean,
     onClick: (() -> Unit)?,
 ) {
-    val accent = if (mine) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.primary
+    // The block's own tint over the bubble is what the author's name is read against.
+    val tint = LocalContentColor.current.copy(alpha = 0.10f)
+    val accent =
+        (if (mine) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.primary)
+            .readableOn(tint.compositeOver(bubbleColor))
     val photoLabel = stringResource(R.string.chat_reply_photo)
     Row(
         modifier =
@@ -2613,7 +2621,7 @@ private fun QuotedMessage(
                 .testTag("chat_quote")
                 .clip(RoundedCornerShape(6.dp))
                 .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
-                .background(LocalContentColor.current.copy(alpha = 0.10f))
+                .background(tint)
                 .height(IntrinsicSize.Min),
         verticalAlignment = Alignment.CenterVertically,
     ) {
