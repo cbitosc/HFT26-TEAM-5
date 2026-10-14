@@ -1,5 +1,8 @@
 package app.getknit.knit.mesh.crypto
 
+import app.getknit.knit.data.message.MentionStore
+import app.getknit.knit.data.message.MessageEntity
+import app.getknit.knit.data.message.replyRef
 import app.getknit.knit.mesh.protocol.AttachmentName
 import app.getknit.knit.mesh.protocol.GroupKeyPayload
 import app.getknit.knit.mesh.protocol.Mention
@@ -148,3 +151,23 @@ data class MessageContent(
             runCatching { cryptoCbor.decodeFromByteArray<MessageContent>(bytes) }.getOrNull()?.normalized()
     }
 }
+
+/**
+ * The sealed content of one of our own DM or group messages, read off its stored row. The one builder
+ * `MeshManager.sendChat` and its re-seal (`resealAndFlood`, behind both `flushPendingFor` and the reset's
+ * `resealRecentDmsTo`) share, so a conversational field added to [MessageContent] is mapped once. Two hand-built
+ * copies drifted twice: the re-seal dropped [MessageContent.attachmentName] / [MessageContent.attachmentSize]
+ * (ADR 2026-09.qq2r), so the first copy a reset peer could open was a file with no name (#131).
+ * `MessageContentTest` fails when a new field is neither mapped here nor named as machinery.
+ */
+internal fun MessageEntity.sealedContent(): MessageContent =
+    MessageContent(
+        body = body,
+        mentions = MentionStore.decode(mentions),
+        attachmentHash = attachmentHash,
+        attachmentMime = attachmentMime,
+        attachmentKey = attachmentKey,
+        attachmentName = attachmentName,
+        attachmentSize = attachmentSize,
+        replyTo = replyRef(),
+    )

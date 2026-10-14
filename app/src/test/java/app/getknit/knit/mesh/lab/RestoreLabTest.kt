@@ -71,6 +71,35 @@ class RestoreLabTest {
             lab.assertConverged(listOf(alice, bob), atLeast = 6) { it.dmWith(if (it === alice) bob else alice) }
         }
 
+    /**
+     * #131: a file Bob sends while Alice is away is sealed under the session her restore wiped, so the first copy
+     * she can open is the one Bob re-seals on her reset. That re-seal used to rebuild the content without the
+     * file's name and size, and the file landed as a nameless attachment whose bubble never drew. Alice's row
+     * carrying both is the proof the re-sealed copy carried them.
+     */
+    @Test
+    fun aFileSentWhileARestoredNodeWasAwayKeepsItsNameThroughTheReseal() =
+        runBlocking {
+            val alice = lab.node("alice").apply { setDisplayName("Alice") }
+            val bob = lab.node("bob").apply { setDisplayName("Bob") }
+            lab.link(alice, bob)
+            lab.awaitAcquainted(alice, bob)
+            assertTrue(alice.sendDm(bob, "before"))
+            lab.assertConverged(listOf(alice, bob), atLeast = 1) { it.dmWith(if (it === alice) bob else alice) }
+
+            alice.restoreFromBackup()
+            val report = "%PDF-1.7 quarterly figures".toByteArray()
+            assertTrue(bob.sendFile(report, "quarterly-report.pdf", "application/pdf", text = "the report", to = alice))
+            val id = bob.ownMessageId(bob.dmWith(alice), "the report")
+
+            lab.link(alice, bob)
+            lab.assertConverged(listOf(alice, bob), atLeast = 2) { it.dmWith(if (it === alice) bob else alice) }
+            val row = checkNotNull(alice.row(id)) { "alice holds the file DM" }
+            assertEquals("the re-sealed copy named the file", "quarterly-report.pdf", row.attachmentName)
+            assertEquals("and gave its size", report.size.toLong(), row.attachmentSize)
+            assertEquals("application/pdf", row.attachmentMime)
+        }
+
     /** The group's sender chain re-mints from one on the restored side; the members open it like any other epoch. */
     @Test
     fun aRestoredNodeReMintsItsGroupChainAndTheMembersFollow() =

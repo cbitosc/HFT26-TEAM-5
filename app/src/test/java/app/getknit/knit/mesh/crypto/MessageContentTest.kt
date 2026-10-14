@@ -1,5 +1,8 @@
 package app.getknit.knit.mesh.crypto
 
+import app.getknit.knit.data.message.MentionStore
+import app.getknit.knit.data.message.MessageEntity
+import app.getknit.knit.data.message.withReply
 import app.getknit.knit.mesh.protocol.GroupInfo
 import app.getknit.knit.mesh.protocol.GroupKeyPayload
 import app.getknit.knit.mesh.protocol.GroupRootPayload
@@ -7,7 +10,12 @@ import app.getknit.knit.mesh.protocol.GroupSeed
 import app.getknit.knit.mesh.protocol.Mention
 import app.getknit.knit.mesh.protocol.ProfilePayload
 import app.getknit.knit.mesh.protocol.ReactionPayload
+import app.getknit.knit.mesh.protocol.ReplyRef
 import app.getknit.knit.mesh.protocol.TransferPayload
+import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.descriptors.elementNames
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -32,6 +40,52 @@ class MessageContentTest {
         assertEquals("hash", decoded.attachmentHash)
         assertEquals("image/jpeg", decoded.attachmentMime)
         assertEquals("key", decoded.attachmentKey)
+    }
+
+    /**
+     * #131's drift guard. [sealedContent] is the one builder sendChat and the re-seal share; a conversational field
+     * added to [MessageContent] and left out of it seals on neither path, and one added by hand to only one of two
+     * builders is how the re-seal lost a file's name. Every field of the class either comes off a fully populated
+     * row or is named in [MACHINERY].
+     */
+    @OptIn(ExperimentalSerializationApi::class)
+    @Test
+    fun theSealedContentOfARowMapsEveryConversationalField() {
+        val row =
+            MessageEntity(
+                id = "m1",
+                senderId = "alice000",
+                recipientId = "bob00000",
+                body = "the report",
+                sentAt = 1_000L,
+                mentions = MentionStore.encode(listOf(Mention("bob00000", "Bob"))),
+                attachmentHash = "cipher-hash",
+                attachmentMime = "application/pdf",
+                attachmentKey = "key",
+                attachmentName = "quarterly-report.pdf",
+                attachmentSize = 1_400_000L,
+            ).withReply(ReplyRef(messageId = "m0", authorId = "bob00000", author = "Bob", snippet = "send it?"))
+
+        val content = row.sealedContent()
+        val emitted =
+            JSON
+                .encodeToJsonElement(MessageContent.serializer(), content)
+                .jsonObject.keys
+        val fields =
+            MessageContent
+                .serializer()
+                .descriptor.elementNames
+                .toSet()
+
+        assertEquals(
+            "a new conversational field must be mapped in MessageEntity.sealedContent, or listed in MACHINERY",
+            fields - MACHINERY,
+            emitted,
+        )
+        assertEquals("quarterly-report.pdf", content.attachmentName)
+        assertEquals(1_400_000L, content.attachmentSize)
+        assertEquals(listOf(Mention("bob00000", "Bob")), content.mentions)
+        assertEquals("m0", content.replyTo?.messageId)
     }
 
     @Test
@@ -328,5 +382,17 @@ class MessageContentTest {
         // Sender-supplied text is brought inside AttachmentName's rules at the decode boundary, like attachmentName.
         assertEquals(ready.copy(name = "evilfdp.exe"), decoded.xf)
         assertNull(MessageContent.decode(MessageContent(body = "hi").encode())!!.xf)
+    }
+
+    private companion object {
+        /**
+         * The [MessageContent] fields a stored message row never carries: the schema version (elided while it equals
+         * [MessageContent.VERSION]) and the ctl machinery. A new conversational field must be mapped in
+         * [sealedContent]; only a new machinery field belongs here.
+         */
+        val MACHINERY = setOf("v", "ctl", "gk", "ack", "rp", "pr", "acks", "xf")
+
+        /** Omits what equals its default, as the CBOR codec does, so the keys left are the fields the row filled. */
+        val JSON = Json { encodeDefaults = false }
     }
 }

@@ -23,7 +23,6 @@ import app.getknit.knit.data.message.Conversations
 import app.getknit.knit.data.message.DeliveryPlane
 import app.getknit.knit.data.message.MentionStore
 import app.getknit.knit.data.message.MessageEntity
-import app.getknit.knit.data.message.replyRef
 import app.getknit.knit.data.message.withReply
 import app.getknit.knit.data.peer.MetPeerRepository
 import app.getknit.knit.data.peer.PeerEntity
@@ -46,6 +45,7 @@ import app.getknit.knit.mesh.crypto.ratchet.RatchetSessions
 import app.getknit.knit.mesh.crypto.readsCryptoV3
 import app.getknit.knit.mesh.crypto.scope.ScopeCrypto
 import app.getknit.knit.mesh.crypto.sealBytes
+import app.getknit.knit.mesh.crypto.sealedContent
 import app.getknit.knit.mesh.lora.LoraCtl
 import app.getknit.knit.mesh.lora.LoraFramePolicy
 import app.getknit.knit.mesh.lora.LoraSizeHint
@@ -1084,9 +1084,9 @@ class MeshManager(
      * A DM or a group message is never classified on the way out: its receivers screen it and hide it behind
      * their own Content filtering toggle (ADR 2026-10.9rh6). A room [attachment] was screened at ingest.
      *
-     * `@Suppress("LongMethod")`: ktlint's one-arg-per-line wrapping of the two parallel MessageEntity /
-     * content builds inflates the raw line count past detekt's LongMethod=60; the logic is two
-     * straight-line branches, not complex.
+     * `@Suppress("LongMethod")`: ktlint's one-arg-per-line wrapping of the room's and the sealed branch's
+     * MessageEntity builds inflates the raw line count past detekt's LongMethod=60; the logic is two
+     * straight-line branches, not complex. The sealed content is read off the row (`sealedContent`, #131).
      */
     @Suppress("LongMethod")
     override suspend fun sendChat(
@@ -1143,44 +1143,10 @@ class MeshManager(
         // DM or group: end-to-end encrypt. The attachment (if any) is encrypted to its own key and
         // re-addressed by its ciphertext hash; body/mentions/attachment refs go into the sealed content.
         val sealedAttachment = attachment?.let { sealAttachment(it) }
-        // The piggyback (ADR 054): a DM to a peer that reads inline acks carries the receipts we still owe
-        // it for DMs that came over the board, in place of a standalone tick that would cost ~3 s of LoRa
-        // air. Attached only in the v2 arm of the seal; a v1 fallback or a parked DM gives them back.
-        val inlineAcks = inlineAcksFor(recipientId, group, text, replying = replyTo != null, attached = attachment != null)
-        val inlineIds = inlineAcks.ids
-        val content =
-            MessageContent(
-                body = text,
-                mentions = mentions,
-                attachmentHash = sealedAttachment?.hash,
-                attachmentMime = attachment?.mime,
-                attachmentKey = sealedAttachment?.key,
-                // A file's name and its plaintext length — the two facts a file bubble needs and cannot
-                // read off the bytes. Null for an image or a voice note, whose bubbles describe themselves,
-                // so an ordinary photo frame is byte-for-byte what it was before ADR 2026-09.qq2r.
-                attachmentName = attachment?.name,
-                attachmentSize = attachment?.takeIf { it.name != null }?.sizeBytes?.toLong(),
-                replyTo = replyTo,
-            )
-        val envelope = sealEnvelopeFor(id, me, sentAt, recipientId, group, content, inlineIds)
-        if (inlineIds.isNotEmpty() && recipientId != null) {
-            val carried = envelope != null && EncEnvelope.isDmRatchetVersion(envelope.v)
-            if (carried) {
-                metrics.onReceiptCoalesced(inlineAcks.dm.size)
-                metrics.onReceiptRidden(inlineAcks.room.size)
-                ackSync.rode(inlineAcks.room)
-            } else {
-                // Each half goes back to the hold that owns it. A room ack must never land in [dmAcks]:
-                // that hold *originates* what it still holds when the debounce runs out, which is the
-                // custody row the ride exists to avoid (ADR 2026-09.aa27).
-                dmAcks.giveBack(recipientId, inlineAcks.dm)
-                ackSync.giveBackRiding(recipientId, inlineAcks.room)
-            }
-        }
-        // Persist our own plaintext copy regardless, so the sender always sees their message. A DM whose
-        // recipient key isn't known yet is flagged pendingKey so handleProfile can retransmit it when the
-        // recipient's profile (carrying the key) finally arrives (groups stay unsent, as before).
-        messages.save(
+        // Our own plaintext copy, built before the seal because the sealed content is read off it
+        // ([sealedContent], the one builder this and [resealAndFlood] share — #131). Saved below regardless, so the
+        // sender always sees their message.
+        val row =
             MessageEntity(
                 id = id,
                 senderId = me,
@@ -1199,8 +1165,11 @@ class MeshManager(
                 // bytes when the blob lands (InboundPipeline.onObtained) — neither value is on the wire.
                 voiceDurationMs = attachment?.voice?.durationMs,
                 voicePeaks = attachment?.voice?.peaks,
-                // A file's name/size come off the sealed content on the receiving side and off the staged
-                // ingest here, and are written against the same ciphertext hash for the same reason.
+                // A file's name and its plaintext length — the two facts a file bubble needs and cannot
+                // read off the bytes. Null for an image or a voice note, whose bubbles describe themselves,
+                // so an ordinary photo frame is byte-for-byte what it was before ADR 2026-09.qq2r. They come
+                // off the sealed content on the receiving side and off the staged ingest here, and are written
+                // against the same ciphertext hash for the same reason.
                 attachmentName = attachment?.name,
                 attachmentSize = attachment?.takeIf { it.name != null }?.sizeBytes?.toLong(),
                 // Read off the frames at ingest, and by the recipient off the same bytes when they land.
@@ -1210,9 +1179,32 @@ class MeshManager(
                 // room picture already names its plaintext, so it records none.
                 attachmentPlainHash = attachment?.hash?.takeIf { sealedAttachment?.key != null },
                 attachmentSourceHash = attachment?.sourceHash,
-                pendingKey = envelope == null && group == null,
-            ).withReply(replyTo),
-        )
+                pendingKey = false,
+            ).withReply(replyTo)
+        // The piggyback (ADR 054): a DM to a peer that reads inline acks carries the receipts we still owe
+        // it for DMs that came over the board, in place of a standalone tick that would cost ~3 s of LoRa
+        // air. Attached only in the v2 arm of the seal; a v1 fallback or a parked DM gives them back.
+        val inlineAcks = inlineAcksFor(recipientId, group, text, replying = replyTo != null, attached = attachment != null)
+        val inlineIds = inlineAcks.ids
+        val envelope = sealEnvelopeFor(id, me, sentAt, recipientId, group, row.sealedContent(), inlineIds)
+        if (inlineIds.isNotEmpty() && recipientId != null) {
+            val carried = envelope != null && EncEnvelope.isDmRatchetVersion(envelope.v)
+            if (carried) {
+                metrics.onReceiptCoalesced(inlineAcks.dm.size)
+                metrics.onReceiptRidden(inlineAcks.room.size)
+                ackSync.rode(inlineAcks.room)
+            } else {
+                // Each half goes back to the hold that owns it. A room ack must never land in [dmAcks]:
+                // that hold *originates* what it still holds when the debounce runs out, which is the
+                // custody row the ride exists to avoid (ADR 2026-09.aa27).
+                dmAcks.giveBack(recipientId, inlineAcks.dm)
+                ackSync.giveBackRiding(recipientId, inlineAcks.room)
+            }
+        }
+        // Persist our own plaintext copy regardless, so the sender always sees their message. A DM whose
+        // recipient key isn't known yet is flagged pendingKey so handleProfile can retransmit it when the
+        // recipient's profile (carrying the key) finally arrives (groups stay unsent, as before).
+        messages.save(row.copy(pendingKey = envelope == null && group == null))
         if (envelope == null) {
             // No recipient's key is known yet — nothing can decrypt this. Saved locally above; a DM is
             // marked pendingKey and retransmitted on key arrival, a group message stays unsent.
@@ -3390,17 +3382,10 @@ class MeshManager(
         me: String,
         hint: FanoutHint,
     ): Boolean {
-        val content =
-            MessageContent(
-                body = row.body,
-                mentions = MentionStore.decode(row.mentions),
-                attachmentHash = row.attachmentHash,
-                attachmentMime = row.attachmentMime,
-                attachmentKey = row.attachmentKey,
-                replyTo = row.replyRef(),
-            )
+        // The one builder sendChat seals through too, so a re-seal carries every sealed field the first send did
+        // (a file's name and size were dropped here once — #131).
         val envelope =
-            sealEnvelopeFor(row.id, me, row.sentAt, recipientId, group = null, content = content)
+            sealEnvelopeFor(row.id, me, row.sentAt, recipientId, group = null, content = row.sealedContent())
                 ?: return false
         originateSigned(
             chatEnvelope(

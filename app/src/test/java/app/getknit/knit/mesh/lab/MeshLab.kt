@@ -1512,6 +1512,37 @@ class LabNode internal constructor(
     }
 
     /**
+     * Sends [bytes] as an arbitrary file named [fileName] — to [to], into [groupId], or into the room when both are
+     * null — the frame the composer sends for a picked document. Like [sendImage] the bytes go straight into the blob
+     * store under their own hash; what differs is the ingest's name, which makes this a file: a DM or group seals the
+     * name and the byte count inside the content (ADR 2026-09.qq2r), and a receiver's row carries both only when the
+     * copy it opened did.
+     */
+    suspend fun sendFile(
+        bytes: ByteArray,
+        fileName: String,
+        mime: String,
+        text: String = "",
+        to: LabNode? = null,
+        groupId: String? = null,
+    ): Boolean {
+        val hash = sha256Hex(bytes)
+        blobs.insert(hash, mime, bytes)
+        val attachment = AttachmentStore.Ingested(hash = hash, mime = mime, name = fileName, sizeBytes = bytes.size)
+        val group = groupId?.let { checkNotNull(groups.find(it)) { "$name holds no group $it" }.toGroupInfo() }
+        return spaced {
+            manager.sendChat(
+                text = text,
+                attachment = attachment,
+                mentions = emptyList(),
+                recipientId = to?.nodeId,
+                group = group,
+                replyTo = null,
+            )
+        }
+    }
+
+    /**
      * Sends [bytes] as a voice note — to [to], into [groupId], or into the room when both are null — the frame the
      * composer sends when a recording stops. The sender describes its own copy at ingest, as `AttachmentStore` does;
      * the duration is header arithmetic, so an `adts` fixture times on the host, while the waveform needs the

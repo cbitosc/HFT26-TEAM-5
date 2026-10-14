@@ -1493,6 +1493,73 @@ class MeshManagerTest {
             assertNull("and a carrier learns neither the name nor the type", content.attachmentMime)
         }
 
+    /**
+     * #131: the re-seal rebuilt the sealed content by hand and dropped the file's name and size. After a reset its
+     * copy is the first one the peer can open, so the file landed nameless and its bubble fell to the image arm.
+     * Both re-seal doors — the reset's [MeshManager.resealRecentDmsTo] and the key-arrival flush — must seal what
+     * the first send sealed.
+     */
+    @Test
+    fun aResealedFileDmCarriesItsNameAndSize() =
+        runTest(UnconfinedTestDispatcher()) {
+            val rig = Rig(backgroundScope)
+            rig.pin(rig.bob)
+            val plainHash = "plain-file-hash"
+            coEvery { rig.blobs.bytes(plainHash) } returns "%PDF-1.7 bytes".toByteArray()
+            assertTrue(
+                rig.manager.sendChat(
+                    "",
+                    attachment =
+                        AttachmentStore.Ingested(
+                            hash = plainHash,
+                            mime = "application/pdf",
+                            name = "quarterly-report.pdf",
+                            sizeBytes = 1_400_000,
+                        ),
+                    recipientId = rig.bob.nodeId,
+                ),
+            )
+            advanceUntilIdle()
+            val row = rig.saved.single()
+
+            // Every seal of this id that went out, in order: [Rig.sentChatFrames] collapses copies by id, and a
+            // re-seal keeps the original one.
+            fun seals(): List<RelayEnvelope> =
+                rig.transport.sent
+                    .mapNotNull { WireCodec.decodeEnvelope(it.first.signed) }
+                    .filter { it.type == FrameType.CHAT && it.id == row.id }
+                    .distinctBy { it.payload.toList() }
+
+            fun opened(frame: RelayEnvelope): MessageContent {
+                val content = WireCodec.decodePayload<ChatContent>(frame.payload)!!
+                assertEquals("a re-seal still exposes only the ciphertext hash", row.attachmentHash, content.attachmentHash)
+                assertNull(content.attachmentMime)
+                val header = MessageCrypto.header(frame.id, rig.me.nodeId, frame.sentAt, rig.bob.nodeId)
+                return rig.bob.crypto.open(content.enc!!, header, rig.bob.nodeId)!!
+            }
+            assertEquals(1, seals().size)
+
+            coEvery { rig.messages.unackedDmsTo(rig.bob.nodeId, rig.me.nodeId, any()) } returns listOf(row)
+            rig.manager.resealRecentDmsTo(rig.bob.nodeId)
+            advanceUntilIdle()
+            assertEquals("the reset re-sealed one fresh copy", 2, seals().size)
+            val afterReset = opened(seals().last())
+            assertEquals("the reset's re-seal names the file", "quarterly-report.pdf", afterReset.attachmentName)
+            assertEquals(1_400_000L, afterReset.attachmentSize)
+            assertEquals("application/pdf", afterReset.attachmentMime)
+            assertEquals(row.attachmentKey, afterReset.attachmentKey)
+
+            coEvery { rig.messages.pendingForRecipient(rig.bob.nodeId) } returns listOf(row)
+            rig.manager.flushPendingFor(rig.bob.nodeId)
+            advanceUntilIdle()
+            assertEquals("the flush re-sealed one fresh copy", 3, seals().size)
+            val afterFlush = opened(seals().last())
+            assertEquals("the key-arrival flush names the file", "quarterly-report.pdf", afterFlush.attachmentName)
+            assertEquals(1_400_000L, afterFlush.attachmentSize)
+            assertEquals("application/pdf", afterFlush.attachmentMime)
+            assertEquals(row.attachmentKey, afterFlush.attachmentKey)
+        }
+
     @Test
     fun theBroadcastRoomStillFillsTheCleartextMimeBecauseTheRoomIsPlaintext() =
         runTest(UnconfinedTestDispatcher()) {
