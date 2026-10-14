@@ -203,6 +203,7 @@ class ChatViewModelTest {
         every { settings.locationShareConsented } returns locationConsentFlow
         every { settings.directTransferConsented } returns transferConsentFlow
         every { transfers.states } returns transfersFlow
+        every { transfers.mayOffer() } returns true
     }
 
     @After
@@ -2537,6 +2538,23 @@ class ChatViewModelTest {
             vm.offerTransfer(uri)
             advanceUntilIdle()
             assertEquals(R.string.chat_transfer_wifi_off, events.last())
+        }
+
+    @Test
+    fun aPhoneThatMayNotHostSaysSoBeforeThePicker() =
+        runTest {
+            // ADR 2026-10.w3dw: the sender hosts the group, and this phone never does.
+            stubDm("bob")
+            coEvery { peers.find("bob") } returns peer("bob", "Bob", capabilities = Protocol.LOCAL_CAPABILITIES)
+            mesh.neighbors.value = setOf(Peer("bob"))
+            every { transfers.mayOffer() } returns false
+            val vm = vm("bob")
+            val events = mutableListOf<Int>()
+            backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.events.collect { events += it } }
+            vm.offerTransfer(Uri.parse("content://docs/clip"))
+            advanceUntilIdle()
+            assertEquals(listOf(R.string.chat_transfer_cannot_host), events)
+            coVerify(exactly = 0) { transfers.offer(any(), any()) }
         }
 
     @Test

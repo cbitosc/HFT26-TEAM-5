@@ -47,6 +47,11 @@ class FakeDirectWifi(
 
     override fun refusal(): TransferRefusal? = refusal
 
+    /** A phone that may not host (ADR 2026-10.w3dw): it refuses to send, and still receives. */
+    var cannotHost = false
+
+    override fun mayHost(): Boolean = !cannotHost
+
     override suspend fun host(
         credentials: GroupCredentials,
         timeoutMs: Long,

@@ -1,5 +1,6 @@
 package app.getknit.knit.di
 
+import android.os.Build
 import android.util.Log
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
@@ -48,6 +49,7 @@ import app.getknit.knit.data.settings.SettingsKeys
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.data.settings.TicketKeyStore
 import app.getknit.knit.demo.DemoComposer
+import app.getknit.knit.device.DeviceImage
 import app.getknit.knit.identity.AndroidDeviceIdSource
 import app.getknit.knit.identity.DeviceIdSource
 import app.getknit.knit.identity.Identity
@@ -287,6 +289,17 @@ val appModule =
         // The one thing CrashHandler structurally cannot see — a native crash — read back from the
         // platform's own exit records. ADR 028 named this as the follow-on; ModelLoadGuard consumes it.
         single { ProcessExitReasons(androidContext()) }
+        // Whether this phone is a generic system image over an older vendor, read once from its build fingerprints:
+        // hosting a Wi-Fi Direct group (ADR 2026-10.w3dw) and a call's microphone (ADR 2026-10.kw29) work around it.
+        single {
+            DeviceImage.read(
+                fingerprint = Build.FINGERPRINT,
+                partitions =
+                    runCatching { Build.getFingerprintedPartitions().associate { it.name to it.fingerprint } }.getOrDefault(
+                        emptyMap(),
+                    ),
+            )
+        }
         single { ReactionRepository(get(), get()) }
         // Who has acked each message — the message-details screen's per-recipient delivery split. Owns the
         // delivery write (tick + acker row in one transaction), so it wraps MessageRepository.

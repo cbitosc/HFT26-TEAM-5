@@ -575,8 +575,9 @@ DirectInvite {           // CallPayload.dw — every field optional, so a broken
 ```
 
 - **C-3.10-1** The caller puts `dw` in its OFFER only when the callee is a mesh neighbour whose pinned profile
-  carries `CAP_DIRECT_TRANSFER`, the radio is free and usable, and neither relay-only nor direct mode `off` is set.
-  Minting raises nothing.
+  carries `CAP_DIRECT_TRANSFER`, the radio is free and usable, this phone may host a group (ADR 2026-10.w3dw: never a
+  generic system image over an older vendor, nor a phone latched after dying while hosting), and neither relay-only nor
+  direct mode `off` is set. Minting raises nothing. A phone that may not host still joins a caller's group.
 - **C-3.10-2** A callee that can join answers `dx = 1` on its RINGING and joins while it rings, after a grace that
   lets the RINGING leave before the radio does. It joins with an **IPv4 lease**: libwebrtc never gathers on an IPv6
   link-local. A callee that may not join off screen (API 29-32) or runs direct mode `answer` joins when it answers,
@@ -760,6 +761,8 @@ scope, never on the inbound path. `ui/call/TelecomCalls` is the one importer of 
 | **C-3.13-9** | A mute set from a car or a watch reaches the call. The first value the system reports is only where it starts, and is not acted on.                                                                                                                                             |
 | **C-3.13-10** | A call the system answered starts the call's microphone service from inside the system's answer, because the call screen may never open. Without the service, a backgrounded call's microphone is silenced. Android allowed that background start on the trial phone (a Pixel 9, API 37). |
 | **C-3.13-11** | A live call on the earpiece, from dialing to reconnecting, holds the proximity wake lock, so the screen goes dark and ignores touches while the phone is at the ear, wherever the user left the call screen. It never does while an incoming call rings, for a walkie, or on any other route; leaving the earpiece gives the screen back at once. A call that ends keeps a dark screen dark until the phone leaves the ear. |
+| **C-3.13-12** | A live call records from one of two profiles: `VOICE_COMMUNICATION` with the platform's echo canceller and noise suppressor, or the fallback, `VOICE_RECOGNITION` with those off so WebRTC runs its own. A generic system image over an older vendor opens every call on the fallback: its vendor lacks the VoIP record route and hands the call zeros. So does a phone where a call went silent, until the app or the OS updates. The audio module is rebuilt for a new profile between calls, never under an open one. ADR 2026-10.kw29. |
+| **C-3.13-13** | A call's microphone is watched. Three seconds of digital silence while unmuted, or a record error, is a dead microphone, unless the platform muted or silenced it. On the standard profile the call then records from a recorder of its own (`VOICE_RECOGNITION`, then `MIC`) for the rest of the call, with no renegotiation, and the next calls open on the fallback. A microphone dead with nowhere further to switch, or silenced, is the call screen's note. |
 
 The system shows the peer's label as the call's name, and `knit:<node id>` as its address. VoIP calls stay out of the
 system call log. A call's line in its thread is §3.12's.
@@ -816,6 +819,11 @@ link down; its own sends were all delivered. Nothing steers a link off Coded whi
   - The audio route (§3.13): `SystemCallSyncTest` for the system call's lifecycle, glare, refusals, mute and the
     walkie's correction; `CallAudioPolicyTest` for the start, the correction, the notification's target and
     when the screen goes dark at the ear.
+  - The microphone (C-3.13-12, C-3.13-13): `CaptureHealthTest` for the profile a call opens on, the learned verdict
+    and the watch (zeros, a mute, a silenced client, a record error), `CallStatsReaderTest` for the two audio levels,
+    and `SystemImageTest` for the image that opens on the fallback.
+  - A phone that may not host (C-3.10-1, ADR 2026-10.w3dw): `DirectHostGuardTest`, `DirectWifiLeaseTest` and
+    `DirectCallPathTest`'s non-hosting caller.
   - Stale `OFFER` → missed call; `CANCEL` before `OFFER` → no alert.
   - Glare resolution; idempotent duplicates.
   - Relay-only SDP stripping, and fingerprint mismatch → call refused.

@@ -220,11 +220,18 @@ class TransferManager(
         return OfferOutcome.Started(id)
     }
 
+    /**
+     * Whether this phone may offer a transfer at all: the sender hosts the group, and a phone where hosting takes the
+     * phone down never does (ADR 2026-10.w3dw). A device fact, so the chat says it before the picker opens. Receiving
+     * only joins, and is never refused for it.
+     */
+    fun mayOffer(): Boolean = wifi.mayHost()
+
     private fun refusalToOffer(
         peerId: String,
         source: TransferSource?,
     ): TransferRefusal? =
-        wifi.refusal()
+        wifi.hostRefusal()
             ?: when {
                 !peerNearby(peerId) -> TransferRefusal.NotNearby
                 source == null || source.size <= 0L -> TransferRefusal.Unreadable

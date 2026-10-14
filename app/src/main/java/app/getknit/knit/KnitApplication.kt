@@ -22,6 +22,7 @@ import app.getknit.knit.di.uiModule
 import app.getknit.knit.mesh.power.AppVisibility
 import app.getknit.knit.notifications.ConversationShortcutSync
 import app.getknit.knit.notifications.Notifier
+import app.getknit.knit.transfer.DirectHostGuard
 import app.getknit.knit.transfer.DirectWifi
 import app.getknit.knit.ui.backup.RestartActivity
 import app.getknit.knit.ui.image.BlobFetcher
@@ -99,6 +100,13 @@ class KnitApplication :
         // a sequence.
         koinApp.koin.get<CoroutineScope>().launch {
             koinApp.koin.get<SettingsStore>().seedDefaultSpools(resources.getStringArray(R.array.default_spools).toList())
+        }
+
+        // Settle what the previous process left about hosting a Wi-Fi Direct group (ADR 2026-10.w3dw): a group of ours
+        // still marked up means it died hosting. Before any group goes up (the lease waits on it), so a second death
+        // latches before a third try; one store read on a phone that never hosted.
+        koinApp.koin.get<CoroutineScope>().launch {
+            runCatching { koinApp.koin.get<DirectHostGuard>().load() }
         }
 
         // Clear a Wi-Fi Direct group a previous run left on air. Nothing removes one when the process dies

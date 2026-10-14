@@ -91,6 +91,10 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   `android.net.wifi.p2p` importer. Wi-Fi Aware does **not** yield to our own P2P on Android 12+, so it must
   be paused explicitly — that is what `pause`/`resume` are for. The radio is shared with calls through
   `DirectWifiLease` (ADR 2026-10.kxnw): every user holds a leased view, never `AndroidDirectWifi` itself.
+  **Before touching `DirectHostGuard`, `DirectWifi.hostRefusal`, `TransferRefusal.CannotHost`, `device/SystemImage` /
+  `DeviceImage` or the `direct_host_` keys:** READ ADR 2026-10.w3dw — a generic system image over an older vendor
+  never hosts a group (its `system_server` dies when a client joins), nor does a phone latched after two unexplained
+  deaths while hosting in one boot; the lease refuses the host before `createGroup`, and a joiner is never refused.
 - **When touching `call/`, `MessageContent.CTL_CALL` / `cl`, `CallPayload`, `Protocol.CAP_CALL`,
   `MeshManager.extraCapabilities`, the spool's `turnreq`/`turncred` (`SpoolConnection.turnCredential`,
   `ScopeSync.turnCredentials`), `di/CallWiring`, `data/settings/CallTombStore`, `SettingsStore.callsRelayAll`,
@@ -133,6 +137,11 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   unsigned, compactly sealed `talk` frames nobody custodies, sized for Coded PHY (a pin in `TalkSealTest`), so nothing
   lands in the thread; a live call drops to one, without a frame, only when both OFFER and ANSWER carried the walkie
   bit (parked since 2026-10-09: `CallManager.dropToWalkie` is off, so a lost live call ends `no_route`); the flag is read once, as `CallWiring.WALKIE_WIRED`.
+  **Before touching `call/CaptureHealth` (`CaptureProfile`, `CapturePolicy`, `CaptureWatch`), `ui/call/CaptureTap`,
+  the audio module in `WebRtcCallMedia` or the `call_capture_` keys:** READ ADR 2026-10.kw29 and `docs/VOICE_CALLS.md`
+  C-3.13-12/13 — a generic image (and a phone where a call went silent) records calls from `VOICE_RECOGNITION` with
+  WebRTC's own canceller, the module is rebuilt per profile between calls only, and the tap watches every 10 ms buffer
+  and moves a call whose path hands it only zeros onto its own recorder mid-call.
   **Before touching casts — `SpoolCast`, `SpoolConnection.castOut` / `canCast` / `ticketedCast`, `ScopeSync.cast` /
   `canCast` / `handleCast`, `ScopeCrypto.sealCast` / `openCast`, `ScopeFrames.castEligible`, `CallPayload.ct` or
   `TalkLink.SPOOL`:** READ `docs/VOICE_CALLS.md` §2.7 and ADR 2026-10.79yb's sixth amendment — a chunk with no mesh path

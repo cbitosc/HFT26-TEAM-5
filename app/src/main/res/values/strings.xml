@@ -311,6 +311,7 @@
     <string name="chat_transfer_hotspot">Turn off your hotspot or screen sharing first</string>
     <string name="chat_transfer_background">Keep Knit on screen to send a file directly on this version of Android</string>
     <string name="chat_transfer_gone">That offer is no longer open</string>
+    <string name="chat_transfer_cannot_host">This phone can receive large files but not send them. Diagnostics says why.</string>
     <string name="chat_transfer_incoming">Wants to send you this file</string>
     <string name="chat_transfer_offered">Waiting for them to accept</string>
     <string name="chat_transfer_accept">Accept</string>
@@ -1165,6 +1166,18 @@
     <string name="diagnostics_moderation_reset_title">Try the model again?</string>
     <string name="diagnostics_moderation_reset_body">Knit will try to load it once more the next time it starts. If it closes the app again, Knit will turn it back off.</string>
     <string name="diagnostics_moderation_reset_confirm">Try again</string>
+    <string name="diagnostics_direct_host_off_label">This phone doesn\'t start direct Wi-Fi connections</string>
+    <string name="diagnostics_direct_host_generic_body">It runs a generic system image over an older phone\'s drivers, and on this combination another phone connecting to one restarts this phone. It can still receive large files and join a call\'s direct connection. It can\'t send large files, and the calls it places go over other routes.</string>
+    <string name="diagnostics_direct_host_latched_body">Knit stopped starting them because Knit was closed twice while one was open, with no other cause. It can still receive large files and join a call\'s direct connection.</string>
+    <string name="diagnostics_direct_host_reset_action">Start them again</string>
+    <string name="diagnostics_direct_host_reset_done">Knit will start direct Wi-Fi connections again</string>
+    <string name="diagnostics_call_capture_fallback_label">Calls record from the backup microphone path</string>
+    <string name="diagnostics_call_capture_standard_label">Calls record from the usual microphone path</string>
+    <string name="diagnostics_call_capture_generic_body">This phone runs a generic system image over an older phone\'s drivers, which lack the path calls usually record from. Knit records calls the way it records walkie messages and cancels echo itself. A Bluetooth headset\'s microphone may not be used.</string>
+    <string name="diagnostics_call_capture_silent_body">A call on this phone sent only silence on the usual path, so Knit moved to the one it records walkie messages from and cancels echo itself.</string>
+    <string name="diagnostics_call_capture_chosen_body">Set by hand for a test.</string>
+    <string name="diagnostics_call_capture_reset_action">Use the usual path again</string>
+    <string name="diagnostics_call_capture_reset_done">The next call records from this phone\'s default path</string>
     <string name="diagnostics_moderation_reset_done">Knit will try the model again next time it starts</string>
 
     <!-- Generic actions / content descriptions -->

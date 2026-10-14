@@ -6,14 +6,17 @@ import android.util.Log
 import androidx.room3.withWriteTransaction
 import app.getknit.knit.BuildConfig
 import app.getknit.knit.call.CallManager
+import app.getknit.knit.crash.ProcessExitReasons
 import app.getknit.knit.data.KnitDatabase
 import app.getknit.knit.data.MeshBlobStore
 import app.getknit.knit.data.crypto.IdentityKeyStore
 import app.getknit.knit.data.forward.ForwardRepository
 import app.getknit.knit.data.relay.RelayStatusRepository
+import app.getknit.knit.data.settings.DirectHostStore
 import app.getknit.knit.data.settings.LoraPlaneStateStore
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.data.settings.TicketKeyStore
+import app.getknit.knit.device.DeviceImage
 import app.getknit.knit.fieldlog.FIELD_LOG_SHARE_DIR
 import app.getknit.knit.fieldlog.FieldJournal
 import app.getknit.knit.fieldlog.FieldLog
@@ -66,10 +69,13 @@ import app.getknit.knit.mesh.spool.SpoolDialer
 import app.getknit.knit.mesh.spool.TicketIssuer
 import app.getknit.knit.mesh.wear.WearStatusSource
 import app.getknit.knit.mesh.wifiaware.WifiAwareTransport
+import app.getknit.knit.moderation.modelGuardStamp
 import app.getknit.knit.net.AndroidInternetGate
 import app.getknit.knit.net.InternetGate
 import app.getknit.knit.transfer.AndroidDirectWifi
 import app.getknit.knit.transfer.AndroidTransferFiles
+import app.getknit.knit.transfer.DirectHostGuard
+import app.getknit.knit.transfer.DirectHostJournal
 import app.getknit.knit.transfer.DirectWifi
 import app.getknit.knit.transfer.DirectWifiLease
 import app.getknit.knit.transfer.TransferFiles
@@ -394,7 +400,21 @@ val meshModule =
         // (MeshManager) and the one state machine. Its inbound half reaches it through MeshManager's
         // onTransferSignal hook above, resolved late so neither singleton constructs the other. The radio is
         // shared with a call between neighbours (call/DirectCallPath) through one lease; the transfer holds its view.
-        single { DirectWifiLease(AndroidDirectWifi(androidContext(), get<MeshTransport>())) }
+        // A phone where hosting a group takes the phone down never hosts one (ADR 2026-10.w3dw): a generic system image
+        // over an older vendor, known at start, or a latch after it died hosting twice. The lease asks it before every
+        // group of ours goes up; KnitApplication settles what the previous process left.
+        single<DirectHostJournal> { DirectHostStore(get()) }
+        single {
+            DirectHostGuard(
+                journal = get(),
+                exits = get<ProcessExitReasons>()::lastExit,
+                stamp = modelGuardStamp(BuildConfig.VERSION_CODE, Build.FINGERPRINT.orEmpty()),
+                genericImage = get<DeviceImage>().genericOnOlderVendor,
+                elapsed = SystemClock::elapsedRealtime,
+                log = { Log.i("KnitTransfer", it) },
+            )
+        }
+        single { DirectWifiLease(AndroidDirectWifi(androidContext(), get<MeshTransport>()), gate = get<DirectHostGuard>()) }
         single<DirectWifi> { get<DirectWifiLease>().leasedTo(DirectWifiLease.TRANSFER) }
         single<TransferFiles> { AndroidTransferFiles(androidContext()) }
         single<TransferSignals> { get<MeshManager>() }

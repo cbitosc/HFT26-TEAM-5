@@ -30,6 +30,7 @@ import androidx.compose.ui.unit.dp
 import app.getknit.knit.call.WalkiePolicy
 import app.getknit.knit.call.WalkieStats
 import java.util.Locale
+import kotlin.math.log10
 
 /**
  * The call screen's diagnostics card (experimental, `CALLS_WIRED`): the live numbers of the media — round trip, jitter,
@@ -40,6 +41,8 @@ import java.util.Locale
 internal fun CallDiagnostics(
     stats: CallStats,
     modifier: Modifier = Modifier,
+    // The microphone's path and health (C-3.13-13), null where nothing reports it.
+    capture: CaptureStatus? = null,
 ) {
     Surface(
         modifier = modifier.fillMaxWidth(),
@@ -58,6 +61,12 @@ internal fun CallDiagnostics(
                 Metric("↓ Receive", kbps(stats.receiveKbps), Modifier.weight(1f))
                 Spacer(Modifier.weight(1f))
             }
+            // What the microphone hands WebRTC and what is heard: "silent" with packets flowing is a dead microphone.
+            Row(Modifier.fillMaxWidth()) {
+                Metric("↑ Mic", level(stats.micLevel), Modifier.weight(1f))
+                Metric("↓ Heard", level(stats.heardLevel), Modifier.weight(1f))
+                Spacer(Modifier.weight(1f))
+            }
             // Loss each way now, then over the whole call: the first two are what the screen's warning reads.
             Row(Modifier.fillMaxWidth()) {
                 Metric("↑ Loss now", percent(stats.sentLossPercent), Modifier.weight(1f))
@@ -69,6 +78,7 @@ internal fun CallDiagnostics(
                 Detail("Path", pathOf(stats))
                 Detail("Relay", relayOf(stats))
                 Detail("Prefer", stats.prefer?.replace('_', ' ') ?: NONE)
+                Detail("Mic", captureOf(capture))
                 Detail("Codec", codecOf(stats))
                 Detail("DTLS", dtlsOf(stats))
                 Detail("SRTP", stats.srtpCipher ?: NONE)
@@ -174,6 +184,7 @@ private fun Detail(
 
 private val DetailLabelWidth = 56.dp
 private const val NONE = "—"
+private const val DB_PER_DECADE = 20.0
 private const val FINE_BELOW = 10.0
 private const val HZ_PER_KHZ = 1_000
 private const val BPS_PER_KBPS = 1_000
@@ -201,6 +212,20 @@ internal fun framesOf(stats: WalkieStats): String =
 internal fun ms(value: Double?): String = value?.let { "${decimal(it)} ms" } ?: NONE
 
 internal fun kbps(value: Double?): String = value?.let { "${decimal(it)} kbps" } ?: NONE
+
+/** An audio level (0..1) in dBFS, "silent" at exactly zero. */
+internal fun level(value: Double?): String =
+    when {
+        value == null -> NONE
+        value <= 0.0 -> "silent"
+        else -> "%.0f dB".format(Locale.ROOT, DB_PER_DECADE * log10(value))
+    }
+
+/** "fallback · switched · live": the profile the call recorded on, whether it moved, and the microphone's health. */
+internal fun captureOf(capture: CaptureStatus?): String =
+    capture
+        ?.let { listOfNotNull(it.profile, "switched".takeIf { _ -> it.switched }, it.health.name.lowercase()).joinToString(" · ") }
+        ?: NONE
 
 internal fun percent(value: Double?): String = value?.let { "%.1f %%".format(Locale.ROOT, it) } ?: NONE
 

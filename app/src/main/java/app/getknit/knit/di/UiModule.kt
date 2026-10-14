@@ -118,6 +118,8 @@ val uiModule =
                 get(),
                 radios = RadioSupport.probe(androidContext()),
                 loraFacts = get<LoraStatusRepository>().facts,
+                hostGuard = get(),
+                captureHealth = getOrNull(),
             )
         }
         viewModel { CrashLogViewModel(get()) }

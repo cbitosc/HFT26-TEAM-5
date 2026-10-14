@@ -202,7 +202,9 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   transfers.
   - **Read `refusal` first when nothing happens.** `WifiOff`, `Hotspot`, `Permission`, `NoWifiDirect`,
     `Background` and `Busy` each fail the transfer before the radio is touched, and from outside all six look
-    the same as a peer that never answered. Both ends also need `CAP_DIRECT_TRANSFER` pinned for each other
+    the same as a peer that never answered. A sender also reads `hostRefusal`: `CannotHost` is a phone that never
+    hosts a group (ADR 2026-10.w3dw; `directHost` says why — a generic system image, or a latch), so it receives
+    and never sends. Both ends also need `CAP_DIRECT_TRANSFER` pinned for each other
     (`…debug.STATE`), and both need to be in range at accept time, not just at offer time.
   - The trial oracle is logcat under `KnitTransfer` — `xfer <id> …` lines carry the group frequency, every
     address bound, and `done bytes= ms= MB/s=` — plus `sha256sum` on the receiver's
@@ -275,6 +277,16 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
       - `handMs`: a chunk's cut to the radio taking it, retries included.
       - `frameOut` and `frameIn`: the average frame's envelope bytes.
       - `failed`: chunks no radio took.
+  - **The microphone** (C-3.13-12/13, ADR 2026-10.kw29). `state` adds `capture`: `next` (the profile the next call
+    opens on, `STANDARD` or `FALLBACK`), `why` (`GENERIC_IMAGE`, `SILENT_CALL`, `CHOSEN` or null), `fault`, and
+    `open`, the call's microphone: its `profile`, whether it `switched` mid-call, and `health` (`WATCHING`, `LIVE`,
+    `SILENCED`, `SWITCHED` or `DEAD`). `--es op capture --es set standard|fallback|reset` picks the next call's path
+    (`reset` forgets every verdict, so the phone's image decides), and `--es fault silence|off` zeroes what the
+    module's own path records: a dead microphone on a phone whose works, for the mid-call switch's trial. `state` also
+    carries `directHost` (ADR 2026-10.w3dw: `Allowed`, `GenericImage` or `Latched(at=…)`). Logcat under `KnitCall`:
+    `webrtc: audio module on <profile> (<why>)` when one is built, `call capture: <HEALTH> on <profile>`, `call
+    capture: own recorder on source <n>, <rate>Hz x<channels>`. The diagnostics card's **↑ Mic** and **↓ Heard** read
+    `silent` for a microphone handing WebRTC zeros.
   - **The audio route** (§3.13, ADR 2026-10.wbua). Every call of either kind is a self-managed Telecom call, which
     owns where its audio goes.
     - `state`: the call's `audio` holds `current`, the route Telecom has it on (null until Telecom says), and

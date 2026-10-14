@@ -11,6 +11,8 @@ import app.getknit.knit.call.CallMedia
 import app.getknit.knit.call.CallSignals
 import app.getknit.knit.call.CallTimings
 import app.getknit.knit.call.CallWalkie
+import app.getknit.knit.call.CaptureHealth
+import app.getknit.knit.call.CaptureJournal
 import app.getknit.knit.call.DirectCallPath
 import app.getknit.knit.call.SystemCallSync
 import app.getknit.knit.call.SystemCalls
@@ -19,7 +21,9 @@ import app.getknit.knit.call.TurnSource
 import app.getknit.knit.data.MessageRepository
 import app.getknit.knit.data.PeerRepository
 import app.getknit.knit.data.settings.CallTombStore
+import app.getknit.knit.data.settings.CaptureStore
 import app.getknit.knit.data.settings.SettingsStore
+import app.getknit.knit.device.DeviceImage
 import app.getknit.knit.identity.Identity
 import app.getknit.knit.mesh.BulkRoute
 import app.getknit.knit.mesh.MeshController
@@ -27,6 +31,7 @@ import app.getknit.knit.mesh.MeshManager
 import app.getknit.knit.mesh.MeshTransport
 import app.getknit.knit.mesh.power.AppVisibility
 import app.getknit.knit.mesh.protocol.Protocol
+import app.getknit.knit.moderation.modelGuardStamp
 import app.getknit.knit.net.InternetGate
 import app.getknit.knit.transfer.DirectWifiLease
 import app.getknit.knit.ui.call.CallBarHost
@@ -116,8 +121,25 @@ private fun callGraph(): Module =
                 log = { Log.i(TAG, it) },
             )
         }
+        // C-3.13-12 (ADR 2026-10.kw29): which microphone path a call records from — the fallback on a generic system
+        // image over an older vendor, or once a call here captured only zeros. Read from the store on the app scope;
+        // until then, the image's own answer.
+        single<CaptureJournal> { CaptureStore(get()) }
         single {
-            WebRtcCallMedia(androidContext(), get<CoroutineScope>(), link = get<DirectCallPath>().link, log = { Log.i(TAG, it) })
+            CaptureHealth(
+                journal = get(),
+                stamp = modelGuardStamp(BuildConfig.VERSION_CODE, Build.FINGERPRINT.orEmpty()),
+                genericImage = get<DeviceImage>().genericOnOlderVendor,
+            ).also { health -> get<CoroutineScope>().launch { health.load() } }
+        }
+        single {
+            WebRtcCallMedia(
+                androidContext(),
+                get<CoroutineScope>(),
+                link = get<DirectCallPath>().link,
+                capture = get(),
+                log = { Log.i(TAG, it) },
+            )
         }
         // The call screen reads the media's stats itself (its diagnostics card); the manager sees only the seam.
         single<CallMedia> { get<WebRtcCallMedia>() }
@@ -195,7 +217,8 @@ private fun callGraph(): Module =
 /**
  * When a call is placed as a walkie (§3.11): the peer must run one, and a live call must look impossible — no Internet
  * route here (no spool, no STUN or TURN), and no Wi-Fi Direct leg, which wants a neighbour that runs the transfer's
- * radio with direct calls on. A wrong guess costs little: a live call with no path drops to a walkie anyway.
+ * radio with direct calls on, and this phone able to host it. A wrong guess costs little: a live call with no path
+ * drops to a walkie anyway.
  */
 private fun Scope.walkieRoute(): CallWalkie =
     object : CallWalkie {
@@ -208,7 +231,9 @@ private fun Scope.walkieRoute(): CallWalkie =
             if (get<InternetGate>().isOnline()) return true
             val neighbour = get<MeshController>().neighbors.value.any { it.nodeId == peerId }
             val direct = (get<PeerRepository>().find(peerId)?.capabilities ?: 0L) and Protocol.CAP_DIRECT_TRANSFER != 0L
-            return neighbour && direct && !get<SettingsStore>().debugDirectCallsOff.first()
+            // The caller hosts the leg, so a phone that may not host has none to offer (ADR 2026-10.w3dw).
+            val hosts = get<DirectWifiLease>().mayHost()
+            return neighbour && direct && hosts && !get<SettingsStore>().debugDirectCallsOff.first()
         }
 
         override fun castTicketed() = get<MeshManager>().castTicketed()

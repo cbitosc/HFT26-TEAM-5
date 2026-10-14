@@ -597,6 +597,25 @@ class TransferManagerTest {
         }
 
     @Test
+    fun aPhoneThatMayNotHostRefusesToSendAndStillReceives() =
+        runBlocking {
+            val (a, b) = pair()
+            a.withClip()
+            b.withClip()
+            b.wifi.cannotHost = true
+            assertFalse(b.manager.mayOffer())
+            assertEquals(OfferOutcome.Refused(TransferRefusal.CannotHost), b.manager.offer("alice", "uri:clip"))
+            assertTrue(b.rows.isEmpty())
+            assertFalse("host" in b.log.events)
+            // The receiver only joins: the same phone takes Alice's file.
+            val id = offer(a)
+            awaitIncoming(b, id)
+            assertNull(b.manager.accept(id))
+            awaitPhase(b, id, TransferPhase.Done)
+            assertTrue(a.manager.mayOffer())
+        }
+
+    @Test
     fun malformedOrStaleOffersAreDroppedWithoutTrace() =
         runBlocking {
             val b = side("bob")

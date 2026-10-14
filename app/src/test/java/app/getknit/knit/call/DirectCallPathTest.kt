@@ -224,6 +224,17 @@ class DirectCallPathTest {
         }
 
     @Test
+    fun aCallerThatMayNotHostOffersNoLegButAsACalleeStillJoins() =
+        runBlocking {
+            // ADR 2026-10.w3dw: the caller hosts (C-3.10-3), and hosting takes this phone down, so it offers nothing.
+            alice.wifi.cannotHost = true
+            assertNull(alice.path.invite(ID, BOB))
+            assertTrue(synchronized(alice.lines) { alice.lines.any { "CannotHost" in it } })
+            assertTrue(alice.path.canJoin(BOB, prewarm = true))
+            assertEquals(0, alice.radioCalls("host"))
+        }
+
+    @Test
     fun aRadioSomeoneElseHoldsIsNeitherJoinedNorReleased() =
         runBlocking {
             // A transfer holds the radio: the call's leg is refused, and its end gives back nothing of the transfer's.

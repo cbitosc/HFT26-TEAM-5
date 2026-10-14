@@ -42,6 +42,11 @@ object SettingsKeys {
     // [TRANSIENT_PREFIXES].
     const val CALL_TOMBS = "call_tombs"
 
+    // Whether this phone may host a Wi-Fi Direct group (`DirectHostStore`, ADR 2026-10.w3dw) and which microphone a
+    // call records from (`CaptureStore`, ADR 2026-10.kw29): facts about this phone's ROM, so in [TRANSIENT_PREFIXES].
+    const val DIRECT_HOST_PREFIX = "direct_host_"
+    const val CALL_CAPTURE_PREFIX = "call_capture_"
+
     /**
      * Keys a backup never carries: state about *this phone's* radios and ROM (the Aware give-up and
      * initiator-hold journals, the model poison-pill latch), and the paired LoRa board's address, names and
@@ -54,7 +59,9 @@ object SettingsKeys {
      * entitlement ticket (`spool_ticket…`, ADR 2026-10.xkp4) is a bearer grant to this phone for a day, and must not
      * ride a backup file anywhere; what the ticket refresher knows about its asks (`spool_key_state…`, ADR 2026-10.3sk7)
      * is this phone's schedule, so a restored phone asks at once. The customer key beside it rides, like a `?k=` token.
-     * The calls this phone saw end (`call_tombs`) are this phone's too: a restored phone holds new sessions.
+     * The calls this phone saw end (`call_tombs`) are this phone's too: a restored phone holds new sessions. So are the
+     * Wi-Fi Direct host guard (`direct_host_`) and the call microphone's verdict (`call_capture_`): another phone's ROM
+     * is not this one's.
      */
     val TRANSIENT_PREFIXES: List<String> =
         listOf(
@@ -72,5 +79,7 @@ object SettingsKeys {
             "spool_ticket",
             "spool_key_state",
             CALL_TOMBS,
+            DIRECT_HOST_PREFIX,
+            CALL_CAPTURE_PREFIX,
         )
 }

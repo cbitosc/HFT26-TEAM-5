@@ -103,6 +103,7 @@ import app.getknit.knit.call.CallManager
 import app.getknit.knit.call.CallPhase
 import app.getknit.knit.call.CallRouting
 import app.getknit.knit.call.CallState
+import app.getknit.knit.call.CaptureWatch
 import app.getknit.knit.call.SystemCallSync
 import app.getknit.knit.call.TalkLink
 import app.getknit.knit.call.WalkieStats
@@ -225,6 +226,7 @@ class CallActivity :
         val mediaUp = state?.walkie != true && state?.phase in MEDIA_UP
         var route by remember { mutableStateOf<String?>(null) }
         var stats by remember { mutableStateOf<CallStats?>(null) }
+        var capture by remember { mutableStateOf<CaptureStatus?>(null) }
         // One judge per call: its hysteresis spans the call's readings, never two calls'.
         val judge = remember(state?.id) { QualityJudge() }
         var quality by remember(state?.id) { mutableStateOf<Quality?>(null) }
@@ -232,6 +234,7 @@ class CallActivity :
             while (mediaUp) {
                 route = calls.route()
                 stats = media.stats()
+                capture = media.captureStatus()
                 quality = judge.next(stats)
                 delay(POLL_MS)
             }
@@ -255,6 +258,7 @@ class CallActivity :
             route = route.takeIf { state?.walkie != true },
             stats = stats.takeIf { state?.walkie != true },
             quality = quality.takeIf { state?.walkie != true },
+            capture = capture.takeIf { state?.walkie != true },
             caller = caller,
             locked = locked,
             hideFlagged = hideFlagged,
@@ -387,6 +391,8 @@ internal fun CallScreen(
     onTalkCancel: () -> Unit = {},
     walkieStats: WalkieStats? = null,
     quality: Quality? = null,
+    // The microphone's health (C-3.13-13): a dead or silenced one is the note the screen shows first.
+    capture: CaptureStatus? = null,
     caller: CallerContext? = null,
     locked: Boolean = false,
     hideFlagged: Boolean = true,
@@ -401,14 +407,14 @@ internal fun CallScreen(
         when {
             !showStats || phase !in MEDIA_UP -> null
             walkieUp -> walkieStats?.let { s -> { m -> WalkieDiagnostics(s, m) } }
-            else -> stats?.let { s -> { m -> CallDiagnostics(s, m) } }
+            else -> stats?.let { s -> { m -> CallDiagnostics(s, m, capture) } }
         }
     Surface(modifier = modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
         BoxWithConstraints(Modifier.fillMaxSize().safeDrawingPadding().padding(horizontal = 24.dp, vertical = 16.dp)) {
             // With the card up, a phone too short for the stacked face puts it beside the name instead.
             val inline = diagnostics != null && maxHeight < StackedMinHeight
             val view = route?.let { routeView(it, stats) }
-            val note = callNote(state, name, quality, view)
+            val note = callNote(state, name, quality, view, capture)
             val callerShown = phase != null && phase != CallPhase.Ended && !walkieUp
             Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
                 Header(stats = if (phase in MEDIA_UP) showStats else null, onStats = { showStats = it })
@@ -1013,8 +1019,9 @@ internal data class CallNote(
 )
 
 /**
- * The note for now: a [quality] warning wins; else, for [MOVED_NOTE_MS] after the route's label changes mid-call, the
- * new route ("Switched to Relayed · Cellular"). The first route a call settles on is not a move.
+ * The note for now: a microphone that hands the call no sound wins (C-3.13-13), then a [quality] warning; else, for
+ * [MOVED_NOTE_MS] after the route's label changes mid-call, the new route ("Switched to Relayed · Cellular"). The first
+ * route a call settles on is not a move.
  */
 @Composable
 private fun callNote(
@@ -1022,6 +1029,7 @@ private fun callNote(
     name: String,
     quality: Quality?,
     route: RouteView?,
+    capture: CaptureStatus? = null,
 ): CallNote? {
     var settled by remember(state?.id) { mutableStateOf<String?>(null) }
     var moved by remember(state?.id) { mutableStateOf<String?>(null) }
@@ -1037,9 +1045,21 @@ private fun callNote(
         }
     }
     if (state?.phase != CallPhase.Connected || state.walkie) return null
+    captureText(capture, name)?.let { return CallNote(it, QualityLevel.POOR) }
     quality?.issue?.takeIf { quality.level != QualityLevel.GOOD }?.let { return CallNote(issueText(it, name), quality.level) }
     return moved?.let { CallNote("Switched to $it", QualityLevel.GOOD) }
 }
+
+/** What the screen says of a microphone that gives the call no sound, or null while it does. */
+internal fun captureText(
+    capture: CaptureStatus?,
+    name: String,
+): String? =
+    when (capture?.health) {
+        CaptureWatch.Health.DEAD -> "$name can't hear you: this phone's microphone isn't giving Knit any sound"
+        CaptureWatch.Health.SILENCED -> "$name can't hear you: Android silenced the microphone"
+        else -> null
+    }
 
 /** How the screen words an issue: a direction ("breaking up for Ada"), never whose network is to blame. */
 internal fun issueText(

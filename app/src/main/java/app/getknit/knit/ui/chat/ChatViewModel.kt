@@ -2243,13 +2243,14 @@ class ChatViewModel(
      * Why this thread cannot take a large file, or null when it can: a DM only, toward a pinned profile
      * carrying [Protocol.CAP_DIRECT_TRANSFER] (the [refusalForFile] rule — gate the send on a fact the peer
      * told us, never the affordance), and a peer this phone can see right now, since the offer has to be
-     * answered while both are still in range.
+     * answered while both are still in range. This phone must be one that may host the group (ADR 2026-10.w3dw).
      */
     private suspend fun refusalForTransfer(): Int? {
         // A group is a roster, not a row: the group repository answers for every id (a relaxed double included),
         // so the same members test refusalForFile uses is the honest one here.
         val members = groups.find(conversationId)?.let { GroupMembersStore.decode(it.members) }.orEmpty()
         if (isRoom || conversationId == Conversations.MESHTASTIC || members.isNotEmpty()) return R.string.chat_transfer_needs_dm
+        if (!transfers.mayOffer()) return R.string.chat_transfer_cannot_host
         if ((peers.find(conversationId)?.capabilities ?: 0L) and Protocol.CAP_DIRECT_TRANSFER == 0L) {
             return R.string.chat_transfer_peer_too_old
         }

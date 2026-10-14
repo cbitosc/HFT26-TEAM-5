@@ -97,6 +97,19 @@ interface DirectWifi {
     /** Why a transfer cannot start on this device right now, or null when it can. A snapshot, re-read per attempt. */
     fun refusal(): TransferRefusal?
 
+    /**
+     * Whether this device may host a group at all: false on a phone where hosting is known to take the phone down
+     * (ADR 2026-10.w3dw). A device fact, not a moment's state; joining is never refused for it.
+     */
+    fun mayHost(): Boolean = true
+
+    /**
+     * Why this device cannot *host* a group right now, or null when it can: [TransferRefusal.CannotHost] where it may
+     * never host, ahead of anything passing, else [refusal]. A sender or a caller asks this; a receiver or a callee asks
+     * [refusal].
+     */
+    fun hostRefusal(): TransferRefusal? = if (mayHost()) refusal() else TransferRefusal.CannotHost
+
     /** Stands up the group and returns once it is formed (within [timeoutMs]); throws [DirectWifiException] otherwise. */
     suspend fun host(
         credentials: GroupCredentials,

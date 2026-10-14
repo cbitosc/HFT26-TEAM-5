@@ -87,6 +87,21 @@ class CallStatsReaderTest {
     }
 
     @Test
+    fun theMicrophoneAndTheHeardLevelsAreRead() {
+        // C-3.13-13: a microphone handing WebRTC zeros reads "silent" with packets still going out.
+        val withLevels =
+            report(0.0, 0, 0).map {
+                if (it.type == "inbound-rtp") StatEntry(it.id, it.type, it.timestampUs, it.members + ("audioLevel" to 0.1)) else it
+            } + StatEntry("S1", "media-source", 0.0, mapOf("kind" to "audio", "audioLevel" to 0.0))
+        val stats = CallStatsReader().read(withLevels, wifiDirect = false)
+        assertEquals(0.0, stats.micLevel!!, 1e-9)
+        assertEquals(0.1, stats.heardLevel!!, 1e-9)
+        assertEquals("silent", level(stats.micLevel))
+        assertEquals("-20 dB", level(stats.heardLevel))
+        assertEquals("—", level(null))
+    }
+
+    @Test
     fun bitratesComeFromTheSecondReportOn() {
         val reader = CallStatsReader()
         val first = reader.read(report(0.0, 0, 0), wifiDirect = false)

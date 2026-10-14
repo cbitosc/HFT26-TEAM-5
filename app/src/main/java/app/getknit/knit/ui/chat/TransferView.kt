@@ -79,6 +79,7 @@ fun transferRefusalMessage(refusal: TransferRefusal): Int =
         TransferRefusal.Hotspot -> R.string.chat_transfer_hotspot
         TransferRefusal.Background -> R.string.chat_transfer_background
         TransferRefusal.Gone -> R.string.chat_transfer_gone
+        TransferRefusal.CannotHost -> R.string.chat_transfer_cannot_host
     }
 
 /**

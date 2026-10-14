@@ -20,6 +20,8 @@ import app.getknit.knit.call.CallAudioRoute
 import app.getknit.knit.call.CallKind
 import app.getknit.knit.call.CallManager
 import app.getknit.knit.call.CallPhase
+import app.getknit.knit.call.CaptureHealth
+import app.getknit.knit.call.CaptureProfile
 import app.getknit.knit.call.DirectCallPath
 import app.getknit.knit.call.DirectMode
 import app.getknit.knit.call.StunServers
@@ -108,6 +110,7 @@ import app.getknit.knit.notifications.NotifMessage
 import app.getknit.knit.notifications.Notifier
 import app.getknit.knit.review.ReviewPromptPolicy
 import app.getknit.knit.review.ReviewPrompter
+import app.getknit.knit.transfer.DirectHostGuard
 import app.getknit.knit.transfer.OfferOutcome
 import app.getknit.knit.transfer.TransferManager
 import app.getknit.knit.ui.call.CallActivity
@@ -2161,6 +2164,12 @@ class DebugBridgeReceiver :
      * The audio route (§3.13): `audio [--es to speaker|earpiece|wired|bluetooth]` moves the call's audio to the first
      * route of that kind the system offers (none named: just reports), and `state` carries `audio`: the route Telecom
      * has the call on (`current`, null until it says) and every route it offers (`available`), each `kind`/`name`/`key`.
+     *
+     * The microphone (§3.13, C-3.13-12/13, ADR 2026-10.kw29): `capture --es set standard|fallback|reset` picks the path
+     * the next call records from (`reset` forgets every verdict, so the image decides), and `--es fault silence|off`
+     * zeroes what the standard path records, a dead microphone for a trial on a phone whose works. `state` carries
+     * `capture`: the profile the next call opens on and why, and the open call's microphone (`profile`, `switched`,
+     * `health`: WATCHING, LIVE, SILENCED, SWITCHED or DEAD). Hosting (ADR 2026-10.w3dw): `directHost`.
      */
     @Suppress("CyclomaticComplexMethod", "ReturnCount", "LongMethod") // a flat dispatch over the ops
     private suspend fun handleCall(
@@ -2300,6 +2309,26 @@ class DebugBridgeReceiver :
                 return reply(if (moved) "ok" else "refused", "audio to ${route.name}").put("audio", audioJson(system))
             }
 
+            "capture" -> {
+                val health = getKoin().get<CaptureHealth>()
+                val set = intent.getStringExtra("set")
+                if (set == "reset") {
+                    health.reset()
+                } else if (set != null) {
+                    val profile =
+                        CaptureProfile.entries.firstOrNull { it.name.equals(set, ignoreCase = true) }
+                            ?: return reply("error", "set must be standard|fallback|reset")
+                    health.choose(profile)
+                }
+                when (intent.getStringExtra("fault")) {
+                    null -> Unit
+                    "silence" -> getKoin().get<WebRtcCallMedia>().faultSilence = true
+                    "off" -> getKoin().get<WebRtcCallMedia>().faultSilence = false
+                    else -> return reply("error", "fault must be silence|off")
+                }
+                return reply("ok", "capture").put("capture", captureJson())
+            }
+
             "dropgroup" -> {
                 val dropped = getKoin().get<DirectCallPath>().dropGroup()
                 return reply(if (dropped) "ok" else "error", if (dropped) "lane closed; the radio goes back" else "no live leg")
@@ -2326,6 +2355,14 @@ class DebugBridgeReceiver :
             .put("turnPrune", if (WebRtcCallMedia.turnPruneOff) "off" else "on")
             .put("directMode", if (getKoin().get<SettingsStore>().debugDirectCallsOff.first()) "off" else calls.directMode.name.lowercase())
             .put("direct", getKoin().getOrNull<DirectCallPath>()?.describe() ?: JSONObject.NULL)
+            .put(
+                "directHost",
+                getKoin()
+                    .getOrNull<DirectHostGuard>()
+                    ?.verdict
+                    ?.value
+                    ?.toString() ?: JSONObject.NULL,
+            ).put("capture", captureJson())
             .put(
                 "call",
                 state?.let {
@@ -2358,6 +2395,23 @@ class DebugBridgeReceiver :
                         .put("lost", it.lost.get())
                         .put("stats", walkieStatsJson(it.stats()))
                 } ?: JSONObject.NULL,
+            )
+    }
+
+    /** The microphone path the next call opens on and why, and the open call's microphone (C-3.13-12/13). */
+    private fun captureJson(): Any {
+        val health = getKoin().getOrNull<CaptureHealth>() ?: return JSONObject.NULL
+        val media = getKoin().getOrNull<WebRtcCallMedia>()
+        val choice = health.choice.value
+        val open = media?.captureStatus()
+        return JSONObject()
+            .put("next", choice.profile.name)
+            .put("why", choice.reason?.name ?: JSONObject.NULL)
+            .put("fault", media?.faultSilence == true)
+            .put(
+                "open",
+                open?.let { JSONObject().put("profile", it.profile).put("switched", it.switched).put("health", it.health.name) }
+                    ?: JSONObject.NULL,
             )
     }
 
@@ -2450,7 +2504,15 @@ class DebugBridgeReceiver :
         return JSONObject()
             .put("status", "ok")
             .put("refusal", directWifi.refusal()?.name ?: JSONObject.NULL)
-            .put("live", live)
+            .put("hostRefusal", directWifi.hostRefusal()?.name ?: JSONObject.NULL)
+            .put(
+                "directHost",
+                getKoin()
+                    .getOrNull<DirectHostGuard>()
+                    ?.verdict
+                    ?.value
+                    ?.toString() ?: JSONObject.NULL,
+            ).put("live", live)
             .put("rows", rows)
     }
 

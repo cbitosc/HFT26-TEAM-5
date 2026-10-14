@@ -26,6 +26,13 @@ before changing behaviour — this file is the map, they are the reasoning.
   `leasedTo("transfer")` as its `DirectWifi`, a call the one leased to its call id. The first host or join takes
   the lease; the other view is refused `TransferRefusal.Busy` and its `release()` is a no-op — which matters,
   because `TransferManager.finish` releases on every end path, hosted or not.
+- `DirectHostGuard` — **a phone where hosting takes the phone down never hosts** (ADR 2026-10.w3dw). The lease asks
+  it before every group of ours goes up, so a refused host never reaches `createGroup`; `DirectWifi.hostRefusal()`
+  answers `TransferRefusal.CannotHost` for a sender or a caller, while a receiver or a callee asks `refusal()` alone
+  and is never refused for it. Two sources: a generic system image over an older vendor (`device/SystemImage`, a
+  TrebleDroid GSI's `system_server` dies when a client joins its group), and a latch after two unexplained deaths
+  while hosting in one boot (`DirectHostStore`'s marker, a reboot told apart by `elapsedRealtime`). Diagnostics shows
+  which, and resets a latch.
 - `AndroidTransferFiles` — MediaStore `Downloads/Knit` with `IS_PENDING`, committed only after the trailer
   verifies.
 - Signaling is one sealed DM ctl (`MessageContent.CTL_TRANSFER` + `xf`), gated on

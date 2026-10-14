@@ -1,8 +1,12 @@
 package app.getknit.knit.ui.call
 
 import android.content.Context
+import android.media.AudioManager
+import android.media.MediaRecorder
 import app.getknit.knit.call.CallMedia
 import app.getknit.knit.call.CallSession
+import app.getknit.knit.call.CaptureHealth
+import app.getknit.knit.call.CaptureProfile
 import app.getknit.knit.call.DirectLink
 import app.getknit.knit.call.MediaEvent
 import app.getknit.knit.call.SdpGuard
@@ -51,14 +55,28 @@ import kotlin.coroutines.resume
  * detector is [DirectNetworkDetector], which adds the group [link] names as an Ethernet-typed network, so its pair wins
  * on cost. A group candidate gathered after the description is no CANDS line — only a peer inside the group can reach
  * it — but a [MediaEvent.DirectCandidates] for the call's lane, as soon as it is gathered.
+ *
+ * **The microphone is watched, and its path is chosen per phone** (C-3.13-12/13, ADR 2026-10.kw29). The audio module is
+ * built for the profile [capture] says — the call-tuned `VOICE_COMMUNICATION` path, or the fallback a generic system
+ * image needs — and rebuilt, factory and all, between calls when that changes. Every module's [CaptureTap] watches what
+ * it records and moves a call whose path hands it only zeros onto its own recorder mid-call.
  */
 internal class WebRtcCallMedia(
     private val context: Context,
     private val scope: CoroutineScope,
     private val link: StateFlow<DirectLink?>,
+    private val capture: CaptureHealth,
     private val log: (String) -> Unit,
 ) : CallMedia {
-    private val factory: PeerConnectionFactory by lazy {
+    /** One audio module and the factory over it, for one capture profile. */
+    private class Audio(
+        val profile: CaptureProfile,
+        val factory: PeerConnectionFactory,
+        val module: JavaAudioDeviceModule,
+        val tap: CaptureTap,
+    )
+
+    private val initialized: Unit by lazy {
         // Before the first monitor starts: it builds its detector from this factory, once per start.
         NetworkMonitor.getInstance().setNetworkChangeDetectorFactory { observer, ctx ->
             DirectNetworkDetector(observer, ctx, link, scope, log)
@@ -66,14 +84,11 @@ internal class WebRtcCallMedia(
         PeerConnectionFactory.initialize(
             PeerConnectionFactory.InitializationOptions.builder(context.applicationContext).createInitializationOptions(),
         )
-        val adm =
-            JavaAudioDeviceModule
-                .builder(context.applicationContext)
-                .setUseHardwareAcousticEchoCanceler(true)
-                .setUseHardwareNoiseSuppressor(true)
-                .createAudioDeviceModule()
-        PeerConnectionFactory.builder().setAudioDeviceModule(adm).createPeerConnectionFactory()
     }
+
+    private val audioLock = Any()
+
+    @Volatile private var audio: Audio? = null
 
     // The sessions open now, newest last: a glare's dropped one can close after its replacement opened.
     private val open = CopyOnWriteArrayList<WebRtcSession>()
@@ -84,11 +99,83 @@ internal class WebRtcCallMedia(
         relayOnly: Boolean,
         direct: Boolean,
         events: (MediaEvent) -> Unit,
-    ): CallSession =
-        WebRtcSession(factory, servers, relayOnly, direct, link, events, scope, log, path, onClosed = open::remove).also(open::add)
+    ): CallSession {
+        val a = audioFor(capture.choice.value.profile)
+        // A glare's replacement opens beside the dropped session on the same module: the call is the same call.
+        if (open.isEmpty()) a.tap.begin(a.profile.name.lowercase(), canSwitch = a.profile == CaptureProfile.STANDARD)
+        return WebRtcSession(a.factory, a.tap, servers, relayOnly, direct, link, events, scope, log, path, onClosed = ::closed)
+            .also(open::add)
+    }
+
+    private fun closed(session: WebRtcSession) {
+        open.remove(session)
+        if (open.isEmpty()) audio?.tap?.end()
+    }
+
+    /**
+     * The audio for [wanted]: the module built now when it matches, or while a session still holds it (the profile
+     * changes for the next call, never under one); else a fresh module and factory, the old ones disposed.
+     */
+    private fun audioFor(wanted: CaptureProfile): Audio =
+        synchronized(audioLock) {
+            initialized
+            val current = audio
+            if (current != null && (current.profile == wanted || open.isNotEmpty())) return current
+            current?.let {
+                it.factory.dispose()
+                it.module.release()
+            }
+            build(wanted).also { audio = it }
+        }
+
+    private fun build(profile: CaptureProfile): Audio {
+        val standard = profile == CaptureProfile.STANDARD
+        val tap =
+            CaptureTap(
+                audio = checkNotNull(context.getSystemService(AudioManager::class.java)),
+                onSwitched = { scope.launch { capture.learnedSilent() } },
+                log = log,
+            )
+        val module =
+            JavaAudioDeviceModule
+                .builder(context.applicationContext)
+                .setAudioSource(
+                    if (standard) MediaRecorder.AudioSource.VOICE_COMMUNICATION else MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                )
+                // Off on the fallback, so WebRTC runs its own canceller and suppressor: none rides that source.
+                .setUseHardwareAcousticEchoCanceler(standard)
+                .setUseHardwareNoiseSuppressor(standard)
+                .setAudioBufferCallback(tap)
+                .setAudioRecordErrorCallback(tap)
+                .setAudioRecordStateCallback(tap)
+                .createAudioDeviceModule()
+        tap.module = module
+        tap.faultSilence = pendingFault
+        val factory = PeerConnectionFactory.builder().setAudioDeviceModule(module).createPeerConnectionFactory()
+        log(
+            "webrtc: audio module on ${profile.name.lowercase()} (${capture.choice.value.reason
+                ?.name
+                ?.lowercase() ?: "default"})",
+        )
+        return Audio(profile, factory, module, tap)
+    }
 
     /** The newest open session's stats, for the call screen's diagnostics card; null with no session or no report. */
     suspend fun stats(): CallStats? = open.lastOrNull()?.stats()
+
+    /** The open call's microphone (C-3.13-13), or null with no call. */
+    fun captureStatus(): CaptureStatus? = audio?.tap?.status?.value
+
+    /** A trial's dead standard path (`…debug.CALL --es op capture --es fault silence`): the module's buffers zeroed. */
+    var faultSilence: Boolean
+        get() = audio?.tap?.faultSilence == true
+        set(value) {
+            pendingFault = value
+            audio?.tap?.faultSilence = value
+        }
+
+    // Carried to a module built later, so a fault armed before the first call applies to it.
+    @Volatile private var pendingFault = false
 
     companion object {
         /**
@@ -154,6 +241,8 @@ internal const val ROUTE_DIRECT = "wifi-direct"
 
 private class WebRtcSession(
     factory: PeerConnectionFactory,
+    // The call's microphone, watched: told of a mute, since the module records on under one.
+    private val tap: CaptureTap,
     servers: List<TurnServer>,
     relayOnly: Boolean,
     private val direct: Boolean,
@@ -361,6 +450,7 @@ private class WebRtcSession(
 
     override fun setMuted(muted: Boolean) {
         if (synchronized(lock) { !closed }) track.setEnabled(!muted)
+        tap.muted = muted
     }
 
     override suspend fun route(): String? = selected

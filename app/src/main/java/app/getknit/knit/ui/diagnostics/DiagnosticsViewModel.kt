@@ -4,6 +4,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.getknit.knit.BuildConfig
 import app.getknit.knit.R
+import app.getknit.knit.call.CaptureChoice
+import app.getknit.knit.call.CaptureHealth
 import app.getknit.knit.crash.CrashReportRef
 import app.getknit.knit.crash.CrashReports
 import app.getknit.knit.data.PeerRepository
@@ -28,6 +30,8 @@ import app.getknit.knit.mesh.lora.LoraPlane
 import app.getknit.knit.mesh.spool.SpoolStatus
 import app.getknit.knit.mesh.spool.spoolPresentPeers
 import app.getknit.knit.moderation.ModelLoadGuard
+import app.getknit.knit.transfer.DirectHostGuard
+import app.getknit.knit.transfer.HostVerdict
 import app.getknit.knit.ui.Reach
 import app.getknit.knit.ui.reachOf
 import kotlinx.coroutines.delay
@@ -129,6 +133,10 @@ class DiagnosticsViewModel(
     // Wall clock, for ageing the Internet plane's per-scope presence stamps. Injected so a test can drive
     // the linger; the combine re-runs on the [REFRESH_MS] metrics ticker, so an expiry lands within a tick.
     private val clock: () -> Long = System::currentTimeMillis,
+    // Whether this phone may host a Wi-Fi Direct group (ADR 2026-10.w3dw). Null in a test that never shows the row.
+    private val hostGuard: DirectHostGuard? = null,
+    // Which microphone path calls record from (ADR 2026-10.kw29). Null in a build without calls, and in most tests.
+    private val captureHealth: CaptureHealth? = null,
 ) : ViewModel() {
     private val myNodeId = MutableStateFlow<String?>(null)
 
@@ -167,6 +175,32 @@ class DiagnosticsViewModel(
     fun resetModerationLatch() {
         viewModelScope.launch { ModelLoadGuard.ALL.forEach { modelGuard.clear(it) } }
         _events.tryEmit(R.string.diagnostics_moderation_reset_done)
+    }
+
+    /**
+     * Whether this phone may host a Wi-Fi Direct group, and why not (ADR 2026-10.w3dw): the row shows only when it may
+     * not. Live, like [moderationLatched], because the reset is on this screen.
+     */
+    val directHost: StateFlow<HostVerdict> = hostGuard?.verdict ?: MutableStateFlow(HostVerdict.Allowed)
+
+    /** Lets a latched phone host again, at once: the next transfer sent or call placed raises its own group. */
+    fun resetDirectHost() {
+        val guard = hostGuard ?: return
+        viewModelScope.launch { guard.reset() }
+        _events.tryEmit(R.string.diagnostics_direct_host_reset_done)
+    }
+
+    /**
+     * The microphone path calls open on, while it is not the standard one for the standard reason (C-3.13-12): the row
+     * shows only then. Null in a build without calls.
+     */
+    val callCapture: StateFlow<CaptureChoice?> = captureHealth?.choice ?: MutableStateFlow(null)
+
+    /** Forgets a learned or chosen microphone path: the next call opens where the phone's image says. */
+    fun resetCallCapture() {
+        val health = captureHealth ?: return
+        viewModelScope.launch { health.reset() }
+        _events.tryEmit(R.string.diagnostics_call_capture_reset_done)
     }
 
     /** Whether this build offers the Bluetooth link limit row — debug builds only. */

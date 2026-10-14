@@ -49,6 +49,10 @@ internal data class CallStats(
     // Every answered candidate pair, fastest first ([pairsOf]), and how many are still unanswered.
     val pairs: List<PairInfo> = emptyList(),
     val pendingPairs: Int = 0,
+    // The level (0..1) of what this phone's microphone hands WebRTC, and of what it hears from the peer: zero on one
+    // side with packets flowing is a microphone sending silence (C-3.13-13).
+    val micLevel: Double? = null,
+    val heardLevel: Double? = null,
 )
 
 /** One answered candidate pair: its types, transport, relay leg, this phone's network for it and its round trip. */
@@ -184,6 +188,7 @@ internal class CallStatsReader {
         val remote = pair?.string("remoteCandidateId")?.let(byId::get)
         val codec = (inbound ?: outbound)?.string("codecId")?.let(byId::get)
         val remoteInbound = report.firstOrNull { it.type == "remote-inbound-rtp" && it.kind == "audio" }
+        val mediaSource = report.firstOrNull { it.type == "media-source" && it.kind == "audio" }
 
         val sent = outbound?.number("bytesSent")
         val received = inbound?.number("bytesReceived")
@@ -231,6 +236,8 @@ internal class CallStatsReader {
             relays = relaySummary(report),
             pairs = pairsOf(report),
             pendingPairs = report.count { it.type == "candidate-pair" && (it.number("responsesReceived") ?: 0.0) <= 0.0 },
+            micLevel = mediaSource?.number("audioLevel"),
+            heardLevel = inbound?.number("audioLevel"),
         )
     }
 

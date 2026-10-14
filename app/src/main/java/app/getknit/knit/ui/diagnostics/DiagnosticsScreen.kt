@@ -68,6 +68,9 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.getknit.knit.R
+import app.getknit.knit.call.CaptureChoice
+import app.getknit.knit.call.CaptureProfile
+import app.getknit.knit.call.CaptureReason
 import app.getknit.knit.crash.CrashReportRef
 import app.getknit.knit.mesh.MeshMetrics
 import app.getknit.knit.mesh.PlaneSupport
@@ -81,6 +84,7 @@ import app.getknit.knit.mesh.bluetooth.PromotionConfig
 import app.getknit.knit.mesh.lora.LoraPlane
 import app.getknit.knit.mesh.spool.SpoolStatus
 import app.getknit.knit.mesh.spool.SpoolUrl
+import app.getknit.knit.transfer.HostVerdict
 import app.getknit.knit.ui.DeviceSupervision
 import app.getknit.knit.ui.Reach
 import app.getknit.knit.ui.components.SectionHeader
@@ -114,6 +118,8 @@ fun DiagnosticsScreen(
     val bleLinkCap by viewModel.bleLinkCap.collectAsStateWithLifecycle()
     val nanOff by viewModel.nanOff.collectAsStateWithLifecycle()
     val directCallsOff by viewModel.directCallsOff.collectAsStateWithLifecycle()
+    val directHost by viewModel.directHost.collectAsStateWithLifecycle()
+    val callCapture by viewModel.callCapture.collectAsStateWithLifecycle()
     val blePhyMode by viewModel.blePhyMode.collectAsStateWithLifecycle()
     val blePhys by viewModel.blePhys.collectAsStateWithLifecycle()
     var confirmingModerationReset by remember { mutableStateOf(false) }
@@ -136,13 +142,17 @@ fun DiagnosticsScreen(
     val scanningMsg = stringResource(R.string.diagnostics_scanning)
     val moderationResetMsg = stringResource(R.string.diagnostics_moderation_reset_done)
     val holdReleasedMsg = stringResource(R.string.diagnostics_nan_hold_retry_done)
-    LaunchedEffect(restartedMsg, scanningMsg, moderationResetMsg, holdReleasedMsg) {
+    val hostResetMsg = stringResource(R.string.diagnostics_direct_host_reset_done)
+    val captureResetMsg = stringResource(R.string.diagnostics_call_capture_reset_done)
+    LaunchedEffect(restartedMsg, scanningMsg, moderationResetMsg, holdReleasedMsg, hostResetMsg, captureResetMsg) {
         viewModel.events.collect { resId ->
             snackbarHostState.showSnackbar(
                 when (resId) {
                     R.string.diagnostics_mesh_restarted -> restartedMsg
                     R.string.diagnostics_moderation_reset_done -> moderationResetMsg
                     R.string.diagnostics_nan_hold_retry_done -> holdReleasedMsg
+                    R.string.diagnostics_direct_host_reset_done -> hostResetMsg
+                    R.string.diagnostics_call_capture_reset_done -> captureResetMsg
                     else -> scanningMsg
                 },
             )
@@ -173,6 +183,10 @@ fun DiagnosticsScreen(
         directCallsSwitchOffered = viewModel.directCallsSwitchOffered,
         directCallsOff = directCallsOff,
         onSetDirectCallsOff = viewModel::setDirectCallsOff,
+        directHost = directHost,
+        onResetDirectHost = viewModel::resetDirectHost,
+        callCapture = callCapture,
+        onResetCallCapture = viewModel::resetCallCapture,
         blePhyMode = blePhyMode,
         onSetBlePhyMode = viewModel::setBlePhyMode,
         blePhys = blePhys,
@@ -226,6 +240,12 @@ internal fun DiagnosticsScreenContent(
     directCallsSwitchOffered: Boolean = false,
     directCallsOff: Boolean = false,
     onSetDirectCallsOff: (Boolean) -> Unit = {},
+    // Whether this phone may host a Wi-Fi Direct group (ADR 2026-10.w3dw); the row shows only when it may not.
+    directHost: HostVerdict = HostVerdict.Allowed,
+    onResetDirectHost: () -> Unit = {},
+    // Which microphone path calls record from (ADR 2026-10.kw29); null, or the standard path by default, hides the row.
+    callCapture: CaptureChoice? = null,
+    onResetCallCapture: () -> Unit = {},
     // The Coded PHY experiment's mode; null (a build that keeps it dark, and every other caller) hides the row.
     blePhyMode: CodedPhyMode? = null,
     onSetBlePhyMode: (CodedPhyMode) -> Unit = {},
@@ -318,6 +338,13 @@ internal fun DiagnosticsScreenContent(
             }
             if (blePhyMode != null && state.transports.any { it is TransportRow.Live && it.kind == TransportKind.Bluetooth }) {
                 item { BlePhyModeRow(mode = blePhyMode, onSet = onSetBlePhyMode) }
+            }
+            // Every build: a transfer's sender hosts, and this says why this phone cannot be one.
+            if (directHost != HostVerdict.Allowed) {
+                item { DirectHostSection(verdict = directHost, onReset = onResetDirectHost) }
+            }
+            callCapture?.reason?.let { reason ->
+                item { CallCaptureSection(profile = callCapture.profile, reason = reason, onReset = onResetCallCapture) }
             }
 
             // Always offered, above the metrics: a user asked to "send the field log from Diagnostics" finds it
@@ -1011,6 +1038,97 @@ private fun ModerationLatchSection(onReset: () -> Unit) {
             Icon(Icons.Filled.RestartAlt, contentDescription = null)
             Spacer(Modifier.width(8.dp))
             Text(stringResource(R.string.diagnostics_moderation_reset_action))
+        }
+    }
+}
+
+/**
+ * Why this phone does not start Wi-Fi Direct groups (ADR 2026-10.w3dw), and for a latch the way back. A generic system
+ * image has none: hosting there restarts the phone, and nothing Knit can reset changes that. Not error-coloured, like
+ * [InitiatorHoldSection]: Knit is protecting the phone, and receiving and joining still work.
+ */
+@Composable
+private fun DirectHostSection(
+    verdict: HostVerdict,
+    onReset: () -> Unit,
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp).testTag("direct_host_section"),
+    ) {
+        Text(
+            text = stringResource(R.string.diagnostics_direct_host_off_label),
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Medium,
+        )
+        Text(
+            text =
+                stringResource(
+                    if (verdict is HostVerdict.Latched) {
+                        R.string.diagnostics_direct_host_latched_body
+                    } else {
+                        R.string.diagnostics_direct_host_generic_body
+                    },
+                ),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 2.dp),
+        )
+        if (verdict is HostVerdict.Latched) {
+            Spacer(Modifier.height(12.dp))
+            OutlinedButton(onClick = onReset, modifier = Modifier.fillMaxWidth()) {
+                Icon(Icons.Filled.RestartAlt, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text(stringResource(R.string.diagnostics_direct_host_reset_action))
+            }
+        }
+    }
+}
+
+/**
+ * Which microphone path this phone's calls record from, when it is not the call-tuned one by default (C-3.13-12, ADR
+ * 2026-10.kw29). A generic image's fallback has no way back; a learned or chosen one has.
+ */
+@Composable
+private fun CallCaptureSection(
+    profile: CaptureProfile,
+    reason: CaptureReason,
+    onReset: () -> Unit,
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp).testTag("call_capture_section"),
+    ) {
+        Text(
+            text =
+                stringResource(
+                    if (profile == CaptureProfile.FALLBACK) {
+                        R.string.diagnostics_call_capture_fallback_label
+                    } else {
+                        R.string.diagnostics_call_capture_standard_label
+                    },
+                ),
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Medium,
+        )
+        Text(
+            text =
+                stringResource(
+                    when (reason) {
+                        CaptureReason.GENERIC_IMAGE -> R.string.diagnostics_call_capture_generic_body
+                        CaptureReason.SILENT_CALL -> R.string.diagnostics_call_capture_silent_body
+                        CaptureReason.CHOSEN -> R.string.diagnostics_call_capture_chosen_body
+                    },
+                ),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 2.dp),
+        )
+        if (reason != CaptureReason.GENERIC_IMAGE) {
+            Spacer(Modifier.height(12.dp))
+            OutlinedButton(onClick = onReset, modifier = Modifier.fillMaxWidth()) {
+                Icon(Icons.Filled.RestartAlt, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text(stringResource(R.string.diagnostics_call_capture_reset_action))
+            }
         }
     }
 }

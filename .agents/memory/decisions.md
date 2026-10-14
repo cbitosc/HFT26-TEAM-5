@@ -240,6 +240,7 @@ carries; never renumber an old one.
 | [2026-10.jbsa](decisions/2026-10-jbsa-conversation-shortcuts-follow-the-chat-list.md) | Conversation shortcuts follow the chat list | notifications, contacts, ui |
 | [2026-10.js2p](decisions/2026-10-js2p-ask-before-large-bluetooth-only-downloads.md) | Ask before large Bluetooth-only downloads | blobs, ui, wire |
 | [2026-10.k8ge](decisions/2026-10-k8ge-a-name-clash-fades-a-week-after-the-look-alike-was-last-heard.md) | A name clash fades a week after the look-alike was last heard | identity, ui, contacts |
+| [2026-10.kw29](decisions/2026-10-kw29-a-call-whose-microphone-captures-only-zeros-falls-back-to-the-recognition-source.md) | A call whose microphone captures only zeros falls back to the recognition source | calls, audio, reliability |
 | [2026-10.kxnw](decisions/2026-10-kxnw-a-call-between-neighbours-carries-its-media-over-a-wi-fi-direct-group.md) | A call between neighbours carries its media over a Wi-Fi Direct group | calls, wifi-direct, transfer |
 | [2026-10.mptm](decisions/2026-10-mptm-an-attachment-keeps-the-identity-it-arrived-under.md) | An attachment keeps the identity it arrived under | attachments, crypto, privacy, custody |
 | [2026-10.nsr7](decisions/2026-10-nsr7-a-file-s-receiver-reports-its-progress.md) | A file's receiver reports its progress, and the holder times parked asks by it | ble, mesh, blobs |
@@ -250,6 +251,7 @@ carries; never renumber an old one.
 | [2026-10.ryak](decisions/2026-10-ryak-the-ble-presence-advert-runs-at-full-power.md) | The BLE presence advert runs at full power | ble, mesh, power |
 | [2026-10.swst](decisions/2026-10-swst-art-s-whitespace-is-the-law-for-both-ports.md) | ART's whitespace is the law for both ports | text, interop, testing |
 | [2026-10.unqn](decisions/2026-10-unqn-a-clean-bounded-picture-is-stripped-not-re-encoded.md) | A clean, bounded picture is stripped, not re-encoded | attachments, privacy |
+| [2026-10.w3dw](decisions/2026-10-w3dw-a-phone-that-cannot-survive-hosting-a-wi-fi-direct-group-never-hosts-one.md) | A phone that cannot survive hosting a Wi-Fi Direct group never hosts one | wifi-direct, transfer, calls, reliability |
 | [2026-10.wbua](decisions/2026-10-wbua-calls-register-with-telecom-through-core-telecom.md) | Calls register with Telecom through core-telecom, which owns their audio route | calls, audio |
 | [2026-10.wtyc](decisions/2026-10-wtyc-a-cut-attachment-resumes-from-the-bytes-the-receiver-kept.md) | A cut attachment resumes from the bytes the receiver kept | mesh, attachments, wire, blob-exchange |
 | [2026-10.xgwj](decisions/2026-10-xgwj-a-forced-group-rekey-retires-the-send-chain.md) | A forced group rekey retires the send chain, never reuses its epoch | crypto, groups |

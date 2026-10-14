@@ -162,7 +162,8 @@ class DirectCallPath(
             return null
         }
         if (lease.owner != null || !nearby(peerId) || !capable(peerId)) return null
-        lease.leasedTo(callId).refusal()?.let {
+        // The caller hosts (C-3.10-3), so a phone that may not host offers no leg (ADR 2026-10.w3dw); it still joins.
+        lease.leasedTo(callId).hostRefusal()?.let {
             log("call $callId: no direct leg ($it)")
             return null
         }

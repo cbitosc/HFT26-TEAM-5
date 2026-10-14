@@ -28,4 +28,10 @@ enum class TransferRefusal {
 
     /** The offer being answered is no longer open (expired, cancelled, already answered). */
     Gone,
+
+    /**
+     * This phone does not host Wi-Fi Direct groups (ADR 2026-10.w3dw): hosting takes it down — a generic system image
+     * over an older vendor, or a latch after it died hosting. It can still receive, which only joins. Local only.
+     */
+    CannotHost,
 }
