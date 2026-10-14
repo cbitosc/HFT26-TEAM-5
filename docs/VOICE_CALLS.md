@@ -745,11 +745,6 @@ Every call, live or walkie, is registered with the phone as a self-managed Telec
 builds only). Telecom owns where its audio goes: the earpiece, the loudspeaker, or a wired or Bluetooth headset, both
 ways. A headset's button, a watch or a car can answer the call and hang it up. ADR 2026-10.wbua records why.
 
-A watch's call screen comes from the system's call, not from Knit's notification: Wear's phone companion sends it the
-display name, the connect time and the app's label, and draws a face only from a contact matched by phone number, so a
-Knit caller shows the placeholder there. The ringing and ongoing call notifications set the peer's face as their large
-icon as well as on the CallStyle's person, because the platform's CallStyle sets none and a bridged card draws only that.
-
 `call/SystemCallSync` keeps the system's call in step with `CallManager`'s. It follows the manager's state on the app
 scope, never on the inbound path. `ui/call/TelecomCalls` is the one importer of the library.
 
