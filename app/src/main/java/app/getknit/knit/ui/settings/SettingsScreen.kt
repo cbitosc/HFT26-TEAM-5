@@ -27,13 +27,17 @@ import androidx.compose.material.icons.automirrored.outlined.Article
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PhonelinkErase
+import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.NewReleases
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SegmentedButton
@@ -61,6 +65,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.getknit.knit.BuildConfig
 import app.getknit.knit.R
+import app.getknit.knit.call.SttModelState
 import app.getknit.knit.data.settings.BluetoothDownloadLimit
 import app.getknit.knit.di.CALLS_WIRED
 import app.getknit.knit.mesh.lora.BoardBattery
@@ -70,6 +75,7 @@ import app.getknit.knit.ui.BackgroundBattery
 import app.getknit.knit.ui.DeviceSupervision
 import app.getknit.knit.ui.UnusedAppPause
 import app.getknit.knit.ui.backgroundBattery
+import app.getknit.knit.ui.call.mb
 import app.getknit.knit.ui.camera.openAppSettings
 import app.getknit.knit.ui.components.Avatar
 import app.getknit.knit.ui.deviceSupervision
@@ -102,6 +108,8 @@ internal data class SettingsFormState(
     val cloneVisible: Boolean = false,
     /** Low-power mode's switch and what holds it on (ADR 2026-10.d44b). */
     val lowPower: LowPowerSummary = LowPowerSummary(),
+    /** The walkie transcript's speech model (docs/VOICE_CALLS.md C-3.11-9); null, and no row, without the walkie. */
+    val speechModel: SpeechModelUi? = null,
 )
 
 /**
@@ -133,6 +141,7 @@ fun SettingsScreen(
     val lora by viewModel.loraSummary.collectAsStateWithLifecycle()
     val cloneVisible by viewModel.cloneVisible.collectAsStateWithLifecycle()
     val lowPower by viewModel.lowPower.collectAsStateWithLifecycle()
+    val speechModel by viewModel.speechModel.collectAsStateWithLifecycle()
     // The clone row's "Sign out here": one confirmation, then the wipe (ui/signout/SignOut).
     var showSignOut by remember { mutableStateOf(false) }
 
@@ -160,6 +169,7 @@ fun SettingsScreen(
                 lora = lora,
                 cloneVisible = cloneVisible,
                 lowPower = lowPower,
+                speechModel = speechModel,
             ),
         battery = rememberOnResume { backgroundBattery(context) },
         unusedPause = rememberOnResume { unusedAppPause(context) },
@@ -181,6 +191,9 @@ fun SettingsScreen(
         onOpenBlockedUsers = onOpenBlockedUsers,
         onOpenWhatsNew = onOpenWhatsNew,
         onSignOut = { showSignOut = true },
+        onDownloadSpeechModel = viewModel::downloadSpeechModel,
+        onCancelSpeechModel = viewModel::cancelSpeechModel,
+        onRemoveSpeechModel = viewModel::removeSpeechModel,
         onAllowBattery = { requestIgnoreBatteryOptimizations(context) },
         onOpenBatterySettings = { openAppSettings(context) },
         onOpenUnusedPauseSettings = { openUnusedAppPauseSettings(context) },
@@ -210,6 +223,9 @@ internal fun SettingsScreenContent(
     onOpenWhatsNew: () -> Unit = {},
     // The clone row's action — opens the confirmation in the stateful wrapper, never the wipe itself.
     onSignOut: () -> Unit = {},
+    onDownloadSpeechModel: () -> Unit = {},
+    onCancelSpeechModel: () -> Unit = {},
+    onRemoveSpeechModel: () -> Unit = {},
     // Whether the Internet-relay plane is introduced at all in this build. A parameter rather than a
     // bare BuildConfig read so the hidden case is previewable and testable; see app/build.gradle.kts.
     showInternetRelays: Boolean = BuildConfig.INTERNET_PLANE,
@@ -373,6 +389,16 @@ internal fun SettingsScreenContent(
 
             // Not under the Internet plane's flag: the person's own TURN server relays a call without any relay.
             if (showCalls) CallsRow(summary = form.calls, onClick = onOpenCalls)
+
+            // Off a call as well as on one, so the model can be had over Wi-Fi before the walkie needs it.
+            form.speechModel?.let {
+                SpeechModelRow(
+                    ui = it,
+                    onDownload = onDownloadSpeechModel,
+                    onCancel = onCancelSpeechModel,
+                    onRemove = onRemoveSpeechModel,
+                )
+            }
 
             if (showInternetRelays) InternetRelayRow(summary = form.relay, onClick = onOpenRelays)
 
@@ -634,6 +660,91 @@ private fun CallsRow(
         onClick = onClick,
         modifier = Modifier.testTag("settings_calls"),
     )
+}
+
+/**
+ * The walkie transcript's speech model (docs/VOICE_CALLS.md C-3.11-9): what it costs and Download, the progress and
+ * Cancel while it comes (the download runs on the app's scope and a foreground service, so leaving the screen does not
+ * stop it), or that it is here and Remove.
+ */
+@Composable
+private fun SpeechModelRow(
+    ui: SpeechModelUi,
+    onDownload: () -> Unit,
+    onCancel: () -> Unit,
+    onRemove: () -> Unit,
+) {
+    val size = mb(ui.bytes)
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp).testTag("settings_speech_model"),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(stringResource(R.string.settings_speech_model_title), style = MaterialTheme.typography.titleMedium)
+        when (val state = ui.state) {
+            SttModelState.Absent, is SttModelState.Failed -> {
+                val failed = state as? SttModelState.Failed
+                Text(
+                    if (failed != null) {
+                        stringResource(R.string.settings_speech_model_failed, failed.reason)
+                    } else {
+                        stringResource(R.string.settings_speech_model_absent, size)
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (failed != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (ui.metered) {
+                    Text(
+                        stringResource(R.string.settings_speech_model_metered),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                FilledTonalButton(onClick = onDownload, contentPadding = ButtonDefaults.ButtonWithIconContentPadding) {
+                    Icon(Icons.Outlined.Download, contentDescription = null, modifier = Modifier.size(ButtonDefaults.IconSize))
+                    Text(
+                        stringResource(
+                            if (failed !=
+                                null
+                            ) {
+                                R.string.settings_speech_model_retry
+                            } else {
+                                R.string.settings_speech_model_download
+                            },
+                        ),
+                        Modifier.padding(start = ButtonDefaults.IconSpacing),
+                    )
+                }
+            }
+
+            is SttModelState.Downloading -> {
+                LinearProgressIndicator(
+                    progress = { if (state.total > 0) (state.done.toFloat() / state.total).coerceIn(0f, 1f) else 0f },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        stringResource(R.string.settings_speech_model_downloading, mb(state.done), mb(state.total)),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = onCancel) { Text(stringResource(R.string.settings_speech_model_cancel)) }
+                }
+            }
+
+            SttModelState.Ready -> {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        stringResource(R.string.settings_speech_model_ready, size),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = onRemove) { Text(stringResource(R.string.settings_speech_model_remove)) }
+                }
+            }
+        }
+    }
 }
 
 /** Entry point to the LoRa radio screen, with its current state as the subtitle. */

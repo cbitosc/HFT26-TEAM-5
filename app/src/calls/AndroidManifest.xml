@@ -13,6 +13,8 @@
          the service holding the microphone holds the phone-call type with it. -->
     <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
+    <!-- The walkie transcript's speech model downloads on a dataSync service, so it outlasts the call it was started on. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
     <application>
         <activity
@@ -28,6 +30,10 @@
             android:name="app.getknit.knit.ui.call.CallService"
             android:exported="false"
             android:foregroundServiceType="microphone|phoneCall" />
+        <service
+            android:name="app.getknit.knit.ui.call.stt.SttDownloadService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
         <receiver
             android:name="app.getknit.knit.ui.call.CallActionReceiver"
             android:exported="false" />

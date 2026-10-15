@@ -350,12 +350,12 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   `burst`, `heardAt`, `state` (`Listening`, `Pending`, `Text`, `NoSpeech`, `NoModel`, `Failed`), `text`, `live` (the
   words so far while it streams), `audioMs`, `tookMs` (its end to its final text), `looks` and `modelMs` (the model's
   time over the burst). The text appears here and on screen only, never in logcat.
-  - `download` fetches the model from getknit.app as the card's button does (refused with no validated route);
+  - `download` fetches the model from getknit.app as the card's and Settings' buttons do (refused with no validated
+    route; its foreground service may be refused from a broadcast, and the download then runs without it);
     `sideload --es dir <dir>` installs it from its nine files pushed there (`scripts/stt-model.py --out` stages
     them; `chmod 755` the directory and `644` the files), each checked against the same pins; `cancel`; `delete`;
-    `unload` releases the model now (otherwise 2 min idle). `use --es model small|tiny|medium` (a label or an id) puts
-    that model in use, as the card's picker does; the other ops act on the model in use, and `status` names it
-    (`model`) and lists the ids on the phone (`installed`).
+    `unload` releases the model now (otherwise 2 min idle). The model is Moonshine Small Streaming alone; `status` names
+    it (`model`).
   - `pcm --es path <file>` streams a raw 16 kHz mono s16le file through the model in 100 ms chunks as fast as it takes
     them, looking as a burst does — in the background, since a long clip outlasts a broadcast's timeout (an ANR). It
     replies at once; poll `status`, whose `pcm` is `running` until it carries `text`, `audioMs`, `tookMs`, `looks`,

@@ -59,6 +59,7 @@ import app.getknit.knit.ui.call.ToneGeneratorPlayer
 import app.getknit.knit.ui.call.WalkieTalk
 import app.getknit.knit.ui.call.WebRtcCallMedia
 import app.getknit.knit.ui.call.stt.MoonshineSpeech
+import app.getknit.knit.ui.call.stt.SttDownloadService
 import app.getknit.knit.ui.call.stt.SttKeytermFeed
 import app.getknit.knit.ui.call.stt.SttModelStore
 import app.getknit.knit.ui.call.stt.WalkieClipFiles
@@ -211,7 +212,15 @@ private fun callGraph(): Module =
         }
         if (WALKIE_WIRED) {
             // The transcript (C-3.11-9): a model the user downloads, fed here the bursts this phone hears as they play.
-            single { SttModelStore(androidContext(), get<AndroidInternetGate>(), get<CoroutineScope>(), log = { Log.i(TAG, it) }) }
+            single {
+                SttModelStore(
+                    androidContext(),
+                    get<AndroidInternetGate>(),
+                    get<CoroutineScope>(),
+                    keepAlive = { SttDownloadService.start(androidContext()) },
+                    log = { Log.i(TAG, it) },
+                )
+            }
             single { MoonshineSpeech(get(), get<ModelLoadGuard>(), get<CoroutineScope>(), log = { Log.i(TAG, it) }) }
             // The names a call is likely to carry, for the model to listen for: read as a call begins, never logged.
             single {

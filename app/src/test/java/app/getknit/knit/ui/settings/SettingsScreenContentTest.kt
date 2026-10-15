@@ -18,6 +18,7 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import app.getknit.knit.R
+import app.getknit.knit.call.SttModelState
 import app.getknit.knit.data.settings.BluetoothDownloadLimit
 import app.getknit.knit.mesh.lora.BoardBattery
 import app.getknit.knit.mesh.lora.LoraPlane
@@ -82,6 +83,10 @@ class SettingsScreenContentTest {
         onOpenUnusedPauseSettings: () -> Unit = {},
         cloneVisible: Boolean = false,
         onSignOut: () -> Unit = {},
+        speechModel: SpeechModelUi? = null,
+        onDownloadSpeechModel: () -> Unit = {},
+        onCancelSpeechModel: () -> Unit = {},
+        onRemoveSpeechModel: () -> Unit = {},
     ) {
         compose.setContent {
             KnitTheme {
@@ -98,6 +103,7 @@ class SettingsScreenContentTest {
                             relay = relay,
                             lora = lora,
                             cloneVisible = cloneVisible,
+                            speechModel = speechModel,
                         ),
                     battery = battery,
                     supervision = supervision,
@@ -123,6 +129,9 @@ class SettingsScreenContentTest {
                     onOpenBackup = onOpenBackup,
                     onOpenBlockedUsers = onOpenBlockedUsers,
                     onSignOut = onSignOut,
+                    onDownloadSpeechModel = onDownloadSpeechModel,
+                    onCancelSpeechModel = onCancelSpeechModel,
+                    onRemoveSpeechModel = onRemoveSpeechModel,
                     unusedPause = unusedPause,
                     onOpenUnusedPauseSettings = onOpenUnusedPauseSettings,
                 )
@@ -462,5 +471,55 @@ class SettingsScreenContentTest {
     fun theCloneRowIsAbsentByDefault() {
         render()
         compose.onNodeWithTag("settings_clone_row").assertDoesNotExist()
+    }
+
+    // The walkie transcript's speech model is had from Settings too, off a call (docs/VOICE_CALLS.md C-3.11-9).
+    @Test
+    fun theSpeechModelRowIsAbsentWithoutTheWalkie() {
+        render()
+        compose.onNodeWithTag("settings_speech_model").assertDoesNotExist()
+    }
+
+    @Test
+    fun theSpeechModelRowOffersTheDownloadAndSaysItsCost() {
+        var downloads = 0
+        render(speechModel = SpeechModelUi(SttModelState.Absent, 142_315_154, metered = true), onDownloadSpeechModel = { downloads++ })
+        compose.onNodeWithText("142 MB", substring = true).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText(context.getString(R.string.settings_speech_model_metered)).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText(context.getString(R.string.settings_speech_model_download)).performScrollTo().performClick()
+        assertEquals(1, downloads)
+    }
+
+    @Test
+    fun aSpeechModelDownloadUnderWayCanBeCancelled() {
+        var cancels = 0
+        render(
+            speechModel = SpeechModelUi(SttModelState.Downloading(17_400_000, 142_315_154), 142_315_154, metered = false),
+            onCancelSpeechModel = { cancels++ },
+        )
+        compose.onNodeWithText("17 MB of 142 MB", substring = true).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText(context.getString(R.string.settings_speech_model_cancel)).performScrollTo().performClick()
+        assertEquals(1, cancels)
+    }
+
+    @Test
+    fun aFailedSpeechModelDownloadSaysWhyAndOffersAnotherTry() {
+        var downloads = 0
+        render(
+            speechModel = SpeechModelUi(SttModelState.Failed("No Internet connection"), 142_315_154, metered = false),
+            onDownloadSpeechModel = { downloads++ },
+        )
+        compose.onNodeWithText("No Internet connection", substring = true).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText(context.getString(R.string.settings_speech_model_retry)).performScrollTo().performClick()
+        assertEquals(1, downloads)
+    }
+
+    @Test
+    fun anInstalledSpeechModelCanBeRemoved() {
+        var removes = 0
+        render(speechModel = SpeechModelUi(SttModelState.Ready, 142_315_154, metered = false), onRemoveSpeechModel = { removes++ })
+        compose.onNodeWithText(context.getString(R.string.settings_speech_model_download)).assertDoesNotExist()
+        compose.onNodeWithText(context.getString(R.string.settings_speech_model_remove)).performScrollTo().performClick()
+        assertEquals(1, removes)
     }
 }

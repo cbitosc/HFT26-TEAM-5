@@ -159,3 +159,18 @@ C-3.11-9). It is debug-only, as the walkie is, and nothing reaches the wire.
   "insecurity" back, the bias at its default not outweighing what the audio sounded like. Repeat runs of one clip at
   one setting also differ by up to four points of word error, since the cadence of looks moves the speculative
   decode, so any gain from the names has to be scored on many real bursts (the clip switch) rather than one.
+- **Amendment 2026-10-14: Small alone, and a download that outlives the call.** Moonshine Small Streaming is the
+  walkie's one model (`SttModel.MOONSHINE_SMALL_STREAMING_EN`). Tiny read too poorly to keep, and Medium cost twice
+  Small's fetch and model time for a gain the clips have not shown, so the card's picker, `SttModel.ALL`, the
+  `models/stt-model` pick file and the bridge's `use` op are gone. `SttModelStore.start` deletes whatever else sits
+  under `noBackupFilesDir/models`, which is the other picks' files and the pick itself.
+  The download could only be started on a walkie call, from the card. It is now also a row in Settings ("Walkie
+  transcripts": Download, progress and Cancel, Try again, Remove), shown only where `WALKIE_WIRED` is on, through
+  `SettingsViewModel`'s nullable store. Either door starts the same job on the app scope. As it starts, the store asks
+  its `keepAlive` to start `SttDownloadService`, a `dataSync` foreground service declared in the calls manifest. That
+  way neither a hang-up nor a screen left behind, nor the cached-app freezer when the mesh is stopped, stalls the
+  fetch half way. The service does no work: it shows the progress and Cancel in a low-importance notification and
+  stops as soon as the store's state is anything but `Downloading`. The store sets that state before it asks, so the
+  service never reads the state it would stop on. On Android 15's `dataSync` time limit the service cancels the
+  download, and the next tap fetches only the files still missing. A start the platform refuses (Android 12+, from
+  the background, so only the debug bridge's) is logged, and the download runs without the service.

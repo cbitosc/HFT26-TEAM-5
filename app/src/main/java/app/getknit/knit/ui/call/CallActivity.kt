@@ -104,7 +104,6 @@ import app.getknit.knit.call.CallPhase
 import app.getknit.knit.call.CallRouting
 import app.getknit.knit.call.CallState
 import app.getknit.knit.call.CaptureWatch
-import app.getknit.knit.call.SttModel
 import app.getknit.knit.call.SttModelState
 import app.getknit.knit.call.SystemCallSync
 import app.getknit.knit.call.TalkLink
@@ -264,12 +263,8 @@ class CallActivity :
         val routing by system.routing.collectAsState()
         val lines by (transcriber?.lines ?: NO_LINES).collectAsState()
         val model by (stt?.state ?: NO_MODEL).collectAsState()
-        // The pick, collected on its own: switching between two models in the same state moves nothing in [model].
-        val picked by (stt?.selected ?: NO_PICK).collectAsState()
         // Read again as the model's state moves: a tap on Download is when the route matters.
         val metered = remember(model) { stt?.metered() == true }
-        // Which models are on the phone, read again as the one in use moves or lands.
-        val installed = remember(model, picked) { stt?.installedIds().orEmpty() }
         CallScreen(
             state = state,
             name = name,
@@ -296,20 +291,9 @@ class CallActivity :
             onTalkSend = { lifecycleScope.launch { walkie?.release() } },
             onTalkCancel = { lifecycleScope.launch { walkie?.cancel() } },
             walkieStats = walkieStats.takeIf { walkieUp },
-            transcript =
-                stt?.let { store ->
-                    TranscriptUi(
-                        lines,
-                        model,
-                        picked?.bytes ?: store.model.bytes,
-                        metered,
-                        choices = store.models.map { SttChoice(it.id, it.label, it.bytes, it.id in installed) },
-                        chosen = picked?.id ?: store.model.id,
-                    )
-                },
+            transcript = stt?.let { store -> TranscriptUi(lines, model, store.model.bytes, metered) },
             onSttDownload = { stt?.download() },
             onSttCancel = { stt?.cancel() },
-            onSttModel = { id -> lifecycleScope.launch { stt?.select(id) } },
         )
     }
 
@@ -384,7 +368,6 @@ private val NO_TALK = MutableStateFlow<Talk>(Talk.Idle())
 private val NO_LINK = MutableStateFlow<TalkLink?>(null)
 private val NO_LINES = MutableStateFlow<List<TranscriptLine>>(emptyList())
 private val NO_MODEL = MutableStateFlow<SttModelState>(SttModelState.Absent)
-private val NO_PICK = MutableStateFlow<SttModel?>(null)
 internal val ToggleSize = 64.dp
 private const val RING_MS = 1_800
 private const val RING_ALPHA = 0.28f
@@ -438,7 +421,6 @@ internal fun CallScreen(
     transcript: TranscriptUi? = null,
     onSttDownload: () -> Unit = {},
     onSttCancel: () -> Unit = {},
-    onSttModel: (String) -> Unit = {},
 ) {
     val phase = state?.phase
     var showStats by rememberSaveable { mutableStateOf(statsShown) }
@@ -476,7 +458,7 @@ internal fun CallScreen(
                 if (transcribed != null) {
                     // The transcript scrolls itself, to keep its newest line in view.
                     Box(Modifier.weight(1f).fillMaxWidth().padding(vertical = 16.dp)) {
-                        WalkieTranscript(transcribed, name, onSttDownload, onSttCancel, Modifier.fillMaxSize(), onSttModel)
+                        WalkieTranscript(transcribed, name, onSttDownload, onSttCancel, Modifier.fillMaxSize())
                     }
                 } else if (diagnostics != null) {
                     // The room between the face and the controls; a short screen scrolls the card rather than clip it.
@@ -1548,13 +1530,6 @@ fun CallScreenWalkieTranscriptNoModelPreview() =
                 model = SttModelState.Absent,
                 modelBytes = PREVIEW_MODEL_BYTES,
                 metered = true,
-                choices =
-                    listOf(
-                        SttChoice("small", "Small", PREVIEW_MODEL_BYTES, installed = false),
-                        SttChoice("tiny", "Tiny", 45_247_839, installed = false),
-                        SttChoice("medium", "Medium", 269_155_803, installed = false),
-                    ),
-                chosen = "small",
             ),
     )
 

@@ -2661,8 +2661,7 @@ class DebugBridgeReceiver :
 
     /**
      * The walkie transcript's speech model and the session's transcript (docs/VOICE_CALLS.md C-3.11-9). `status` (the
-     * default) dumps both; `use --es model tiny|small|medium` (a label or an id) puts that model in use, as the card's
-     * picker does, and the ops below act on the one in use; `download` fetches it from its host as the card's button does,
+     * default) dumps both; `download` fetches the model from its host as the card's and Settings' buttons do,
      * `sideload --es dir <dir>` installs it from the files pushed there (world-readable, e.g. under /data/local/tmp;
      * `scripts/stt-model.py --out` stages them), each checked against the same pins; `cancel`, `delete` and `unload`
      * (release the model now) do what they say. `pcm --es path <file>` streams (in the background; poll `status`) a raw 16 kHz mono s16le file through the
@@ -2697,14 +2696,6 @@ class DebugBridgeReceiver :
 
             "cancel" -> {
                 store.cancel()
-            }
-
-            "use" -> {
-                val id = intent.getStringExtra("model") ?: return reply("error", "missing 'model' extra")
-                val model = store.models.firstOrNull { it.id == id || it.label.equals(id, ignoreCase = true) }
-                if (model == null || !store.select(model.id)) {
-                    return reply("error", "no model '$id'; one of ${store.models.joinToString { it.id }}")
-                }
             }
 
             "delete" -> {
@@ -2790,7 +2781,6 @@ class DebugBridgeReceiver :
         return reply("ok", "stt")
             .put("model", store.model.id)
             .put("bytes", store.model.bytes)
-            .put("installed", JSONArray(store.installedIds().sorted()))
             .put("stt", sttStateJson(store.state.value))
             .put("resident", speech.resident)
             .put("lines", speech.lines.name.lowercase())

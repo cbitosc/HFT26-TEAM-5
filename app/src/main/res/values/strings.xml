@@ -750,6 +750,17 @@
     <string name="settings_low_power_subtitle">Turns Wi-Fi Aware off to save battery. Bluetooth keeps you on the mesh, so messages still arrive, but photos and files take longer. Also on while Battery Saver is.</string>
     <string name="settings_low_power_subtitle_saver">On now because Battery Saver is on. Wi-Fi Aware is off, and Bluetooth keeps you on the mesh.</string>
     <string name="settings_low_power_subtitle_charging">Paused while charging. Wi-Fi Aware stays on until you unplug.</string>
+    <!-- The walkie transcript's speech model (docs/VOICE_CALLS.md C-3.11-9), fetched here as well as on a walkie call. -->
+    <string name="settings_speech_model_title">Walkie transcripts</string>
+    <string name="settings_speech_model_absent">Turn the walkie-talkie bursts you hear and speak into text, on this phone. The speech model is a one-time %1$s download from getknit.app.</string>
+    <string name="settings_speech_model_metered">You\'re on mobile data or Data Saver now.</string>
+    <string name="settings_speech_model_downloading">Downloading the speech model · %1$s of %2$s</string>
+    <string name="settings_speech_model_ready">The speech model is on this phone (%1$s).</string>
+    <string name="settings_speech_model_failed">The speech model didn\'t download. %1$s.</string>
+    <string name="settings_speech_model_download">Download</string>
+    <string name="settings_speech_model_retry">Try again</string>
+    <string name="settings_speech_model_cancel">Cancel</string>
+    <string name="settings_speech_model_remove">Remove</string>
 
     <!-- Profile details (another peer) -->
     <string name="profile_details_message">Message</string>

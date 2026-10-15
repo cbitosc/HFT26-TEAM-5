@@ -1,3 +1,5 @@
+@file:Suppress("MatchingDeclarationName") // the walkie transcript card and the state it draws
+
 package app.getknit.knit.ui.call
 
 import androidx.compose.foundation.layout.Arrangement
@@ -22,9 +24,6 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -54,17 +53,6 @@ internal data class TranscriptUi(
     // What the model costs to fetch, and whether the route a fetch would take now is mobile data or under Data Saver.
     val modelBytes: Long,
     val metered: Boolean,
-    // The models to pick between (none drawn for fewer than two) and the id of the one in use.
-    val choices: List<SttChoice> = emptyList(),
-    val chosen: String? = null,
-)
-
-/** A speech model the card offers: what it is called, what it costs to fetch, and whether it is already here. */
-internal data class SttChoice(
-    val id: String,
-    val label: String,
-    val bytes: Long,
-    val installed: Boolean,
 )
 
 /**
@@ -82,7 +70,6 @@ internal fun WalkieTranscript(
     onDownload: () -> Unit,
     onCancel: () -> Unit,
     modifier: Modifier = Modifier,
-    onModel: (String) -> Unit = {},
     zone: ZoneId = ZoneId.systemDefault(),
 ) {
     val ready = ui.model == SttModelState.Ready
@@ -112,7 +99,6 @@ internal fun WalkieTranscript(
                 contentPadding = PaddingValues(start = 16.dp, top = 12.dp, end = 16.dp, bottom = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                if (ui.choices.size > 1) item(key = "models") { ModelPicker(ui, onModel) }
                 transcriptItems(ui, name, ready, times, onDownload, onCancel)
             }
         }
@@ -221,35 +207,6 @@ private fun noteOf(
         TranscriptLine.State.Failed -> "Couldn't transcribe this one"
         is TranscriptLine.State.Text -> state.text
     }
-
-/** Which speech model transcribes: a pick between the models on offer, each with its size or "on phone". */
-@Composable
-private fun ModelPicker(
-    ui: TranscriptUi,
-    onModel: (String) -> Unit,
-) {
-    SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-        ui.choices.forEachIndexed { index, choice ->
-            SegmentedButton(
-                selected = choice.id == ui.chosen,
-                onClick = { onModel(choice.id) },
-                shape = SegmentedButtonDefaults.itemShape(index = index, count = ui.choices.size),
-                label = {
-                    // The name, and under it what it costs: three side by side leave no room for one line.
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(choice.label, maxLines = 1, style = MaterialTheme.typography.labelLarge)
-                        Text(
-                            if (choice.installed) "on phone" else mb(choice.bytes),
-                            maxLines = 1,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                },
-            )
-        }
-    }
-}
 
 /** Where the speech model stands, with the one action that moves it on. */
 @Composable

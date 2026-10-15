@@ -164,6 +164,9 @@ internal suspend fun callerName(
 internal object CallNotifications {
     const val CHANNEL_RING = "knit_calls"
     const val CHANNEL_STATUS = "knit_call_status"
+
+    // The walkie transcript's speech-model download (`SttDownloadService`): progress only, never a sound.
+    const val CHANNEL_DOWNLOAD = "knit_stt_download"
     const val TAG_RING = "call:ring"
     const val TAG_MISSED = "call:missed:"
     const val TAG_FULL_SCREEN = "call:fullscreen"
@@ -190,6 +193,12 @@ internal object CallNotifications {
             NotificationChannelCompat
                 .Builder(CHANNEL_STATUS, NotificationManagerCompat.IMPORTANCE_DEFAULT)
                 .setName("Call status (experimental)")
+                .build(),
+        )
+        manager.createNotificationChannel(
+            NotificationChannelCompat
+                .Builder(CHANNEL_DOWNLOAD, NotificationManagerCompat.IMPORTANCE_LOW)
+                .setName("Speech model download (experimental)")
                 .build(),
         )
     }

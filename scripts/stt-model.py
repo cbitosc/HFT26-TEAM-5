@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""Stage the walkie transcript's speech models for getknit.app, and check the app's pins against them.
+"""Stage the walkie transcript's speech model for getknit.app, and check the app's pins against it.
 
-The app downloads Moonshine v2 Tiny, Small or Medium Streaming (English, int8 `.ort`, MIT) — the user's pick — file by
-file from getknit.app and checks every byte against the sizes and SHA-256s pinned in `SttModel`
+The app downloads Moonshine v2 Small Streaming (English, int8 `.ort`, MIT) file by file from getknit.app and checks every byte against the sizes and SHA-256s pinned in `SttModel`
 (app/src/main/java/app/getknit/knit/call/SttModel.kt; docs/VOICE_CALLS.md C-3.11-9). This script is where those pins
 come from, so nobody types a hash by hand:
 
-  scripts/stt-model.py [--model M]     print the Kotlin pins for the upstream files (default: every model)
-  scripts/stt-model.py --check         exit 1 unless SttModel.kt pins exactly those files, for every model
+  scripts/stt-model.py                 print the Kotlin pins for the upstream files
+  scripts/stt-model.py --check         exit 1 unless SttModel.kt pins exactly those files
   scripts/stt-model.py --out DIR       also write the files to DIR/<model id>/, ready to upload under
                                        https://getknit.app/models/stt/ (immutable: a new model is a new id)
 
@@ -41,11 +40,9 @@ FILES = [
 # v0.1.5's tree; the MIT grant covers every streaming model (its SECTION 1).
 LICENSE_URL = "https://raw.githubusercontent.com/moonshine-ai/moonshine/234f60faa0eb388b01cdf7e60aca232af37aefda/LICENSE"
 LICENSE_SHA256 = "fa7d1174dd8af6a7cd280be20b80d10095ed4c19b5b20b61a7715c3ad790dc5f"
-# name: (model id, the CDN's model directory)
+# name: (model id, the CDN's model directory). Small alone: Tiny and Medium were tried and dropped (ADR 2026-10.nz3g).
 MODELS = {
-    "tiny": ("moonshine-tiny-streaming-en-2026-08-21", "tiny-streaming-en"),
     "small": ("moonshine-small-streaming-en-2026-08-21", "small-streaming-en"),
-    "medium": ("moonshine-medium-streaming-en-2026-08-21", "medium-streaming-en"),
 }
 
 ROOT = Path(__file__).resolve().parent.parent

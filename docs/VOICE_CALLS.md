@@ -784,8 +784,7 @@ an experiment behind `BuildConfig.WALKIE` (`-Pwalkie=`, on in debug and off in r
     at 8 kbps cost the model from what the model gets wrong on clean audio. A cancelled burst drops its line.
   - **The model.** Moonshine v2 Streaming, English (int8 `.ort`, MIT), through Moonshine's own runtime
     (`moonshine-voice`, `MoonshineSpeech`; its slim ONNX Runtime inside), packaged only where calls are, like
-    libwebrtc: Small (142 MB, the default; 7.84 % on the Open ASR average), Tiny (45 MB, 12.0 %) or Medium (269 MB,
-    6.65 %) — the user's pick on the card. Each is fetched and kept on its own; the transcript uses the one picked.
+    libwebrtc: Small Streaming (142 MB; 7.84 % on the Open ASR average), the one model there is.
     Each burst is one stream of the model's: its streaming encoder caches what it has seen, so a look costs the new
     audio and a decode. How a burst becomes lines is `MoonshineSpeech.lines` (`LineMode`): one line of up to 30 s with
     the model's voice detector off (the default, since a split at a pause decodes each half without the other), or a
@@ -795,9 +794,12 @@ an experiment behind `BuildConfig.WALKIE` (`-Pwalkie=`, on in debug and off in r
     The model is held on a `ModelLease` (released after 2 min idle) and loaded under `ModelLoadGuard` as `stt`, a
     probe stream included.
   - **The download.** Not in the APK: nine files under `https://getknit.app/models/stt/<model id>/`,
-    fetched only on the user's tap (the card's Download), each pinned by size and SHA-256 in `SttModel`, streamed
+    fetched only on the user's tap (the card's Download on a walkie call, or the "Walkie transcripts" row in Settings
+    at any time), each pinned by size and SHA-256 in `SttModel`, streamed
     through the hash to a `.part` and renamed in, the model counted as installed only once a marker follows the last
-    file. Stored in `noBackupFilesDir`. The fetch binds to the validated default network
+    file. Stored in `noBackupFilesDir`. The fetch runs on the app scope and holds a `dataSync` foreground service
+    (`SttDownloadService`, its notification the progress and Cancel) until it ends, so it outlives the call or screen
+    it was started from. The fetch binds to the validated default network
     (`AndroidInternetGate.currentNetwork`, never the Wi-Fi Aware link) through `Network.openConnection`: https,
     `Accept-Encoding: identity`, no redirect followed, the server's declared length checked first. The pins come
     from `scripts/stt-model.py`, which reads Moonshine's own CDN (one dated directory, never rewritten) and stages

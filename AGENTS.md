@@ -155,12 +155,14 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   **Before touching `call/WalkieTranscript.kt` (`BurstPcm`, `PassGate`, `SpeechStream`, `WalkieTranscriber`, `SttPolicy`),
   `call/WalkieClips.kt` and `WalkieClipFiles` (a debug build's saved bursts, off by default), `call/SttKeytermPolicy.kt` and
   `SttKeytermFeed` (the names the model listens for),
-  `call/SttModel.kt` (the pins, `SttModelInstaller`), `ui/call/stt/` (`MoonshineSpeech`), `TalkPlayer`'s `TalkPcmTap`,
+  `call/SttModel.kt` (the pins, `SttModelInstaller`), `ui/call/stt/` (`MoonshineSpeech`, `SttModelStore`,
+  `SttDownloadService`), Settings' speech-model row, `TalkPlayer`'s `TalkPcmTap`,
   `WalkieTranscriptCard`, `ModelLoadGuard.STT`, the `moonshineVoice` pin or `scripts/stt-model.py`:** READ ADR
   2026-10.nz3g and `docs/VOICE_CALLS.md` C-3.11-9 — the receiver writes each heard burst out as text while it plays,
-  behind `BuildConfig.CALLS` and never on the wire; the model (Moonshine v2 Small, Tiny or Medium Streaming, through
+  behind `BuildConfig.CALLS` and never on the wire; the model (Moonshine v2 Small Streaming alone, through
   Moonshine's own runtime, called by its `JNI` class alone and taken without its transitive dependencies) is a
-  tap-to-download from getknit.app pinned by size and SHA-256 (never hand-edit the pins: the script derives them),
+  tap-to-download from getknit.app (the walkie card or Settings, held past a hang-up by a `dataSync` service), pinned
+  by size and SHA-256 (never hand-edit the pins: the script derives them),
   fetched with `Network.openConnection` on the gate's network, not okhttp; each burst is one stream fed as the audio
   comes, looked at on `PassGate`'s cadence, one model call at a time, and every stream call holds the lease.
 - **When touching `badge/`, `ProfilePayload.badges` / `BadgeEntry` / `ProfileV2` label 8, `peer_badges` /
