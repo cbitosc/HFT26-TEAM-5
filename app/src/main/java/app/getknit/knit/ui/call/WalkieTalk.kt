@@ -133,6 +133,7 @@ internal class WalkieTalk(
     val talk: StateFlow<Talk> = _talk.asStateFlow()
 
     // For the debug bridge: bursts this phone sent and played, chunks out and in, and chunks skipped as never come.
+    // Process-lifetime totals; the card's per-session counts are the meter's.
     val sent = AtomicInteger()
     val heard = AtomicInteger()
     val chunksOut = AtomicInteger()
@@ -213,7 +214,7 @@ internal class WalkieTalk(
             calls.state.value
                 ?.takeIf { it.walkie }
                 ?.peerId
-        return meter.snapshot().copy(burstsOut = sent.get(), burstsIn = heard.get(), path = peerId?.let(::pathTo))
+        return meter.snapshot().copy(path = peerId?.let(::pathTo))
     }
 
     // Whether the walkie call's peer said it holds a cast ticket (§2.7): then a relay that sells casts carries ours.
@@ -370,6 +371,7 @@ internal class WalkieTalk(
         )
         if (delivered == 0) return if (_link.value == TalkLink.NONE) Talk.Note.NO_LINK else Talk.Note.NOT_SENT
         sent.incrementAndGet()
+        meter.burstSent()
         return Talk.Note.SENT
     }
 
@@ -426,6 +428,7 @@ internal class WalkieTalk(
                                 transcript?.end(step.burst)
                                 logHeard(step.burst, arrivals.remove(step.burst).orEmpty(), playedAt, queue.skipped - skipped)
                                 heard.incrementAndGet()
+                                meter.burstHeard()
                                 if (_talk.value == Talk.Hearing) _talk.value = Talk.Idle()
                             }
                             lost.addAndGet(queue.skipped - skipped)

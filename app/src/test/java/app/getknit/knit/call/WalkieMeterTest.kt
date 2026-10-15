@@ -96,12 +96,28 @@ class WalkieMeterTest {
     }
 
     @Test
+    fun burstsAreCountedForTheSessionOnly() {
+        meter.burstSent()
+        meter.burstHeard()
+        meter.burstHeard()
+        assertEquals(1, meter.snapshot().burstsOut)
+        assertEquals(2, meter.snapshot().burstsIn)
+        // A new session's card starts at none either way, whatever the last one sent.
+        meter.reset()
+        meter.burstHeard()
+        assertEquals(0, meter.snapshot().burstsOut)
+        assertEquals(1, meter.snapshot().burstsIn)
+    }
+
+    @Test
     fun aResetStartsTheSessionOver() {
         meter.burstOut()
         meter.chunkOut(audio(24), frameBytes = 712, handMs = 10)
         meter.chunkIn(chunk(q = 0), at = 1_000, sentAt = 900, frameBytes = 700)
         meter.skipped(2)
         meter.started(firstAt = 1_000, at = 1_400)
+        meter.burstSent()
+        meter.burstHeard()
         meter.reset()
         assertEquals(WalkieStats(), meter.snapshot())
     }

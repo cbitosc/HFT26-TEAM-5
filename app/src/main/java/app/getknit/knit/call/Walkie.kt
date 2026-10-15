@@ -402,7 +402,7 @@ class TalkQueue(
 
 /**
  * A walkie session's numbers, as the call screen's diagnostics card draws them (§3.11): the walkie's answer to a live
- * call's `CallStats`. Null until measured. [path] and the burst counts are filled in by the caller.
+ * call's `CallStats`. Null until measured. [path] is filled in by the caller.
  */
 data class WalkieStats(
     // Arrival less the sender's stamp, the median of the latest chunks: by two phones' clocks, so their skew is in it.
@@ -450,6 +450,8 @@ class WalkieMeter {
     private var failed = 0
     private var chunksIn = 0
     private var lost = 0
+    private var burstsOut = 0
+    private var burstsIn = 0
 
     // Bytes over the audio they carried (ms), or over the frames counted.
     private class Tally(
@@ -473,6 +475,8 @@ class WalkieMeter {
         failed = 0
         chunksIn = 0
         lost = 0
+        burstsOut = 0
+        burstsIn = 0
     }
 
     /** A burst out begins: the send rate is this burst's from here. */
@@ -537,6 +541,18 @@ class WalkieMeter {
         buffer = at - firstAt
     }
 
+    /** A burst out reached the radio: at least one of its chunks was taken. */
+    @Synchronized
+    fun burstSent() {
+        burstsOut++
+    }
+
+    /** A burst in played to its end. */
+    @Synchronized
+    fun burstHeard() {
+        burstsIn++
+    }
+
     /** [n] chunks skipped over as never come. */
     @Synchronized
     fun skipped(n: Int) {
@@ -559,6 +575,8 @@ class WalkieMeter {
             chunksFailed = failed,
             chunksIn = chunksIn,
             chunksLost = lost,
+            burstsOut = burstsOut,
+            burstsIn = burstsIn,
         )
 
     // Bits per millisecond are kilobits per second.
