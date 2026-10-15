@@ -302,9 +302,10 @@ private fun Scope.talkLinks(): TalkLinks =
             val meshPath =
                 linked.any { it.nodeId == peerId } || (linked.isNotEmpty() && peerId in get<MeshController>().heardIndirectly.value)
             val manager = get<MeshManager>()
+            val cast = !meshPath && manager.canCastTalk(peerId, peerTicketed)
             return when {
-                !meshPath && manager.canCastTalk(peerId, peerTicketed) ->
-                    if (manager.castCoversTalk(peerId, peerTicketed)) TalkPath.SPOOL else TalkPath.CAST_UNSEEN
+                cast && manager.castCoversTalk(peerId, peerTicketed) -> TalkPath.SPOOL
+                cast -> TalkPath.CAST_UNSEEN
                 linked.isEmpty() -> TalkPath.NONE
                 transport.bulkRouteTo(peerId) == BulkRoute.Linked -> TalkPath.WIFI_AWARE
                 linked.none { it.nodeId == peerId } -> TalkPath.FLOODED

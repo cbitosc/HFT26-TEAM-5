@@ -164,8 +164,7 @@ data class CallTimings(
  * `OFFER gen+1` twice at most, and the callee answers each under the same call id without ringing. A dead peer, a
  * reset session and a dead network all end the same way: the window runs out and the call ends no_route.
  */
-// One call's whole state machine, its direct leg's four decisions and its reach watch included; pure and two-sided tested.
-@Suppress("LargeClass", "TooManyFunctions")
+@Suppress("LargeClass", "TooManyFunctions") // one call's whole state machine, direct leg and reach watch; two-sided tested
 class CallManager(
     private val signals: CallSignals,
     private val turn: TurnSource,

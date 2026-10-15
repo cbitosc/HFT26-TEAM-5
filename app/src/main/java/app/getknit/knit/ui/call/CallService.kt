@@ -178,17 +178,20 @@ class CallService :
 
     private fun textOf(state: CallState?): String =
         when (state?.phase) {
-            CallPhase.Calling ->
-                when {
-                    state.unreachable -> "Can't reach them right now"
-                    state.unproven -> "Waiting for their phone to respond"
-                    else -> "Calling…"
-                }
+            CallPhase.Calling -> callingText(state)
             CallPhase.Ringing -> "Ringing…"
             CallPhase.Connecting -> "Connecting…"
             CallPhase.Connected -> connectedText(state)
             CallPhase.Reconnecting -> "Reconnecting…"
             else -> "Knit call"
+        }
+
+    /** An outgoing call with no RINGING back: whether anything reaches the peer (C-3.3-5), and whether it answered (C-3.3-6). */
+    private fun callingText(state: CallState): String =
+        when {
+            state.unreachable -> "Can't reach them right now"
+            state.unproven -> "Waiting for their phone to respond"
+            else -> "Calling…"
         }
 
     private fun connectedText(state: CallState): String =
