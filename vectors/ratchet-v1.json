@@ -1,0 +1,306 @@
+{
+  "about": "Ratchet vectors for the forward-secrecy ratchet (companion change A9 for the iOS port): the primitive known answers walked through one first exchange. RatchetVectorTest rebuilds and checks them. See vectors/README.md.",
+  "identities": {
+    "alice": {
+      "signingSeed": "01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3da",
+      "agreementScalar": "020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4db",
+      "bundle": "omZzaWdQdWJYIOQDCZjP1a0XI8Fp+VaqC564YZtZkr1hLCr0KOvHn43wZ2hwa2VQdWJYIHPnmXHJEQApcjYyqAtwe/T2LBJXYzRuHocY1sDcw6o6",
+      "nodeId": "4cgq2pnhh6p3j3afwsue3chrpi"
+    },
+    "bob": {
+      "signingSeed": "030a11181f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dc",
+      "agreementScalar": "040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dd",
+      "bundle": "omZzaWdQdWJYIHVcTLklbKfNxKz9xs/u2oSQF+W5+VFOmRkb1n4LDUJ2Z2hwa2VQdWJYIPdOW7dRXVZSdJZ6912ISX3G/H/NYH2p3ZGmF9uGrQEQ",
+      "nodeId": "raunzp43s3sncyojiezgg7ulna"
+    },
+    "carol": {
+      "signingSeed": "050c131a21282f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7de",
+      "agreementScalar": "060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8df",
+      "bundle": "omZzaWdQdWJYIB732sTQJYioIlVlseDvzv7dxPWfey5VST+bTzB+NHTyZ2hwa2VQdWJYIKWW0/5gVIi2ofXoj8aeuKFfydnnXnsVLGa6azU+NqJ5",
+      "nodeId": "7vo3pnlkcfbe3qhaw67fqboy34"
+    }
+  },
+  "kats": {
+    "draws": {
+      "bobSpk": {
+        "seed": 41,
+        "priv": "2930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb02",
+        "pub": "3cf35a8c6b0ba57d60aeb75a84445c8655f14c5fd0f5a3943c25ecd585d19b50"
+      },
+      "aliceSpk": {
+        "seed": 42,
+        "priv": "2a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc03",
+        "pub": "e79b22403832afc4411e2cc9b1b7a51afa108d6b138cfa35b529a6c158adbd00"
+      },
+      "aliceEph": {
+        "seed": 43,
+        "priv": "2b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd04",
+        "pub": "030aa9e3f9c7058319c4005c37b821f1848025a05f092266d852f763991b8664"
+      },
+      "aliceEpoch1": {
+        "seed": 44,
+        "priv": "2c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe05",
+        "pub": "3f62ac52cd387b1cf36a41ea529351eda1da7b9f4c907cc7cd718fd323ec083a"
+      },
+      "bobEpoch1": {
+        "seed": 45,
+        "priv": "2d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff06",
+        "pub": "aebbb70885c8c08c5e45b09d97841b5a2fd64cc4c47174430d260d73b34f282a"
+      }
+    },
+    "x3dh": {
+      "initiator": "alice",
+      "responder": "bob",
+      "initiate": {
+        "ikPriv": "020910171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4db",
+        "ekPriv": "2b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd04",
+        "peerIkPub": "f74e5bb7515d565274967af75d88497dc6fc7fcd607da9dd91a617db86ad0110",
+        "peerSpkPub": "3cf35a8c6b0ba57d60aeb75a84445c8655f14c5fd0f5a3943c25ecd585d19b50"
+      },
+      "respond": {
+        "ikPriv": "040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dd",
+        "spkPriv": "2930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb02",
+        "peerIkPub": "73e79971c9110029723632a80b707bf4f62c125763346e1e8718d6c0dcc3aa3a",
+        "peerEkPub": "030aa9e3f9c7058319c4005c37b821f1848025a05f092266d852f763991b8664"
+      },
+      "root": "4f4aded8d8700fe15eaf77ac292b540ed7e118cb0b50481d9fd3a2a7a4333b42"
+    },
+    "deriveEpoch": [
+      {
+        "note": "alice's first epoch, on bob's prekey",
+        "sessionRoot": "4f4aded8d8700fe15eaf77ac292b540ed7e118cb0b50481d9fd3a2a7a4333b42",
+        "senderEpochPriv": "2c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe05",
+        "senderEpochPub": "3f62ac52cd387b1cf36a41ea529351eda1da7b9f4c907cc7cd718fd323ec083a",
+        "basePub": "3cf35a8c6b0ba57d60aeb75a84445c8655f14c5fd0f5a3943c25ecd585d19b50",
+        "dhShared": "30f0122257430d6ab6eafc0fa92f8cba49da043cfd1ce90fc219a1e45407db65",
+        "dir": "i",
+        "senderIsInitiator": true,
+        "se": 1,
+        "pe": 0,
+        "info": "6b6e69742f646d2f76322f65706f6368690000000100000000",
+        "okm": "345ab9cc930442c4a121134d4dde6f6abfcd481c05e63c366ca0c877dd3c89d7cb169bc1a2f1eba961cd9c20a1959558d1fa28473878622f44f838c7a6caa6fe",
+        "chainKey": "345ab9cc930442c4a121134d4dde6f6abfcd481c05e63c366ca0c877dd3c89d7",
+        "export": "cb169bc1a2f1eba961cd9c20a1959558d1fa28473878622f44f838c7a6caa6fe"
+      },
+      {
+        "note": "bob's first epoch, on alice's epoch-1 key",
+        "sessionRoot": "4f4aded8d8700fe15eaf77ac292b540ed7e118cb0b50481d9fd3a2a7a4333b42",
+        "senderEpochPriv": "2d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff06",
+        "senderEpochPub": "aebbb70885c8c08c5e45b09d97841b5a2fd64cc4c47174430d260d73b34f282a",
+        "basePub": "3f62ac52cd387b1cf36a41ea529351eda1da7b9f4c907cc7cd718fd323ec083a",
+        "dhShared": "778afbdcbd3b254655916b098a71b84ef13f7a7440ac65f3f3cc3281a6c61c3b",
+        "dir": "r",
+        "senderIsInitiator": false,
+        "se": 1,
+        "pe": 1,
+        "info": "6b6e69742f646d2f76322f65706f6368720000000100000001",
+        "okm": "1c4af237b8d192f2d9d3c03ac1f2416656f735c9e41e532f901b7b5ba9ef3fa9df98381dbf0f16bef06e0ff21c37138483718bd0c04f539dfea92105e84bc720",
+        "chainKey": "1c4af237b8d192f2d9d3c03ac1f2416656f735c9e41e532f901b7b5ba9ef3fa9",
+        "export": "df98381dbf0f16bef06e0ff21c37138483718bd0c04f539dfea92105e84bc720"
+      }
+    ],
+    "chain": [
+      {
+        "sender": "alice",
+        "epoch": 1,
+        "ck0": "345ab9cc930442c4a121134d4dde6f6abfcd481c05e63c366ca0c877dd3c89d7",
+        "steps": [
+          {
+            "n": 0,
+            "ck": "345ab9cc930442c4a121134d4dde6f6abfcd481c05e63c366ca0c877dd3c89d7",
+            "mk": "3000fb0edc0ae78f334bc312196e7678c1c1a669115b35be24072b5afb708c0b",
+            "nextCk": "719c332af4daff7bda9af7af9474f6b4399fc19618f12ad3a501ece4a277536f"
+          },
+          {
+            "n": 1,
+            "ck": "719c332af4daff7bda9af7af9474f6b4399fc19618f12ad3a501ece4a277536f",
+            "mk": "4adb8c497c018c09b9b28241284bef2360dd495214494daa8bcee2ee5099377b",
+            "nextCk": "b6b1a4ec44fbb4289b47aa51f794e977a27461c775a16d52681239ad3921a381"
+          },
+          {
+            "n": 2,
+            "ck": "b6b1a4ec44fbb4289b47aa51f794e977a27461c775a16d52681239ad3921a381",
+            "mk": "38c2b73337d15ccf1a4c9feff5b1373930d0f8769c4d337050d35aef1bbff7be",
+            "nextCk": "d6b9b6221f8ea8fb866b31ffc66acda9f76fd1394ea5050398d9f644e0476690"
+          },
+          {
+            "n": 3,
+            "ck": "d6b9b6221f8ea8fb866b31ffc66acda9f76fd1394ea5050398d9f644e0476690",
+            "mk": "22f12f954747d8c94eaca06a766584282ea7780774efdf7a6fdaf7876b56f0f0",
+            "nextCk": "ad8762ef6d1c1a3a861ad7c9bd7ce484f227b1ad31e6ebf3b2386d7b109fe4fc"
+          }
+        ]
+      },
+      {
+        "sender": "bob",
+        "epoch": 1,
+        "ck0": "1c4af237b8d192f2d9d3c03ac1f2416656f735c9e41e532f901b7b5ba9ef3fa9",
+        "steps": [
+          {
+            "n": 0,
+            "ck": "1c4af237b8d192f2d9d3c03ac1f2416656f735c9e41e532f901b7b5ba9ef3fa9",
+            "mk": "edd0588b57bebc59eee4b7d94ed878d206454819154a0659938631c4c87b6da7",
+            "nextCk": "9efd2f94986b5165643d15f4bf2f01d9b56b67725f801f51078aa716fe1ca5c4"
+          },
+          {
+            "n": 1,
+            "ck": "9efd2f94986b5165643d15f4bf2f01d9b56b67725f801f51078aa716fe1ca5c4",
+            "mk": "c97d81c7723041eba287f73911ff7e948e1aa9dcbc86d7804a0ba41f3e61170f",
+            "nextCk": "acf8106fe330e25ea4dc0abb251ef271b06123d24d7e55827cdea8a16186207a"
+          },
+          {
+            "n": 2,
+            "ck": "acf8106fe330e25ea4dc0abb251ef271b06123d24d7e55827cdea8a16186207a",
+            "mk": "ecb5be92e576c39521cbdeee170f41e7348df1ebf3086192cfe4fdb2e45782ff",
+            "nextCk": "f95b663369e79b2a9681cca11e7cc3e003fa92b15c93e42af91412e0ad74dbf2"
+          },
+          {
+            "n": 3,
+            "ck": "f95b663369e79b2a9681cca11e7cc3e003fa92b15c93e42af91412e0ad74dbf2",
+            "mk": "a176c833f2d86442c020500c7e59d3ccecf96a633a27d0822f6f40d9deb69018",
+            "nextCk": "b75e2fef689477074cbe20adb82069ad038093eeb1df80aa42d4c995a70dd3bf"
+          }
+        ]
+      }
+    ],
+    "messageNonce": {
+      "note": "alice's first frame (se 1, n 0, with init): boundAad = aad || headerBindingBytes(header)",
+      "mk": "3000fb0edc0ae78f334bc312196e7678c1c1a669115b35be24072b5afb708c0b",
+      "aadText": "LjU8Q0pRWF9mbXR7gomQlw|4cgq2pnhh6p3j3afwsue3chrpi|1756100003000|raunzp43s3sncyojiezgg7ulna",
+      "aad": "4c6a5538513070525746396d62585237676f6d516c777c3463677132706e68683670336a336166777375653363687270697c313735363130303030333030307c7261756e7a7034337333736e63796f6a69657a676737756c6e61",
+      "headerBinding": "initFlags0",
+      "boundAad": "4c6a5538513070525746396d62585237676f6d516c777c3463677132706e68683670336a336166777375653363687270697c313735363130303030333030307c7261756e7a7034337333736e63796f6a69657a676737756c6e616b6e69742f646d2f76332f686472000000013f62ac52cd387b1cf36a41ea529351eda1da7b9f4c907cc7cd718fd323ec083a00000000000000000001030aa9e3f9c7058319c4005c37b821f1848025a05f092266d852f763991b86640000000100000198dfb77900",
+      "nonce": "f7580388d5b666ab47ecf327"
+    },
+    "headerBindingBytes": {
+      "initFlags0": {
+        "se": 1,
+        "ek": "3f62ac52cd387b1cf36a41ea529351eda1da7b9f4c907cc7cd718fd323ec083a",
+        "pe": 0,
+        "n": 0,
+        "flags": 0,
+        "init": {
+          "eph": "030aa9e3f9c7058319c4005c37b821f1848025a05f092266d852f763991b8664",
+          "pkid": 1,
+          "at": 1756100000000
+        },
+        "bytes": "6b6e69742f646d2f76332f686472000000013f62ac52cd387b1cf36a41ea529351eda1da7b9f4c907cc7cd718fd323ec083a00000000000000000001030aa9e3f9c7058319c4005c37b821f1848025a05f092266d852f763991b86640000000100000198dfb77900"
+      },
+      "initFlags1": {
+        "se": 1,
+        "ek": "3f62ac52cd387b1cf36a41ea529351eda1da7b9f4c907cc7cd718fd323ec083a",
+        "pe": 0,
+        "n": 0,
+        "flags": 1,
+        "init": {
+          "eph": "030aa9e3f9c7058319c4005c37b821f1848025a05f092266d852f763991b8664",
+          "pkid": 1,
+          "at": 1756100000000
+        },
+        "bytes": "6b6e69742f646d2f76332f686472000000013f62ac52cd387b1cf36a41ea529351eda1da7b9f4c907cc7cd718fd323ec083a00000000000000000101030aa9e3f9c7058319c4005c37b821f1848025a05f092266d852f763991b86640000000100000198dfb77900"
+      },
+      "noInitFlags0": {
+        "se": 1,
+        "ek": "aebbb70885c8c08c5e45b09d97841b5a2fd64cc4c47174430d260d73b34f282a",
+        "pe": 1,
+        "n": 2,
+        "flags": 0,
+        "bytes": "6b6e69742f646d2f76332f68647200000001aebbb70885c8c08c5e45b09d97841b5a2fd64cc4c47174430d260d73b34f282a00000001000000020000"
+      },
+      "noInitFlags1": {
+        "se": 1,
+        "ek": "aebbb70885c8c08c5e45b09d97841b5a2fd64cc4c47174430d260d73b34f282a",
+        "pe": 1,
+        "n": 2,
+        "flags": 1,
+        "bytes": "6b6e69742f646d2f76332f68647200000001aebbb70885c8c08c5e45b09d97841b5a2fd64cc4c47174430d260d73b34f282a00000001000000020100"
+      }
+    },
+    "spkSigningBytes": [
+      {
+        "owner": "alice",
+        "id": 1,
+        "pub": "e79b22403832afc4411e2cc9b1b7a51afa108d6b138cfa35b529a6c158adbd00",
+        "bytes": "6b6e69742f646d2f76322f73706b00000001e79b22403832afc4411e2cc9b1b7a51afa108d6b138cfa35b529a6c158adbd00",
+        "sig": "63c6ed1af8e856ca5497c4282a2e347d47e52e0768c87575952909e25363d03be40cc7a12d7a2048c3cd279dfdc1a3381527c0a8ca8cee1d172bff7088492f0a",
+        "sigNote": "Ed25519 by the owner's signing key; Tink's is RFC 8032 deterministic, but verify, never compare"
+      },
+      {
+        "owner": "bob",
+        "id": 1,
+        "pub": "3cf35a8c6b0ba57d60aeb75a84445c8655f14c5fd0f5a3943c25ecd585d19b50",
+        "bytes": "6b6e69742f646d2f76322f73706b000000013cf35a8c6b0ba57d60aeb75a84445c8655f14c5fd0f5a3943c25ecd585d19b50",
+        "sig": "0bb14ba1751f76fe5bdb8c69b8fe10d6f2671a309a8383c3fb98e95a047ab6197005360666b119153f931cabc3539dc575fe95cfe9f43041afd73e025f255f0b",
+        "sigNote": "Ed25519 by the owner's signing key; Tink's is RFC 8032 deterministic, but verify, never compare"
+      }
+    ],
+    "rootTag": {
+      "note": "local storage only, never on the wire: the first 8 HKDF bytes, read big-endian as a signed Int64",
+      "root": "4f4aded8d8700fe15eaf77ac292b540ed7e118cb0b50481d9fd3a2a7a4333b42",
+      "bytes": "335c9ff97ee2f743",
+      "int64": 3701008887716181827
+    },
+    "group": {
+      "groupId": "g-bec4e7dac6ce43deb38c74d7",
+      "groupMembers": [
+        "alice",
+        "bob",
+        "carol"
+      ],
+      "senderId": "4cgq2pnhh6p3j3afwsue3chrpi",
+      "sender": "alice",
+      "epoch": 1,
+      "seedSeed": 47,
+      "seed": "2f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa0108",
+      "info": "6b6e69742f67726f75702f76312f65706f6368672d6265633465376461633663653433646562333863373464377c3463677132706e68683670336a336166777375653363687270697c00000001",
+      "chainKey": "08cc92406343edc3d6865aa3d1a3a4fc9d0dd5e5098be5e866808f7383ec4fc1",
+      "export": "9a6c2ff445282a5118ced976ff7d948bdbc5178e996a99433c6e44cc63f4cf39",
+      "chain": {
+        "sender": "alice",
+        "epoch": 1,
+        "ck0": "08cc92406343edc3d6865aa3d1a3a4fc9d0dd5e5098be5e866808f7383ec4fc1",
+        "steps": [
+          {
+            "n": 0,
+            "ck": "08cc92406343edc3d6865aa3d1a3a4fc9d0dd5e5098be5e866808f7383ec4fc1",
+            "mk": "1c5af05b1ae9e2b32e075d08a2fa1eea29d49e94ca4bc9ffce95d2ed7ec28ed4",
+            "nextCk": "065349fcc3ad55ad831fc155c2dc69318a86271e3db7950544e386faa1e35763"
+          },
+          {
+            "n": 1,
+            "ck": "065349fcc3ad55ad831fc155c2dc69318a86271e3db7950544e386faa1e35763",
+            "mk": "1c337c6af75599c4fde27d65ac42e8846cde18bb744688a88b0a6274353cb269",
+            "nextCk": "3aff1f9095f66597d0e669fd1f069acf6487e80aebdc65b97073ae34ea01b677"
+          },
+          {
+            "n": 2,
+            "ck": "3aff1f9095f66597d0e669fd1f069acf6487e80aebdc65b97073ae34ea01b677",
+            "mk": "ca3e3f317353065ca36fcdf7c57b680b4e43922e4870d05cf87bb22aa91edc6e",
+            "nextCk": "b93067785b8ea6445d91046dd0f38ea55e3de715a0b633d4ef6b7167d4a8cabe"
+          },
+          {
+            "n": 3,
+            "ck": "b93067785b8ea6445d91046dd0f38ea55e3de715a0b633d4ef6b7167d4a8cabe",
+            "mk": "1b075e0714737c768a507bfa1806ca4c37c0d0cdedc9eb747a549e63b43a663f",
+            "nextCk": "01caad469f74b5b424cb4b70bec34bf0033159ce6772949d4b9cbca06889e441"
+          }
+        ]
+      }
+    },
+    "aesGcm": {
+      "key": "30373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb0209",
+      "iv": "31383f464d545b626970777e",
+      "aad": "323940474e555c636a71787f868d949ba2a9b0b7",
+      "plaintext": "486920426f62",
+      "sealed": "3a8f5015a04d3ec9bb3c2437d06c7ffab056aa0434c5",
+      "sealedNote": "ciphertext || 16-byte tag"
+    },
+    "export": {
+      "normative": false,
+      "note": "API-only today (the spool's pairwiseRoot and a reserved sealv 2); a port may skip these",
+      "exportRoot": "74d72735c09ac1b22cfda7914aef5a6dbc24cdd3011fd11a063b43a3bbc29df1",
+      "aliceEpoch1ExportSeal": "3a643690ddad93bee0a3bcec1be98605fae3cc52c0499e33c01cbf9f07305b2c",
+      "groupExportSeal": "1fcdfadfd77348a23e896bd16417b3bb881b807bd211484497be5e3db5bf8de1"
+    }
+  }
+}

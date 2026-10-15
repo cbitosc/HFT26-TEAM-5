@@ -33,3 +33,12 @@ v1 draws a fresh key, nonce and ephemeral per message; write mode keeps it while
 re-encodes to its own bytes. The private keys in `keyed-v1.json` are test keys and nothing else.
 `GoldenVectorTest` fails when the file names a fixture it does not build or misses one it does, and
 `vectors/README.md` says who writes each file.
+
+## Amendment 2026-10-15 — the ratchet gets its own vector file (companion change A9)
+
+The iOS port of the forward-secrecy ratchet had nothing keyed to check against: `wire-v1.json` pins only the
+shapes. `vectors/ratchet-v1.json`, written and checked by `RatchetVectorTest`, lands in stages, the primitive
+known answers (`kats`) first. Every key it uses is a stated `fixtureBytes` draw recorded beside what it derives,
+with the HKDF infos spelled out, so a port replays values rather than reproducing the seeding. Alice and Bob are
+`keyed-v1.json`'s identities and Carol is `ios-emitted-v1.json`'s. It is additive: no other vector file moves.
+
