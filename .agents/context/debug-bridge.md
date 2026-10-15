@@ -359,15 +359,16 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   - `pcm --es path <file>` streams a raw 16 kHz mono s16le file through the model in 100 ms chunks as fast as it takes
     them, looking as a burst does — in the background, since a long clip outlasts a broadcast's timeout (an ANR). It
     replies at once; poll `status`, whose `pcm` is `running` until it carries `text`, `audioMs`, `tookMs`, `looks`,
-    `modelMs` and `finishMs` (the last look: a burst's end to its text): the engine alone, no call. `split --ez on
-    true|false` sets whether the model splits a burst at its pauses (off by default; in memory, reloads the model).
+    `modelMs` and `finishMs` (the last look: a burst's end to its text): the engine alone, no call. `lines --es mode
+    whole|split` sets how a burst becomes lines (`LineMode`; whole by default; in memory, reloads the model),
+    and `status` names it (`lines`).
     `pcm` also takes a saved clip's WAV (its 44-byte header skipped).
   - `clips` reports Diagnostics' **Save walkie clips** switch (`SettingsStore.debugWalkieClips`, off by default): `on`,
     `dir`, `clips` (how many) and `bytes`; `--ez on true|false` sets it (persisted, read as each burst begins), `--ez
     clear true` deletes every clip. While on, each burst the transcript finishes — heard or spoken, a slipped thumb
     and a dropped burst excepted, one heard with no model included — is written by `WalkieClipFiles` to
     `Android/data/<package>/files/walkie-clips/` as `<UTC stamp>-heard|spoken-b<burst>.wav` (16 kHz mono s16, as the
-    model got it) and a `.json` sidecar: the line's fields as `transcript` gives them, plus `model`, `splitAtPauses`,
+    model got it) and a `.json` sidecar: the line's fields as `transcript` gives them, plus `model`, `lines`,
     `call` (the call's id, the same on both phones) and, for a spoken burst, `suppressor`. Unencrypted, capped at
     256 MiB (oldest first); pull with `adb pull /sdcard/Android/data/app.getknit.knit/files/walkie-clips`.
   - `loop --es path <file>` sends the file the whole walkie way but the radio (the recorder's Opus encoder at 8 kbps,

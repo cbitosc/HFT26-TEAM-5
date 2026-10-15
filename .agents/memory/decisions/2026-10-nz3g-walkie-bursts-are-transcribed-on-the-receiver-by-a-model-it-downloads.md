@@ -129,3 +129,16 @@ C-3.11-9). It is debug-only, as the walkie is, and nothing reaches the wire.
   transcript's text, or its audio, is written down, and only a debug build, on the user's switch, does it; release has
   no switch and its store key reads false. `…debug.STT --es op clips` reports, sets and clears them, and `pcm` reads a
   clip's WAV back.
+- **Amendment 2026-10-14: the hybrid, tried and not taken.** The proposal was to keep a split transcriber's cheap looks
+  for the live words and decode the whole burst once at the release for the text. The runtime sets the voice detector
+  per transcriber, not per stream (and keeps one encoder state per transcriber), so the hybrid is two transcribers over
+  the same files, both fed every burst, the whole-burst one with `decode_incomplete_lines=false` so its looks only
+  encode. `MoonshineSpeech.lines` (`LineMode`, replacing the split boolean) has it as `HYBRID`, beside `WHOLE` and
+  `SPLIT`. Measured with `pcm` on the Pixel 9 and 7 (Small, six clips, then the noisy 10 s clip three rounds with the
+  modes alternating, both phones dozing): it read exactly as `WHOLE` did, and cost more on every count — native heap
+  633 against 452 MB (P9) and 621 against 350 MB (P7); model time 132 % and 122 % of real time against 101 % and 115 %;
+  and 2.1 s and 2.0 s from the release to the text against 0.75 s and 1.8 s, because its one decode starts from
+  nothing where `WHOLE`'s last look verifies its previous guess in one pass. `SPLIT` stayed cheapest (93 % and 83 %,
+  under 10 ms to the text) and worst on noise. `WHOLE` stays the default and `HYBRID` was removed; `LineMode`
+  keeps `WHOLE` and `SPLIT` (`…debug.STT --es op lines`). Both `WHOLE` and `HYBRID` drop the 44 s clip's last words at the
+  30 s line cut, where `SPLIT` keeps them; that is the next thing to chase.

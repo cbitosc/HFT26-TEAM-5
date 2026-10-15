@@ -140,6 +140,7 @@ import app.getknit.knit.ui.call.TalkPlayer
 import app.getknit.knit.ui.call.TalkRecorder
 import app.getknit.knit.ui.call.WalkieTalk
 import app.getknit.knit.ui.call.WebRtcCallMedia
+import app.getknit.knit.ui.call.stt.LineMode
 import app.getknit.knit.ui.call.stt.MoonshineSpeech
 import app.getknit.knit.ui.call.stt.SttModelStore
 import app.getknit.knit.ui.call.stt.WalkieClipFiles
@@ -2715,10 +2716,12 @@ class DebugBridgeReceiver :
                 speech.unload()
             }
 
-            "split" -> {
-                // `--ez on true|false`: the model's voice detector splitting a burst at pauses (off by default), for an
-                // A/B. In memory until the process ends; the next burst reloads the model with it.
-                speech.splitAtPauses = intent.getBooleanExtra("on", false)
+            "lines" -> {
+                // `--es mode whole|split` (`LineMode`, whole by default), for an A/B. In memory until the process
+                // ends; the next burst reloads the model with it.
+                val mode = intent.getStringExtra("mode")
+                speech.lines = LineMode.entries.firstOrNull { it.name.equals(mode, ignoreCase = true) }
+                    ?: return reply("error", "mode is one of ${LineMode.entries.joinToString { it.name.lowercase() }}")
             }
 
             "clips" -> {
@@ -2774,7 +2777,7 @@ class DebugBridgeReceiver :
             .put("installed", JSONArray(store.installedIds().sorted()))
             .put("stt", sttStateJson(store.state.value))
             .put("resident", speech.resident)
-            .put("splitAtPauses", speech.splitAtPauses)
+            .put("lines", speech.lines.name.lowercase())
             .put("pcm", lastPcm ?: JSONObject.NULL)
             .put(
                 "transcript",

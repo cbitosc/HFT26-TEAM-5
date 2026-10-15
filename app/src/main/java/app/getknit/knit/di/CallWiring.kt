@@ -221,7 +221,7 @@ private fun callGraph(): Module =
                     about = { line ->
                         mapOf(
                             "model" to get<SttModelStore>().model.id,
-                            "splitAtPauses" to get<MoonshineSpeech>().splitAtPauses,
+                            "lines" to get<MoonshineSpeech>().lines.name.lowercase(),
                             "call" to get<CallManager>().state.value?.id,
                             "suppressor" to if (line.mine) get<TalkRecorder>().suppressor else null,
                         )

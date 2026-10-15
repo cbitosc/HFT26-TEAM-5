@@ -43,17 +43,15 @@ internal class MoonshineSpeech(
     private val lock = Any()
     private var lease: ModelLease<Engine>? = null
 
-    // What the lease was built over: the store's generation, and whether the model split at pauses.
-    private var leaseKey: Pair<Int, Boolean>? = null
+    // What the lease was built over: the store's generation, and how a burst becomes lines.
+    private var leaseKey: Pair<Int, LineMode>? = null
 
     /**
-     * Whether the model's own voice detector splits a burst into lines at its pauses. Off: the talk button already says
-     * where the speech is, and a split decodes each half without the other, which Moonshine measured at 1.5–2 points of
-     * word error on clean speech, mostly words inserted at the seams; a burst is one line of up to [MAX_LINE_S]. The
-     * debug bridge turns it on for an A/B; it is read when the model loads, so a change makes the next burst reload it.
+     * How a burst becomes lines ([LineMode]). Read when the model loads, so a change makes the next burst reload it; the
+     * debug bridge sets it for an A/B.
      */
     @Volatile
-    var splitAtPauses = false
+    var lines = LineMode.WHOLE
 
     override suspend fun open(): SpeechStream? {
         val current = current() ?: return null
@@ -133,7 +131,7 @@ internal class MoonshineSpeech(
 
     // The lease over the model on disk now, made afresh when the store's files changed; null with no model there.
     private fun current(): ModelLease<Engine>? {
-        val key = store.generation to splitAtPauses
+        val key = store.generation to lines
         val files = store.paths() ?: return null
         val model = store.model
         val dir = files.values.firstOrNull()?.parentFile ?: return null
@@ -145,7 +143,7 @@ internal class MoonshineSpeech(
                     ModelLease(
                         scope = scope,
                         idleMs = SttPolicy.IDLE_UNLOAD_MS,
-                        load = { guard.guard(ModelLoadGuard.STT) { build(model, dir, key.second) } },
+                        load = { guard.guard(ModelLoadGuard.STT) { build(model, dir, key.second == LineMode.SPLIT) } },
                         close = { JNI.moonshineFreeTranscriber(it.handle) },
                     )
                 lease = made
@@ -239,3 +237,14 @@ internal class MoonshineSpeech(
         }
     }
 }
+
+/**
+ * How the transcript turns a burst into lines, the model's own voice detector being what splits one at a pause.
+ * [WHOLE] keeps it off, a burst being one line of up to 30 s: the talk button already bounds the speech, and a split
+ * decodes each half without the other, which Moonshine measured at 1.5–2 points of word error on clean speech (16.7 %
+ * against 0 on the lab's noisy clip), though every look re-decodes the burst so far. [SPLIT] cuts at pauses: its looks
+ * stay cheap and its text is final the moment the burst ends, and the seams cost words. A third mode, live words from a
+ * split transcriber and the text from a second whole-burst one, read no better than [WHOLE] and cost more on every count
+ * (ADR 2026-10.nz3g).
+ */
+internal enum class LineMode { WHOLE, SPLIT }
