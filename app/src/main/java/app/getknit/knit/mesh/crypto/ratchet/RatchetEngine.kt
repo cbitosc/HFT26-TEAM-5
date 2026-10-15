@@ -6,7 +6,8 @@ import app.getknit.knit.mesh.crypto.AesGcm
  * The DM epoch-rekey ratchet state machine (crypto scheme v2, docs/FORWARD_SECRECY_RATCHET.md). Pure:
  * state comes in as immutable snapshots, changes go out as [SealResult]/[OpenOutcome] deltas the caller
  * persists (atomically with the message row — see `RatchetSessions`); no IO, no Android, randomness
- * only through the injected keypair source. That keeps every ordering/race scenario a plain-JVM test.
+ * only through the injected keypair and v2 IV sources. That keeps every ordering/race scenario a plain-JVM
+ * test, and lets `RatchetVectorTest` replay a whole transcript byte for byte (companion change A9).
  *
  * Design invariants (the mesh's custody semantics force all of them — see the design doc):
  * - **Epochs derive independently** off a static per-session root: any subset of a peer's epochs can be
@@ -36,6 +37,8 @@ import app.getknit.knit.mesh.crypto.AesGcm
  */
 class RatchetEngine(
     private val newKeyPair: () -> RatchetCrypto.KeyPair = RatchetCrypto::generateKeyPair,
+    // The v2 form's carried AES-GCM IV; v3 derives its nonce instead. Only a vector test passes another.
+    private val newIv: () -> ByteArray = AesGcm::randomIv,
 ) {
     /** Immutable snapshot of one peer session (mirrors the `ratchet_sessions` row). */
     data class SessionState(
@@ -303,7 +306,7 @@ class RatchetEngine(
             nonce = null
             ct = AesGcm.encrypt(msgKey, plaintext, boundAad, RatchetCrypto.messageNonce(msgKey, boundAad)).second
         } else {
-            val sealed = AesGcm.encrypt(msgKey, plaintext, aad)
+            val sealed = AesGcm.encrypt(msgKey, plaintext, aad, newIv())
             nonce = sealed.first
             ct = sealed.second
         }

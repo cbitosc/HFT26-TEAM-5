@@ -42,3 +42,8 @@ known answers (`kats`) first. Every key it uses is a stated `fixtureBytes` draw 
 with the HKDF infos spelled out, so a port replays values rather than reproducing the seeding. Alice and Bob are
 `keyed-v1.json`'s identities and Carol is `ios-emitted-v1.json`'s. It is additive: no other vector file moves.
 
+From the DM transcripts on (`dm`, `negative`), nothing in the file is stored: `RatchetEngine` and
+`GroupRatchetEngine` take their v2 AES-GCM IV through an injected `newIv` source (production keeps
+`AesGcm.randomIv`), as they already took key pairs and seeds, so every frame is rebuilt and compared on each run
+and every draw a transcript consumes is listed per party in the order the engine takes it.
+

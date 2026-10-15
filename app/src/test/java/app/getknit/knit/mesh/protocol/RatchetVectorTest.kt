@@ -8,6 +8,7 @@ import app.getknit.knit.mesh.crypto.ratchet.GroupRatchetCrypto
 import app.getknit.knit.mesh.crypto.ratchet.RatchetCrypto
 import app.getknit.knit.mesh.crypto.ratchet.RatchetEngine
 import com.google.crypto.tink.subtle.Hkdf
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.add
@@ -34,6 +35,10 @@ import org.junit.Test
  * answers on Alice's epoch key. Everything in it is deterministic (HKDF, X25519, Tink's RFC 8032 Ed25519 and a
  * fixed-IV GCM seal), so it is rebuilt on every run and compared whole. Entries marked `normative: false`
  * (the export secrets) are API-only today; a port may skip them.
+ *
+ * The `dm` and `negative` sections are whole transcripts through `RatchetSessions` ([RatchetDmVectors]): the
+ * engines draw every key pair and v2 IV from a stated seed plan, so those too are rebuilt on every run, and each open
+ * is asserted to give the outcome the file states while the section is built.
  */
 class RatchetVectorTest {
     private val alice = VectorParty(fixtureBytes(32, 1), fixtureBytes(32, 2))
@@ -131,6 +136,30 @@ class RatchetVectorTest {
         }
     }
 
+    private val transcripts by lazy {
+        RatchetDmVectors(alice, bob, carol, prekeys.getValue("aliceSpk1").vector(), prekeys.getValue("bobSpk1").vector(), SESSION_AT)
+    }
+
+    private fun dmJson() = runBlocking { transcripts.scenarios() }
+
+    private fun negativeJson() = runBlocking { transcripts.negatives() }
+
+    @Test
+    fun `the dm transcripts rebuild exactly and open as they state`() {
+        // Building them asserts every stated outcome against the engine, so this half runs in write mode too.
+        val dm = dmJson()
+        assumeFalse(VectorFiles.writing)
+        assertEquals("ratchet vector section 'dm' drifted; regenerate with KNIT_WRITE_VECTORS=1", dm, file.getValue("dm"))
+        assertEquals(transcripts.formatJson(), file.getValue("transcriptFormat"))
+    }
+
+    @Test
+    fun `the negative transcripts rebuild exactly and refuse as they state`() {
+        val negative = negativeJson()
+        assumeFalse(VectorFiles.writing)
+        assertEquals("ratchet vector section 'negative' drifted; regenerate with KNIT_WRITE_VECTORS=1", negative, file.getValue("negative"))
+    }
+
     @Test
     fun `KNIT_WRITE_VECTORS=1 rewrites the ratchet vectors`() {
         assumeTrue(VectorFiles.writing)
@@ -141,6 +170,9 @@ class RatchetVectorTest {
                 put("identities", identitiesJson())
                 put("kats", katsJson())
                 put("profiles", profilesJson())
+                put("transcriptFormat", transcripts.formatJson())
+                put("dm", dmJson())
+                put("negative", negativeJson())
             },
         )
     }
@@ -303,6 +335,8 @@ class RatchetVectorTest {
         val createdAt: Long,
     ) {
         val sig: ByteArray = owner.sign(RatchetCrypto.spkSigningBytes(id, keys.pub))
+
+        fun vector() = VectorPrekey(name, id, keys)
     }
 
     private val prekeys =
@@ -527,7 +561,9 @@ class RatchetVectorTest {
         const val FILE = "ratchet-v1.json"
         const val ABOUT =
             "Ratchet vectors for the forward-secrecy ratchet (companion change A9 for the iOS port): the primitive " +
-                "known answers walked through one first exchange. RatchetVectorTest rebuilds and checks them. See vectors/README.md."
+                "known answers walked through one first exchange, the signed ratchet profiles, whole DM transcripts (dm) and " +
+                "single-frame refusals (negative) through the session layer. RatchetVectorTest rebuilds and checks them. " +
+                "See vectors/README.md."
 
         // fixtureBytes seeds. 1-8 are identities (dave takes 7-8), 21-23 keyed-v1's frame ids and file key.
         const val SEED_BOB_SPK = 41

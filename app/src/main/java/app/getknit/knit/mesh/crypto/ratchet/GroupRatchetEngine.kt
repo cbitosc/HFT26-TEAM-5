@@ -7,7 +7,7 @@ import app.getknit.knit.mesh.crypto.AesGcm
  * docs/GROUP_FORWARD_SECRECY.md). Pure:
  * state comes in as immutable snapshots, changes go out as [SealResult]/[OpenOutcome] deltas the caller
  * persists (atomically with the message row — see `GroupRatchetSessions`); no IO, no Android,
- * randomness only through the injected seed source.
+ * randomness only through the injected seed and IV sources.
  *
  * Much smaller than the DM [RatchetEngine], deliberately: there are no sessions, no DH, and no races.
  * Each member's chain state is authored solely by that member — the trust, freshness, and healing
@@ -25,6 +25,8 @@ import app.getknit.knit.mesh.crypto.AesGcm
  */
 class GroupRatchetEngine(
     private val newSeed: () -> ByteArray = GroupRatchetCrypto::newSeed,
+    // The frame's carried AES-GCM IV. Only a vector test passes another, to replay a transcript (A9).
+    private val newIv: () -> ByteArray = AesGcm::randomIv,
 ) {
     /** Our own send chain for one group (mirrors a `group_send_chains` row). [seed] is retained for
      *  (re-)distribution while the epoch is current or draining — deleting the row is the sender-side
@@ -190,7 +192,7 @@ class GroupRatchetEngine(
     ): SealResult? {
         if (chain.count >= MAX_EPOCH_MESSAGES) return null
         val msgKey = GroupRatchetCrypto.messageKey(chain.chainKey)
-        val (iv, ct) = AesGcm.encrypt(msgKey, plaintext, aad)
+        val (iv, ct) = AesGcm.encrypt(msgKey, plaintext, aad, newIv())
         return SealResult(
             header = FrameHeader(se = chain.epoch, n = chain.count),
             nonce = iv,

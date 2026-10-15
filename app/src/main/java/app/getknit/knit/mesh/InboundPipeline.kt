@@ -1,6 +1,7 @@
 package app.getknit.knit.mesh
 
 import android.util.Log
+import androidx.annotation.VisibleForTesting
 import androidx.room3.withWriteTransaction
 import app.getknit.knit.TextLimits
 import app.getknit.knit.badge.Badges
@@ -3985,9 +3986,9 @@ class InboundPipeline(
         }.onFailure { Log.w(TAG, "animation check failed: ${it.javaClass.simpleName}") }
     }
 
-    private companion object {
+    internal companion object {
         /** Types a missing sender key never spends a key request on — see the comment in `verifyInbound`. */
-        val NO_KEY_REQUEST_TYPES =
+        private val NO_KEY_REQUEST_TYPES =
             setOf(
                 FrameType.KEY_REQ,
                 FrameType.PROFILE,
@@ -4002,20 +4003,20 @@ class InboundPipeline(
 
         // Same tag as MeshManager on purpose: these inbound verify/drop log lines are grepped in field
         // diagnostics, so the extraction must not change them.
-        const val TAG = "MeshManager"
+        private const val TAG = "MeshManager"
 
         /** Longest message or node id a quote may name; every id this protocol mints is far shorter. */
-        const val MAX_QUOTED_ID = 64
+        private const val MAX_QUOTED_ID = 64
 
         /** Most acked ids applied from one sealed CTL_RECEIPT — 2× AckSync's send-side batch cap. */
-        const val MAX_RECEIPT_ACKS = 2 * AckSync.MAX_BATCH_ACKS
+        private const val MAX_RECEIPT_ACKS = 2 * AckSync.MAX_BATCH_ACKS
 
         /**
          * How often one member's rejoin may force our rekey ([rejoinRekeyDue]). Membership itself is never
          * floored — the rejoiner is back the moment their frame lands — only the epoch re-mint it triggers,
          * so the worst a leave/rejoin loop costs the roster is one mint and one seed fan-out an hour.
          */
-        const val REJOIN_REKEY_FLOOR_MS = 60 * 60_000L
+        private const val REJOIN_REKEY_FLOOR_MS = 60 * 60_000L
 
         /**
          * The v2 DM failures that feed the session-reset heuristic (ADR 023) — the ratchet outcomes that
@@ -4027,7 +4028,8 @@ class InboundPipeline(
          * walk straight past the distinct-frame rule. It was added as a proxy for the peer-restarted-its-
          * chain desync, which the three purge sites now fix at the source.
          */
-        val RESET_TRIGGERING_DROPS =
+        @VisibleForTesting
+        internal val RESET_TRIGGERING_DROPS =
             setOf(
                 DropReason.RATCHET_NO_SESSION,
                 DropReason.RATCHET_EPOCH_GONE,

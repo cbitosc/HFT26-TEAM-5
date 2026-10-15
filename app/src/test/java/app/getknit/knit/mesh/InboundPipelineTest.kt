@@ -86,6 +86,7 @@ import app.getknit.knit.mesh.protocol.ReplyRef
 import app.getknit.knit.mesh.protocol.TransferPayload
 import app.getknit.knit.mesh.protocol.TypingContent
 import app.getknit.knit.mesh.protocol.VectorFiles
+import app.getknit.knit.mesh.protocol.VectorParty
 import app.getknit.knit.mesh.protocol.VideoInfo
 import app.getknit.knit.mesh.protocol.WireCodec
 import app.getknit.knit.mesh.protocol.WireEnvelope
@@ -117,6 +118,8 @@ import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
@@ -240,8 +243,11 @@ class InboundPipelineTest {
     /** The pipeline under test wired with real DTN services + crypto + transport and mocked repos. */
     private inner class Rig(
         scope: CoroutineScope,
+        // A fixed identity and prekey for a test that replays a vector file's frames (ratchet-v1.json's negatives).
+        val self: Party = party(),
+        val selfSpk: RatchetCrypto.KeyPair = RatchetCrypto.generateKeyPair(),
+        holdsSpk: Boolean = true,
     ) {
-        val self = party()
         val transport = FakeLoopTransport(self.nodeId)
         val metrics = MeshMetrics()
         val forwardStore = FakeForwardStore()
@@ -322,14 +328,13 @@ class InboundPipelineTest {
         // Our side of the v2 epoch ratchet: a signed-prekey pair the fake "identity" serves, and the
         // session service over the REAL Room-backed store (the in-memory DB above) — v2 tests exercise
         // the actual applyOpen/commit SQL, not a fake.
-        val selfSpk = RatchetCrypto.generateKeyPair()
         val ratchetMutex = Mutex()
         val ratchetStore = RatchetRepository(db.ratchetDao(), clock = { 5L })
         val ratchet =
             RatchetSessions(
                 store = ratchetStore,
                 dhIdentityPriv = { self.dhPriv },
-                spkPrivFor = { id -> if (id == SPK_ID) selfSpk.priv else null },
+                spkPrivFor = { id -> if (holdsSpk && id == SPK_ID) selfSpk.priv else null },
                 mutex = ratchetMutex,
             )
 
@@ -6193,6 +6198,90 @@ class InboundPipelineTest {
                 assertEquals(name, expect.getValue("prekeyProfileAt").jsonPrimitive.long, row.prekeyProfileAt)
             }
         }
+
+    /**
+     * `ratchet-v1.json`'s `negative` cases with no setup on the receiver's side, through the real pipeline as Bob: each
+     * frame is signed by Alice, whom Bob has pinned as ratchet-capable, and must leave exactly the drop the file
+     * states, no message row, no ratchet session and no reset request. This is the layer the file's `pipeline`
+     * cases are refused at (a nonce of the wrong shape, v3 to a group, a small-order init key), and it pins the
+     * engine cases' drop mapping too. The pipeline opens with `System.currentTimeMillis()` as the ratchet's `now`, not
+     * the rig clock, so only a case whose outcome is independent of time may set `pipelineReplay`.
+     */
+    @Test
+    fun theRatchetVectorNegativesDropAsTheFileSays() =
+        runTest {
+            val file = VectorFiles.read("ratchet-v1.json")
+            val keys = vectorPrekeys(file)
+            val alice = vectorParty(file, "alice")
+            val bob = vectorParty(file, "bob")
+            var replayed = 0
+            for (case in file.getValue("negative").jsonArray.map { it.jsonObject }) {
+                if (!case.getValue("pipelineReplay").jsonPrimitive.boolean) continue
+                val name = case.getValue("name").jsonPrimitive.content
+                val holds =
+                    case
+                        .getValue("parties")
+                        .jsonObject
+                        .getValue("bob")
+                        .jsonObject
+                        .getValue("holdsPrekeys")
+                        .jsonArray
+                        .map { it.jsonPrimitive.content }
+                check(holds.isEmpty() || holds == listOf("bobSpk1")) { "$name: the rig holds one prekey, id $SPK_ID" }
+                val rig = Rig(backgroundScope, self = bob, selfSpk = keys.getValue("bobSpk1"), holdsSpk = holds.isNotEmpty())
+                rig.pinRatchetCapable(alice, keys.getValue("aliceSpk1").pub)
+                case["groupMembers"]?.jsonArray?.let { names ->
+                    val members = names.map { VectorParty.identity(file, it.jsonPrimitive.content).nodeId }
+                    rig.seedGroup(Conversations.groupIdFor(members), members = members, createdBy = alice.nodeId)
+                }
+                val step =
+                    case
+                        .getValue("steps")
+                        .jsonArray
+                        .last()
+                        .jsonObject
+                val wire = checkNotNull(WireCodec.decodeWire(step.hex("wire")))
+                val env = checkNotNull(WireCodec.decodeEnvelope(wire.signed))
+                rig.nowMs = env.sentAt
+                rig.pipeline.onDeliver(wire, env, alice.nodeId, TransportKind.Other)
+                val drop = DropReason.valueOf(step.getValue("drop").jsonPrimitive.content)
+                assertEquals(name, 1L, rig.drops(drop))
+                assertEquals(
+                    name,
+                    1L,
+                    rig.metrics
+                        .frames()
+                        .dropsByReason.values
+                        .sum(),
+                )
+                assertTrue(name, rig.msgMap.isEmpty())
+                assertNull(name, rig.ratchet.sessionFor(alice.nodeId))
+                assertEquals(name, 0, rig.resetsSent())
+                replayed++
+            }
+            assertTrue("the file has pipeline cases to replay", replayed > 0)
+        }
+
+    private fun JsonObject.hex(key: String): ByteArray = getValue(key).jsonPrimitive.content.fromHex()
+
+    /** A vector file's identity as this test's [Party]: the same raw keys, so it opens and signs what the file holds. */
+    private fun vectorParty(
+        file: JsonObject,
+        name: String,
+    ): Party {
+        val vector = VectorParty.identity(file, name)
+        return Party(vector.crypto, vector.bundle, vector.agreementScalar)
+    }
+
+    /** `ratchet-v1.json`'s `profiles.prekeys`, by name, as key pairs. */
+    private fun vectorPrekeys(file: JsonObject): Map<String, RatchetCrypto.KeyPair> =
+        file
+            .getValue("profiles")
+            .jsonObject
+            .getValue("prekeys")
+            .jsonArray
+            .map { it.jsonObject }
+            .associate { it.getValue("name").jsonPrimitive.content to RatchetCrypto.KeyPair(it.hex("priv"), it.hex("pub")) }
 
     @Test
     fun theProfileVersionOrdersLwwAndFallsBackToSentAtForAPeerWithoutTheField() =
