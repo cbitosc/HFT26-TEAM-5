@@ -241,7 +241,7 @@ internal class TranscriptParty(
     val nodeId: String get() = identity.nodeId
 }
 
-/** A DM frame as it went on the air: its signed wire bytes, and what built them. */
+/** A DM frame as it went on the air: its wire bytes, and what built them. */
 internal class TranscriptFrame(
     val step: Int,
     val sender: TranscriptParty,
@@ -251,8 +251,18 @@ internal class TranscriptFrame(
     val body: String?,
     /** What a mutation changed, for the file; null for a frame exactly as the sender sealed it. */
     val mutation: String? = null,
+    /**
+     * False for the unsigned point-to-point form (ADR 059): `relay = false` and an empty signature, as
+     * `MeshManager.unsigned` sends a v3 live-link tick.
+     */
+    val signed: Boolean = true,
 ) {
-    val wire: ByteArray = sender.identity.signedWire(env)
+    val wire: ByteArray =
+        if (signed) {
+            sender.identity.signedWire(env)
+        } else {
+            WireCodec.encodeWire(WireEnvelope(relay = false, sig = ByteArray(0), signed = WireCodec.encodeEnvelope(env)))
+        }
 
     /** The same frame with [enc] swapped in and re-signed by the sender — a buggy (never a forging) peer. */
     fun mutated(
@@ -273,20 +283,39 @@ internal class TranscriptFrame(
             )
         return TranscriptFrame(step, sender, reAddressed, newEnc, body = null, mutation = description)
     }
+
+    /** These very envelope bytes, signed and flooded as an ordinary frame: what a captured tick's signed twin is. */
+    fun signedCopy(): TranscriptFrame = TranscriptFrame(step, sender, env, enc, body, mutation = "the same envelope, signed")
 }
 
 /** Where a refusal happens, and what the pipeline records for it. */
 internal enum class Layer { ENGINE, PIPELINE }
 
+/** What a seal sends besides its content: the knobs `MeshManager`'s other seal sites turn. */
+internal class SealOptions(
+    /** The frame id; null mints the transcript's next one. A re-seal passes the original's. */
+    val id: String? = null,
+    /** `sentAt` when it differs from the seal's `now` (a re-seal keeps the row's). */
+    val sentAt: Long? = null,
+    val signed: Boolean = true,
+    /** The cleartext `ChatContent.attachmentHash` (a sealed profile's avatar hint). */
+    val attachmentHash: String? = null,
+    /** The step whose frame this re-seals (same id, same sentAt, new bytes). */
+    val resealOf: Int? = null,
+    val note: String? = null,
+)
+
 /**
  * One recorded transcript: the steps run as they are declared, each leaving a digest of its actor's state, and
- * [json] lays it out. A scenario that adds a step kind (a reset, a wipe, a ctl) adds a function here, and the
- * scenarios in `RatchetDmVectors` stay a list of calls.
+ * [json] lays it out. A scenario that adds a step kind adds a function here, and the scenarios in
+ * `RatchetDmVectors` stay a list of calls. [recordFloors] adds `floorsBefore` to every step — the in-memory
+ * floors `RatchetSessions` decides resets and replacements by, which the state digest does not hold.
  */
 internal class Transcript(
     private val name: String,
     private val note: String,
     parties: List<TranscriptParty>,
+    private val recordFloors: Boolean = false,
 ) {
     private val parties = parties.associateBy { it.name }
     private val pins = HashMap<Pair<String, String>, VectorPrekey>()
@@ -312,6 +341,11 @@ internal class Transcript(
         caseFields[key] = value
     }
 
+    private fun prekeyFor(
+        actor: String,
+        peer: String,
+    ) = pins[actor to peer]?.let { RatchetEngine.PeerPrekey(it.id, it.keys.pub) }
+
     /** Seals [body] from [actor] to [peer] at [at] (the sender's clock: `sentAt` and the seal's `now` alike). */
     suspend fun seal(
         actor: String,
@@ -319,13 +353,30 @@ internal class Transcript(
         body: String,
         at: Long,
         v3: Boolean,
+    ): TranscriptFrame =
+        // MeshManager.sealEnvelopeFor: the row's sealed content, no inline acks, laid out for the peer's scheme.
+        sealContent(actor, peer, MessageContent(body = body).copy(acks = null), at, v3)
+
+    /**
+     * Seals [content] from [actor] to [peer] the way every DM-form seal site in `MeshManager` and `InboundPipeline`
+     * does — `sealBytes` for the peer's scheme, `RatchetSessions.sealDm`, a `chat` frame addressed to the peer — with
+     * [options] for what a particular site adds.
+     */
+    suspend fun sealContent(
+        actor: String,
+        peer: String,
+        content: MessageContent,
+        at: Long,
+        v3: Boolean,
+        options: SealOptions = SealOptions(),
     ): TranscriptFrame {
+        val floors = floorsBefore(actor, peer)
         val from = party(actor)
         val to = party(peer)
-        val id = frameIdFor("$name/${steps.size}")
-        val aad = MessageCrypto.header(id, from.nodeId, at, to.nodeId)
-        // MeshManager.sealEnvelopeFor: the row's sealed content, no inline acks, laid out for the peer's scheme.
-        val (plaintext, scheme) = MessageContent(body = body).copy(acks = null).sealBytes(v3)
+        val id = options.id ?: frameIdFor("$name/${steps.size}")
+        val sentAt = options.sentAt ?: at
+        val aad = MessageCrypto.header(id, from.nodeId, sentAt, to.nodeId)
+        val (plaintext, scheme) = content.sealBytes(v3)
         val drawsBefore = from.draws.count
         val prekey = pins[actor to peer]
         val enc =
@@ -333,23 +384,15 @@ internal class Transcript(
                 from.sessions.sealDm(
                     peerId = to.nodeId,
                     peerIkPub = to.identity.bundle.dhPublicKey(),
-                    peerSpk = prekey?.let { RatchetEngine.PeerPrekey(it.id, it.keys.pub) },
+                    peerSpk = prekeyFor(actor, peer),
                     plaintext = plaintext,
                     aad = aad,
                     now = at,
                     scheme = scheme,
                 ),
             ) { "$name: $actor could not seal to $peer" }
-        val env =
-            RelayEnvelope(
-                type = FrameType.CHAT,
-                id = id,
-                senderId = from.nodeId,
-                sentAt = at,
-                recipientId = to.nodeId,
-                payload = WireCodec.encodePayload(ChatContent(enc = enc)),
-            )
-        val frame = TranscriptFrame(steps.size, from, env, enc, body)
+        val env = chatTo(id, from, sentAt, to, ChatContent(enc = enc, attachmentHash = options.attachmentHash))
+        val frame = TranscriptFrame(steps.size, from, env, enc, content.body, signed = options.signed)
         steps +=
             buildJsonObject {
                 put("step", steps.size)
@@ -359,30 +402,134 @@ internal class Transcript(
                 put("now", at)
                 put("peerPrekey", prekey?.name)
                 putJsonArray("drawsUsed") { for (i in drawsBefore until from.draws.count) add(i) }
-                put("contentBody", body)
+                put("contentBody", content.body)
                 put("plaintextSchema", if (scheme == EncEnvelope.VERSION_DM_V3) "MessageContentV2" else "MessageContent")
                 put("plaintext", plaintext.toHex())
                 frameFields(frame)
-                put("state", stateJson(from, to))
+                put("state", TranscriptJson.state(from, to))
+                TranscriptJson.content(content)?.let { put("content", it) }
+                options.attachmentHash?.let { put("cleartextAttachmentHash", it) }
+                options.resealOf?.let { put("resealOf", it) }
+                options.note?.let { put("note", it) }
+                floors?.let { put("floorsBefore", it) }
             }
         return frame
     }
 
     /**
-     * Opens [frame] as [actor], the way `InboundPipeline.decryptAndDeliverV2` does — from the signed wire, the v1
-     * header as AAD, the nonce dropped for v3, a lock-free peek and, when it opens, the commit — and asserts the
-     * outcome is [expect] (an `OpenOutcome` name, `OPENED` for success).
+     * [actor] re-seals [original]'s content to [peer] at [at] as `MeshManager.resealAndFlood` does after the peer's
+     * reset: the row's own id and `sentAt` — so the same AAD — under whatever session the actor holds now.
+     */
+    suspend fun reseal(
+        actor: String,
+        peer: String,
+        original: TranscriptFrame,
+        at: Long,
+        v3: Boolean,
+        note: String? = null,
+    ): TranscriptFrame =
+        sealContent(
+            actor,
+            peer,
+            MessageContent(body = checkNotNull(original.body)),
+            at,
+            v3,
+            SealOptions(id = original.env.id, sentAt = original.env.sentAt, resealOf = original.step, note = note),
+        )
+
+    /**
+     * [actor] asks `RatchetSessions.sealResetDm` for a session reset toward [peer] at [at], as
+     * `InboundPipeline.sendSessionReset` does: the `CTL_SESSION_RESET` marker, always the named v2 plaintext, and on
+     * success a signed `chat` frame. [expect] is `REROOT`, `MARK` or `DECLINED`; a declined reset seals nothing.
+     */
+    suspend fun reset(
+        actor: String,
+        peer: String,
+        at: Long,
+        cause: RatchetSessions.ResetCause,
+        expect: String,
+        // The field (and floor) that decided the plan, for the file: a port keys its plan on the same one.
+        decidedBy: String,
+        note: String? = null,
+    ): TranscriptFrame? {
+        val floors = floorsBefore(actor, peer)
+        val from = party(actor)
+        val to = party(peer)
+        val id = frameIdFor("$name/${steps.size}")
+        val plaintext = MessageContent(body = "", ctl = MessageContent.CTL_SESSION_RESET).encode()
+        val drawsBefore = from.draws.count
+        val seal =
+            from.sessions.sealResetDm(
+                peerId = to.nodeId,
+                peerIkPub = to.identity.bundle.dhPublicKey(),
+                peerSpk = prekeyFor(actor, peer),
+                plaintext = plaintext,
+                aad = MessageCrypto.header(id, from.nodeId, at, to.nodeId),
+                now = at,
+                cause = cause,
+            )
+        val result =
+            when (seal) {
+                is RatchetSessions.ResetSeal.Sealed -> if (seal.reRooted) "REROOT" else "MARK"
+                is RatchetSessions.ResetSeal.Declined -> "DECLINED"
+                RatchetSessions.ResetSeal.NoPrekey -> "NO_PREKEY"
+            }
+        assertEquals("$name step ${steps.size}: the reset's plan", expect, result)
+        val frame =
+            (seal as? RatchetSessions.ResetSeal.Sealed)?.let {
+                // A reset always seals v2 (RatchetSessions.resetEnvelope), toward a v3 reader too.
+                assertEquals("$name: a reset seals v2", EncEnvelope.VERSION_RATCHET, it.envelope.v)
+                val env = chatTo(id, from, at, to, ChatContent(enc = it.envelope))
+                TranscriptFrame(steps.size, from, env, it.envelope, body = "")
+            }
+        steps +=
+            buildJsonObject {
+                put("step", steps.size)
+                put("actor", actor)
+                put("op", "reset")
+                put("peer", peer)
+                put("now", at)
+                put("cause", cause.name)
+                put("peerPrekey", pins[actor to peer]?.name)
+                put("result", result)
+                put("reason", (seal as? RatchetSessions.ResetSeal.Declined)?.reason)
+                put("decidedBy", decidedBy)
+                putJsonArray("drawsUsed") { for (i in drawsBefore until from.draws.count) add(i) }
+                if (frame != null) {
+                    put("plaintextSchema", "MessageContent")
+                    put("plaintext", plaintext.toHex())
+                    frameFields(frame)
+                }
+                put("state", TranscriptJson.state(from, to))
+                note?.let { put("note", it) }
+                floors?.let { put("floorsBefore", it) }
+            }
+        return frame
+    }
+
+    /**
+     * Opens [frame] as [actor], the way `InboundPipeline.decryptAndDeliverV2` does — from the wire, the v1 header as
+     * AAD, the nonce dropped for v3, a lock-free peek and, when it opens, the commit — and asserts the outcome is
+     * [expect] (an `OpenOutcome` name, `OPENED` for success). [applies] states what the pipeline does with what
+     * opened (a pipeline replay checks it); the session layer has no opinion on it.
      */
     suspend fun open(
         actor: String,
         frame: TranscriptFrame,
         at: Long,
         expect: String,
+        applies: JsonObject? = null,
+        note: String? = null,
     ) {
+        val floors = floorsBefore(actor, frame.sender.name)
         val me = party(actor)
         val sender = frame.sender
         val wire = checkNotNull(WireCodec.decodeWire(frame.wire))
-        assertTrue("$name: the frame verifies", MessageCrypto.verify(sender.identity.bundle, wire.sig, wire.signed))
+        if (frame.signed) {
+            assertTrue("$name: the frame verifies", MessageCrypto.verify(sender.identity.bundle, wire.sig, wire.signed))
+        } else {
+            assertTrue("$name: an unsigned frame carries no signature", wire.sig.isEmpty() && !wire.relay)
+        }
         val env = checkNotNull(WireCodec.decodeEnvelope(wire.signed))
         val enc = checkNotNull(WireCodec.decodePayload<ChatContent>(env.payload)?.enc)
         val header = checkNotNull(enc.r)
@@ -406,15 +553,18 @@ internal class Transcript(
         steps +=
             openStep(actor, sender.name, frame, at, Layer.ENGINE, name, dropFor(outcome)) {
                 put("plaintext", plaintext?.toHex())
-                put("state", stateJson(me, sender))
+                put("state", TranscriptJson.state(me, sender))
+                applies?.let { put("applies", it) }
+                note?.let { put("note", it) }
+                floors?.let { put("floorsBefore", it) }
             }
     }
 
     /**
      * A frame refused above the engine, by `InboundPipeline` (a nonce of the wrong shape for its version, a v3 frame
-     * addressed to a group, a key the X25519 layer refuses to use). The file states the drop the pipeline records;
-     * `InboundPipelineTest` replays it there. [atSessions] checks what the session layer itself does with it, if
-     * anything is worth checking, and the actor's state is recorded after it.
+     * addressed to a group, a key the X25519 layer refuses to use, an unsigned frame that is not a tick). The file
+     * states the drop the pipeline records; `InboundPipelineTest` replays it there. [atSessions] checks what the
+     * session layer itself does with it, if anything is worth checking, and the actor's state is recorded after it.
      */
     suspend fun refusedByPipeline(
         actor: String,
@@ -426,13 +576,48 @@ internal class Transcript(
         dropNote: String? = null,
         atSessions: (suspend (TranscriptParty) -> Unit)? = null,
     ) {
+        val floors = floorsBefore(actor, frame.sender.name)
         val me = party(actor)
         atSessions?.invoke(me)
         steps +=
             openStep(actor, frame.sender.name, frame, at, Layer.PIPELINE, "REFUSED", drop, dropNormative) {
                 dropNote?.let { put("dropNote", it) }
                 put("plaintext", JsonNull)
-                put("state", stateJson(me, frame.sender))
+                put("state", TranscriptJson.state(me, frame.sender))
+                floors?.let { put("floorsBefore", it) }
+            }
+    }
+
+    /**
+     * [frame] reaches [actor]'s pipeline after a message row with its id already exists: `InboundPipeline.decryptAndDeliver`'s
+     * exists-gate never decrypts it, so no receive key is spent, and acknowledges it ([acksBack]: a DM to us gets
+     * `acknowledge`'s sealed `CTL_RECEIPT`, the actor's own outbound seal, which the transcript does not list).
+     */
+    fun skip(
+        actor: String,
+        frame: TranscriptFrame,
+        at: Long,
+        note: String,
+        acksBack: Boolean = true,
+    ) {
+        val floors = floorsBefore(actor, frame.sender.name)
+        val me = party(actor)
+        steps +=
+            buildJsonObject {
+                put("step", steps.size)
+                put("actor", actor)
+                put("op", "skip")
+                put("peer", frame.sender.name)
+                put("now", at)
+                put("opens", frame.step)
+                put("layer", "pipeline")
+                put("expect", "SKIPPED_EXISTS")
+                put("drop", JsonNull)
+                put("acksBack", acksBack)
+                frameFields(frame)
+                put("state", TranscriptJson.state(me, frame.sender))
+                put("note", note)
+                floors?.let { put("floorsBefore", it) }
             }
     }
 
@@ -459,7 +644,7 @@ internal class Transcript(
                 from.sessions.sealDm(
                     to.nodeId,
                     to.identity.bundle.dhPublicKey(),
-                    pins[actor to peer]?.let { RatchetEngine.PeerPrekey(it.id, it.keys.pub) },
+                    prekeyFor(actor, peer),
                     plaintext,
                     MessageCrypto.header(id, from.nodeId, at, to.nodeId),
                     at,
@@ -483,9 +668,29 @@ internal class Transcript(
                     "seal $count v3 frames of any content and discard them: they advance the send chain from n $startN " +
                         "and move nothing else",
                 )
-                put("state", stateJson(from, to))
+                put("state", TranscriptJson.state(from, to))
             }
     }
+
+    private fun floorsBefore(
+        actor: String,
+        peer: String,
+    ): JsonObject? = if (recordFloors) TranscriptJson.floors(party(actor), party(peer)) else null
+
+    private fun chatTo(
+        id: String,
+        from: TranscriptParty,
+        sentAt: Long,
+        to: TranscriptParty,
+        content: ChatContent,
+    ) = RelayEnvelope(
+        type = FrameType.CHAT,
+        id = id,
+        senderId = from.nodeId,
+        sentAt = sentAt,
+        recipientId = to.nodeId,
+        payload = WireCodec.encodePayload(content),
+    )
 
     private fun openStep(
         actor: String,
@@ -548,76 +753,19 @@ internal class Transcript(
         put("aad", aadText.encodeToByteArray().toHex())
         put("scheme", if (enc.v == EncEnvelope.VERSION_DM_V3) "v3" else "v${enc.v}")
         put("v", enc.v)
-        enc.r?.let { put("header", headerJson(it)) }
+        enc.r?.let { put("header", TranscriptJson.header(it)) }
         put("nonce", enc.nonce.toHex())
         put("ct", enc.ct.toHex())
         put("encEnvelope", WireCodec.encodePayload(enc).toHex())
         frame.env.group?.let { put("groupId", it.id) }
         put("wire", frame.wire.toHex())
+        if (!frame.signed) put("signed", false)
     }
-
-    private fun headerJson(r: RatchetHeader) =
-        buildJsonObject {
-            put("se", r.se)
-            put("ek", r.ek.toHex())
-            put("pe", r.pe)
-            put("n", r.n)
-            put("flags", r.flags)
-            val init = r.init
-            if (init == null) {
-                put("init", JsonNull)
-            } else {
-                putJsonObject("init") {
-                    put("eph", init.eph.toHex())
-                    put("pkid", init.pkid)
-                    put("at", init.at)
-                }
-            }
-        }
-
-    private fun stateJson(
-        who: TranscriptParty,
-        peer: TranscriptParty,
-    ): JsonObject =
-        buildJsonObject {
-            put("of", who.name)
-            put("peer", peer.name)
-            put("session", who.store.sessionOf(peer.nodeId)?.let(::sessionJson) ?: JsonNull)
-            putJsonArray("recvEpochs") {
-                for (row in who.store.recvOf(peer.nodeId)) {
-                    add(
-                        buildJsonObject {
-                            put("epoch", row.epoch)
-                            put("rootTag", "%016x".format(row.rootTag))
-                            put("next", row.next)
-                            put("chainKeySha256", sha256(row.chainKey))
-                            put("lastUsedAt", row.lastUsedAt)
-                        },
-                    )
-                }
-            }
-            val skipped = who.store.skippedOf(peer.nodeId)
-            put("skippedKeyCount", skipped.size)
-            put("skippedKeys", skippedRuns(skipped))
-            putJsonArray("localEpochs") {
-                for (epoch in who.store.localEpochsOf(peer.nodeId)) {
-                    add(
-                        buildJsonObject {
-                            put("epoch", epoch.epoch)
-                            put("createdAt", epoch.createdAt)
-                            put("pub", epoch.pub.toHex())
-                        },
-                    )
-                }
-            }
-        }
 
     companion object {
         /** A frame id as `FrameId.new` mints one (16 bytes, base64url), drawn from a hash of [label]. */
         fun frameIdFor(label: String): String =
             FrameId.fromBytes(MessageDigest.getInstance("SHA-256").digest("ratchet-v1/$label".encodeToByteArray()).copyOf(16))
-
-        fun sha256(bytes: ByteArray?): String? = bytes?.let { MessageDigest.getInstance("SHA-256").digest(it).toHex() }
 
         fun outcomeName(outcome: OpenOutcome): String =
             when (outcome) {
@@ -634,58 +782,6 @@ internal class Transcript(
                 OpenOutcome.Failed.DUPLICATE -> DropReason.RATCHET_DUPLICATE
                 OpenOutcome.Failed.BAD_HEADER -> DropReason.RATCHET_BAD_HEADER
                 OpenOutcome.Failed.AEAD_FAIL -> DropReason.RATCHET_AEAD_FAIL
-            }
-
-        private fun sessionJson(s: RatchetEngine.SessionState) =
-            buildJsonObject {
-                put("rootSha256", sha256(s.root))
-                put("confirmed", s.confirmed)
-                put("weAreInitiator", s.weAreInitiator)
-                put("establishedAt", s.establishedAt)
-                put("initEphPub", s.initEphPub?.toHex())
-                put("initPkid", s.initPkid)
-                put("peerInitEphPub", s.peerInitEphPub?.toHex())
-                put("peerBasePub", s.peerBasePub?.toHex())
-                put("peerBaseEpoch", s.peerBaseEpoch)
-                put("sendEpoch", s.sendEpoch)
-                put("sendEpochPub", s.sendEpochPub?.toHex())
-                put("sendChainKeySha256", sha256(s.sendChainKey))
-                put("sendCount", s.sendCount)
-                put("sendEpochStartedAt", s.sendEpochStartedAt)
-                put("sendEpochBaseEpoch", s.sendEpochBaseEpoch)
-                put("sendEpochExportSha256", sha256(s.sendEpochExport))
-                put("highestPeAcked", s.highestPeAcked)
-                put("prevRootSha256", sha256(s.prevRoot))
-                put("prevRootWeAreInitiator", s.prevRootWeAreInitiator)
-                put("prevRootExpiresAt", s.prevRootExpiresAt)
-                put("lastResetSentAt", s.lastResetSentAt)
-            }
-
-        /** Skipped keys as contiguous runs per `(epoch, rootTag)`: a 196-key gap is one entry, not 196. */
-        private fun skippedRuns(keys: List<RatchetEngine.SkippedKey>): JsonArray =
-            buildJsonArray {
-                for ((group, members) in keys.groupBy { it.epoch to it.rootTag }) {
-                    var start = members.first().idx
-                    var last = start
-
-                    fun flush() =
-                        add(
-                            buildJsonObject {
-                                put("epoch", group.first)
-                                put("rootTag", "%016x".format(group.second))
-                                put("fromIdx", start)
-                                put("toIdx", last)
-                            },
-                        )
-                    for (key in members.drop(1)) {
-                        if (key.idx != last + 1) {
-                            flush()
-                            start = key.idx
-                        }
-                        last = key.idx
-                    }
-                    flush()
-                }
             }
     }
 }

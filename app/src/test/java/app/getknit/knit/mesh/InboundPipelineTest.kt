@@ -44,6 +44,7 @@ import app.getknit.knit.identity.NodeId
 import app.getknit.knit.identity.PeerLabels
 import app.getknit.knit.mesh.crypto.AttachmentCrypto
 import app.getknit.knit.mesh.crypto.MessageContent
+import app.getknit.knit.mesh.crypto.MessageContentV2
 import app.getknit.knit.mesh.crypto.MessageCrypto
 import app.getknit.knit.mesh.crypto.PublicKeyBundle
 import app.getknit.knit.mesh.crypto.TinkInit
@@ -247,6 +248,8 @@ class InboundPipelineTest {
         val self: Party = party(),
         val selfSpk: RatchetCrypto.KeyPair = RatchetCrypto.generateKeyPair(),
         holdsSpk: Boolean = true,
+        // Spies the ratchet facade, so a test can see what it is asked to seal (the vector replay's tick check).
+        spyRatchet: Boolean = false,
     ) {
         val transport = FakeLoopTransport(self.nodeId)
         val metrics = MeshMetrics()
@@ -336,7 +339,7 @@ class InboundPipelineTest {
                 dhIdentityPriv = { self.dhPriv },
                 spkPrivFor = { id -> if (holdsSpk && id == SPK_ID) selfSpk.priv else null },
                 mutex = ratchetMutex,
-            )
+            ).let { if (spyRatchet) spyk(it) else it }
 
         /** Every peer the ratchet reported a scope-root change for (ADR 2026-09.dcah), in order. */
         val rootChanges = mutableListOf<String>()
@@ -6261,6 +6264,171 @@ class InboundPipelineTest {
             }
             assertTrue("the file has pipeline cases to replay", replayed > 0)
         }
+
+    /**
+     * `ratchet-v1.json`'s `dm` scenarios marked `pipelineReplay` (stage 3b's `ctlPlane`) through the real pipeline as
+     * Bob, holding the rows `fixtures.bobSent` names: every frame is Alice's, in file order, and each open must apply
+     * exactly what its `applies` says and nothing more — the message rows added, the receipts recorded against Alice,
+     * the reaction applies, the writes to Alice's peer row, and the one sealed `CTL_RECEIPT` acking this frame that
+     * Bob sends back (or none) — and the pipeline-layer refusal must leave its drop and no row. Like the negatives,
+     * only a scenario whose outcomes do not depend on the wall clock may set `pipelineReplay`.
+     */
+    @Test
+    fun theRatchetVectorCtlPlaneAppliesAsTheFileSays() =
+        runTest {
+            val file = VectorFiles.read("ratchet-v1.json")
+            val keys = vectorPrekeys(file)
+            val alice = vectorParty(file, "alice")
+            val bob = vectorParty(file, "bob")
+            val cases =
+                file
+                    .getValue("dm")
+                    .jsonArray
+                    .map { it.jsonObject }
+                    .filter { it["pipelineReplay"]?.jsonPrimitive?.boolean == true }
+            assertTrue("the file has a dm scenario to replay", cases.isNotEmpty())
+            for (case in cases) {
+                val name = case.getValue("name").jsonPrimitive.content
+                val replay = CtlReplay(Rig(backgroundScope, self = bob, selfSpk = keys.getValue("bobSpk1"), spyRatchet = true), alice)
+                replay.rig.pinRatchetCapable(alice, keys.getValue("aliceSpk1").pub)
+                for (row in case
+                    .getValue("fixtures")
+                    .jsonObject
+                    .getValue("bobSent")
+                    .jsonArray
+                    .map { it.jsonObject }) {
+                    val id = row.getValue("id").jsonPrimitive.content
+                    replay.rig.msgMap[id] =
+                        MessageEntity(
+                            id = id,
+                            senderId = bob.nodeId,
+                            recipientId = alice.nodeId,
+                            conversationId = alice.nodeId,
+                            body = id,
+                            sentAt = 1L,
+                        )
+                }
+                for (step in case.getValue("steps").jsonArray.map { it.jsonObject }) {
+                    if (step.getValue("op").jsonPrimitive.content != "open") continue
+                    replay.step("$name step ${step.getValue("step").jsonPrimitive.content}", step)
+                }
+            }
+        }
+
+    /** One `pipelineReplay` scenario's replay: the deltas each step may cause, checked exactly. */
+    private inner class CtlReplay(
+        val rig: Rig,
+        private val alice: Party,
+    ) {
+        /** Every DM-form seal Bob's ratchet made toward Alice: its plaintext and scheme. */
+        private val sealedToAlice = mutableListOf<Pair<ByteArray, Int>>()
+        private var reactionApplies = 0
+
+        init {
+            coEvery { rig.ratchet.sealDm(any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+                if (arg<String>(0) == alice.nodeId) sealedToAlice += arg<ByteArray>(3) to arg<Int>(6)
+                callOriginal()
+            }
+        }
+
+        suspend fun step(
+            label: String,
+            step: JsonObject,
+        ) {
+            val wire = checkNotNull(WireCodec.decodeWire(step.hex("wire")))
+            val env = checkNotNull(WireCodec.decodeEnvelope(wire.signed))
+            rig.nowMs = env.sentAt
+            val rowsBefore = rig.msgMap.keys.toSet()
+            val receiptsBefore = rig.receiptMap.keys.toSet()
+            val peerBefore = rig.peerMap[alice.nodeId]
+            val sealsBefore = sealedToAlice.size
+            val dropsBefore = totalDrops()
+            rig.pipeline.onDeliver(wire, env, alice.nodeId, TransportKind.Other)
+            if (step.getValue("layer").jsonPrimitive.content == "pipeline") {
+                assertEquals(label, 1L, rig.drops(DropReason.valueOf(step.getValue("drop").jsonPrimitive.content)))
+                assertEquals("$label: one drop", dropsBefore + 1, totalDrops())
+                assertEquals("$label: no row", rowsBefore, rig.msgMap.keys.toSet())
+                assertEquals("$label: no tick back", sealsBefore, sealedToAlice.size)
+                return
+            }
+            assertEquals("$label: nothing dropped", dropsBefore, totalDrops())
+            val applies = step.getValue("applies").jsonObject
+            val message = applies["message"]?.jsonObject
+            val expectedRows = rowsBefore + listOfNotNull(message?.getValue("id")?.jsonPrimitive?.content)
+            assertEquals("$label: rows", expectedRows, rig.msgMap.keys.toSet())
+            message?.let {
+                assertEquals(
+                    label,
+                    it.getValue("body").jsonPrimitive.content,
+                    rig.msgMap[it.getValue("id").jsonPrimitive.content]?.body,
+                )
+            }
+            val listed =
+                applies.getValue("receipts").jsonArray.map {
+                    it.jsonObject
+                        .getValue("id")
+                        .jsonPrimitive.content to alice.nodeId
+                }
+            assertEquals("$label: receipts", listed.toSet(), rig.receiptMap.keys - receiptsBefore)
+            checkReaction(applies["reaction"]?.jsonObject)
+            checkProfile(label, applies["profile"]?.jsonObject, peerBefore)
+            checkTickBack(label, applies.getValue("acksBack").jsonPrimitive.boolean, env.id, sealsBefore)
+        }
+
+        private fun totalDrops(): Long =
+            rig.metrics
+                .frames()
+                .dropsByReason.values
+                .sum()
+
+        private fun checkReaction(reaction: JsonObject?) {
+            if (reaction != null) {
+                reactionApplies++
+                val expected =
+                    ReactionEntity(
+                        reaction.getValue("messageId").jsonPrimitive.content,
+                        alice.nodeId,
+                        reaction.getValue("emoji").jsonPrimitive.contentOrNull,
+                        reaction.getValue("at").jsonPrimitive.long,
+                    )
+                coVerify(exactly = 1) { rig.reactions.apply(expected) }
+            }
+            coVerify(exactly = reactionApplies) { rig.reactions.apply(any()) }
+        }
+
+        private fun checkProfile(
+            label: String,
+            profile: JsonObject?,
+            before: PeerEntity?,
+        ) {
+            val row = checkNotNull(rig.peerMap[alice.nodeId])
+            if (profile == null) {
+                assertEquals("$label: Alice's row untouched", before, row)
+                return
+            }
+            assertEquals(label, profile.getValue("name").jsonPrimitive.content, row.name)
+            assertEquals(label, profile.getValue("status").jsonPrimitive.content, row.status)
+            assertEquals(label, profile.getValue("avatarHash").jsonPrimitive.contentOrNull, row.avatarHash)
+            assertEquals(label, profile.getValue("version").jsonPrimitive.long, row.updatedAt)
+            assertEquals(label, profile.getValue("openToChat").jsonPrimitive.boolean, row.openToChat)
+        }
+
+        private fun checkTickBack(
+            label: String,
+            acksBack: Boolean,
+            ackedId: String,
+            sealsBefore: Int,
+        ) {
+            val seals = sealedToAlice.drop(sealsBefore)
+            assertEquals("$label: ticks back", if (acksBack) 1 else 0, seals.size)
+            for ((plaintext, scheme) in seals) {
+                val tick = if (scheme == EncEnvelope.VERSION_DM_V3) MessageContentV2.decode(plaintext) else MessageContent.decode(plaintext)
+                assertEquals("$label: the tick is a receipt", MessageContent.CTL_RECEIPT, tick?.ctl)
+                assertEquals("$label: acking this frame", ackedId, tick?.ack)
+                assertTrue("$label: and nothing else", tick?.acks.isNullOrEmpty())
+            }
+        }
+    }
 
     private fun JsonObject.hex(key: String): ByteArray = getValue(key).jsonPrimitive.content.fromHex()
 

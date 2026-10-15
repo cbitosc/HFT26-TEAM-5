@@ -81,6 +81,8 @@ internal class RatchetDmVectors(
             add(epochCap())
             add(epochAge())
             add(outOfOrder())
+            // Stage 3b, appended: stage 3a's six above do not move.
+            for (scenario in RatchetSessionVectors(alice, bob, aliceSpk1, bobSpk1, t0).scenarios()) add(scenario)
         }
 
     private suspend fun firstContact(): JsonObject =
@@ -383,6 +385,8 @@ internal class RatchetDmVectors(
                 add(JsonPrimitive("open: actor opens the frame in wire (signed by peer); expect is the outcome"))
                 add(JsonPrimitive("advance: actor seals count v3 frames of any content to peer and discards them"))
             }
+            // Stage 3b's rules, after stage 3a's entries (which do not move).
+            for ((key, value) in RatchetSessionVectors.formatAdditions()) put(key, value)
         }
 
     companion object {
