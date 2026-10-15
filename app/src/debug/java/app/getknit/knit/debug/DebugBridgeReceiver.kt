@@ -2724,6 +2724,22 @@ class DebugBridgeReceiver :
                     ?: return reply("error", "mode is one of ${LineMode.entries.joinToString { it.name.lowercase() }}")
             }
 
+            "keyterms" -> {
+                // `--es terms 'Ada,Grace Hopper'` replaces the names the next burst listens for (a call's start sets its
+                // own); `--ez clear true` empties them. In memory; `status` shows them (`keyterms`).
+                speech.keyterms =
+                    if (intent.getBooleanExtra("clear", false)) {
+                        emptyList()
+                    } else {
+                        intent
+                            .getStringExtra("terms")
+                            ?.split(',')
+                            ?.map(String::trim)
+                            ?.filter(String::isNotEmpty)
+                            ?: return reply("error", "missing 'terms' or 'clear' extra")
+                    }
+            }
+
             "clips" -> {
                 // Diagnostics' "Save walkie clips": `--ez on true|false` sets the persisted switch, `--ez clear true`
                 // deletes what was saved; either way the reply says where they are and how many.
@@ -2778,6 +2794,7 @@ class DebugBridgeReceiver :
             .put("stt", sttStateJson(store.state.value))
             .put("resident", speech.resident)
             .put("lines", speech.lines.name.lowercase())
+            .put("keyterms", JSONArray(speech.keyterms))
             .put("pcm", lastPcm ?: JSONObject.NULL)
             .put(
                 "transcript",

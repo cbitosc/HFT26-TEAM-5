@@ -363,6 +363,9 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
     whole|split` sets how a burst becomes lines (`LineMode`; whole by default; in memory, reloads the model),
     and `status` names it (`lines`).
     `pcm` also takes a saved clip's WAV (its 44-byte header skipped).
+  - `keyterms --es terms 'Ada,Grace Hopper'` replaces the names the model listens for from the next burst
+    (`MoonshineSpeech.keyterms`; a call's start sets its own through `SttKeytermFeed`, and its end clears them), `--ez
+    clear true` empties them; `status` lists them (`keyterms`). For an A/B of the biasing on `pcm` clips.
   - `clips` reports Diagnostics' **Save walkie clips** switch (`SettingsStore.debugWalkieClips`, off by default): `on`,
     `dir`, `clips` (how many) and `bytes`; `--ez on true|false` sets it (persisted, read as each burst begins), `--ez
     clear true` deletes every clip. While on, each burst the transcript finishes — heard or spoken, a slipped thumb

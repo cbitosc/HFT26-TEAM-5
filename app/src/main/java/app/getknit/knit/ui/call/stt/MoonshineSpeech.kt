@@ -35,10 +35,15 @@ internal class MoonshineSpeech(
     private val scope: CoroutineScope,
     private val log: (String) -> Unit = {},
 ) : SpeechToText {
-    /** One loaded model: the runtime's handle for it. Compared by identity, since a handle is reused once freed. */
+    /**
+     * One loaded model: the runtime's handle for it, and the key terms it was last given. Compared by identity, since a
+     * handle is reused once freed.
+     */
     private class Engine(
         val handle: Int,
-    )
+    ) {
+        var keyterms: List<String> = emptyList()
+    }
 
     private val lock = Any()
     private var lease: ModelLease<Engine>? = null
@@ -53,10 +58,18 @@ internal class MoonshineSpeech(
     @Volatile
     var lines = LineMode.WHOLE
 
+    /**
+     * The names the next burst listens for (`sttKeyterms`): given to the model as a burst opens, when they differ from
+     * what it has, since a load starts it with none. Never logged.
+     */
+    @Volatile
+    var keyterms: List<String> = emptyList()
+
     override suspend fun open(): SpeechStream? {
         val current = current() ?: return null
         return current.use { engine ->
             engine ?: return@use null
+            listen(engine)
             val stream = JNI.moonshineCreateStream(engine.handle, 0)
             if (stream < 0 || JNI.moonshineStartStream(engine.handle, stream) != JNI.MOONSHINE_ERROR_NONE) {
                 if (stream >= 0) JNI.moonshineFreeStream(engine.handle, stream)
@@ -65,6 +78,23 @@ internal class MoonshineSpeech(
             }
             Stream(current, engine, stream)
         }
+    }
+
+    // Inside the lease: [keyterms] to [engine], if it has others. A list the runtime refuses is logged by its size and
+    // not tried again until it changes; the burst goes on without it.
+    @Suppress("TooGenericExceptionCaught") // the native runtime throws what it likes
+    private fun listen(engine: Engine) {
+        val wanted = keyterms
+        if (wanted == engine.keyterms) return
+        engine.keyterms = wanted
+        val result =
+            try {
+                JNI.moonshineTranscriberSetKeyterms(engine.handle, wanted.joinToString(","))
+            } catch (e: Exception) {
+                log("walkie stt: key terms not set: ${e.javaClass.simpleName}")
+                return
+            }
+        if (result != JNI.MOONSHINE_ERROR_NONE) log("walkie stt: ${wanted.size} key terms refused: ${JNI.moonshineErrorToString(result)}")
     }
 
     /** Releases the model now; the next burst builds it again. */

@@ -142,3 +142,20 @@ C-3.11-9). It is debug-only, as the walkie is, and nothing reaches the wire.
   under 10 ms to the text) and worst on noise. `WHOLE` stays the default and `HYBRID` was removed; `LineMode`
   keeps `WHOLE` and `SPLIT` (`…debug.STT --es op lines`). Both `WHOLE` and `HYBRID` drop the 44 s clip's last words at the
   30 s line cut, where `SPLIT` keeps them; that is the next thing to chase.
+- **Amendment 2026-10-14: the names a call carries.** Proper nouns are where the model fails most, and Moonshine's
+  streaming models take a list of key terms at runtime, nudging the decode towards them (a bonus on the logits along
+  each term's subword path, `keyterm_boost` 2.0 by default; at that strength Moonshine measured about a quarter fewer
+  errors on the terms for at most a quarter of a point elsewhere, and a hundred listed terms nobody says costing half
+  a point). As a call begins, `SttKeytermFeed` reads the peer's and this phone's names, the latest twenty threads'
+  names (DMs and groups) and the thread with the peer's last hundred messages, and `sttKeyterms` ranks them in that
+  order — a multi-word name with its first word too, the messages' contribution being their capitalised mid-sentence
+  words by frequency, at most twelve — cleaned to letters, digits and the marks names use (one term the tokenizer
+  cannot spell fails the whole list, and a comma splits one) and capped at forty. `MoonshineSpeech` hands the list to
+  the model as a burst opens, when it differs from what the model has (a load starts it empty); the call's end clears
+  it. Held in memory only, never logged. The runtime's `set_context` would pick terms from a passage by the model's own
+  tokenizer, but it *replaces* the key terms rather than adding to them (only the load options combine the two), so
+  the merge is ours. On the phones (`pcm`, Small, whole lines): forty Irish and English names left the Beckett and
+  noisy Dickens clips exactly as they were, so no false hits; and listing "incredulity" did not turn the noisy clip's
+  "insecurity" back, the bias at its default not outweighing what the audio sounded like. Repeat runs of one clip at
+  one setting also differ by up to four points of word error, since the cadence of looks moves the speculative
+  decode, so any gain from the names has to be scored on many real bursts (the clip switch) rather than one.

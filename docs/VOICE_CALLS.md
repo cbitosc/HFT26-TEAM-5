@@ -806,6 +806,11 @@ an experiment behind `BuildConfig.WALKIE` (`-Pwalkie=`, on in debug and off in r
     `Listening…` until the model has heard something, then its words so far (dimmed, not read out), then its text (a
     polite live region) or why not (no speech, no model, failed). While the model is not on the phone, the card says
     what it costs, flags a metered or Data Saver route, and offers Download, Cancel or Try again.
+  - **The names.** As a call begins, the model is given a short list of names to listen for (`SttKeytermFeed`,
+    `sttKeyterms`; Moonshine's key-term biasing at its default strength): the peer's and this phone's names, the latest
+    threads' (DMs and groups), and the capitalised words the thread with the peer keeps using — at most 40, ranked in
+    that order, since every listed term costs a little accuracy on the words nobody listed. The list is held in memory,
+    given to the model and nowhere else, never logged, and cleared when the call ends.
   - **The lab's clips.** A debug build only: while Diagnostics' "Save walkie clips" is on (off by default), each burst
     the transcript finishes is written by `WalkieClipFiles` as a 16 kHz mono WAV and a JSON sidecar, its text
     included, to the app's external files, unencrypted, for scoring the model off the phone. This is the one exception
