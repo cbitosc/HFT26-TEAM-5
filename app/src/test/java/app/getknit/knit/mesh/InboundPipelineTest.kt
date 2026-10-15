@@ -85,6 +85,7 @@ import app.getknit.knit.mesh.protocol.ReactionPayload
 import app.getknit.knit.mesh.protocol.ReceiptContent
 import app.getknit.knit.mesh.protocol.RelayEnvelope
 import app.getknit.knit.mesh.protocol.ReplyRef
+import app.getknit.knit.mesh.protocol.TranscriptJson
 import app.getknit.knit.mesh.protocol.TransferPayload
 import app.getknit.knit.mesh.protocol.TypingContent
 import app.getknit.knit.mesh.protocol.VectorFiles
@@ -121,8 +122,11 @@ import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.intOrNull
@@ -130,6 +134,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
+import kotlinx.serialization.json.put
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -6474,7 +6479,33 @@ class InboundPipelineTest {
             var checked = 0
             for (case in cases) {
                 for (receiver in case.getValue("pipelineReceivers").jsonArray.map { it.jsonObject }) {
-                    checked += replayGroupCase(file, case, receiver.getValue("name").jsonPrimitive.content)
+                    checked += replayVectorCase(file, case, receiver.getValue("name").jsonPrimitive.content)
+                }
+            }
+            val marked =
+                cases.sumOf { case ->
+                    case.getValue("steps").jsonArray.count { it.jsonObject["pipelineChecked"]?.jsonPrimitive?.boolean == true }
+                }
+            assertEquals("every pipelineChecked step was checked", marked, checked)
+        }
+
+    /**
+     * `ratchet-v1.json`'s `carol` section — the iPhone's sessions with Bob and Alice — through the real pipeline as
+     * each scenario's Android receiver, exactly as [theRatchetVectorGroupScenariosApplyAsTheFileSays] replays the group
+     * section (the same clock caveat: opens run at wall time): the receiver re-seals its own DMs from their recorded
+     * draws and must match them byte for byte, and each open it ticks back hands its pipeline's tick the draws the
+     * transcript's `sealedByPipeline` step drew.
+     */
+    @Test
+    fun theRatchetVectorCarolScenariosApplyAsTheFileSays() =
+        runTest {
+            val file = VectorFiles.read("ratchet-v1.json")
+            val cases = file.getValue("carol").jsonArray.map { it.jsonObject }
+            assertTrue("the file has carol scenarios", cases.isNotEmpty())
+            var checked = 0
+            for (case in cases) {
+                for (receiver in case.getValue("pipelineReceivers").jsonArray.map { it.jsonObject }) {
+                    checked += replayVectorCase(file, case, receiver.getValue("name").jsonPrimitive.content, compareState = true)
                 }
             }
             val marked =
@@ -6485,10 +6516,13 @@ class InboundPipelineTest {
         }
 
     /** One scenario as [receiver]; returns how many steps it checked. */
-    private suspend fun TestScope.replayGroupCase(
+    private suspend fun TestScope.replayVectorCase(
         file: JsonObject,
         case: JsonObject,
         receiver: String,
+        // Compare the receiver's session with the step's `state` after each open (the carol section: every seal the
+        // receiver's pipeline makes there is a listed step, so its state is the transcript's).
+        compareState: Boolean = false,
     ): Int {
         val keys = vectorPrekeys(file)
         val entries = case.getValue("parties").jsonObject.mapValues { it.value.jsonObject }
@@ -6519,11 +6553,13 @@ class InboundPipelineTest {
                 ratchetEngine = RatchetEngine(newKeyPair = draws::keyPair, newIv = draws::iv),
             )
         for ((name, party) in parties) if (name != receiver) rig.pinRatchetCapable(party, keys.getValue(prekeyName(name)).pub)
-        val groupId = case.getValue("groupId").jsonPrimitive.content
-        val founders = case.getValue("founders").jsonArray.map { parties.getValue(it.jsonPrimitive.content).nodeId }
-        if (case.getValue("holdsAtStart").jsonArray.any { it.jsonPrimitive.content == receiver }) {
+        // The carol section's scenarios hold no group: no id, no founders, nothing seeded.
+        val groupId = case["groupId"]?.jsonPrimitive?.content.orEmpty()
+        val founders = case["founders"]?.jsonArray?.map { parties.getValue(it.jsonPrimitive.content).nodeId }.orEmpty()
+        if (case["holdsAtStart"]?.jsonArray.orEmpty().any { it.jsonPrimitive.content == receiver }) {
             rig.seedGroup(groupId, members = founders, createdBy = parties.getValue("alice").nodeId)
         }
+        val stepsByIndex = case.getValue("steps").jsonArray.map { it.jsonObject }
         val plan =
             case
                 .getValue("draws")
@@ -6531,7 +6567,7 @@ class InboundPipelineTest {
                 .getValue(receiver)
                 .jsonArray
                 .map { it.jsonObject }
-        val replay = GroupReplay(rig, parties, groupId)
+        val replay = GroupReplay(rig, parties, groupId, draws)
         var checked = 0
         for (step in case.getValue("steps").jsonArray.map { it.jsonObject }) {
             val mine = step.getValue("actor").jsonPrimitive.content == receiver && step["pipelineChecked"]?.jsonPrimitive?.boolean == true
@@ -6540,16 +6576,200 @@ class InboundPipelineTest {
             if (step.getValue("op").jsonPrimitive.content == "seal") {
                 resealOwn(rig, draws, plan, parties, keys, entries, groupId, label, step)
             } else {
-                replay.step(label, step)
+                replayOpen(replay, draws, plan, stepsByIndex, label, step)
+                if (compareState) {
+                    val peer = parties.getValue(step.getValue("peer").jsonPrimitive.content).nodeId
+                    assertRigState(label, rig, peer, (tickOf(step, stepsByIndex) ?: step).getValue("state").jsonObject)
+                }
             }
             checked++
         }
         return checked
     }
 
+    /**
+     * One open of a vector replay. An open the pipeline ticks back hands its tick the draws the listed
+     * `sealedByPipeline` step drew, so the rig's chain stays the transcript's (the tick's id and clock are the
+     * pipeline's own).
+     */
+    @Suppress("LongParameterList") // the replay's context for one open
+    private suspend fun replayOpen(
+        replay: GroupReplay,
+        draws: OwnDraws,
+        plan: List<JsonObject>,
+        steps: List<JsonObject>,
+        label: String,
+        step: JsonObject,
+    ) {
+        val tick = tickOf(step, steps)
+        if (tick != null) {
+            // The open itself draws nothing (an empty queue throws); the tick's draws arm for its seal alone.
+            draws.pending = ArrayDeque()
+            draws.armed = ArrayDeque(tick.getValue("drawsUsed").jsonArray.map { i -> plan[i.jsonPrimitive.int] })
+        }
+        replay.step(label, step)
+        if (tick != null) {
+            assertNull("$label: the pipeline sealed its tick", draws.armed)
+            assertTrue("$label: the tick drew what the transcript's did", draws.pending?.isEmpty() == true)
+            draws.pending = null
+            assertEquals("$label: the tick's scheme", tick.getValue("v").jsonPrimitive.int, replay.lastSealScheme)
+        }
+    }
+
+    /**
+     * What `MeshManager` keeps beside an own seal: a seed DM's outbox stamp (`sendSeedDm`), so a later ack has a row to
+     * land on, and a plain DM's message row (`sendChat`), which a later receipt for it lands on.
+     */
+    @Suppress("LongParameterList") // one seal's bookkeeping inputs
+    private suspend fun recordOwnSend(
+        rig: Rig,
+        groupId: String,
+        peer: Party,
+        step: JsonObject,
+        plaintext: ByteArray,
+        now: Long,
+    ) {
+        val content =
+            if (step.getValue("v").jsonPrimitive.int ==
+                EncEnvelope.VERSION_DM_V3
+            ) {
+                MessageContentV2.decode(plaintext)
+            } else {
+                MessageContent.decode(plaintext)
+            }
+        val epoch =
+            content
+                ?.gk
+                ?.keys
+                ?.firstOrNull()
+                ?.epoch
+        if (content?.ctl == MessageContent.CTL_GROUP_KEY && epoch != null) rig.groupRatchet.markKeySent(groupId, peer.nodeId, epoch, now)
+        // A plain DM is a row of ours, as MeshManager.sendChat saves it: what a later receipt for it lands on.
+        if (content != null && content.ctl == null) {
+            val id = checkNotNull(WireCodec.decodeEnvelope(checkNotNull(WireCodec.decodeWire(step.hex("wire"))).signed)).id
+            rig.msgMap[id] =
+                MessageEntity(
+                    id = id,
+                    senderId = rig.self.nodeId,
+                    recipientId = peer.nodeId,
+                    conversationId = peer.nodeId,
+                    body = content.body,
+                    sentAt = now,
+                )
+        }
+    }
+
+    /** The tick step an open names in `applies.tickStep`, if it ticks back. */
+    private fun tickOf(
+        step: JsonObject,
+        steps: List<JsonObject>,
+    ): JsonObject? =
+        step["applies"]
+            ?.jsonObject
+            ?.get("tickStep")
+            ?.jsonPrimitive
+            ?.int
+            ?.let { steps[it] }
+
+    /** [store]'s ratchet state for [peerId] in the transcript's digest, `lastUsedAt` left out of the receive chains. */
+    private suspend fun rigStateJson(
+        store: RatchetRepository,
+        peerId: String,
+    ): JsonObject {
+        val recv = (1..STATE_EPOCHS).flatMap { store.recvEpochs(peerId, it) }.sortedWith(compareBy({ it.epoch }, { it.rootTag }))
+        val skipped =
+            (1..STATE_EPOCHS)
+                .flatMap { e -> (0 until STATE_INDICES).flatMap { i -> store.skippedKeys(peerId, e, i) } }
+                .sortedWith(compareBy({ it.epoch }, { it.rootTag }, { it.idx }))
+        return buildJsonObject {
+            put("session", store.session(peerId)?.let { TranscriptJson.session(it) } ?: JsonNull)
+            put(
+                "recvEpochs",
+                JsonArray(
+                    recv.map {
+                        buildJsonObject {
+                            put("epoch", it.epoch)
+                            put("rootTag", "%016x".format(it.rootTag))
+                            put("next", it.next)
+                            put("chainKeySha256", TranscriptJson.sha256(it.chainKey))
+                        }
+                    },
+                ),
+            )
+            put("skippedKeyCount", skipped.size)
+            put("skippedKeys", TranscriptJson.skippedRuns(skipped))
+            put(
+                "localEpochs",
+                JsonArray(
+                    store.debugLocalEpochs(peerId).map { (epoch, createdAt) ->
+                        buildJsonObject {
+                            put("epoch", epoch)
+                            put("createdAt", createdAt)
+                            put("pub", RatchetCrypto.publicFromPrivate(checkNotNull(store.localEpochPriv(peerId, epoch))).toHex())
+                        }
+                    },
+                ),
+            )
+        }
+    }
+
+    /**
+     * The rig's ratchet state for [peerId], in the transcript's digest, against [expected] (a step's `state`): the
+     * session, the receive chains, the skipped keys and our local epochs. Two fields are left out, by name, because
+     * the pipeline's opens stamp them from `System.currentTimeMillis()` rather than the step's `now`: each receive
+     * chain's `lastUsedAt` and the session's `prevRootExpiresAt`.
+     */
+    private suspend fun assertRigState(
+        label: String,
+        rig: Rig,
+        peerId: String,
+        expected: JsonObject,
+    ) {
+        val actual = rigStateJson(rig.ratchetStore, peerId)
+        val wanted =
+            buildJsonObject {
+                put(
+                    "session",
+                    expected.getValue("session").let { s ->
+                        (s as? JsonObject)?.let { JsonObject(it - "prevRootExpiresAt") } ?: s
+                    },
+                )
+                put("recvEpochs", JsonArray(expected.getValue("recvEpochs").jsonArray.map { JsonObject(it.jsonObject - "lastUsedAt") }))
+                put("skippedKeyCount", expected.getValue("skippedKeyCount"))
+                put("skippedKeys", expected.getValue("skippedKeys"))
+                put("localEpochs", expected.getValue("localEpochs"))
+            }
+        val got =
+            buildJsonObject {
+                for ((k, v) in actual) {
+                    put(
+                        k,
+                        if (k == "session" &&
+                            v is JsonObject
+                        ) {
+                            JsonObject(v - "prevRootExpiresAt")
+                        } else {
+                            v
+                        },
+                    )
+                }
+            }
+        assertEquals("$label: the receiver's ratchet state", wanted, got)
+    }
+
     /** The receiver's own recorded draws, served to its rig's engine only while one of its own seals is re-sealed. */
     private class OwnDraws {
         var pending: ArrayDeque<JsonObject>? = null
+
+        /** A tick's draws, handed over only when the pipeline's seal begins ([onSeal]), so none can serve the open. */
+        var armed: ArrayDeque<JsonObject>? = null
+
+        fun onSeal() {
+            armed?.let {
+                pending = it
+                armed = null
+            }
+        }
 
         fun keyPair(): RatchetCrypto.KeyPair {
             val draw = pending?.removeFirst() ?: return RatchetCrypto.generateKeyPair()
@@ -6616,14 +6836,7 @@ class InboundPipelineTest {
             step.getValue("encEnvelope").jsonPrimitive.content,
             WireCodec.encodePayload(enc).toHex(),
         )
-        val content = MessageContent.decode(plaintext)
-        val epoch =
-            content
-                ?.gk
-                ?.keys
-                ?.firstOrNull()
-                ?.epoch
-        if (content?.ctl == MessageContent.CTL_GROUP_KEY && epoch != null) rig.groupRatchet.markKeySent(groupId, peer.nodeId, epoch, now)
+        recordOwnSend(rig, groupId, peer, step, plaintext, now)
     }
 
     /** One group scenario's replay: every delta a step may cause, checked exactly. */
@@ -6631,13 +6844,18 @@ class InboundPipelineTest {
         private val rig: Rig,
         private val parties: Map<String, Party>,
         private val groupId: String,
+        private val draws: OwnDraws? = null,
     ) {
         private val sealed = mutableListOf<Triple<String, ByteArray, Int>>()
         private var reactionApplies = 0
 
+        /** The scheme of the last seal the pipeline made. */
+        val lastSealScheme: Int? get() = sealed.lastOrNull()?.third
+
         init {
             coEvery { rig.ratchet.sealDm(any(), any(), any(), any(), any(), any(), any()) } coAnswers {
                 sealed += Triple(arg<String>(0), arg<ByteArray>(3), arg<Int>(6))
+                draws?.onSeal()
                 callOriginal()
             }
         }
@@ -8916,6 +9134,10 @@ class InboundPipelineTest {
 
         /** The prekey id the Rig's fake identity serves (mirrors IdentityKeyStore.prekeyPrivFor). */
         const val SPK_ID = 1
+
+        /** How far [assertRigState] looks for receive chains and skipped keys: past anything a vector scenario holds. */
+        const val STATE_EPOCHS = 8
+        const val STATE_INDICES = 16
 
         /** 👩🏽‍❤️‍💋‍👨🏼 — the longest RGI emoji sequence Unicode ships: 10 code points, 15 UTF-16 units, 35 B UTF-8. */
         const val LONGEST_RGI = "\uD83D\uDC69\uD83C\uDFFD\u200D\u2764\uFE0F\u200D\uD83D\uDC8B\u200D\uD83D\uDC68\uD83C\uDFFC"

@@ -353,6 +353,11 @@ internal class SealOptions(
     val note: String? = null,
     /** False for a seal site that passes no prekey (`InboundPipeline.ackGroupSeed`: the session exists by construction). */
     val peerPrekey: Boolean = true,
+    /**
+     * A frame the receiving party's own pipeline seals in answer to the open before it (a delivery tick,
+     * `InboundPipeline.sealDmReceipt`), not one a user or MeshManager sends: recorded as `sealedByPipeline`.
+     */
+    val byPipeline: Boolean = false,
 )
 
 /**
@@ -489,7 +494,8 @@ internal class Transcript(
                 options.resealOf?.let { put("resealOf", it) }
                 options.note?.let { put("note", it) }
                 floors?.let { put("floorsBefore", it) }
-                pipelineChecked?.let { put("pipelineChecked", it(actor, "seal", false)) }
+                if (options.byPipeline) put("sealedByPipeline", true)
+                pipelineChecked?.let { put("pipelineChecked", it(actor, if (options.byPipeline) "pipelineSeal" else "seal", false)) }
                 extra(from)
             }
         return frame

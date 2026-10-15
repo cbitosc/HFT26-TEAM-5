@@ -389,6 +389,8 @@ internal class RatchetDmVectors(
             for ((key, value) in RatchetSessionVectors.formatAdditions()) put(key, value)
             // Stage 4's group section, after every earlier key (which do not move).
             put("group", RatchetGroupVectors.formatJson())
+            // Stage 5's carol section, after every earlier key (which do not move).
+            put("carol", RatchetCarolVectors.formatJson())
         }
 
     companion object {

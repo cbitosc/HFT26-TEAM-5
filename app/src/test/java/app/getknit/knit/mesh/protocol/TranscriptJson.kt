@@ -74,7 +74,7 @@ internal object TranscriptJson {
             }
         }
 
-    private fun session(s: RatchetEngine.SessionState) =
+    fun session(s: RatchetEngine.SessionState) =
         buildJsonObject {
             put("rootSha256", sha256(s.root))
             put("confirmed", s.confirmed)
@@ -100,7 +100,7 @@ internal object TranscriptJson {
         }
 
     /** Skipped keys as contiguous runs per `(epoch, rootTag)`: a 196-key gap is one entry, not 196. */
-    private fun skippedRuns(keys: List<RatchetEngine.SkippedKey>): JsonArray =
+    fun skippedRuns(keys: List<RatchetEngine.SkippedKey>): JsonArray =
         buildJsonArray {
             for ((group, members) in keys.groupBy { it.epoch to it.rootTag }) {
                 var start = members.first().idx

@@ -158,6 +158,26 @@ class RatchetVectorTest {
             ).scenarios()
         }
 
+    private fun carolSectionJson() =
+        runBlocking {
+            RatchetCarolVectors(
+                alice,
+                bob,
+                carol,
+                prekeys.getValue("aliceSpk1").vector(),
+                prekeys.getValue("bobSpk1").vector(),
+                prekeys.getValue("carolSpk1").vector(),
+                SESSION_AT,
+            ).scenarios()
+        }
+
+    @Test
+    fun `the carol transcripts rebuild exactly and open as they state`() {
+        val carolSection = carolSectionJson()
+        assumeFalse(VectorFiles.writing)
+        assertEquals("ratchet vector section 'carol' drifted; regenerate with KNIT_WRITE_VECTORS=1", carolSection, file.getValue("carol"))
+    }
+
     @Test
     fun `the group mirror's seed floor is MeshManager's`() {
         // Private to MeshManager's companion, so a const compiled onto the class: reflection pins the mirror to it.
@@ -202,6 +222,7 @@ class RatchetVectorTest {
                 put("dm", dmJson())
                 put("negative", negativeJson())
                 put("group", groupSectionJson())
+                put("carol", carolSectionJson())
             },
         )
     }
