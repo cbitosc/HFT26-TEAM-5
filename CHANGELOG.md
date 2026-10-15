@@ -20,6 +20,11 @@ document:
 
 ## Unreleased
 
+### Added
+
+- In a group chat, typing @ now offers @everyone first. Picking it mentions every other member at once, and each
+  gets the same mention alert as if you had picked them one by one.
+
 ### Changed
 
 - Private messages over LoRa to someone your board hasn't heard from lately now wait, apart from one every 15

@@ -87,6 +87,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Done
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Lock
@@ -534,7 +535,7 @@ fun ChatScreen(
         onOpenMessageDetails = onOpenMessageDetails,
         onSend = {
             val text = inputState.text.toString()
-            val applied = pendingMentions.filter { text.contains("@${it.name}") }
+            val applied = mentionsStillIn(text, pendingMentions)
             // Don't clear here: a message blocked for abuse must keep the draft. The ViewModel
             // emits clearInput only once a message is actually accepted (see the collector above).
             viewModel.send(text, applied, replyingTo)
@@ -579,6 +580,7 @@ fun ChatScreen(
         linkPreviewLoading = linkPreviewLoading,
         mentions = pendingMentions,
         onMentionAdded = { m -> if (pendingMentions.none { it == m }) pendingMentions.add(m) },
+        onMentionsAdded = { added -> pendingMentions.addAll(added.distinct().filter { it !in pendingMentions }) },
         onStartReply = { replyingTo = it },
         onCancelReply = { replyingTo = null },
         onReact = viewModel::react,
@@ -708,6 +710,8 @@ internal fun ChatScreenContent(
     // The draft's autocompleted mentions, drawn and edited as chips in the field (see [MentionChips]).
     mentions: List<Mention> = emptyList(),
     onMentionAdded: (Mention) -> Unit,
+    // `@everyone` adds one entry per member at once; defaulted so previews and the content tests keep working.
+    onMentionsAdded: (List<Mention>) -> Unit = {},
     onStartReply: (ReplyRef) -> Unit,
     onCancelReply: () -> Unit,
     onReact: (messageId: String, emoji: String) -> Unit,
@@ -1150,11 +1154,13 @@ internal fun ChatScreenContent(
                         pendingAttachment = pendingAttachment,
                         stagedAttachmentRelay = stagedAttachmentRelay,
                         candidates = state.mentionCandidates,
+                        everyone = state.everyoneMentions,
                         replyingTo = replyingTo,
                         myNodeId = state.myNodeId,
                         onCancelReply = onCancelReply,
                         mentions = mentions,
                         onMentionAdded = onMentionAdded,
+                        onMentionsAdded = onMentionsAdded,
                         onAttachClick = onAttachClick,
                         onCameraClick = onCameraClick,
                         // Files are DM/group only, for the reason voice notes are: nothing on the device can screen
@@ -3653,11 +3659,14 @@ private fun MessageInput(
     pendingAttachment: AttachmentStore.Ingested?,
     stagedAttachmentRelay: AttachmentRelay = AttachmentRelay.Silent,
     candidates: List<MentionCandidate>,
+    // What the `@everyone` row would mention, or null where the row is not offered (see [everyoneMentions]).
+    everyone: List<Mention>? = null,
     replyingTo: ReplyRef? = null,
     myNodeId: String = "",
     onCancelReply: () -> Unit = {},
     mentions: List<Mention> = emptyList(),
     onMentionAdded: (Mention) -> Unit,
+    onMentionsAdded: (List<Mention>) -> Unit = {},
     onAttachClick: () -> Unit,
     onCameraClick: () -> Unit = {},
     // Whether the long-press menu offers "Send a file" (ADR 2026-09.qq2r). Off in the room only, where the
@@ -3786,7 +3795,9 @@ private fun MessageInput(
         remember(activeQuery, candidates) {
             activeQuery?.let { filterCandidates(candidates, it.query) }.orEmpty()
         }
-    val showSuggestions = activeQuery != null && filtered.isNotEmpty()
+    // Outside the five-candidate cap, so offering it never pushes a person off the list.
+    val everyoneRow = everyone?.takeIf { activeQuery?.let { q -> matchesEveryone(q.query) } == true }
+    val showSuggestions = activeQuery != null && (everyoneRow != null || filtered.isNotEmpty())
     // Read by the field's transformations on every edit and draw, so a mention picked a moment ago is a chip at once.
     val currentMentions by rememberUpdatedState(mentions)
     val chipStyle =
@@ -3809,6 +3820,19 @@ private fun MessageInput(
         activeQuery = null
     }
 
+    fun insertEveryone(
+        query: MentionQuery,
+        mentioned: List<Mention>,
+    ) {
+        val replacement = "@$EVERYONE_NAME "
+        state.edit {
+            replace(query.start, query.end, replacement)
+            placeCursorBeforeCharAt(query.start + replacement.length)
+        }
+        onMentionsAdded(mentioned)
+        activeQuery = null
+    }
+
     Surface(
         tonalElevation = 2.dp,
         // Edge-to-edge: lift the input bar above the IME and the navigation bar.
@@ -3824,6 +3848,38 @@ private fun MessageInput(
                     modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
                 ) {
                     Column {
+                        if (everyoneRow != null) {
+                            Row(
+                                modifier =
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .testTag("mention_everyone")
+                                        .clickable { activeQuery?.let { insertEveryone(it, everyoneRow) } }
+                                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Box(Modifier.size(32.dp), contentAlignment = Alignment.Center) {
+                                    Icon(
+                                        Icons.Filled.Groups,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                Spacer(Modifier.width(12.dp))
+                                Column {
+                                    Text(
+                                        text = "@$EVERYONE_NAME",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                    )
+                                    Text(
+                                        text = stringResource(R.string.chat_mention_everyone_hint),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                        }
                         filtered.take(5).forEach { candidate ->
                             Row(
                                 modifier =

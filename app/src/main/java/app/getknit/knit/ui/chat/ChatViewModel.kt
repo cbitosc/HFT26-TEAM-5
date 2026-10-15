@@ -392,6 +392,9 @@ data class ChatUiState(
     val transportHealth: TransportHealth = TransportHealth.Healthy,
     val myNodeId: String = "",
     val mentionCandidates: List<MentionCandidate> = emptyList(),
+    // What the picker's `@everyone` row mentions: the group's roster minus us and the blocked (see
+    // [everyoneMentions]). Null in every thread but a group, and in a group with nobody else to mention.
+    val everyoneMentions: List<Mention>? = null,
     // Conversation header: the room ([isRoom] true) or a 1:1 DM with [title]/[avatarHash] of the peer.
     val isRoom: Boolean = true,
     val title: String = "",
@@ -1166,6 +1169,7 @@ class ChatViewModel(
                 transportHealth = health,
                 myNodeId = me.orEmpty(),
                 mentionCandidates = candidates,
+                everyoneMentions = if (isGroup) everyoneMentions(members, me, blocked) else null,
                 isRoom = isRoom,
                 title =
                     when {

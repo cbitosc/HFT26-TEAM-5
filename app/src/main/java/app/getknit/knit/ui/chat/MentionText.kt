@@ -72,6 +72,38 @@ fun filterCandidates(
     }
 }
 
+/** The `@everyone` token's name: ASCII, lowercase, frozen in the sender's body, never localised (ADR 2026-10.6h2g). */
+const val EVERYONE_NAME = "everyone"
+
+/** Whether the `@everyone` row answers [query]: a blank one, or one `everyone` starts with (trimmed, case-insensitive). */
+fun matchesEveryone(query: String): Boolean {
+    val q = query.trim().lowercase()
+    return q.isEmpty() || EVERYONE_NAME.startsWith(q)
+}
+
+/**
+ * What picking `@everyone` mentions: one [Mention] named [EVERYONE_NAME] for each of [members] but [me] and the
+ * [blocked], in ascending node id, each id once. Null when nobody is left, so the picker offers no row. Reads
+ * the roster only — the picker's other candidates also take senders.
+ */
+fun everyoneMentions(
+    members: Collection<String>,
+    me: String?,
+    blocked: Set<String>,
+): List<Mention>? =
+    members
+        .filter { it != me && it !in blocked }
+        .distinct()
+        .sorted()
+        .map { Mention(nodeId = it, name = EVERYONE_NAME) }
+        .ifEmpty { null }
+
+/** The [pending] mentions whose "@name" is still in [text]: edit a token away and its entries drop with it. */
+fun mentionsStillIn(
+    text: String,
+    pending: List<Mention>,
+): List<Mention> = pending.filter { text.contains("@${it.name}") }
+
 /**
  * Returns [body] with each "@<name>" occurrence styled by [spanStyle], at the spans [mentionSpans] finds.
  * Every occurrence of a matched name is highlighted; text without a literal '@' is never styled.

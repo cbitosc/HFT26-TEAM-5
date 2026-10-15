@@ -608,6 +608,7 @@ class InboundPipelineTest {
             group: GroupInfo,
             id: String,
             body: String,
+            mentions: List<Mention> = emptyList(),
         ): RelayEnvelope =
             RelayEnvelope(
                 type = FrameType.CHAT,
@@ -615,7 +616,7 @@ class InboundPipelineTest {
                 senderId = author.nodeId,
                 sentAt = 5L,
                 group = group,
-                payload = WireCodec.encodePayload(ChatContent(body = body)),
+                payload = WireCodec.encodePayload(ChatContent(body = body, mentions = mentions)),
             )
 
         /** A plaintext broadcast chat that references an out-of-band attachment blob [attachmentHash]. */
@@ -3028,6 +3029,43 @@ class InboundPipelineTest {
 
             coVerify { rig.notifier.notifyMention(any(), any(), any(), any(), any()) }
             coVerify(exactly = 0) { rig.notifier.notify(any(), any(), any(), any(), any()) }
+        }
+
+    /** `@everyone` (ADR 2026-10.6h2g) is seven ordinary entries: the receiver notifies on the node-id match, once. */
+    @Test
+    fun aGroupMessageCarryingSevenEveryoneEntriesNotifiesOnceOnTheMentionsChannel() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.pin(alice)
+            val others = (1..6).map { "other$it" }
+            val members = listOf(alice.nodeId, rig.self.nodeId) + others
+            val group = rig.group(members = members, createdBy = alice.nodeId, name = "Crew")
+            rig.settings.accepted.value = setOf(group.id)
+            val everyone = (members - alice.nodeId).map { Mention(nodeId = it, name = "everyone") }
+            assertEquals(7, everyone.size)
+
+            rig.deliver(alice, rig.groupChat(alice, group, id = "ev1", body = "@everyone standup", mentions = everyone))
+
+            coVerify(exactly = 1) { rig.notifier.notifyMention(any(), any(), any(), any(), any()) }
+            coVerify(exactly = 0) { rig.notifier.notify(any(), any(), any(), any(), any()) }
+        }
+
+    @Test
+    fun aGroupMessageWhoseEveryoneEntriesNameNoOneButOthersDoesNotNotifyOnTheMentionsChannel() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.pin(alice)
+            val others = (1..6).map { "other$it" }
+            val group = rig.group(members = listOf(alice.nodeId, rig.self.nodeId) + others, createdBy = alice.nodeId, name = "Crew")
+            rig.settings.accepted.value = setOf(group.id)
+            val everyone = (others + "other7").map { Mention(nodeId = it, name = "everyone") }
+
+            rig.deliver(alice, rig.groupChat(alice, group, id = "ev2", body = "@everyone standup", mentions = everyone))
+
+            coVerify(exactly = 0) { rig.notifier.notifyMention(any(), any(), any(), any(), any()) }
+            coVerify { rig.notifier.notify(any(), any(), any(), any(), any()) }
         }
 
     @Test

@@ -5,17 +5,22 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import app.getknit.knit.mesh.protocol.Mention
+import app.getknit.knit.ui.chat.EVERYONE_NAME
 import app.getknit.knit.ui.chat.MentionCandidate
 import app.getknit.knit.ui.chat.MentionEdit
 import app.getknit.knit.ui.chat.activeMentionQuery
 import app.getknit.knit.ui.chat.annotateMessageBody
+import app.getknit.knit.ui.chat.everyoneMentions
 import app.getknit.knit.ui.chat.filterCandidates
 import app.getknit.knit.ui.chat.findUrls
 import app.getknit.knit.ui.chat.highlightMentions
 import app.getknit.knit.ui.chat.keepChipsWhole
+import app.getknit.knit.ui.chat.matchesEveryone
 import app.getknit.knit.ui.chat.mentionSpans
+import app.getknit.knit.ui.chat.mentionsStillIn
 import app.getknit.knit.ui.chat.snapOutOfChips
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -334,5 +339,46 @@ class MentionTextTest {
         assertEquals(TextRange(0, 10), snapOutOfChips(chips, TextRange(0, 6), from = null))
         // A backwards selection keeps its direction.
         assertEquals(TextRange(13, 3), snapOutOfChips(chips, TextRange(13, 6), from = null))
+    }
+
+    // --- @everyone (ADR 2026-10.6h2g) ---
+
+    @Test
+    fun theEveryoneRowMatchesABlankQueryAndAnyPrefixOfTheWordIgnoringCaseAndPadding() {
+        assertTrue(matchesEveryone(""))
+        assertTrue(matchesEveryone("  "))
+        assertTrue(matchesEveryone("ev"))
+        assertTrue(matchesEveryone(" EVERYONE "))
+        assertTrue(matchesEveryone("everyone"))
+    }
+
+    @Test
+    fun theEveryoneRowIgnoresAQueryThatIsNotAPrefixOfTheWord() {
+        assertFalse(matchesEveryone("x"))
+        assertFalse(matchesEveryone("one"))
+        assertFalse(matchesEveryone("everyonee"))
+    }
+
+    @Test
+    fun everyoneExpandsToTheRosterMinusUsAndTheBlockedInAsciiOrderEachOnce() {
+        val mentions = everyoneMentions(listOf("zed", "me", "Bob", "mallory", "amy", "zed"), me = "me", blocked = setOf("mallory"))
+        assertEquals(
+            listOf("Bob", "amy", "zed").map { Mention(it, EVERYONE_NAME) },
+            mentions,
+        )
+    }
+
+    @Test
+    fun everyoneIsNullWhenNobodyIsLeftToMention() {
+        assertNull(everyoneMentions(listOf("me", "mallory"), me = "me", blocked = setOf("mallory")))
+        assertNull(everyoneMentions(emptyList(), me = "me", blocked = emptySet()))
+    }
+
+    @Test
+    fun editingTheTokenAwayDropsEveryEntryItBound() {
+        val pending = listOf(Mention("a", "everyone"), Mention("b", "everyone"), Mention("c", "Carol"))
+        assertEquals(pending, mentionsStillIn("@everyone and @Carol", pending))
+        assertEquals(listOf(Mention("c", "Carol")), mentionsStillIn("hi @Carol", pending))
+        assertEquals(emptyList<Mention>(), mentionsStillIn("hi all", pending))
     }
 }

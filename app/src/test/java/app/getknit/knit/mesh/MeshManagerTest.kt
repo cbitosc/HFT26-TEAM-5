@@ -1218,6 +1218,30 @@ class MeshManagerTest {
             assertEquals("the keyed member can decrypt", "standup in 5", carol.crypto.open(enc, header, carol.nodeId)?.body)
         }
 
+    /** `@everyone` (ADR 2026-10.6h2g): a full group's seven same-named entries ride the sealed content unchanged. */
+    @Test
+    fun aFullGroupsSevenEveryoneEntriesRideTheSealedContentUnchanged() =
+        runTest(UnconfinedTestDispatcher()) {
+            val rig = Rig(backgroundScope)
+            val carol = party()
+            rig.pin(carol)
+            val others = (1..6).map { "dave$it" }
+            val members = listOf(rig.me.nodeId, carol.nodeId) + others
+            val group = GroupInfo(id = "g-8", members = members, createdBy = rig.me.nodeId)
+            val everyone = (members - rig.me.nodeId).sorted().map { Mention(nodeId = it, name = "everyone") }
+            assertEquals(7, everyone.size)
+
+            assertTrue(rig.manager.sendChat("@everyone standup", mentions = everyone, group = group))
+            advanceUntilIdle()
+
+            val frame = rig.sentChatFrames().single()
+            val enc = WireCodec.decodePayload<ChatContent>(frame.payload)!!.enc!!
+            val header = MessageCrypto.header(frame.id, rig.me.nodeId, frame.sentAt, group.id)
+            val opened = carol.crypto.open(enc, header, carol.nodeId)!!
+            assertEquals(everyone, opened.mentions)
+            assertEquals(MentionStore.encode(everyone), rig.saved.single().mentions)
+        }
+
     // --- attachment: re-seal under a ciphertext hash, key stays sealed ---
 
     @Test

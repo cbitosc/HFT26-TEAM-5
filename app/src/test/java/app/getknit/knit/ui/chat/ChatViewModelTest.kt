@@ -57,6 +57,7 @@ import app.getknit.knit.mesh.lora.LoraPlane
 import app.getknit.knit.mesh.lora.PublicPostPolicy
 import app.getknit.knit.mesh.protocol.LinkCard
 import app.getknit.knit.mesh.protocol.LinkPreviewBlob
+import app.getknit.knit.mesh.protocol.Mention
 import app.getknit.knit.mesh.protocol.Protocol
 import app.getknit.knit.mesh.protocol.ReplyRef
 import app.getknit.knit.mesh.sha256Hex
@@ -457,6 +458,86 @@ class ChatViewModelTest {
             assertTrue("nothing from a blocked sender is rendered", state.rows.none { it.senderNodeId == "mallory" })
             assertTrue("but the thread still reads as having more", state.hasOlder)
             assertFalse("and they are not mentionable", "mallory" in state.mentionCandidates.map { it.nodeId })
+        }
+
+    @Test
+    fun aGroupOffersEveryoneFromTheRosterAloneWithoutUsOrTheBlockedSortedByNodeId() =
+        runTest {
+            blockedFlow.value = setOf("mallory")
+            groupFlow.value = group(GROUP, members = listOf("zed", "me", "mallory", "amy", "kit"))
+            val vm = vm(GROUP)
+            collectState(vm)
+            // Dora has posted but is not on the roster: the picker's candidates take her, the expansion does not.
+            messagesFlow.value = listOf(msg(senderId = "dora", body = "hello", sentAt = 1L))
+            advanceUntilIdle()
+
+            assertEquals(
+                listOf(Mention("amy", "everyone"), Mention("kit", "everyone"), Mention("zed", "everyone")),
+                vm.state.value.everyoneMentions,
+            )
+            assertTrue(
+                "dora is still an ordinary candidate",
+                "dora" in
+                    vm.state.value.mentionCandidates
+                        .map { it.nodeId },
+            )
+        }
+
+    @Test
+    fun aGroupWithNobodyElseToMentionOffersNoEveryoneRow() =
+        runTest {
+            blockedFlow.value = setOf("mallory")
+            groupFlow.value = group(GROUP, members = listOf("me", "mallory"))
+            val vm = vm(GROUP)
+            collectState(vm)
+            advanceUntilIdle()
+
+            assertNull(vm.state.value.everyoneMentions)
+        }
+
+    @Test
+    fun aDirectMessageAndTheNearbyRoomNeverOfferEveryone() =
+        runTest {
+            stubDm("bob")
+            for (thread in listOf("bob", Conversations.NEARBY)) {
+                val vm = vm(thread)
+                collectState(vm)
+                messagesFlow.value = listOf(msg(senderId = "bob", body = "hello", sentAt = 1L))
+                advanceUntilIdle()
+
+                assertNull(thread, vm.state.value.everyoneMentions)
+            }
+        }
+
+    @Test
+    fun aFullGroupsEveryoneSendsSevenEntriesAndDropsThemWhenTheTokenIsEditedAway() =
+        runTest {
+            val roster = (1..8).map { "n$it" }
+            val full = group(GROUP, members = listOf("me") + roster.take(7))
+            groupFlow.value = full
+            coEvery { groups.find(GROUP) } returns full
+            val vm = vm(GROUP)
+            collectState(vm)
+            advanceUntilIdle()
+            val picked = checkNotNull(vm.state.value.everyoneMentions)
+            assertEquals(7, picked.size)
+
+            // The screen hands send() what is still in the field: here the token was edited out.
+            vm.send("hello all", mentionsStillIn("hello all", picked))
+            advanceUntilIdle()
+            assertEquals(emptyList<Mention>(), mesh.sentChats.single().mentions)
+            vm.onInputCleared()
+
+            val text = "@everyone standup"
+            vm.send(text, mentionsStillIn(text, picked))
+            advanceUntilIdle()
+            assertEquals(picked, mesh.sentChats.last().mentions)
+            assertTrue(
+                mesh.sentChats
+                    .last()
+                    .mentions
+                    .all { it.name == "everyone" },
+            )
         }
 
     @Test

@@ -395,6 +395,8 @@
     </plurals>
     <string name="chat_user_blocked">User blocked</string>
     <string name="chat_user_unblocked">User unblocked</string>
+    <!-- The picker's @everyone row in a group: one mention per other member. A mention alerts; it promises no more. -->
+    <string name="chat_mention_everyone_hint">Mentions everyone else in this group and notifies them</string>
 
     <!-- Emoji picker (the "more reactions" sheet) -->
     <string name="emoji_search_hint">Search emoji</string>

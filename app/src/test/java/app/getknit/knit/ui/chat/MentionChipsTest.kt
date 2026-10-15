@@ -41,6 +41,20 @@ class MentionChipsTest {
         compose.onNodeWithTag("field").requestFocus()
     }
 
+    private fun fieldWith(
+        state: TextFieldState,
+        mentions: List<Mention>,
+    ) {
+        compose.setContent {
+            BasicTextField(
+                state = state,
+                inputTransformation = MentionChips { mentions },
+                modifier = Modifier.testTag("field"),
+            )
+        }
+        compose.onNodeWithTag("field").requestFocus()
+    }
+
     private fun press(key: Key) = compose.onNodeWithTag("field").performKeyInput { pressKey(key) }
 
     @Test
@@ -84,5 +98,17 @@ class MentionChipsTest {
         press(Key.Backspace)
 
         assertEquals("hi @Walter o", state.text.toString())
+    }
+
+    @Test
+    fun sevenEntriesNamedEveryoneAreOneChip() {
+        val everyone = (1..7).map { Mention("n$it", "everyone") }
+        val state = TextFieldState("hi @everyone ok", initialSelection = TextRange(12))
+        fieldWith(state, everyone)
+
+        assertEquals(1, mentionSpans(state.text, everyone).size)
+        press(Key.Backspace)
+
+        assertEquals("hi  ok", state.text.toString())
     }
 }
