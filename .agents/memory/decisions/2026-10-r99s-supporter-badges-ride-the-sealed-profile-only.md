@@ -64,3 +64,11 @@ by `BadgesTest`, `PeerBadgesTest`, `BadgeRefresherTest`, `GoldenVectorTest`, `Su
 clears it on both, a rename's cleartext profile does not clear it, switching off while stopped still clears it, a
 copied badge verifies for no one). Received entries are bounded at intake (`Badges.entryFits`: a 16-byte `r`, a wrapper
 no larger than the largest legal one). knit-ios must mirror the sealed field and its vectors.
+
+**Amended 2026-10-14 (the mark is the Yarnworld logo):** the supporter mark is the Knit Anywhere logo, Yarnworld, in
+its own blue and green, drawn untinted inside the surface ring, so no theme or Material You wallpaper recolours it. The
+heart, then the Knit K on `tertiary`, read as the app's online green. The full logo is a 128 px lossless WebP
+(`drawable-nodpi/ic_badge_supporter`), because a vector drawable has no dash pattern for its stitching; a mark under
+16 dp (avatars under about 44 dp, and the profile pill) draws `ic_badge_supporter_small`, a vector reduction to the
+ball, one swirl, one island and its spiral. The logo's green sits near the online dot's: the mark's place on the
+avatar and its blue ball are what tell them apart.

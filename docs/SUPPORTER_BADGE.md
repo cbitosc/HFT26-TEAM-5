@@ -142,6 +142,9 @@ not a wire change.
   "<Name> supports Knit."
 - **C-7-3** Copy: no link, no price, no product name, no "Get" / "Upgrade" / "Become" / "Donate", and no call to action
   shown to anyone who holds no badge. The badge says the person supports Knit, not what they bought.
+- **C-7-4** The supporter mark is the Knit Anywhere logo (Yarnworld) in its own colours, never tinted, inside a ring of
+  the surface colour. A mark under 16 dp draws its simplified form (`ic_badge_supporter_small`); larger ones draw the
+  full logo (`ic_badge_supporter`).
 
 ## 8. The `sub` vector (owned here)
 

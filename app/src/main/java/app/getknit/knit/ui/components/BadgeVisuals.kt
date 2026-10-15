@@ -3,8 +3,8 @@ package app.getknit.knit.ui.components
 import android.content.res.Configuration
 import androidx.annotation.DrawableRes
 import androidx.annotation.StringRes
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -13,13 +13,13 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
@@ -34,14 +34,21 @@ import app.getknit.knit.badge.VerifiedBadge
 import app.getknit.knit.ui.preview.KnitPreview
 
 /**
- * How a badge id draws (docs/SUPPORTER_BADGE.md §7, ADR 2026-10.r99s): its glyph and its one-word name. Keyed by id, so
- * a future badge is a row here; an id with no row is never drawn, which the verifier already guarantees.
+ * How a badge id draws (docs/SUPPORTER_BADGE.md §7, ADR 2026-10.r99s): its artwork and its one-word name. Keyed by id,
+ * so a future badge is a row here; an id with no row is never drawn, which the verifier already guarantees.
  */
 object BadgeVisuals {
+    /**
+     * [badge]'s artwork for a mark [markSize] across, drawn in its own colours (C-7-4). The supporter badge is the
+     * Yarnworld logo, and below [SMALL_MARK] its simplified form: the full logo's stitching and islands blur there.
+     */
     @DrawableRes
-    fun iconFor(badge: String): Int? =
+    fun iconFor(
+        badge: String,
+        markSize: Dp,
+    ): Int? =
         when (badge) {
-            Badges.SUPPORTER -> R.drawable.ic_badge_supporter
+            Badges.SUPPORTER -> if (markSize < SMALL_MARK) R.drawable.ic_badge_supporter_small else R.drawable.ic_badge_supporter
             else -> null
         }
 
@@ -72,9 +79,9 @@ val LocalPeerBadges = compositionLocalOf<Map<String, List<VerifiedBadge>>> { emp
 fun peerBadge(nodeId: String?): String? = nodeId?.let { LocalPeerBadges.current[it]?.firstOrNull()?.b }
 
 /**
- * The small mark a badge puts on an avatar of diameter [avatarSize]: a tertiary disc ringed in the surface colour, so
- * it reads against a photo and against the tinted initial alike, in light and dark. Sized to the avatar, with a floor
- * that keeps the 36 dp chat header's mark legible. Tappable only when [onClick] is set.
+ * The small mark a badge puts on an avatar of diameter [avatarSize]: the badge's artwork, untinted, ringed in the
+ * surface colour, so it reads against a photo and against the tinted initial alike, in light and dark. Sized to the
+ * avatar, with a floor that keeps the 36 dp chat header's mark legible. Tappable only when [onClick] is set.
  */
 @Composable
 fun BadgeMark(
@@ -83,16 +90,16 @@ fun BadgeMark(
     modifier: Modifier = Modifier,
     onClick: (() -> Unit)? = null,
 ) {
-    val icon = BadgeVisuals.iconFor(badge) ?: return
-    val label = BadgeVisuals.markLabelFor(badge)?.let { stringResource(it) }
     val size = markSize(avatarSize)
+    val icon = BadgeVisuals.iconFor(badge, size) ?: return
+    val label = BadgeVisuals.markLabelFor(badge)?.let { stringResource(it) }
     Box(
         modifier =
             modifier
                 .size(size)
                 .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.tertiary)
-                .border(RING, MaterialTheme.colorScheme.surface, CircleShape)
+                // The surface shows as a ring round the inset artwork, parting it from the avatar.
+                .background(MaterialTheme.colorScheme.surface)
                 .then(
                     if (onClick != null) {
                         Modifier.clickable(onClickLabel = label, role = Role.Button, onClick = onClick)
@@ -102,11 +109,12 @@ fun BadgeMark(
                 ).semantics { label?.let { contentDescription = it } },
         contentAlignment = Alignment.Center,
     ) {
-        Icon(
+        // A logo in its own colours, never a tinted glyph: no theme or wallpaper recolours it.
+        Image(
             painter = painterResource(icon),
             contentDescription = null,
-            tint = MaterialTheme.colorScheme.onTertiary,
-            modifier = Modifier.size(size * GLYPH_FRACTION),
+            contentScale = ContentScale.Fit,
+            modifier = Modifier.size(size - RING * 2),
         )
     }
 }
@@ -115,8 +123,10 @@ fun BadgeMark(
 internal fun markSize(avatarSize: Dp): Dp = (avatarSize * MARK_FRACTION).coerceIn(MIN_MARK, MAX_MARK)
 
 private const val MARK_FRACTION = 0.36f
-private const val GLYPH_FRACTION = 0.7f
 private val MIN_MARK = 14.dp
+
+// A mark narrower than this draws the badge's simplified artwork: avatars under about 44 dp, and the profile pill.
+private val SMALL_MARK = 16.dp
 private val MAX_MARK = 28.dp
 private val RING = 1.5.dp
 
@@ -127,7 +137,7 @@ private val RING = 1.5.dp
 fun AvatarBadgeSizesPreview() =
     KnitPreview {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.padding(12.dp)) {
-            for (size in listOf(36.dp, 48.dp, 52.dp, 96.dp)) {
+            for (size in listOf(30.dp, 36.dp, 40.dp, 48.dp, 52.dp, 96.dp)) {
                 Row(horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically) {
                     Avatar(avatarHash = null, name = "Ada", nodeId = "ada", size = size)
                     Avatar(avatarHash = null, name = "Ada", nodeId = "ada", size = size, badge = Badges.SUPPORTER)
