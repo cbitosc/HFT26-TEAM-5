@@ -12,13 +12,15 @@ import androidx.core.content.ContextCompat
  * Feeds [PowerStateSource] from Android system signals: screen on/off
  * ([Intent.ACTION_SCREEN_ON] / [Intent.ACTION_SCREEN_OFF]), charger connect/disconnect, and the
  * coarse battery-low/okay transitions — plus an initial seed of all three so state is correct before
- * the first broadcast arrives. The screen actions cannot be declared in the manifest, so the
+ * the first broadcast arrives. Battery Saver goes to [BatterySaverState] beside it, read only by low-power mode
+ * ([LowPowerSource], ADR 2026-10.d44b). The screen actions cannot be declared in the manifest, so the
  * receiver is registered at runtime; [app.getknit.knit.mesh.MeshService] owns its [start]/[stop]
  * lifecycle (mirroring its Bluetooth receiver).
  */
 class PowerMonitor(
     context: Context,
     private val source: PowerStateSource,
+    private val batterySaver: BatterySaverState = BatterySaverState(),
 ) {
     private val appContext = context.applicationContext
     private val powerManager = appContext.getSystemService(PowerManager::class.java)
@@ -36,6 +38,7 @@ class PowerMonitor(
                     Intent.ACTION_POWER_DISCONNECTED -> source.update { it.copy(charging = false) }
                     Intent.ACTION_BATTERY_LOW -> source.update { it.copy(batteryLow = true) }
                     Intent.ACTION_BATTERY_OKAY -> source.update { it.copy(batteryLow = false) }
+                    PowerManager.ACTION_POWER_SAVE_MODE_CHANGED -> batterySaver.set(powerManager?.isPowerSaveMode == true)
                 }
             }
         }
@@ -50,6 +53,7 @@ class PowerMonitor(
                 addAction(Intent.ACTION_POWER_DISCONNECTED)
                 addAction(Intent.ACTION_BATTERY_LOW)
                 addAction(Intent.ACTION_BATTERY_OKAY)
+                addAction(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED)
             }
         ContextCompat.registerReceiver(appContext, receiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
     }
@@ -73,6 +77,7 @@ class PowerMonitor(
                 level >= 0 && scale > 0 && level.toFloat() / scale <= LOW_BATTERY_THRESHOLD
             } ?: false
         source.update { it.copy(interactive = interactive, charging = charging, batteryLow = batteryLow) }
+        batterySaver.set(powerManager?.isPowerSaveMode == true)
     }
 
     private companion object {

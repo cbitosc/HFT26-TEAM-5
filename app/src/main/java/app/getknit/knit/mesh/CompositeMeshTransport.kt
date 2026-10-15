@@ -151,7 +151,7 @@ class CompositeMeshTransport(
                         child.initiatorHeld,
                     ) { linked, nearby, health, contended, held ->
                         TransportStatus(child.kind, health, linked.size, nearby.size, contended, held)
-                    }
+                    }.combine(child.switchedOff) { status, off -> status.copy(switchedOff = off) }
                 },
             ) { it.toList() }.stateIn(scope, SharingStarted.Eagerly, emptyList())
         }

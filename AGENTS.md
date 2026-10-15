@@ -207,6 +207,15 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   `heal()` whole; the motion trigger is floored at its source (60 s), one basket runs at a time, and the retention
   sweeps and the custody replay run once an hour off the start's stamp. The replay reads the store's group-chat query,
   never `liveFrames`. Regression: `MeshServiceMotionTest`, `MeshManagerTest`'s heal cases, `ForwardDaoTest`.
+- **When touching low-power mode — `mesh/power/LowPower.kt` (`LowPowerPolicy`, `LowPowerSource`,
+  `awareSwitchedOff`, `BatterySaverState`), `data/settings/LowPowerSwitch`, `SwitchableTransport`'s `off` and
+  `switchedOff`, `TransportStatus.switchedOff` / `radioWarningFor`, the motion gate in `MeshService.observeLowPower`,
+  or `…debug.LOWPOWER`:** READ ADR 2026-10.d44b and its amendments. The mode is an overlay on the user's switch or
+  Battery Saver, lifted after a minute on the charger; it writes one phone-bound key and nothing else. Phase 1 gives
+  up exactly Wi-Fi Aware (through `SwitchableTransport`, in every build) and the motion heal (the sensor left
+  unarmed, the heartbeat and resume heals kept); each further lever waits for a battery arm that shows it paying
+  (`scripts/battery-trial.py`). A plane Knit switched off is never a "turn on Wi-Fi" banner. Regression:
+  `LowPowerTest`, `SwitchableTransportTest`, `MeshServiceMotionTest`, `RadioWarningTest`, `LowPowerSwitchTest`.
 - **When touching `mesh/power/PowerPolicy` (`idleAfterScan` / `lonelyRelaxed` / the `LONELY_*` constants),
   `mesh/wifiaware/NanLonelyPolicy`, or the cadence in `BluetoothMeshTransport.scanLoop`:** READ ADR
   2026-09.kb68 and ADR 2026-09.w3xk. The shared rule is "alone ≥ 3 min, not charging"; each radio picks its

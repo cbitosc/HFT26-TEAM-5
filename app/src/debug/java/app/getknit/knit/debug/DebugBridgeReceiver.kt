@@ -58,6 +58,7 @@ import app.getknit.knit.data.peer.PeerEntity
 import app.getknit.knit.data.settings.BadgeStore
 import app.getknit.knit.data.settings.KnitBoardSetup
 import app.getknit.knit.data.settings.OwnIceStore
+import app.getknit.knit.data.settings.LowPowerSwitch
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.data.settings.TicketKeyStore
 import app.getknit.knit.data.webp.WebpTranscode
@@ -91,6 +92,9 @@ import app.getknit.knit.mesh.lora.BoardOwner
 import app.getknit.knit.mesh.lora.BoardSettings
 import app.getknit.knit.mesh.lora.ProvisionMode
 import app.getknit.knit.mesh.power.AppVisibility
+import app.getknit.knit.mesh.power.BatterySaverState
+import app.getknit.knit.mesh.power.LowPowerSource
+import app.getknit.knit.mesh.power.PowerStateSource
 import app.getknit.knit.mesh.protocol.ReplyRef
 import app.getknit.knit.mesh.sha256Hex
 import app.getknit.knit.mesh.spool.CommonsInvite
@@ -259,6 +263,10 @@ import java.nio.ByteBuffer
  *   false` starts it again, no extras reads. The reply is the stored `off` and the Wi-Fi Aware row's `health` /
  *   `linked` / `nearby` (`present` false where the device has no Wi-Fi Aware plane). Applied live by the debug
  *   build's `SwitchableTransport`; persists across restarts until switched back on.
+ * - [ACTION_LOWPOWER] — **low-power mode** (ADR 2026-10.d44b), the user's switch (`LowPowerSwitch`). `--ez
+ *   on true|false` sets it, no extras reads. The reply is `lowPower` (the stored `switch`, `batterySaver`, `charging`,
+ *   the posture's `active` and `reason`) and the Wi-Fi Aware row's `health` / `switchedOff`. The posture also follows
+ *   Battery Saver (`cmd power set-mode 1`) and lifts after a minute on the charger; `STATE` carries the same `lowPower`.
  * - [ACTION_PHY] — the **BLE Coded PHY experiment** (ADR 2026-10.yvn6; `BuildConfig.BLE_CODED_PHY`, else an error).
  *   `--es mode off|auto|coded|1m` stores the mode (`SettingsStore.debugBlePhyMode`, applied live), `--es txpower
  *   high|medium` re-raises the Coded advert, and `--ei stepDown|stepUp|stepDownReads|minGapMs|stepUpHoldMs N` and
@@ -330,6 +338,10 @@ class DebugBridgeReceiver :
     private val startGate: MeshStartGate by inject()
     private val identity: Identity by inject()
     private val settings: SettingsStore by inject()
+    private val lowPower: LowPowerSource by inject()
+    private val lowPowerSwitch: LowPowerSwitch by inject()
+    private val batterySaver: BatterySaverState by inject()
+    private val powerState: PowerStateSource by inject()
     private val ticketKeys: TicketKeyStore by inject()
     private val badgeStore: BadgeStore by inject()
     private val contactCards: app.getknit.knit.contacts.ContactCards by inject()
@@ -527,6 +539,10 @@ class DebugBridgeReceiver :
 
                         ACTION_NANOFF -> {
                             handleNanOff(intent)
+                        }
+
+                        ACTION_LOWPOWER -> {
+                            handleLowPower(intent)
                         }
 
                         ACTION_PHY -> {
@@ -1016,6 +1032,7 @@ class DebugBridgeReceiver :
                                 .put("linked", it.linked)
                                 .put("nearby", it.nearby)
                                 .put("initiatorHeld", it.initiatorHeld)
+                                .put("switchedOff", it.switchedOff)
                         },
                     ),
                 ).put("neighborCount", mesh.neighborCount.value)
@@ -1028,6 +1045,8 @@ class DebugBridgeReceiver :
                 .put("meshPaused", MeshPause.activeDeadline(pausedUntil, System.currentTimeMillis()) != null)
                 // False after the notification's Stop: KnitApp and BootReceiver then start nothing until Start.
                 .put("meshEnabled", meshEnabled)
+                // Low-power mode's switch and the posture the planes read (ADR 2026-10.d44b).
+                .put("lowPower", lowPowerJson())
                 .put("reachable", reachable)
                 .put("indirect", indirect)
                 .put("typing", typing)
@@ -2821,6 +2840,32 @@ class DebugBridgeReceiver :
             .put("nearby", nan?.nearby ?: JSONObject.NULL)
     }
 
+    /** [ACTION_LOWPOWER]: sets low-power mode's switch, then reports the posture with the Wi-Fi Aware row. */
+    private suspend fun handleLowPower(intent: Intent): JSONObject {
+        if (intent.hasExtra("on")) {
+            lowPowerSwitch.set(intent.getBooleanExtra("on", false))
+            delay(NANOFF_SETTLE_MS) // the posture and the transport collect the key; let it land before reading
+        }
+        val nan = mesh.transportStatuses.value.firstOrNull { it.kind == TransportKind.WifiAware }
+        return JSONObject()
+            .put("status", "ok")
+            .put("lowPower", lowPowerJson())
+            .put("awarePresent", nan != null)
+            .put("awareHealth", nan?.health?.name ?: JSONObject.NULL)
+            .put("awareSwitchedOff", nan?.switchedOff ?: JSONObject.NULL)
+    }
+
+    /** Low-power mode's inputs and the posture they make, for [ACTION_STATE] and [ACTION_LOWPOWER]. */
+    private suspend fun lowPowerJson(): JSONObject {
+        val posture = lowPower.current
+        return JSONObject()
+            .put("switch", lowPowerSwitch.on.first())
+            .put("batterySaver", batterySaver.on.value)
+            .put("charging", powerState.state.value.charging)
+            .put("active", posture.active)
+            .put("reason", posture.reason?.name ?: JSONObject.NULL)
+    }
+
     /** [ACTION_PHY]: sets the Coded PHY experiment's mode, Coded advert power or step tuning, then reports it. */
     private suspend fun handlePhy(intent: Intent): JSONObject {
         if (!BuildConfig.BLE_CODED_PHY) return reply("error", "this build keeps the Coded PHY experiment dark (-PbleCodedPhy)")
@@ -3150,6 +3195,7 @@ class DebugBridgeReceiver :
         const val ACTION_NANMSG = "app.getknit.knit.debug.NANMSG"
         const val ACTION_BLECAP = "app.getknit.knit.debug.BLECAP"
         const val ACTION_NANOFF = "app.getknit.knit.debug.NANOFF"
+        const val ACTION_LOWPOWER = "app.getknit.knit.debug.LOWPOWER"
         const val ACTION_PHY = "app.getknit.knit.debug.PHY"
         const val ACTION_LINKTUNE = "app.getknit.knit.debug.LINKTUNE"
         const val ACTION_REQNOTIF = "app.getknit.knit.debug.REQNOTIF"

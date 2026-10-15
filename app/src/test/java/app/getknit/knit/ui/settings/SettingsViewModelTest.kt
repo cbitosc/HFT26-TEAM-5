@@ -9,6 +9,7 @@ import app.getknit.knit.identity.Alias
 import app.getknit.knit.identity.Identity
 import app.getknit.knit.mesh.lora.LoraFacts
 import app.getknit.knit.mesh.lora.LoraPlane
+import app.getknit.knit.mesh.power.LowPowerPosture
 import app.getknit.knit.ui.theme.ThemeMode
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -17,6 +18,7 @@ import io.mockk.mockk
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -73,7 +75,7 @@ class SettingsViewModelTest {
         Dispatchers.resetMain()
     }
 
-    private fun vm() = SettingsViewModel(settings, identity, relayFacts, loraFacts, ownIceFlow)
+    private fun vm() = SettingsViewModel(settings, identity, relayFacts, loraFacts, ownIceFlow, mockk(relaxed = true), flowOf(LowPowerPosture.OFF))
 
     /**
      * The load-bearing one. This ViewModel outlives a trip to the profile editor — Save there pops straight

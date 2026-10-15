@@ -3,6 +3,7 @@ package app.getknit.knit.fieldlog
 import app.getknit.knit.mesh.MeshMetrics
 import app.getknit.knit.mesh.TransportKind
 import app.getknit.knit.mesh.TransportStatus
+import app.getknit.knit.mesh.power.LowPowerPosture
 import app.getknit.knit.mesh.power.PowerState
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -64,6 +65,8 @@ class FieldLog(
     private val tickMs: Long = FLUSH_EVERY_MS,
     // Where the export stages its copy for the share sheet ([FieldLogExport.stage]); [clear] empties it. Null keeps none.
     private val staged: File? = null,
+    // Low-power mode's posture (`LowPowerSource.posture`, ADR 2026-10.d44b), followed for the session like [power].
+    private val lowPower: Flow<LowPowerPosture>? = null,
 ) : FieldRecorder {
     private class Pending(
         val at: Long,
@@ -191,6 +194,9 @@ class FieldLog(
         session.launch { enabled.collect { on = it } }
         record(FieldEvent.MeshOn(versionCode))
         session.launch { power.distinctUntilChanged().collect { record(it.toEvent()) } }
+        lowPower?.let { posture ->
+            session.launch { posture.distinctUntilChanged().collect { record(FieldEvent.LowPower(it.reason)) } }
+        }
         session.launch { followRadios(statuses) }
         session.launch {
             while (true) {

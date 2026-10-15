@@ -731,8 +731,12 @@ private fun LiveTransportRow(
             modifier = Modifier.weight(1f),
         )
         // Debug flag: the Wi-Fi Aware switch under this section has stopped the plane (its dot reads Unavailable).
+        // Otherwise a plane Knit has off is low-power mode's doing (ADR 2026-10.d44b), not a radio the user turned off.
         if (switchedOff) {
             TransportTag(stringResource(R.string.diagnostics_transport_debug_off))
+            Spacer(Modifier.width(8.dp))
+        } else if (status.switchedOff) {
+            TransportTag(stringResource(R.string.diagnostics_transport_low_power))
             Spacer(Modifier.width(8.dp))
         }
         // Diagnostic flag: this radio reports itself contended (Bluetooth ↔ A2DP audio streaming).

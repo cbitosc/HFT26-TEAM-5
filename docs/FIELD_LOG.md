@@ -63,6 +63,7 @@ Schema 1. A new field is additive. Renaming or removing a field, or changing a f
 | `nan_up` | A Wi-Fi Aware data path came up | `peer`, `initiator`, `links` |
 | `nan_down` | A data path ended | `peer`, `initiator`, `life` ms, `clean` (quiet sync, not a reset) |
 | `nan_cycle` | The Aware session was cycled | — |
+| `low_power` | Low-power mode went on or off (ADR 2026-10.d44b); while on, Wi-Fi Aware is off and the Aware lines stop | `on`, `why` SWITCH/BATTERY_SAVER (only when on) |
 | `lora` | Every 5 min while a board's link is ready | `role`, `snr10` (SNR × 10), `rssi`, `queued`, `heard`, `boards`, `airUsed` / `airBudget` ms (live share) |
 | `latency` | At export, per plane | `dir` IN (others' messages reaching us; includes clock skew) or ACK (receipts for ours; one clock), `plane`, `n`, `p50`, `p90`, `max` ms |
 

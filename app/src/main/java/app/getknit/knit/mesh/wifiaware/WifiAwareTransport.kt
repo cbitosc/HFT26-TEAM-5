@@ -241,6 +241,13 @@ class WifiAwareTransport(
     @Volatile private var attachGen = 0
     private val reattaching = AtomicBoolean(false)
 
+    // Between start() and stop(). attach() and reattach() refuse while it is false: a stop() leaves handler work
+    // queued behind it (the subscribe wedge's delayed reattach, a loop tick or an availability broadcast already in
+    // flight), and an attach any of those made would keep a session nothing closes, ICM lit and the accept-any
+    // responder filed, with the loops and the receiver gone. Low-power mode (ADR 2026-10.d44b) is the first thing to
+    // stop the plane routinely in release.
+    @Volatile private var started = false
+
     // elapsedRealtime the last attach() called mgr.attach(). Two jobs: it lets a later attach() self-heal a
     // stuck [attaching] guard if the framework silently drops an attach (mgr.attach with no
     // onAttached/onAttachFailed), and it is the floor on how often we may call mgr.attach at all
@@ -577,6 +584,7 @@ class WifiAwareTransport(
             Log.w(TAG, "Wi-Fi Aware unsupported on this device; mesh disabled")
             return
         }
+        started = true
         scope.launch {
             localNodeId = identity.nodeId()
             lastLinkOrAcceptAt = SystemClock.elapsedRealtime() // grace window before the wedge watchdog can fire
@@ -954,6 +962,7 @@ class WifiAwareTransport(
     }
 
     override fun stop() {
+        started = false // before anything: no attach may begin from here on (see [started])
         loopJob?.cancel()
         powerJob?.cancel()
         cueJob?.cancel()
@@ -1010,7 +1019,42 @@ class WifiAwareTransport(
         lonelyRelaxedLogged = false
         _neighbors.value = emptySet()
         _reachable.value = emptySet()
+        closeStoppedGeneration()
     }
+
+    /**
+     * [stop]'s half on the [handler] thread. The teardown above runs on the caller's thread and never moved
+     * [attachGen], so an attach in flight at the stop came back to an `onAttached` that kept its session and filed
+     * publish, the responder and subscribe on a stopped plane — and an `onPublishStarted` running beside
+     * [stopResponder] could leave a [responderCallback] that blocks every later session's responder. Posted, this
+     * runs after every callback already queued (whatever they created is closed here) and before any the stop has
+     * not yet seen (their generation is stale, so they close their own, the way [pause] and the NAN-down path
+     * leave them). Every bump of [attachGen] is on this thread, so the increment never races another. Nothing here
+     * is a failed attach: a late `onAttached` already counted as the success it was (ADR 052/055), and closing a
+     * session refunds nothing. A [start] that follows posts its attach behind this, and [attach] stamps a fresh
+     * generation, so the sweep cannot reach the next session.
+     */
+    private fun closeStoppedGeneration() =
+        onHandler {
+            ++attachGen
+            stopResponder()
+            runCatching { publishSession?.close() }
+            runCatching { subscribeSession?.close() }
+            runCatching { session?.close() }
+            publishSession = null
+            subscribeSession = null
+            session = null
+            attaching.set(false)
+            subscribing.set(false)
+            reattaching.set(false)
+            // Handles and sends learned on whatever a late callback opened die with it (ADR 2026-09.9dnk, jjhg).
+            synchronized(lock) {
+                discovered.clear()
+                accepting = 0
+            }
+            hopTable.clear()
+            msgInFlight.clear()
+        }
 
     override fun heal() {
         if (!hasHardware) return
@@ -1257,6 +1301,7 @@ class WifiAwareTransport(
     private fun attach() =
         onHandler {
             val mgr = awareManager ?: return@onHandler
+            if (!started) return@onHandler // stopped: work queued behind stop() must not open a session
             if (paused) return@onHandler // lent out; resume() attaches
             if (!mgr.isAvailable) {
                 _health.value = TransportHealth.Unavailable // Wi-Fi Aware off (Wi-Fi off / airplane mode)
@@ -1634,7 +1679,7 @@ class WifiAwareTransport(
     private fun reattach() =
         onHandler {
             if (anyLinkActivity()) return@onHandler
-            if (paused) return@onHandler
+            if (paused || !started) return@onHandler // a delayed reattach can outlive a stop()
             if (!reattaching.compareAndSet(false, true)) return@onHandler // collapse concurrent re-attach triggers
             Log.w(TAG, "re-attaching to recover wedged discovery/responder")
             stopResponder()

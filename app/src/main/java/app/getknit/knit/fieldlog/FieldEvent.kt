@@ -327,6 +327,21 @@ sealed interface FieldEvent {
         }
     }
 
+    /**
+     * Low-power mode's posture changed (ADR 2026-10.d44b): [reason] is what holds it on (`LowPowerReason`), null when it
+     * went off. While it is on, Wi-Fi Aware is switched off and a move does not heal, so the Aware lines stop on purpose.
+     */
+    data class LowPower(
+        val reason: Enum<*>?,
+    ) : FieldEvent {
+        override val kind get() = "low_power"
+
+        override fun write(out: FieldWriter) {
+            out.flag("on", reason != null)
+            reason?.let { out.enum("why", it) }
+        }
+    }
+
     /** The Wi-Fi Aware session was torn down and re-attached — the plane's own cure for a wedge (ADR 2026-09.jjhg). */
     data object NanCycle : FieldEvent {
         override val kind get() = "nan_cycle"

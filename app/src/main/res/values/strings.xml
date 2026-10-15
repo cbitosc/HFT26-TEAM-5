@@ -744,6 +744,12 @@
     <string name="call_settings_saved">Saved</string>
     <string name="call_settings_test_busy">Can\'t test during a call</string>
     <string name="settings_link_previews_subtitle">When you type a link, Knit fetches the page\'s title and picture over the Internet and sends them with your message. The site sees your IP address; the people you send to never contact it.</string>
+    <!-- Low-power mode (ADR 2026-10.d44b). The subtitle changes when Battery Saver holds the mode on with the switch off,
+         or the charger holds it off with the switch on. -->
+    <string name="settings_low_power_title">Low-power mode</string>
+    <string name="settings_low_power_subtitle">Turns Wi-Fi Aware off to save battery. Bluetooth keeps you on the mesh, so messages still arrive, but photos and files take longer. Also on while Battery Saver is.</string>
+    <string name="settings_low_power_subtitle_saver">On now because Battery Saver is on. Wi-Fi Aware is off, and Bluetooth keeps you on the mesh.</string>
+    <string name="settings_low_power_subtitle_charging">Paused while charging. Wi-Fi Aware stays on until you unplug.</string>
 
     <!-- Profile details (another peer) -->
     <string name="profile_details_message">Message</string>
@@ -999,6 +1005,8 @@
     <string name="diagnostics_direct_calls_switch_label">Wi-Fi Direct calls (debug)</string>
     <string name="diagnostics_direct_calls_switch_body">Turn off to send calls with a nearby phone over the internet path, STUN and TURN, as if it were far away. Applies to the next call and stays off until you turn it back on.</string>
     <string name="diagnostics_transport_debug_off">off</string>
+    <!-- A plane low-power mode has switched off (ADR 2026-10.d44b), as a tag beside the transport. -->
+    <string name="diagnostics_transport_low_power">low power</string>
     <string name="diagnostics_ble_phy_label">Long-range Bluetooth (experiment)</string>
     <string name="diagnostics_ble_phy_body">Off is today\'s Bluetooth. Auto finds phones further away and slows a link down to keep it as they walk off. Coded and 1M hold every link on one speed, for comparing range.</string>
     <string name="diagnostics_ble_phy_off">Off</string>

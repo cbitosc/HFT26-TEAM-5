@@ -19,6 +19,7 @@ import app.getknit.knit.location.LocationSource
 import app.getknit.knit.mesh.MeshController
 import app.getknit.knit.mesh.RadioSupport
 import app.getknit.knit.mesh.lora.LoraStatusRepository
+import app.getknit.knit.mesh.power.LowPowerSource
 import app.getknit.knit.transfer.TransferManager
 import app.getknit.knit.ui.StorageGate
 import app.getknit.knit.ui.addcontact.AddContactViewModel
@@ -150,6 +151,8 @@ val uiModule =
                 get<RelayStatusRepository>().facts,
                 get<LoraStatusRepository>().facts,
                 get<OwnIceStore>().ownIce,
+                get(),
+                get<LowPowerSource>().posture,
             )
         }
         viewModel { BackupViewModel(androidContext(), get(), get()) }

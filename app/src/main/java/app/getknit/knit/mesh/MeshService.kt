@@ -29,6 +29,7 @@ import app.getknit.knit.data.crypto.keystoreUnavailable
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.di.isKoinStarted
 import app.getknit.knit.mesh.bluetooth.wear.WearStatusServer
+import app.getknit.knit.mesh.power.LowPowerSource
 import app.getknit.knit.mesh.power.PowerMonitor
 import app.getknit.knit.moderation.MlTextModerator
 import app.getknit.knit.notifications.NotificationChannels
@@ -136,14 +137,29 @@ class MeshService : LifecycleService() {
     private var wearStatus: WearStatusServer? = null
 
     /**
+     * Low-power mode's posture (ADR 2026-10.d44b), resolved by [resolveGraph] on the worker and read by
+     * [observeLowPower]. Null only in a test graph that leaves it out, which then keeps the motion heal as shipped.
+     */
+    private var lowPower: LowPowerSource? = null
+
+    /** Whether the posture lets a move heal; false while low-power mode is on. Written and read on the main thread. */
+    private var motionHealAllowed = true
+
+    /**
      * A significant-motion trigger. The sensor is one-shot and re-armed after every fire, so a walk fires it every
      * 30-60 s, and each fire used to run the whole heal — a BLE scan window, a NAN re-arm and the maintenance basket's
      * database reads — for as long as the phone was carried (work item #63). One heal a minute is what a move can
      * usefully buy: a peer that came into range mid-walk is found by the next one, and the heartbeat and the app's
-     * resume keep their own unfloored path. The sensor is re-armed either way. `internal` for the Robolectric test;
+     * resume keep their own unfloored path. The sensor is re-armed either way, except under low-power mode, which
+     * gives the motion heal up and leaves the sensor unarmed ([observeLowPower]). `internal` for the Robolectric test;
      * the shadow has no trigger-sensor delivery.
      */
     internal fun onSignificantMotion() {
+        if (!motionHealAllowed) {
+            // A fire that raced the posture going on: neither heal nor re-arm (the posture disarmed the sensor).
+            Log.d(TAG, "motion: low-power mode, no heal")
+            return
+        }
         val now = clock()
         val since = now - lastMotionHealAt
         if (since >= MOTION_HEAL_FLOOR_MS) {
@@ -240,6 +256,7 @@ class MeshService : LifecycleService() {
         val began = SystemClock.elapsedRealtime()
         val roots = listOf(meshManager, powerMonitor, settings)
         wearStatus = getKoin().getOrNull()
+        lowPower = getKoin().getOrNull()
         Log.i(TAG, "mesh graph resolved in ${SystemClock.elapsedRealtime() - began} ms on ${Thread.currentThread().name}")
         return roots
     }
@@ -262,7 +279,7 @@ class MeshService : LifecycleService() {
         // flips this off. Guarded to skip the redundant write on the common already-enabled start.
         scope.launch { if (!settings.meshEnabled.first()) settings.setMeshEnabled(true) }
         scheduleHeartbeat()
-        armSignificantMotion()
+        observeLowPower()
         observePause()
         wearStatus?.start()
     }
@@ -305,6 +322,31 @@ class MeshService : LifecycleService() {
                     if (applyPause(MeshPause.activeDeadline(raw, clock()))) refreshNotification()
                 }
             }
+    }
+
+    /**
+     * Low-power mode gives up the motion heal (ADR 2026-10.d44b): while the posture is on the significant-motion sensor
+     * is left unarmed, so a carried phone takes neither the sensor's wake nor the heal's radio work, and the heartbeat's
+     * and the resume's heals stay (a heal re-asserts the advert, ADR 2026-10.9utz). The sensor is armed again when the
+     * posture lifts. Without a posture in the graph the sensor is armed as shipped.
+     */
+    private fun observeLowPower() {
+        val source = lowPower
+        if (source == null) {
+            armSignificantMotion()
+            return
+        }
+        lifecycleScope.launch {
+            source.posture.map { it.motionHeal }.distinctUntilChanged().collect { allowed ->
+                motionHealAllowed = allowed
+                if (allowed) {
+                    armSignificantMotion()
+                } else {
+                    disarmSignificantMotion()
+                    Log.d(TAG, "motion: low-power mode, sensor disarmed")
+                }
+            }
+        }
     }
 
     /** A pause whose deadline has passed while no alarm reached us (a late inexact delivery) ends on any start. */
@@ -450,7 +492,7 @@ class MeshService : LifecycleService() {
             return
         }
         powerMonitor.stop()
-        significantMotion?.let { sensorManager.cancelTriggerSensor(motionListener, it) }
+        disarmSignificantMotion()
         cancelHeartbeat()
         cancelResume()
         wearStatus?.stop()
@@ -461,6 +503,10 @@ class MeshService : LifecycleService() {
     private fun armSignificantMotion() {
         significantMotion = sensorManager.getDefaultSensor(Sensor.TYPE_SIGNIFICANT_MOTION)
         significantMotion?.let { sensorManager.requestTriggerSensor(motionListener, it) }
+    }
+
+    private fun disarmSignificantMotion() {
+        significantMotion?.let { sensorManager.cancelTriggerSensor(motionListener, it) }
     }
 
     private fun heartbeatIntent(): PendingIntent =

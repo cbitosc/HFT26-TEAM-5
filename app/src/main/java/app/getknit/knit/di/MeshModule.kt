@@ -1,6 +1,7 @@
 package app.getknit.knit.di
 
 import android.os.Build
+import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
 import androidx.room3.withWriteTransaction
@@ -17,6 +18,7 @@ import app.getknit.knit.data.relay.RelayStatusRepository
 import app.getknit.knit.data.settings.BadgeStore
 import app.getknit.knit.data.settings.DirectHostStore
 import app.getknit.knit.data.settings.LoraPlaneStateStore
+import app.getknit.knit.data.settings.LowPowerSwitch
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.data.settings.TicketKeyStore
 import app.getknit.knit.device.DeviceImage
@@ -63,8 +65,11 @@ import app.getknit.knit.mesh.lora.MeshtasticSession
 import app.getknit.knit.mesh.lora.fieldSample
 import app.getknit.knit.mesh.meshExceptionHandler
 import app.getknit.knit.mesh.power.AppVisibility
+import app.getknit.knit.mesh.power.BatterySaverState
+import app.getknit.knit.mesh.power.LowPowerSource
 import app.getknit.knit.mesh.power.PowerMonitor
 import app.getknit.knit.mesh.power.PowerStateSource
+import app.getknit.knit.mesh.power.awareSwitchedOff
 import app.getknit.knit.mesh.protocol.Protocol
 import app.getknit.knit.mesh.spool.OkHttpSpoolDialer
 import app.getknit.knit.mesh.spool.OkHttpTicketIssuer
@@ -121,7 +126,22 @@ val meshModule =
         single { AppVisibility() }
         // Lets the Meshtastic board GATT dial pause the mesh BLE scan for its connect window (shared singleton).
         single { BleConnectArbiter() }
-        single { PowerMonitor(androidContext(), get()) }
+        // Low-power mode's switch, and Battery Saver, which PowerMonitor writes and only low-power mode reads (ADR
+        // 2026-10.d44b).
+        single { LowPowerSwitch(get()) }
+        // Built with the platform's answer, so the posture's first reading on a Battery Saver phone is already on.
+        single { BatterySaverState(androidContext().getSystemService(PowerManager::class.java)?.isPowerSaveMode == true) }
+        single { PowerMonitor(androidContext(), get(), get()) }
+        // Low-power mode's one reading: the user's switch or Battery Saver, lifted on the charger (ADR 2026-10.d44b).
+        // SwitchableTransport switches Wi-Fi Aware off on it and MeshService drops the motion heal.
+        single {
+            LowPowerSource(
+                switchOn = get<LowPowerSwitch>().on,
+                batterySaver = get<BatterySaverState>().on,
+                power = get<PowerStateSource>().state,
+                scope = get<CoroutineScope>(),
+            ) { msg -> Log.i("LowPower", msg) }
+        }
         // The field log (ADR 2026-10.a239): how this phone's radios behaved, kept under noBackupFilesDir and handed
         // over only by the user from Diagnostics. MeshManager drives its session half; the radios record into it.
         single {
@@ -132,6 +152,7 @@ val meshModule =
                 enabled = get<SettingsStore>().fieldLogEnabled,
                 versionCode = BuildConfig.VERSION_CODE.toLong(),
                 staged = File(androidContext().cacheDir, FIELD_LOG_SHARE_DIR),
+                lowPower = get<LowPowerSource>().posture,
             ).also { log ->
                 // Resolved at each sample, never here: the plane's status is built from the transport, which this precedes.
                 if (BuildConfig.LORA_PLANE) log.sampler("lora") { get<LoraPlaneStatus>().status.value.fieldSample() }
@@ -206,15 +227,12 @@ val meshModule =
                                     get(),
                                     field = get<FieldLog>(),
                                 )
-                            // Debug builds can switch the plane off live (Diagnostics / the bridge's NANOFF); release
-                            // hands the composite the bare transport.
-                            add(
-                                if (BuildConfig.DEBUG) {
-                                    SwitchableTransport(nan, settings.debugNanOff, get()) { msg -> Log.d("WifiAwareTransport", msg) }
-                                } else {
-                                    nan
-                                },
-                            )
+                            // Low-power mode switches the plane off live in every build (ADR 2026-10.d44b), and a debug
+                            // build's own switch (Diagnostics / the bridge's NANOFF) does too; debugNanOff reads false in
+                            // release.
+                            val off = awareSwitchedOff(settings.debugNanOff, get<LowPowerSource>().posture)
+                            // Log.i: release keeps it, so a bugreport shows the plane stopped for low-power mode.
+                            add(SwitchableTransport(nan, off, get(), { msg -> Log.i("WifiAwareTransport", msg) }))
                         }
                         // The LoRa (Meshtastic) plane rides LAST — lowest send-preference, fast-plane only.
                         // Gated on the flag; the classes stay in the APK but are never resolved when off.

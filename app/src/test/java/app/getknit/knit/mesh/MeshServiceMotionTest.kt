@@ -1,11 +1,14 @@
 package app.getknit.knit.mesh
 
 import android.app.Application
+import android.os.Looper
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import app.getknit.knit.data.settings.SettingsStore
+import app.getknit.knit.mesh.power.LowPowerSource
 import app.getknit.knit.mesh.power.PowerMonitor
+import app.getknit.knit.mesh.power.PowerState
 import app.getknit.knit.mesh.power.PowerStateSource
 import app.getknit.knit.moderation.MlTextModerator
 import io.mockk.coEvery
@@ -26,19 +29,24 @@ import org.koin.core.context.startKoin
 import org.koin.core.context.stopKoin
 import org.koin.dsl.module
 import org.robolectric.Robolectric
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.android.controller.ServiceController
 
 /**
  * The significant-motion trigger heals at most once a minute (work item #63): the sensor is one-shot and re-armed
  * after every fire, so a walk used to run the whole heal — a scan window, a re-arm and the basket's database reads —
- * every 30-60 s. Same rig as [MeshServicePauseTest]; the shadow sensor manager has no trigger delivery, so the test
- * drives the listener's body directly.
+ * every 30-60 s. Low-power mode gives the motion heal up entirely (ADR 2026-10.d44b). Same rig as
+ * [MeshServicePauseTest]; the shadow sensor manager has no trigger delivery, so the test drives the listener's body
+ * directly.
  */
 @RunWith(AndroidJUnit4::class)
 class MeshServiceMotionTest {
     private val app: Application = ApplicationProvider.getApplicationContext()
     private val mesh = FakeMeshController()
     private var now = 1_700_000_000_000L
+
+    // Low-power mode's switch (ADR 2026-10.d44b), off unless a test turns it on.
+    private val lowPowerSwitch = MutableStateFlow(false)
     private lateinit var controller: ServiceController<MeshService>
 
     @Before
@@ -55,6 +63,9 @@ class MeshServiceMotionTest {
                     single { PowerMonitor(app, PowerStateSource()) }
                     single { settings }
                     single<CoroutineScope> { CoroutineScope(SupervisorJob() + Dispatchers.Unconfined) }
+                    single {
+                        LowPowerSource(lowPowerSwitch, MutableStateFlow(false), MutableStateFlow(PowerState()), get<CoroutineScope>())
+                    }
                     single { mockk<MlTextModerator>(relaxed = true) }
                 },
             )
@@ -89,5 +100,21 @@ class MeshServiceMotionTest {
         now += 1
         service.onSignificantMotion()
         assertEquals(3, mesh.healCount)
+    }
+
+    @Test
+    fun `low-power mode gives the motion heal up, and it comes back when the mode lifts`() {
+        val service = controller.create().get()
+        shadowOf(Looper.getMainLooper()).idle()
+
+        lowPowerSwitch.value = true
+        shadowOf(Looper.getMainLooper()).idle()
+        service.onSignificantMotion()
+        assertEquals("no heal under the posture", 0, mesh.healCount)
+
+        lowPowerSwitch.value = false
+        shadowOf(Looper.getMainLooper()).idle()
+        service.onSignificantMotion()
+        assertEquals(1, mesh.healCount)
     }
 }

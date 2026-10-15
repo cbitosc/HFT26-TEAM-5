@@ -226,6 +226,7 @@ carries; never renumber an old one.
 | [2026-10.a239](decisions/2026-10-a239-the-field-log-is-kept-on-the-phone-and-handed-over-only-by-the-user.md) | The field log is kept on the phone and handed over only by the user | privacy, diagnostics, bluetooth |
 | [2026-10.a4pm](decisions/2026-10-a4pm-a-lora-dm-waits-for-its-recipient-to-be-heard.md) | A LoRa DM waits for its recipient to be heard | lora, dm |
 | [2026-10.b8yf](decisions/2026-10-b8yf-a-bluetooth-link-s-acl-is-armed-to-idle-out-when-its-channel-closes.md) | A Bluetooth link's ACL is armed to idle out when its channel closes | ble, transport |
+| [2026-10.d44b](decisions/2026-10-d44b-low-power-mode-makes-the-phone-a-bluetooth-leaf.md) | Low-power mode makes the phone a Bluetooth leaf | battery, mesh, bluetooth, wifi-aware, power |
 | [2026-10.d62w](decisions/2026-10-d62w-identity-slurs-are-blocked-by-a-word-list-in-every-conversation.md) | Identity slurs are blocked by a word list in every conversation, not only the Nearby room | moderation, privacy |
 | [2026-10.dmgw](decisions/2026-10-dmgw-a-reset-s-re-seal-goes-out-twice.md) | A reset's re-seal goes out twice, the second past the routers' dedup window | crypto, custody |
 | [2026-10.f7gg](decisions/2026-10-f7gg-a-blob-is-asked-of-the-likeliest-holder-first.md) | A blob is asked of the likeliest holder first, then of every neighbour | mesh, attachments, blob-exchange, wifi-aware |

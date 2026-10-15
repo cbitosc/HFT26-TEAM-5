@@ -71,6 +71,8 @@ class CompositeMeshTransportTest {
         override val health = healthState.asStateFlow()
         private val heldState = MutableStateFlow(false)
         override val initiatorHeld = heldState.asStateFlow()
+        private val offState = MutableStateFlow(false)
+        override val switchedOff = offState.asStateFlow()
         var releases = 0
 
         override fun releaseInitiatorHold() {
@@ -199,6 +201,10 @@ class CompositeMeshTransportTest {
 
         fun setInitiatorHeld(held: Boolean) {
             heldState.value = held
+        }
+
+        fun setSwitchedOff(off: Boolean) {
+            offState.value = off
         }
 
         fun emitInbound(frame: InboundFrame) {
@@ -1040,6 +1046,31 @@ class CompositeMeshTransportTest {
             assertEquals(
                 TransportStatus(TransportKind.WifiAware, TransportHealth.Degraded, linked = 1, nearby = 2),
                 statuses.first { it.kind == TransportKind.WifiAware },
+            )
+        }
+
+    /** ADR 2026-10.d44b: a plane Knit switched off says so on its status line, so the banner can tell it from Wi-Fi off. */
+    @Test
+    fun statusesCarryAPlaneSwitchedOff() =
+        runTest(UnconfinedTestDispatcher()) {
+            val bt = FakeChild(kind = TransportKind.Bluetooth)
+            val nan = FakeChild(hasFastPlane = true, kind = TransportKind.WifiAware)
+            val composite = CompositeMeshTransport(listOf(bt, nan), backgroundScope)
+            nan.setHealth(TransportHealth.Unavailable)
+            nan.setSwitchedOff(true)
+            advanceUntilIdle()
+
+            val statuses = composite.statuses.value
+            assertTrue(statuses.first { it.kind == TransportKind.WifiAware }.switchedOff)
+            assertTrue(!statuses.first { it.kind == TransportKind.Bluetooth }.switchedOff)
+            assertEquals("Bluetooth still meshes", TransportHealth.Healthy, composite.health.value)
+
+            nan.setSwitchedOff(false)
+            advanceUntilIdle()
+            assertTrue(
+                !composite.statuses.value
+                    .first { it.kind == TransportKind.WifiAware }
+                    .switchedOff,
             )
         }
 

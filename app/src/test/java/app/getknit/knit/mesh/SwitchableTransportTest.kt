@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -16,7 +17,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
 
-/** The debug Wi-Fi Aware switch's wrapper: the inner transport runs exactly while the mesh runs and the switch is on. */
+/** The Wi-Fi Aware switch's wrapper (low-power mode, a debug build's switch): the inner runs while the mesh runs and the switch is on. */
 @OptIn(ExperimentalCoroutinesApi::class)
 class SwitchableTransportTest {
     /** Records every call that reaches it, in order. */
@@ -104,7 +105,80 @@ class SwitchableTransportTest {
     private val wire = WireEnvelope(sig = ByteArray(0), signed = ByteArray(0))
     private val meta = FileMeta(FileKind.ATTACHMENT, "hash", "image/webp")
 
-    private fun TestScope.switchable(off: Flow<Boolean>) = SwitchableTransport(inner, off, backgroundScope)
+    // No floors: these cases are about what the switch and the mesh want, not when.
+    private fun TestScope.switchable(off: Flow<Boolean>) =
+        SwitchableTransport(inner, off, backgroundScope, clock = { testScheduler.currentTime }, restartFloorMs = 0, upFloorMs = 0)
+
+    // The shipped floors on the scheduler's virtual clock.
+    private fun TestScope.floored(off: Flow<Boolean>) =
+        SwitchableTransport(inner, off, backgroundScope, clock = { testScheduler.currentTime })
+
+    @Test
+    fun aResumeWhileOffStillReachesTheInnerSoItsHandOverHoldLifts() =
+        runTest(UnconfinedTestDispatcher()) {
+            // The Aware transport keeps a hand-over pause across its own stop and only its resume lifts it: a call that
+            // ends while low-power mode has the plane off must still hand the radio back (the advisory review).
+            val off = MutableStateFlow(false)
+            val t = switchable(off)
+            t.start()
+            t.pause()
+            off.value = true
+            t.resume()
+            off.value = false
+            assertEquals(listOf("start", "pause", "stop", "resume", "start"), inner.calls)
+        }
+
+    @Test
+    fun aSwitchedStopWaitsOutTheUpFloorAndTheMeshsOwnStopDoesNot() =
+        runTest(UnconfinedTestDispatcher()) {
+            val off = MutableStateFlow(false)
+            val t = floored(off)
+            t.start()
+            advanceTimeBy(1_000)
+            off.value = true
+            advanceTimeBy(SwitchableTransport.UP_FLOOR_MS - 1_000 - 1)
+            assertEquals("an attach in flight is left to land", listOf("start"), inner.calls)
+            // The plane still runs and sends, so it reads as it is, not as the switch wants it.
+            assertFalse(t.switchedOff.value)
+            assertEquals(TransportHealth.Healthy, t.health.value)
+            advanceTimeBy(2)
+            assertEquals(listOf("start", "stop"), inner.calls)
+            assertTrue(t.switchedOff.value)
+            assertEquals(TransportHealth.Unavailable, t.health.value)
+
+            off.value = false
+            advanceTimeBy(SwitchableTransport.RESTART_FLOOR_MS / 2)
+            // A deferred start: the plane is down and Knit is keeping it so, whatever its last health said.
+            assertTrue(t.switchedOff.value)
+            assertEquals(TransportHealth.Unavailable, t.health.value)
+            advanceTimeBy(SwitchableTransport.RESTART_FLOOR_MS)
+            assertEquals(listOf("start", "stop", "start"), inner.calls)
+            assertFalse(t.switchedOff.value)
+            t.stop()
+            assertEquals("the mesh's own stop is never floored", listOf("start", "stop", "start", "stop"), inner.calls)
+        }
+
+    @Test
+    fun aFlappingSwitchRestartsTheInnerOnceTheRestartFloorIsOut() =
+        runTest(UnconfinedTestDispatcher()) {
+            val off = MutableStateFlow(false)
+            val t = floored(off)
+            t.start()
+            advanceTimeBy(SwitchableTransport.UP_FLOOR_MS + 1)
+            off.value = true
+            assertEquals(listOf("start", "stop"), inner.calls)
+
+            repeat(5) {
+                off.value = false
+                advanceTimeBy(300)
+                off.value = true
+                advanceTimeBy(300)
+            }
+            off.value = false
+            assertEquals("no start inside the floor", listOf("start", "stop"), inner.calls)
+            advanceTimeBy(SwitchableTransport.RESTART_FLOOR_MS)
+            assertEquals("one start, once the floor is out", listOf("start", "stop", "start"), inner.calls)
+        }
 
     @Test
     fun startWhileOffNeverStartsTheInnerTransport() =
@@ -131,6 +205,25 @@ class SwitchableTransportTest {
 
             off.value = false
             assertEquals(listOf("start", "stop", "start"), inner.calls)
+        }
+
+    @Test
+    fun switchedOffFollowsTheSwitchSoTheBannerKnowsTheRadioIsOn() =
+        runTest(UnconfinedTestDispatcher()) {
+            // Low-power mode (ADR 2026-10.d44b): an off plane reads Unavailable like a radio the user turned off, and
+            // switchedOff is what keeps the chat list from asking them to turn Wi-Fi on.
+            val off = MutableStateFlow(false)
+            val t = switchable(off)
+            t.start()
+            assertFalse(t.switchedOff.value)
+
+            off.value = true
+            assertTrue(t.switchedOff.value)
+            assertEquals(TransportHealth.Unavailable, t.health.value)
+
+            off.value = false
+            assertFalse(t.switchedOff.value)
+            assertEquals(TransportHealth.Healthy, t.health.value)
         }
 
     @Test

@@ -45,6 +45,33 @@ class RadioWarningTest {
     }
 
     @Test
+    fun awareSwitchedOffByLowPowerMode_isNotAWifiOff() {
+        // ADR 2026-10.d44b: Knit has the plane off, the phone's Wi-Fi is on, so "turn on Wi-Fi" could not help.
+        assertNull(
+            radioWarningFor(
+                listOf(
+                    status(TransportKind.Bluetooth, TransportHealth.Healthy),
+                    status(TransportKind.WifiAware, TransportHealth.Unavailable).copy(switchedOff = true),
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun bluetoothOffWithAwareSwitchedOff_isAllRadiosOff() {
+        // The switched-off plane counts as absent, so Bluetooth is the only radio and it is off: nothing reaches anyone.
+        assertEquals(
+            RadioWarning.AllRadiosOff,
+            radioWarningFor(
+                listOf(
+                    status(TransportKind.Bluetooth, TransportHealth.Unavailable),
+                    status(TransportKind.WifiAware, TransportHealth.Unavailable).copy(switchedOff = true),
+                ),
+            ),
+        )
+    }
+
+    @Test
     fun bluetoothOffWifiUp_bluetoothWarning() {
         assertEquals(
             RadioWarning.BluetoothOff,

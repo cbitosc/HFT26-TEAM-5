@@ -65,6 +65,7 @@ import app.getknit.knit.data.settings.BluetoothDownloadLimit
 import app.getknit.knit.di.CALLS_WIRED
 import app.getknit.knit.mesh.lora.BoardBattery
 import app.getknit.knit.mesh.lora.LoraPlane
+import app.getknit.knit.mesh.power.LowPowerReason
 import app.getknit.knit.ui.BackgroundBattery
 import app.getknit.knit.ui.DeviceSupervision
 import app.getknit.knit.ui.UnusedAppPause
@@ -99,6 +100,8 @@ internal data class SettingsFormState(
     val lora: LoraSummary = LoraSummary(),
     /** The "also active on another phone" row (ADR 2026-09.ypcc), shown while the chat list's banner is. */
     val cloneVisible: Boolean = false,
+    /** Low-power mode's switch and what holds it on (ADR 2026-10.d44b). */
+    val lowPower: LowPowerSummary = LowPowerSummary(),
 )
 
 /**
@@ -129,6 +132,7 @@ fun SettingsScreen(
     val relay by viewModel.relaySummary.collectAsStateWithLifecycle()
     val lora by viewModel.loraSummary.collectAsStateWithLifecycle()
     val cloneVisible by viewModel.cloneVisible.collectAsStateWithLifecycle()
+    val lowPower by viewModel.lowPower.collectAsStateWithLifecycle()
     // The clone row's "Sign out here": one confirmation, then the wipe (ui/signout/SignOut).
     var showSignOut by remember { mutableStateOf(false) }
 
@@ -155,6 +159,7 @@ fun SettingsScreen(
                 relay = relay,
                 lora = lora,
                 cloneVisible = cloneVisible,
+                lowPower = lowPower,
             ),
         battery = rememberOnResume { backgroundBattery(context) },
         unusedPause = rememberOnResume { unusedAppPause(context) },
@@ -166,6 +171,7 @@ fun SettingsScreen(
         onSelectBluetoothDownloadLimit = viewModel::setBluetoothDownloadLimit,
         onToggleLinkPreviews = viewModel::setLinkPreviewsEnabled,
         onToggleDynamicColor = viewModel::setDynamicColor,
+        onToggleLowPower = viewModel::setLowPowerMode,
         onOpenRelays = onOpenRelays,
         onOpenLora = onOpenLora,
         onOpenCalls = onOpenCalls,
@@ -193,6 +199,7 @@ internal fun SettingsScreenContent(
     onSelectBluetoothDownloadLimit: (BluetoothDownloadLimit) -> Unit = {},
     onToggleLinkPreviews: (Boolean) -> Unit = {},
     onToggleDynamicColor: (Boolean) -> Unit = {},
+    onToggleLowPower: (Boolean) -> Unit = {},
     onOpenRelays: () -> Unit,
     onOpenLora: () -> Unit = {},
     onOpenCalls: () -> Unit = {},
@@ -376,6 +383,15 @@ internal fun SettingsScreenContent(
                 subtitle = stringResource(R.string.settings_backup_subtitle),
                 onClick = onOpenBackup,
                 modifier = Modifier.testTag("settings_backup"),
+            )
+
+            // Low-power mode sits with the battery rows: what Knit does with less, above what Android lets it do.
+            ToggleRow(
+                title = stringResource(R.string.settings_low_power_title),
+                subtitle = lowPowerSubtitle(form.lowPower),
+                enabled = form.lowPower.switchOn,
+                onToggle = onToggleLowPower,
+                modifier = Modifier.testTag("settings_low_power"),
             )
 
             BatteryOptimizationRow(battery = battery, onAllow = onAllowBattery, onOpenSettings = onOpenBatterySettings)
@@ -731,6 +747,27 @@ private fun NavigatingRow(
         )
     }
 }
+
+/**
+ * What low-power mode is doing now (ADR 2026-10.d44b). The switch shows the user's own choice, so the subtitle says
+ * when the posture differs from it: Battery Saver holding it on with the switch off, or the charger holding it off
+ * with the switch on.
+ */
+@Composable
+private fun lowPowerSubtitle(summary: LowPowerSummary): String =
+    when {
+        summary.switchOn && summary.reason == null -> {
+            stringResource(R.string.settings_low_power_subtitle_charging)
+        }
+
+        !summary.switchOn && summary.reason == LowPowerReason.BATTERY_SAVER -> {
+            stringResource(R.string.settings_low_power_subtitle_saver)
+        }
+
+        else -> {
+            stringResource(R.string.settings_low_power_subtitle)
+        }
+    }
 
 /** "On · <board> · connected", with the board's battery appended once it has reported one. */
 @Composable

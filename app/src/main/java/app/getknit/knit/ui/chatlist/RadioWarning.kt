@@ -18,15 +18,18 @@ enum class RadioWarning { BluetoothOff, WifiOff, AllRadiosOff }
  * no entry and is never warned about; `health == Unavailable` is a present-but-off radio. `Degraded` (radio on
  * but momentarily seized) is deliberately not a banner state — it's transient and already shown in the header.
  * A single-radio device whose one radio is off maps to [RadioWarning.AllRadiosOff] (it truly can't connect).
+ * A plane Knit switched off itself ([TransportStatus.switchedOff]: low-power mode, ADR 2026-10.d44b) is counted as
+ * absent: its radio is on, so a banner asking the user to turn it on would be wrong and could not help.
  */
 fun radioWarningFor(statuses: List<TransportStatus>): RadioWarning? {
-    if (statuses.isEmpty()) return null // no radio hardware at all — nothing the user can fix here
-    val off = statuses.filter { it.health == TransportHealth.Unavailable }.map { it.kind }
+    val present = statuses.filterNot { it.switchedOff }
+    if (present.isEmpty()) return null // no radio hardware at all — nothing the user can fix here
+    val off = present.filter { it.health == TransportHealth.Unavailable }.map { it.kind }
     return when {
         off.isEmpty() -> null
 
         // every present radio is up (or only Degraded)
-        off.size == statuses.size -> RadioWarning.AllRadiosOff
+        off.size == present.size -> RadioWarning.AllRadiosOff
 
         TransportKind.Bluetooth in off -> RadioWarning.BluetoothOff
 

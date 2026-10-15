@@ -7,6 +7,7 @@ import app.getknit.knit.mesh.TransportKind
 import app.getknit.knit.mesh.bluetooth.CodedPhyMode
 import app.getknit.knit.mesh.bluetooth.LinkPhy
 import app.getknit.knit.mesh.lora.LoraGatewayPolicy
+import app.getknit.knit.mesh.power.LowPowerReason
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -103,6 +104,11 @@ class FieldEventSchemaTest {
             line(FieldEvent.NanDown(peer, initiator = false, lifetimeMs = 4_200, clean = true)),
         )
         assertEquals("""{"t":42,"e":"nan_cycle"}""", line(FieldEvent.NanCycle))
+        assertEquals(
+            """{"t":42,"e":"low_power","on":true,"why":"BATTERY_SAVER"}""",
+            line(FieldEvent.LowPower(LowPowerReason.BATTERY_SAVER)),
+        )
+        assertEquals("""{"t":42,"e":"low_power","on":false}""", line(FieldEvent.LowPower(null)))
         assertEquals(
             """{"t":42,"e":"lora","role":"ACTIVE","snr10":-75,"rssi":-118,"queued":2,"heard":9,"boards":3,""" +
                 """"airUsed":4100,"airBudget":36000}""",

@@ -18,6 +18,9 @@ object SettingsKeys {
     /** See [SettingsStore.onboardingSeen]; a restore sets it so the name page never overwrites the restored name. */
     const val ONBOARDING_SEEN = "onboarding_seen"
 
+    // Low-power mode's switch (ADR 2026-10.d44b, `LowPowerSwitch`), backup-transient under "low_power_".
+    const val LOW_POWER_MODE = "low_power_mode"
+
     // A held entitlement ticket and its verdict, per spool host name (ADR 2026-10.xkp4). Both start with
     // "spool_ticket", the backup-transient prefix in [TRANSIENT_PREFIXES]; neither prefix is a prefix of the other.
     // Here rather than in the store because `TicketKeyStore` forgets a host's ticket in the same edit as its key.
@@ -75,6 +78,7 @@ object SettingsKeys {
      * Wi-Fi Direct host guard (`direct_host_`) and the call microphone's verdict (`call_capture_`): another phone's ROM
      * is not this one's. The supporter badges this phone holds (`badge_held…`) carry the `r` it drew for them, which
      * stays on the phone that drew it.
+     * Low-power mode (`low_power_mode`, ADR 2026-10.d44b) is about this phone's battery, not the person.
      */
     val TRANSIENT_PREFIXES: List<String> =
         listOf(
@@ -95,5 +99,6 @@ object SettingsKeys {
             DIRECT_HOST_PREFIX,
             CALL_CAPTURE_PREFIX,
             BADGE_HELD,
+            "low_power_",
         )
 }

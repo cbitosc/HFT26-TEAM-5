@@ -49,6 +49,7 @@ KINDS: dict[str, set[str] | None] = {
     "nan_up": {"peer", "initiator", "links"},
     "nan_down": {"peer", "initiator", "life", "clean"},
     "nan_cycle": set(),
+    "low_power": {"on", "why"},
     "lora": {"role", "snr10", "rssi", "queued", "heard", "boards", "airUsed", "airBudget"},
     "latency": {"dir", "plane", "n", "p50", "p90", "max"},
 }

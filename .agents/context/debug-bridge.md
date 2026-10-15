@@ -45,7 +45,9 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   when sealed, recording its plaintext name as a real save does). Pair it with `SENDIMG --es path <out>` for the
   save-and-forward loop with no UI. Replies `hash` (the row's), `plainHash`, `bytes`, `mime`; an unheld blob or a
   key that will not open it is an `error`.
-- `…debug.STATE` — self id/name, transport health, reachable peers, and mesh metrics. Add `--es conv <id>`
+- `…debug.STATE` — self id/name, transport health, reachable peers, and mesh metrics. Each `transports[]` row carries
+  `switchedOff` (Knit has the plane off: low-power mode or `NANOFF`), and `lowPower` is low-power mode's switch and
+  posture (as `LOWPOWER` reports it). Add `--es conv <id>`
   to also dump that thread's latest messages (`--ei limit N`, default 20) — this is how you **verify receipt
   on the other device without a screenshot**: the body turning up in the receiver's `messages[]`. Each row
   with an attachment carries `attachmentHash` (the hash the frame names), `attachmentKeyed` (sealed or not),
@@ -434,15 +436,31 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   Bluetooth row's `linked` / `nearby`. It persists across restarts (a `debug_` key, never in a backup) until
   cleared. The transport sheds the weakest links once they are 20 s old and refuses a dialer that would add one
   (`bt refused client <id> (… atCap=true)`); the side channel still reaches unlinked peers, and NAN is untouched.
-- `…debug.NANOFF` — the **Wi-Fi Aware switch** (debug builds only; `SettingsStore.debugNanOff`, also a switch under
+- `…debug.NANOFF` — the **Wi-Fi Aware switch** (debug builds' own; `SettingsStore.debugNanOff`, also a switch under
   Diagnostics' Transports), for running the mesh on Bluetooth alone without touching the phone's Wi-Fi. `--ez off true`
   stops the plane (its links, responder and session go, `neighbors`/`reachable` empty, the composite's file route
   skips it), `--ez off false` starts it again, no extras reads. The reply carries `off`, `present` (false where the
   device has no Wi-Fi Aware plane — the switch is still stored) and the Wi-Fi Aware row's `health` (`Unavailable`
-  while off) / `linked` / `nearby`. Applied live by the debug build's `mesh/SwitchableTransport`, which logs
+  while off) / `linked` / `nearby`. Applied live by `mesh/SwitchableTransport` (which low-power mode drives in every
+  build too), which logs
   `debug switch: WifiAware off → stopped` / `on → started` under `WifiAwareTransport` (and `is off — not starting`
-  on a mesh start while off). It persists across restarts (a `debug_` key, never in a backup) until switched back
+  on a mesh start while off). A switch edge is floored (ADR 2026-10.d44b): a start waits 5 s after the plane last
+  stopped and a stop 10 s after it last started (`SwitchableTransport.RESTART_FLOOR_MS` / `UP_FLOOR_MS`), logged as
+  `debug switch: WifiAware off in <n>ms (floor)`; the row's `health` and `switchedOff` follow what the plane is
+  doing, not what was asked, so a trial waits for `off → stopped` before it measures. It persists across restarts (a `debug_` key, never in a backup) until switched back
   on. While it is off, a NAN action that needs the live transport (`NANICM`, say) finds nothing bound.
+- `…debug.LOWPOWER` — **low-power mode** (ADR 2026-10.d44b): the user's switch (`LowPowerSwitch`, the Settings row).
+  `--ez on true|false` sets it, no extras reads. The reply carries `lowPower` (`switch`, `batterySaver`, `charging`,
+  the posture's `active` and `reason` SWITCH/BATTERY_SAVER, null while off) and the Wi-Fi Aware row's `awareHealth` /
+  `awareSwitchedOff`, which follow the plane, not the switch (the floors under `NANOFF` apply). The posture also comes
+  on with Battery Saver (`adb shell cmd power set-mode 1`, `0` to undo). A lift the switch did not make waits: a
+  minute on the charger (`LowPowerPolicy.CHARGE_HOLD_MS`, Battery Saver's own plug-in off included), 5 s off it
+  (`LIFT_SETTLE_MS`); the switch going off lifts at once. While it is on, Wi-Fi Aware stops
+  through the same `SwitchableTransport` as `NANOFF` (the same `debug switch: WifiAware off → stopped` line) and
+  `MeshService` leaves the significant-motion sensor unarmed (`motion: low-power mode, sensor disarmed`); `LowPower`
+  logs each posture (`low-power posture: SWITCH`). The negative control is `--ez on false` with Battery Saver off and
+  the Aware row back to `switchedOff: false`. The key is phone-bound (never in a backup); `battery-trial.py`'s
+  `lowpower` arm sets it and the run's restore clears it.
 - `…debug.PHY` — the **BLE Coded PHY experiment** (ADR 2026-10.yvn6; builds with `BuildConfig.BLE_CODED_PHY`, else
   an error; also a segmented row under Diagnostics' Transports). `--es mode off|auto|coded|1m` stores the mode
   (applied live, persists — a `debug_` key), `--es txpower high|medium` re-raises the Coded advert, `--ei stepDown

@@ -77,7 +77,9 @@ enum class TransportKind { Bluetooth, WifiAware, LoRa, Other }
  * for Bluetooth); [nearby] is the smoothed coordination-plane [MeshTransport.reachable] count. [contended] is
  * this radio's [MeshTransport.radioContended] hint (Bluetooth ↔ A2DP audio), shown as a diagnostic flag;
  * [initiatorHeld] is its [MeshTransport.initiatorHeld] (Wi-Fi Aware has stopped starting data paths from this
- * phone), shown as a flag and a Diagnostics section with the way back.
+ * phone), shown as a flag and a Diagnostics section with the way back. [switchedOff] is its
+ * [MeshTransport.switchedOff]: Knit itself has the plane off (low-power mode, or a debug build's switch), so its
+ * [TransportHealth.Unavailable] is not a radio the user turned off and asks nothing of them (ADR 2026-10.d44b).
  */
 data class TransportStatus(
     val kind: TransportKind,
@@ -86,6 +88,7 @@ data class TransportStatus(
     val nearby: Int,
     val contended: Boolean = false,
     val initiatorHeld: Boolean = false,
+    val switchedOff: Boolean = false,
 )
 
 /** Shared "never contended" default for [MeshTransport.radioContended], so a transport without the signal
@@ -94,6 +97,9 @@ internal val NOT_CONTENDED: StateFlow<Boolean> = MutableStateFlow(false)
 
 /** Shared "never held" default for [MeshTransport.initiatorHeld] (only the Wi-Fi Aware plane overrides it). */
 internal val NEVER_HELD: StateFlow<Boolean> = MutableStateFlow(false)
+
+/** Shared "never switched off" default for [MeshTransport.switchedOff] (only `SwitchableTransport` overrides it). */
+internal val NEVER_SWITCHED_OFF: StateFlow<Boolean> = MutableStateFlow(false)
 
 /**
  * A frame received from a neighbor: the verbatim [wire] (its [WireEnvelope.signed]/[WireEnvelope.sig]
@@ -316,6 +322,14 @@ interface MeshTransport {
      * [releaseInitiatorHold] as the way back. Defaults to never held ([NEVER_HELD]); only Wi-Fi Aware overrides it.
      */
     val initiatorHeld: StateFlow<Boolean> get() = NEVER_HELD
+
+    /**
+     * Whether Knit itself has this plane switched off — low-power mode or a debug build's switch, applied by
+     * `SwitchableTransport` (ADR 2026-10.d44b). The plane then reads [TransportHealth.Unavailable] like a radio the
+     * user turned off, and this is what tells the two apart, so no surface asks the user to turn on a radio that is
+     * on. Defaults to never ([NEVER_SWITCHED_OFF]).
+     */
+    val switchedOff: StateFlow<Boolean> get() = NEVER_SWITCHED_OFF
 
     /** Frames received from neighbors (after transport-level decode, before mesh dedup/relay). */
     val inbound: Flow<InboundFrame>

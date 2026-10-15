@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import app.getknit.knit.call.OwnIceServers
 import app.getknit.knit.data.relay.RelayFacts
 import app.getknit.knit.data.settings.BluetoothDownloadLimit
+import app.getknit.knit.data.settings.LowPowerSwitch
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.identity.Alias
 import app.getknit.knit.identity.Identity
@@ -12,6 +13,8 @@ import app.getknit.knit.identity.displayNameFor
 import app.getknit.knit.mesh.lora.BoardBattery
 import app.getknit.knit.mesh.lora.LoraFacts
 import app.getknit.knit.mesh.lora.LoraPlane
+import app.getknit.knit.mesh.power.LowPowerPosture
+import app.getknit.knit.mesh.power.LowPowerReason
 import app.getknit.knit.ui.theme.ThemeMode
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -37,6 +40,16 @@ data class CallsSummary(
     val relayAll: Boolean = false,
     val ownStun: Boolean = false,
     val ownTurn: Boolean = false,
+)
+
+/**
+ * Low-power mode as its Settings row shows it (ADR 2026-10.d44b): the user's own [switchOn], and the [reason] the
+ * posture is on, null while it is off. The two differ when Battery Saver holds the mode on with the switch off, and
+ * when the charger has lifted it with the switch on.
+ */
+data class LowPowerSummary(
+    val switchOn: Boolean = false,
+    val reason: LowPowerReason? = null,
 )
 
 /** The Internet-relay plane, as the Settings row summarises it before handing off to its own screen. */
@@ -73,6 +86,9 @@ class SettingsViewModel(
     loraFacts: Flow<LoraFacts>,
     // The person's own call servers (§3.14), for the Calls row's summary.
     ownIce: Flow<OwnIceServers>,
+    private val lowPowerSwitch: LowPowerSwitch,
+    // `LowPowerSource.posture`: the switch with Battery Saver and the charger applied.
+    lowPowerPosture: Flow<LowPowerPosture>,
 ) : ViewModel() {
     private val nodeId = MutableStateFlow("")
     private val alias = MutableStateFlow("")
@@ -158,6 +174,11 @@ class SettingsViewModel(
             LoraSummary(enabled, name, lora.plane, lora.battery)
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), LoraSummary())
 
+    /** Low-power mode's switch and what holds the posture on, for the row's subtitle. */
+    val lowPower: StateFlow<LowPowerSummary> =
+        combine(lowPowerSwitch.on, lowPowerPosture) { on, posture -> LowPowerSummary(on, posture.reason) }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), LowPowerSummary())
+
     init {
         viewModelScope.launch {
             val id = identity.nodeId()
@@ -176,6 +197,10 @@ class SettingsViewModel(
 
     fun setBluetoothDownloadLimit(value: BluetoothDownloadLimit) {
         viewModelScope.launch { settings.setBluetoothDownloadLimit(value) }
+    }
+
+    fun setLowPowerMode(value: Boolean) {
+        viewModelScope.launch { lowPowerSwitch.set(value) }
     }
 
     fun setDynamicColor(value: Boolean) {

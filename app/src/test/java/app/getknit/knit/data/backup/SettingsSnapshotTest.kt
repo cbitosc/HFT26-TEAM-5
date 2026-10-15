@@ -43,6 +43,8 @@ class SettingsSnapshotTest {
                     longPreferencesKey("mesh_pause_until") to 9L,
                     intPreferencesKey("debug_ble_link_cap") to 2,
                     booleanPreferencesKey("debug_nan_off") to true,
+                    // ADR 2026-10.d44b: low-power mode is about this phone's battery.
+                    booleanPreferencesKey("low_power_mode") to true,
                     stringPreferencesKey("spool_ticket:relay.example") to "knit-ticket:v1:…",
                     stringPreferencesKey("spool_ticket_verdict:relay.example") to "retry:early",
                     // ADR 2026-10.3sk7: the customer key rides, as the relay's token does; this phone's ask schedule does not.
@@ -77,6 +79,7 @@ class SettingsSnapshotTest {
                 "spool_ticket:relay.example",
                 "spool_ticket_verdict:relay.example",
                 "spool_key_state:relay.example",
+                "low_power_mode",
             )) {
                 assertFalse(dropped, restored.asMap().keys.any { it.name == dropped })
             }
