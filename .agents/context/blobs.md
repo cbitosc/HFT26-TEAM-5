@@ -87,7 +87,8 @@ Adjacent routing that stays where its owner is, because another subsystem owns i
   `FramedLink.close()` keeps:** READ ADR 2026-10.wtyc — a link cut mid-stream keeps an attachment's prefix
   (session-scoped, keep-the-longer, never written in place), the ask names its length, the holder streams the tail
   (`size` is the tail's; the whole is `offset + size`), and a spliced file that fails its hash drops the prefix and
-  re-asks from 0. Receive-side changes go through `FileIntake` under the link's lock.
+  re-asks from 0. Receive-side changes go through `FileIntake` under the link's lock. A link takes one resumed header
+  per key per `FileIntake.RESUME_WINDOW_MS` (the ask round), refused before its prefix opens (the amendment, #161).
 - **When touching `data/AttachmentIdentities`, `messages.attachmentPlainHash` / `attachmentSourceHash`,
   `AttachmentStore.ingestPicked` or its reuse check, `AttachmentStore.Ingested.reuse`, `MeshManager.sealAttachment`,
   `InboundPipeline.copyFromOwnStore`, or `MessageDao.sealedHolding`:** READ ADR 2026-10.mptm. A phone seals a

@@ -1,6 +1,7 @@
 package app.getknit.knit.mesh.link
 
 import app.getknit.knit.mesh.ArrivingFile
+import app.getknit.knit.mesh.BlobExchange
 import app.getknit.knit.mesh.FileKind
 import app.getknit.knit.mesh.FileMeta
 import app.getknit.knit.mesh.PartialBlobs
@@ -26,7 +27,8 @@ import java.util.concurrent.atomic.AtomicReference
  *   announce. The hash check over the bytes is the store's (`MeshBlobStore.saveIncoming`).
  * - **A cut** — the link closed mid-file — hands an attachment's bytes to [PartialBlobs] instead of deleting
  *   them, and a header whose `offset` names how many the asker kept splices the rest onto a copy of them (work item
- *   #116, ADR 2026-10.wtyc). An avatar is pushed, never asked for, so it is never kept or resumed.
+ *   #116, ADR 2026-10.wtyc). An avatar is pushed, never asked for, so it is never kept or resumed. A key resumes at
+ *   most once per [RESUME_WINDOW_MS] on one link: each resume copies up to 8 MiB of flash for a ~100 B header (#161).
  *
  * [arrivingFile] is the published "a header is in and no end yet" snapshot `MeshTransport.arrivingFiles` reads
  * (ADR 2026-09.4tx5, 2026-10.y9qh): one reference, so a reader never pairs one file's key with another's count.
@@ -115,6 +117,11 @@ internal class FileIntake(
 
     private var state: State = State.Idle
 
+    // Attachment key -> when its kept prefix last opened for a resume on this link ([RESUME_WINDOW_MS], #161). Bounded:
+    // an entry is added only when [PartialBlobs.open] found a prefix (at most [PartialBlobs.MAX_COUNT] at once), and
+    // pruned once it ages out of the window.
+    private val resumedAt = HashMap<String, Long>()
+
     private val arriving = AtomicReference<ArrivingFile?>(null)
 
     /** The file streaming in right now, with the bytes in so far and the total its header declared. */
@@ -134,14 +141,16 @@ internal class FileIntake(
             begin(meta, header.size)
             return null
         }
-        val prefix =
-            offset
-                .takeIf { meta.kind == FileKind.ATTACHMENT && isValidBlobHash(meta.key) && it in 1..MAX_INCOMING_FILE_BYTES }
-                ?.let { partials.open(meta.key, it) }
+        val valid = meta.kind == FileKind.ATTACHMENT && isValidBlobHash(meta.key) && offset in 1..MAX_INCOMING_FILE_BYTES
+        // Gated before the prefix opens, so a refused resume costs no read of it (#161).
+        val recent = if (valid) resumedRecently(meta.key) else null
+        val prefix = if (valid && recent == null) partials.open(meta.key, offset) else null
         if (prefix == null) {
-            log("rx ${label(meta)} refused ← $peer from $offset: ${partials.length(meta.key)}B kept")
+            log("rx ${label(meta)} refused ← $peer from $offset: ${recent ?: "${partials.length(meta.key)}B kept"}")
             return skip()
         }
+        // Stamped as it opens: the copy is the cost, whether or not it installs.
+        resumedAt[meta.key] = now()
         // A temp file that will not open fails the link as it always has; the prefix it would have copied is closed.
         val temp = runCatching { File.createTempFile(RX_PREFIX, RX_SUFFIX, cacheDir) }.onFailure { prefix.close() }.getOrThrow()
         val resume = Resume(temp, meta, header.size, prefix)
@@ -292,6 +301,17 @@ internal class FileIntake(
         log("rx ${label(meta)} ${size ?: "?"}B ← $peer")
     }
 
+    /**
+     * Why a resume of [key] is refused now — `resumed <n>ms ago` when one opened its prefix on this link inside
+     * [RESUME_WINDOW_MS] — or null when it may open. Only a resume is gated: a whole file copies nothing, and a failed
+     * splice is asked for again from byte 0.
+     */
+    private fun resumedRecently(key: String): String? {
+        val t = now()
+        resumedAt.values.removeAll { t - it >= RESUME_WINDOW_MS }
+        return resumedAt[key]?.let { "resumed ${t - it}ms ago" }
+    }
+
     /** A header mid-file drops the file it interrupts: a sender that moves on without an end abandoned it. */
     private fun discard() {
         val current = state
@@ -326,6 +346,12 @@ internal class FileIntake(
         // Receive-side ceiling on a file, matching the send cap (AttachmentStore.MAX_BYTES = 8 MiB) plus
         // headroom for E2E framing (GCM IV+tag) — refuses an unbounded malicious stream that exhausts disk.
         const val MAX_INCOMING_FILE_BYTES = 8L * 1024 * 1024 + 64 * 1024
+
+        // The shortest gap between two resumes of one key on one link (#161, ADR 2026-10.wtyc's amendment). An honest
+        // holder sends one at most once a round: the asker opens a round of asks per blob at most every ROUND_MS, the
+        // holder serves one asker one hash at most once per SERVE_MEMO_MS (the same 45 s), a cut closes the link (the
+        // next one has an intake of its own), and a failed splice is asked for again from byte 0, a whole file.
+        const val RESUME_WINDOW_MS = BlobExchange.ROUND_MS
 
         private const val RX_PREFIX = "link-rx-"
         private const val RX_SUFFIX = ".tmp"

@@ -29,7 +29,10 @@ class FileIntakeTest {
 
     private val partials by lazy { PartialBlobs(File(tmp.root, "parts"), minBytes = 1) }
 
-    private fun intake(store: PartialBlobs = partials) = FileIntake(tmp.root, store, "peer0001", now = { 0L }, log = { log += it })
+    // The intake's clock: the resume gate's window runs on it (#161).
+    private var t = 0L
+
+    private fun intake(store: PartialBlobs = partials) = FileIntake(tmp.root, store, "peer0001", now = { t }, log = { log += it })
 
     private fun header(
         kind: FileKind = FileKind.ATTACHMENT,
@@ -38,8 +41,11 @@ class FileIntakeTest {
         key: String = this.key,
     ) = LinkFraming.encodeFileHeader(FileHeaderWire(kind.wire, key, "image/jpeg", size, offset))
 
-    /** Keeps the first [n] bytes of [body] as a cut transfer's prefix, as a closed link would. */
-    private fun keepPrefix(n: Int) {
+    /** Keeps the first [n] bytes of [body] as a cut transfer's prefix of [key], as a closed link would. */
+    private fun keepPrefix(
+        n: Int,
+        key: String = this.key,
+    ) {
         val cut = tmp.newFile().apply { writeBytes(body.copyOf(n)) }
         assertTrue(partials.keep(key, cut, basedOn = null))
     }
@@ -48,8 +54,9 @@ class FileIntakeTest {
     private fun FileIntake.resume(
         offset: Long,
         size: Long?,
+        key: String = this@FileIntakeTest.key,
     ): Boolean {
-        val resume = header(header(size = size, offset = offset)) ?: return false
+        val resume = header(header(size = size, offset = offset, key = key)) ?: return false
         resume.copy()
         return install(resume)
     }
@@ -268,5 +275,90 @@ class FileIntakeTest {
         intake.chunk(body.copyOfRange(600, 1000))
         assertNull("its chunks and its end come to nothing", intake.end())
         assertTrue(rxFiles().isEmpty())
+    }
+
+    /** Resumes [key] from 600 on [intake] and lets the stream end whole, as an honest holder's tail would. */
+    private fun resumeWhole(
+        intake: FileIntake,
+        key: String = this.key,
+    ): File {
+        assertTrue(intake.resume(offset = 600, size = 400, key = key))
+        intake.chunk(body.copyOfRange(600, 1000))
+        return File(checkNotNull(intake.finalize(checkNotNull(intake.end()))).path)
+    }
+
+    @Test
+    fun aSecondResumeOfOneKeyInsideTheWindowIsRefusedBeforeItsPrefixIsCopied() {
+        // #161: a resume copies up to 8 MiB of kept prefix for a ~100 B header; a holder that is honest sends one per
+        // key per ask round, so a second one on the same link inside the round is refused without opening the prefix.
+        keepPrefix(600)
+        val intake = intake()
+        resumeWhole(intake)
+        t += FileIntake.RESUME_WINDOW_MS - 1
+        assertNull("refused here", intake.header(header(size = 400, offset = 600)))
+        assertTrue(log.any { it.startsWith("rx ATTACHMENT/$key refused ← peer0001 from 600: resumed ") && it.endsWith("ms ago") })
+        assertNull(intake.arrivingFile)
+        intake.chunk(body.copyOfRange(600, 1000))
+        assertNull("its chunks and its end come to nothing", intake.end())
+        assertTrue("no copy was started", rxFiles().isEmpty())
+        assertEquals("and the prefix is untouched", 600L, partials.length(key))
+    }
+
+    @Test
+    fun aResumeOfOneKeyPastTheWindowIsTakenAgain() {
+        keepPrefix(600)
+        val intake = intake()
+        resumeWhole(intake)
+        t += FileIntake.RESUME_WINDOW_MS
+        assertArrayEquals("spliced byte for byte", body, resumeWhole(intake).readBytes())
+        assertTrue(rxFiles().isEmpty())
+    }
+
+    @Test
+    fun theWindowIsPerKey() {
+        val other = "b".repeat(64)
+        keepPrefix(600)
+        keepPrefix(600, key = other)
+        val intake = intake()
+        resumeWhole(intake)
+        t += 1
+        assertArrayEquals("another blob's resume is its own", body, resumeWhole(intake, key = other).readBytes())
+    }
+
+    @Test
+    fun aWholeFileOfAGatedKeyIsStillTaken() {
+        keepPrefix(600)
+        val intake = intake()
+        resumeWhole(intake)
+        t += 1
+        assertNull("taken here: a whole file copies nothing", intake.header(header(size = 1000)))
+        assertEquals(ArrivingFile(key, 0, 1000), intake.arrivingFile)
+        intake.chunk(body)
+        val received = checkNotNull(intake.finalize(checkNotNull(intake.end())))
+        assertEquals(0L, received.resumedFrom)
+        assertArrayEquals(body, File(received.path).readBytes())
+    }
+
+    @Test
+    fun aResumeThatNeverInstalledStillClosesTheWindow() {
+        // Stamped as the prefix opens: a peer cannot make our copy fail, so the copy, not the splice, is what is gated.
+        keepPrefix(600)
+        val intake = intake()
+        val resume = checkNotNull(intake.header(header(size = 400, offset = 600)))
+        assertFalse("never copied, so never installed", intake.install(resume))
+        t += 1
+        assertNull(intake.header(header(size = 400, offset = 600)))
+        assertTrue(log.last().startsWith("rx ATTACHMENT/$key refused ← peer0001 from 600: resumed "))
+        assertTrue(rxFiles().isEmpty())
+    }
+
+    @Test
+    fun aResumeRefusedForNoKeptPrefixLeavesTheWindowOpen() {
+        // Nothing was copied, so nothing is stamped: once a prefix is kept, the next resume of the key is taken.
+        val intake = intake()
+        assertNull(intake.header(header(size = 400, offset = 600)))
+        assertTrue(log.last().endsWith("from 600: 0B kept"))
+        keepPrefix(600)
+        assertArrayEquals(body, resumeWhole(intake).readBytes())
     }
 }

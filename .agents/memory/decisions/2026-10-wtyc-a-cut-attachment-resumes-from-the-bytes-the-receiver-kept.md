@@ -125,3 +125,39 @@ Two traps for a re-run:
   picks the strongest peer. Keep it off after the cut until its 45 s serve memo lapses.
 - A cut before the first whole 16 KiB `FILE_CHUNK` record keeps nothing. A holder feeding three links at once had
   delivered less than one record after 8.6 s.
+
+## Amendment 2026-10-15 — one resumed header per key per link per round (#161)
+
+**What was found.** `FileIntake.header` turned every resumed `FILE_HEADER` naming a key it held a prefix of into a
+`Resume`, whose copy rewrites up to 8 MiB of the kept prefix into a temp file. Nothing limited how often a linked peer
+sent one, and each new header discards the copy before it and starts another: about 100 bytes on air bought 8 MiB of
+flash I/O, as often as the peer liked. Work item knit/knit-next#161.
+
+**What changed.** The receiving link takes at most one resumed header per key per `FileIntake.RESUME_WINDOW_MS`
+(`BlobExchange.ROUND_MS`, 45 s). Inside the window a second one is refused before its prefix opens (`rx
+ATTACHMENT/<hash> refused ← <peer> from <offset>: resumed <n>ms ago`), its chunks and end dropped as any refused
+header's are. The stamp is taken when the prefix opens, whether or not the copy installs, since the copy is the cost.
+The memo lives with the link's intake, so it is per link, and it is bounded: an entry is added only when
+`PartialBlobs.open` found a prefix (at most `PartialBlobs.MAX_COUNT` at once) and pruned once it leaves the window. A
+whole-file header is never gated, and neither is another key's resume, because a flat count would refuse the
+honest resumes of several blobs after one cut and waste each one's tail.
+
+**Why the round.** An honest holder sends one asker at most one resumed header per key per link per round. The asker
+opens a round of asks per blob at most every `ROUND_MS`. The holder serves one asker a given hash at most once per
+`SERVE_MEMO_MS` (the same 45 s), and a parked ask is stamped when it is served. A cut closes the link, so the next
+link has an intake and a window of its own, and a spliced file that fails its hash is asked for again from byte 0, a
+whole file. The memo is stamped at the enqueue and the gate at the header's arrival, so the two can disagree by
+the first copy's wait in the holder's queue. The asker re-asks the same key on one link only when a taken resume ended
+without the blob held and with the prefix kept: its copy, a chunk write or the finalize failed on the asker's own
+disk. A re-ask whose header lands inside the window then costs one tail and a round.
+
+**The ceiling.** A peer can make each kept prefix copy at most once per window per link: at most
+`PartialBlobs.MAX_BYTES` (32 MiB) of reads, and as many writes into the temp file, per link per 45 s, and in practice
+one 8 MiB blob's prefix per key. The window is per link, not per peer: a peer linked over both Bluetooth and Wi-Fi
+Aware has two intakes and two windows. A new link starts a new window, so a peer that relinks to reset it pays a link
+setup per attempt.
+
+**What the lab cannot see.** `LabTransport` builds a fresh `FileIntake` for every file it streams, where a phone keeps
+one per `FramedLink`, so no lab scenario ever meets a second resumed header on one intake: `AttachmentResumeLabTest`
+passes with or without the gate. `FileIntakeTest` is its only coverage until the lab keeps one intake per pipe for the
+pipe's lifetime.

@@ -241,7 +241,8 @@ free). Two invariants that are easy to break:
   store is purged at every mesh start (plaintext at rest), and a whole-file stream never discards a longer
   prefix. `size` is the tail's — the whole is `offset + size`. A spliced file that fails its hash drops the
   prefix and is asked for from byte 0 at once; a whole file that fails leaves it. Every receive-side change
-  goes through `FileIntake` under the link's lock; the serve memo stays as 4tx5 left it.
+  goes through `FileIntake` under the link's lock; the serve memo stays as 4tx5 left it. A link resumes one key at
+  most once per `FileIntake.RESUME_WINDOW_MS` (`BlobExchange.ROUND_MS`): a resume copies up to 8 MiB (#161).
 - **The database says which attachments are missing; `BlobExchange`'s `fetching` set is a swept memo of it**
   (ADR 2026-09.ptv8). A `want` parked with no neighbor (a frame heard over the board alone) is reclaimed by
   the 30-min `FETCH_TTL_MS` sweep, and `onNeighborAdded` re-asks only from the memo — so
