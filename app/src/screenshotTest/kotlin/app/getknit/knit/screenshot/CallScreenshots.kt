@@ -24,6 +24,9 @@ import app.getknit.knit.ui.call.CallScreenUnreachablePreview
 import app.getknit.knit.ui.call.CallScreenWalkieDiagnosticsPreview
 import app.getknit.knit.ui.call.CallScreenWalkieMeshPreview
 import app.getknit.knit.ui.call.CallScreenWalkiePreview
+import app.getknit.knit.ui.call.CallScreenWalkieTranscriptDownloadingPreview
+import app.getknit.knit.ui.call.CallScreenWalkieTranscriptNoModelPreview
+import app.getknit.knit.ui.call.CallScreenWalkieTranscriptPreview
 import app.getknit.knit.ui.call.CallScreenWalkieUnlinkedPreview
 import com.android.tools.screenshot.PreviewTest
 
@@ -130,6 +133,21 @@ fun CallScreenWalkieMesh() = CallScreenWalkieMeshPreview()
 @ScreenShots
 @Composable
 fun CallScreenWalkieDiagnostics() = CallScreenWalkieDiagnosticsPreview()
+
+@PreviewTest
+@ScreenShots
+@Composable
+fun CallScreenWalkieTranscript() = CallScreenWalkieTranscriptPreview()
+
+@PreviewTest
+@ScreenShots
+@Composable
+fun CallScreenWalkieTranscriptNoModel() = CallScreenWalkieTranscriptNoModelPreview()
+
+@PreviewTest
+@ScreenShots
+@Composable
+fun CallScreenWalkieTranscriptDownloading() = CallScreenWalkieTranscriptDownloadingPreview()
 
 @PreviewTest
 @ComponentShots

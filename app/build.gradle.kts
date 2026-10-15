@@ -1115,14 +1115,17 @@ dependencies {
     compileOnly(libs.androidx.core.telecom)
     debugImplementation(libs.webrtc.android)
     debugImplementation(libs.androidx.core.telecom)
-    // The walkie transcript's speech runtime (docs/VOICE_CALLS.md C-3.11-9), packaged beside the walkie it serves.
-    compileOnly(libs.sherpa.onnx)
-    debugImplementation(libs.sherpa.onnx)
+    // The walkie transcript's speech runtime (docs/VOICE_CALLS.md C-3.11-9), packaged beside the walkie it serves. Not
+    // transitive: its appcompat/material/okhttp/WorkManager serve wrappers we never call (libs.versions.toml).
+    compileOnly(libs.moonshine.voice) { isTransitive = false }
+    debugImplementation(libs.moonshine.voice) { isTransitive = false }
     if (callsInRelease) {
         android.buildTypes.names.filter { it != "debug" }.forEach { buildType ->
             add("${buildType}RuntimeOnly", libs.webrtc.android)
             add("${buildType}RuntimeOnly", libs.androidx.core.telecom)
-            add("${buildType}RuntimeOnly", libs.sherpa.onnx)
+            addProvider<MinimalExternalModuleDependency, ExternalModuleDependency>("${buildType}RuntimeOnly", libs.moonshine.voice) {
+                isTransitive = false
+            }
         }
     }
     // Compose Preview Screenshot Testing: `@PreviewTest` plus the preview renderer's tooling, for the

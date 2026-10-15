@@ -58,7 +58,7 @@ import app.getknit.knit.ui.call.TelecomCalls
 import app.getknit.knit.ui.call.ToneGeneratorPlayer
 import app.getknit.knit.ui.call.WalkieTalk
 import app.getknit.knit.ui.call.WebRtcCallMedia
-import app.getknit.knit.ui.call.stt.SherpaSpeech
+import app.getknit.knit.ui.call.stt.MoonshineSpeech
 import app.getknit.knit.ui.call.stt.SttModelStore
 import app.getknit.knit.ui.callsettings.CallSettingsViewModel
 import kotlinx.coroutines.CoroutineScope
@@ -208,15 +208,15 @@ private fun callGraph(): Module =
             )
         }
         if (WALKIE_WIRED) {
-            // The transcript (C-3.11-9): a model the user downloads, run here on the bursts this phone hears.
+            // The transcript (C-3.11-9): a model the user downloads, fed here the bursts this phone hears as they play.
             single { SttModelStore(androidContext(), get<AndroidInternetGate>(), get<CoroutineScope>(), log = { Log.i(TAG, it) }) }
-            single { SherpaSpeech(get(), get<ModelLoadGuard>(), get<CoroutineScope>(), log = { Log.i(TAG, it) }) }
+            single { MoonshineSpeech(get(), get<ModelLoadGuard>(), get<CoroutineScope>(), log = { Log.i(TAG, it) }) }
             single {
                 WalkieTranscriber(
-                    speech = get<SherpaSpeech>(),
+                    speech = get<MoonshineSpeech>(),
                     ready = { get<SttModelStore>().paths() != null },
                     scope = get<CoroutineScope>(),
-                    // One burst at a time, in the order they ended, off the player's loop.
+                    // One model call at a time, in the order the audio came, off the player's and the recorder's threads.
                     dispatcher = Dispatchers.Default.limitedParallelism(1),
                     log = { Log.i(TAG, it) },
                 )

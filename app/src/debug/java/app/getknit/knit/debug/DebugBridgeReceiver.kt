@@ -28,6 +28,7 @@ import app.getknit.knit.call.CaptureProfile
 import app.getknit.knit.call.DirectCallPath
 import app.getknit.knit.call.DirectMode
 import app.getknit.knit.call.OverridingTurnSource
+import app.getknit.knit.call.PassGate
 import app.getknit.knit.call.SttModelState
 import app.getknit.knit.call.SttPolicy
 import app.getknit.knit.call.StunServers
@@ -139,13 +140,14 @@ import app.getknit.knit.ui.call.TalkPlayer
 import app.getknit.knit.ui.call.TalkRecorder
 import app.getknit.knit.ui.call.WalkieTalk
 import app.getknit.knit.ui.call.WebRtcCallMedia
-import app.getknit.knit.ui.call.stt.SherpaSpeech
+import app.getknit.knit.ui.call.stt.MoonshineSpeech
 import app.getknit.knit.ui.call.stt.SttModelStore
 import app.getknit.knit.ui.chat.ChatWindow
 import app.getknit.knit.ui.chat.quoteLabels
 import app.getknit.knit.ui.invite.prepareKnitApk
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -1262,7 +1264,7 @@ class DebugBridgeReceiver :
             val (resident, lastUsedAt) =
                 when (model) {
                     ModelLoadGuard.TOXICITY -> textModel.isResident to textModel.lastUsedAt
-                    ModelLoadGuard.STT -> (getKoin().getOrNull<SherpaSpeech>()?.resident == true) to 0L
+                    ModelLoadGuard.STT -> (getKoin().getOrNull<MoonshineSpeech>()?.resident == true) to 0L
                     else -> imageModel.isResident to imageModel.lastUsedAt
                 }
             models.put(
@@ -2419,6 +2421,16 @@ class DebugBridgeReceiver :
                 ).put("sent", walkie.sent.get()).put("chunksOut", walkie.chunksOut.get())
             }
 
+            "ns" -> {
+                // The walkie microphone's platform noise suppressor (C-3.11-5): `--ez on false` for an A/B, in memory
+                // only, until the process ends. Takes effect at the next burst; `suppressor` is what the last one had.
+                val recorder = getKoin().getOrNull<TalkRecorder>() ?: return reply("error", "this build wires no walkie")
+                if (intent.hasExtra("on")) recorder.suppressNoise = intent.getBooleanExtra("on", true)
+                return reply("ok", "noise suppression ${if (recorder.suppressNoise) "asked for" else "off"}")
+                    .put("on", recorder.suppressNoise)
+                    .put("suppressor", recorder.suppressor ?: JSONObject.NULL)
+            }
+
             "relay" -> {
                 // Settings' "Relay all calls" (`SettingsStore.callsRelayAll`, C-3.7-3): persisted, and the row shows it.
                 val on = intent.getBooleanExtra("on", true)
@@ -2647,21 +2659,23 @@ class DebugBridgeReceiver :
 
     /**
      * The walkie transcript's speech model and the session's transcript (docs/VOICE_CALLS.md C-3.11-9). `status` (the
-     * default) dumps both; `use --es model tiny|base|whisper` (a label or an id) puts that model in use, as the card's picker
-     * does, and the ops below act on the one in use; `download` fetches it from its host as the card's button does, `sideload --es dir
-     * <dir>` installs it from the four files pushed there (world-readable, e.g. under /data/local/tmp), each checked
-     * against the same pins; `cancel`, `delete` and `unload` (release the recognizer now) do what they say. `pcm --es
-     * path <file>` runs the model over a raw 16 kHz mono s16le file, cut as a burst is, and replies with the text and
-     * the time it took — the engine's own regression, with no call and no radio. `loop --es path <file>` sends that file
-     * the whole walkie way but the radio — the recorder's Opus encoder at 8 kbps, the player's decoder and its tap, the
-     * transcriber — as burst [LOOP_BURST] of a fresh transcript, and replies at once; poll `status` for its two lines,
-     * the spoken one (`mine`, the file before Opus) and the heard one (after it), whose texts differ by the codec. It
+     * default) dumps both; `use --es model tiny|small|medium` (a label or an id) puts that model in use, as the card's
+     * picker does, and the ops below act on the one in use; `download` fetches it from its host as the card's button does,
+     * `sideload --es dir <dir>` installs it from the files pushed there (world-readable, e.g. under /data/local/tmp;
+     * `scripts/stt-model.py --out` stages them), each checked against the same pins; `cancel`, `delete` and `unload`
+     * (release the model now) do what they say. `pcm --es path <file>` streams (in the background; poll `status`) a raw 16 kHz mono s16le file through the
+     * model in 100 ms chunks, as fast as it will take them, looking as a burst does, and replies with the text, the looks,
+     * the model's time over it all and the time its last look took — the time from a burst's end to its text — with no
+     * call and no radio. `loop --es path <file>` sends that file the whole walkie way but the radio — the recorder's Opus
+     * encoder at 8 kbps, the player's decoder and its tap, the transcriber — as burst [LOOP_BURST] of a fresh transcript,
+     * in real time, and replies at once; poll `status` for its two lines, the spoken one (`mine`, the file before Opus)
+     * and the heard one (after it), whose texts differ by the codec, and whose `live` shows the text while it streams. It
      * plays aloud, and refuses while a walkie call is up.
      */
     @Suppress("CyclomaticComplexMethod", "ReturnCount") // a flat dispatch over the ops
     private suspend fun handleStt(intent: Intent): JSONObject {
         val store = getKoin().getOrNull<SttModelStore>() ?: return reply("error", "this build wires no walkie")
-        val speech = getKoin().get<SherpaSpeech>()
+        val speech = getKoin().get<MoonshineSpeech>()
         // A broadcast can wake a fresh process before its own start has read the disk.
         withContext(Dispatchers.IO) { store.start() }
         when (val op = intent.getStringExtra("op") ?: "status") {
@@ -2698,6 +2712,12 @@ class DebugBridgeReceiver :
                 speech.unload()
             }
 
+            "split" -> {
+                // `--ez on true|false`: the model's voice detector splitting a burst at pauses (off by default), for an
+                // A/B. In memory until the process ends; the next burst reloads the model with it.
+                speech.splitAtPauses = intent.getBooleanExtra("on", false)
+            }
+
             "loop" -> {
                 val file = intent.getStringExtra(EXTRA_PATH)?.let(::File) ?: return reply("error", "missing 'path' extra")
                 if (!file.canRead()) return reply("error", "can't read $file")
@@ -2717,17 +2737,14 @@ class DebugBridgeReceiver :
                 val file = intent.getStringExtra(EXTRA_PATH)?.let(::File) ?: return reply("error", "missing 'path' extra")
                 if (store.paths() == null) return reply("error", "the model isn't installed")
                 val samples = withContext(Dispatchers.IO) { readPcm16(file) } ?: return reply("error", "can't read $file")
-                val began = System.currentTimeMillis()
-                val parts = speech.cut(samples)
-                val texts =
-                    parts.map { r ->
-                        withContext(Dispatchers.Default) { speech.transcribe(samples.copyOfRange(r.first, r.last + 1)) }
+                // Off the broadcast: a long clip outlasts its timeout (an ANR). The result lands in `status`'s `pcm`.
+                pcmRun?.cancel()
+                lastPcm = JSONObject().put("status", "running").put("path", file.path)
+                pcmRun =
+                    getKoin().get<CoroutineScope>().launch(Dispatchers.Default) {
+                        lastPcm = streamPcm(speech, samples).put("path", file.path)
                     }
-                return reply("ok", "transcribed")
-                    .put("audioMs", samples.size * MILLIS_PER_SEC / SttPolicy.SAMPLE_RATE)
-                    .put("tookMs", System.currentTimeMillis() - began)
-                    .put("parts", parts.size)
-                    .put("text", if (texts.any { it == null }) JSONObject.NULL else texts.filterNotNull().joinToString(" ") { it.trim() })
+                return reply("ok", "streaming $file; poll status for `pcm`")
             }
 
             else -> {
@@ -2740,6 +2757,8 @@ class DebugBridgeReceiver :
             .put("installed", JSONArray(store.installedIds().sorted()))
             .put("stt", sttStateJson(store.state.value))
             .put("resident", speech.resident)
+            .put("splitAtPauses", speech.splitAtPauses)
+            .put("pcm", lastPcm ?: JSONObject.NULL)
             .put(
                 "transcript",
                 getKoin()
@@ -2772,6 +2791,42 @@ class DebugBridgeReceiver :
         transcript.end(LOOP_BURST)
     }
 
+    // The `pcm` op: [samples] through one stream in 100 ms chunks, looking whenever a burst's [PassGate] would.
+    private suspend fun streamPcm(
+        speech: MoonshineSpeech,
+        samples: FloatArray,
+    ): JSONObject {
+        val began = System.currentTimeMillis()
+        val stream = speech.open() ?: return reply("error", "the model would not run")
+        val gate = PassGate()
+        var looks = 0
+        var modelMs = 0L
+        val chunk = SttPolicy.SAMPLE_RATE / PCM_CHUNKS_PER_SEC
+        var at = 0
+        while (at < samples.size) {
+            val part = samples.copyOfRange(at, minOf(samples.size, at + chunk))
+            at += part.size
+            val t = System.currentTimeMillis()
+            if (!stream.add(part)) return reply("error", "the model failed on the audio")
+            if (gate.fed(part.size * MILLIS_PER_SEC.toDouble() / SttPolicy.SAMPLE_RATE)) {
+                stream.look() ?: return reply("error", "the model failed on a look")
+                looks++
+                gate.took(System.currentTimeMillis() - t)
+            }
+            modelMs += System.currentTimeMillis() - t
+        }
+        val ending = System.currentTimeMillis()
+        val heard = stream.finish()
+        val finishMs = System.currentTimeMillis() - ending
+        return reply("ok", "transcribed")
+            .put("audioMs", samples.size * MILLIS_PER_SEC / SttPolicy.SAMPLE_RATE)
+            .put("tookMs", System.currentTimeMillis() - began)
+            .put("modelMs", modelMs + finishMs)
+            .put("finishMs", finishMs)
+            .put("looks", looks)
+            .put("text", heard?.text ?: JSONObject.NULL)
+    }
+
     private fun sttStateJson(state: SttModelState): JSONObject =
         when (state) {
             SttModelState.Absent -> JSONObject().put("state", "absent")
@@ -2792,8 +2847,11 @@ class DebugBridgeReceiver :
                         .put("heardAt", line.heardAt)
                         .put("state", if (state is TranscriptLine.State.Text) "Text" else state.toString())
                         .put("text", (state as? TranscriptLine.State.Text)?.text ?: JSONObject.NULL)
+                        .put("live", line.live)
                         .put("audioMs", line.audioMs)
-                        .put("tookMs", line.tookMs),
+                        .put("tookMs", line.tookMs)
+                        .put("looks", line.looks)
+                        .put("modelMs", line.modelMs),
                 )
             }
         }
@@ -3483,6 +3541,13 @@ class DebugBridgeReceiver :
     }
 
     private companion object {
+        // The `STT --es op pcm` run under way, and its result (or `running`), which `status` reports. Here, not on the
+        // receiver: a new receiver serves every broadcast.
+        var pcmRun: Job? = null
+
+        @Volatile
+        var lastPcm: JSONObject? = null
+
         const val TAG = "KnitBridge"
 
         const val ACTION_SEND = "app.getknit.knit.debug.SEND"
@@ -3644,3 +3709,6 @@ private const val PCM_FULL_SCALE = 32_768f
 
 // The burst number `…debug.STT --es op loop` gives its one burst.
 private const val LOOP_BURST = 0
+
+// `…debug.STT --es op pcm` feeds its file in 100 ms chunks.
+private const val PCM_CHUNKS_PER_SEC = 10

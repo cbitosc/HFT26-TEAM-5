@@ -15,14 +15,8 @@ data class SttFile(
     val sha256: String,
 )
 
-/** The runtime family a speech model belongs to: how its files are wired into the engine. */
-enum class SttEngine {
-    /** Moonshine v2: an encoder, a merged decoder and tokens. Reads at most about 9 s at once. */
-    MOONSHINE,
-
-    /** Whisper: an encoder, a decoder and tokens. Pads every input to 30 s, and reads no more than that. */
-    WHISPER,
-}
+/** Which of Moonshine's streaming English models a [SttModel] is: what the engine is told when it loads the files. */
+enum class SttArch { TINY_STREAMING, SMALL_STREAMING, MEDIUM_STREAMING }
 
 /**
  * A speech model the walkie's transcript can download (C-3.11-9): its files, fetched by name under [baseUrl] and
@@ -33,12 +27,9 @@ class SttModel(
     val id: String,
     val baseUrl: String,
     val files: List<SttFile>,
+    val arch: SttArch,
     // What the call screen's picker calls it.
     val label: String = id,
-    val engine: SttEngine = SttEngine.MOONSHINE,
-    // The longest stretch it is handed at once, and the shortest a long burst is cut into (`segments`).
-    val segmentMaxMs: Long = SttPolicy.SEGMENT_MAX_MS,
-    val segmentMinMs: Long = SttPolicy.SEGMENT_MIN_MS,
 ) {
     init {
         require(baseUrl.startsWith("https://") && baseUrl.endsWith("/")) { "a model is fetched over https, from a directory" }
@@ -54,82 +45,81 @@ class SttModel(
         private val SAFE_NAME = Regex("[A-Za-z0-9._-]+")
 
         /**
-         * Moonshine tiny, English, v2 (int8, ORT), as sherpa-onnx packages it (`sherpa-onnx-moonshine-tiny-en-quantized-
-         * 2026-02-27`), rehosted under getknit.app with its MIT licence. `scripts/stt-model.py --check` re-derives these
-         * pins from the upstream archive; never edit them by hand.
+         * Moonshine v2 Small Streaming, English (123M parameters, int8 `.ort`, MIT): 7.84 % on the Open ASR average,
+         * ahead of Whisper Small's 8.59 at half its size and a fraction of its time. The default. Moonshine's own files
+         * (`small-streaming-en/quantized_26_08_21`, the per-channel quantization), rehosted under getknit.app with the
+         * library's licence. `scripts/stt-model.py --check` re-derives these pins from upstream; never edit them by hand.
          */
-        val MOONSHINE_TINY_EN_V2 =
+        val MOONSHINE_SMALL_STREAMING_EN =
             SttModel(
-                id = "moonshine-tiny-en-2026-02-27",
-                baseUrl = "https://getknit.app/models/stt/moonshine-tiny-en-2026-02-27/",
+                id = "moonshine-small-streaming-en-2026-08-21",
+                baseUrl = "https://getknit.app/models/stt/moonshine-small-streaming-en-2026-08-21/",
                 files =
                     listOf(
-                        SttFile("encoder_model.ort", 13_281_600, "94e90a4654fc45cdfedb77c4c08e1739f48862998e58fada384b25118134f221"),
-                        SttFile("decoder_model_merged.ort", 30_412_256, "cf524c4862d36e9e5ab032eddc73637efd822d70e868ac575cf1a46e1e4708a0"),
-                        SttFile("tokens.txt", 549_350, "2870d843e14c1e187bf1913a521562a63b53933814bd7f2145120468f494a049"),
-                        SttFile("LICENSE", 13_344, "6148d7574a6554b7379b633cfd4c4fe5840c3f548d13bc83e00b52dc6fa00abd"),
+                        SttFile("adapter.ort", 2_870_368, "c665f742364febad597cc9ac1e0b341ffbee0e24a1466e2f3bde95e6e4771762"),
+                        SttFile("cross_kv.ort", 5_356_536, "e2d3417144e9514055ebfefe8dcc4c0a55a55adcb8530435844c75c53e352bf6"),
+                        SttFile("decoder_kv.ort", 81_878_600, "1a05465b1dd955858dfcbee039c0020fb5dd982b0f5094c34e61735d518d771b"),
+                        SttFile("encoder.ort", 44_148_576, "2d4d973e91e8aca08c51e7e7efa28a46ab265b63d809d5294d18b86bcd85b993"),
+                        SttFile("frontend.model.ort", 26_944, "09b1210ae30dc5f0f3e45f0ebab914c254741323114f53fbbe5ae62cca35058f"),
+                        SttFile("frontend.weights.ort", 7_769_464, "7ef97521bd4bad3928f5bb6808586f4fcc6e92bd5990394112eed7d4052ec338"),
+                        SttFile("streaming_config.json", 512, "26f02b6afb22d60871a5efd85c3d38e569cc0ddb6c5eb6e93d3260152ae8a47a"),
+                        SttFile("tokenizer.bin", 249_974, "6884b35fd6377d4c4d32336a0bc152f36b64d1e45b6503683cdc238250a8472d"),
+                        SttFile("LICENSE", 14_180, "fa7d1174dd8af6a7cd280be20b80d10095ed4c19b5b20b61a7715c3ad790dc5f"),
                     ),
+                arch = SttArch.SMALL_STREAMING,
+                label = "Small",
+            )
+
+        /**
+         * Moonshine v2 Tiny Streaming, English (34M, int8, MIT): 12.0 % on the Open ASR average, for a phone that can
+         * afford nothing more. Pins as for small.
+         */
+        val MOONSHINE_TINY_STREAMING_EN =
+            SttModel(
+                id = "moonshine-tiny-streaming-en-2026-08-21",
+                baseUrl = "https://getknit.app/models/stt/moonshine-tiny-streaming-en-2026-08-21/",
+                files =
+                    listOf(
+                        SttFile("adapter.ort", 1_319_664, "22ecc949e146c49667fda28d102d4e30749a107dc88a396292aa8f277ef1347c"),
+                        SttFile("cross_kv.ort", 1_287_544, "143a36667b8d05fd9d04e8c337b7ee121f37ef299aea6b3d82bdb3d3401950b4"),
+                        SttFile("decoder_kv.ort", 32_583_720, "8852553f312adb6c9aa4d17418015049b30f412209ee569d336548c0044627de"),
+                        SttFile("encoder.ort", 7_675_440, "a8414e1a5dedf9f2093d7680601dd8a9b0433e7020260eafe0e370ead91134ca"),
+                        SttFile("frontend.model.ort", 23_344, "5121b561417b638afce0c6c31b760e37c93cf97f80d9b0031aad1fe7b6f25d61"),
+                        SttFile("frontend.weights.ort", 2_093_464, "217da24ac6f522ebf02da8ef288e77d1ac68d50d4a6821433182e4fbf4204bbd"),
+                        SttFile("streaming_config.json", 509, "74fe5ddebd63b17caf59e8a3b18c17547ff7bce1642050edbb1c3962674f8950"),
+                        SttFile("tokenizer.bin", 249_974, "6884b35fd6377d4c4d32336a0bc152f36b64d1e45b6503683cdc238250a8472d"),
+                        SttFile("LICENSE", 14_180, "fa7d1174dd8af6a7cd280be20b80d10095ed4c19b5b20b61a7715c3ad790dc5f"),
+                    ),
+                arch = SttArch.TINY_STREAMING,
                 label = "Tiny",
             )
 
         /**
-         * Moonshine base, English, v2 (int8, ORT; `sherpa-onnx-moonshine-base-en-quantized-2026-02-27`, MIT): about three
-         * times tiny's size, for a better guess. It shares tiny's ~9 s limit, so it is cut the same way. Pins as for tiny.
+         * Moonshine v2 Medium Streaming, English (245M, int8, MIT): 6.65 % on the Open ASR average, ahead of Whisper
+         * Large v3's 7.44. Twice small's fetch and time. Pins as for small.
          */
-        val MOONSHINE_BASE_EN_V2 =
+        val MOONSHINE_MEDIUM_STREAMING_EN =
             SttModel(
-                id = "moonshine-base-en-2026-02-27",
-                baseUrl = "https://getknit.app/models/stt/moonshine-base-en-2026-02-27/",
+                id = "moonshine-medium-streaming-en-2026-08-21",
+                baseUrl = "https://getknit.app/models/stt/moonshine-medium-streaming-en-2026-08-21/",
                 files =
                     listOf(
-                        SttFile("encoder_model.ort", 31_326_816, "7c66495948d0d08ec1af454cd4b5514862ae6511e94712a60e6d83eaec8dc8cf"),
-                        SttFile(
-                            "decoder_model_merged.ort",
-                            109_424_400,
-                            "d9d7b333af34bc552580576ddcf248a1c6c839e0d3b43b09afb9376ed009899d",
-                        ),
-                        SttFile("tokens.txt", 549_350, "2870d843e14c1e187bf1913a521562a63b53933814bd7f2145120468f494a049"),
-                        SttFile("LICENSE", 13_344, "6148d7574a6554b7379b633cfd4c4fe5840c3f548d13bc83e00b52dc6fa00abd"),
+                        SttFile("adapter.ort", 3_651_296, "3f2a287def57cc094367a0eec3c4f5fc36a32ec420e86764b696920991b20281"),
+                        SttFile("cross_kv.ort", 11_643_776, "642f6e21cd305be79342207c6f9e6b681d469d55bc48c72b27b84846fb71fd1e"),
+                        SttFile("decoder_kv.ort", 146_972_408, "193bb366492b74fc4ad338c6778e8d8eb916aaa11b5aa264f9057f4db7759486"),
+                        SttFile("encoder.ort", 94_705_376, "12915e76ebac7dd287c5ea63965d06103a53ba1ce242a4a34f318f3958c60c37"),
+                        SttFile("frontend.model.ort", 28_720, "95768855c70c8251eeecc05fedf69999da1b8ab16f605c9f457fd3354b0ad6b5"),
+                        SttFile("frontend.weights.ort", 11_889_560, "5ac941f490cbe035b335b99a414cc393d62d4c6f9f2423495b286870d271d709"),
+                        SttFile("streaming_config.json", 513, "28e83b7a28e91472692a035e0dae3116422ae43aeb2bef5ed822c44ce89b88af"),
+                        SttFile("tokenizer.bin", 249_974, "6884b35fd6377d4c4d32336a0bc152f36b64d1e45b6503683cdc238250a8472d"),
+                        SttFile("LICENSE", 14_180, "fa7d1174dd8af6a7cd280be20b80d10095ed4c19b5b20b61a7715c3ad790dc5f"),
                     ),
-                label = "Base",
-            )
-
-        /**
-         * Whisper small, English only (int8 ONNX; `sherpa-onnx-whisper-small.en`, MIT, its licence from OpenAI's
-         * repository at a pinned commit): 375 MB and far slower than Moonshine — every stretch costs a 30 s encode — but
-         * the best reader of the three. It reads up to 30 s, so a burst is cut only past 28 s.
-         */
-        val WHISPER_SMALL_EN =
-            SttModel(
-                id = "whisper-small-en-2024-07-13",
-                baseUrl = "https://getknit.app/models/stt/whisper-small-en-2024-07-13/",
-                files =
-                    listOf(
-                        SttFile(
-                            "small.en-encoder.int8.onnx",
-                            112_442_483,
-                            "8bdac288f369aa94ee2194059238c465ed82ea9d47ee8fa4a8c0a891873e462f",
-                        ),
-                        SttFile(
-                            "small.en-decoder.int8.onnx",
-                            262_223_042,
-                            "710ccf890e10f3faa15f51ec346081a2723c9f3adb6e4da81c6573a5a6f877fb",
-                        ),
-                        SttFile("small.en-tokens.txt", 835_554, "306cd27f03c1a714eca7108e03d66b7dc042abe8c258b44c199a7ed9838dd930"),
-                        SttFile("LICENSE", 1_063, "b5d65a59060e68c4ff940e1eddfa6f94b2d68fdf58ed7f4dd57721c997e35e9d"),
-                    ),
-                label = "Whisper",
-                engine = SttEngine.WHISPER,
-                segmentMaxMs = WHISPER_SEGMENT_MAX_MS,
-                segmentMinMs = WHISPER_SEGMENT_MIN_MS,
+                arch = SttArch.MEDIUM_STREAMING,
+                label = "Medium",
             )
 
         /** The models the user picks between, the default first. */
-        val ALL = listOf(MOONSHINE_TINY_EN_V2, MOONSHINE_BASE_EN_V2, WHISPER_SMALL_EN)
-
-        // Whisper's window is 30 s; a little short of it, and cut at a pause from 20 s on.
-        private const val WHISPER_SEGMENT_MAX_MS = 28_000L
-        private const val WHISPER_SEGMENT_MIN_MS = 20_000L
+        val ALL = listOf(MOONSHINE_SMALL_STREAMING_EN, MOONSHINE_TINY_STREAMING_EN, MOONSHINE_MEDIUM_STREAMING_EN)
     }
 }
 

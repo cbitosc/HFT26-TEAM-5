@@ -1550,11 +1550,11 @@ fun CallScreenWalkieTranscriptNoModelPreview() =
                 metered = true,
                 choices =
                     listOf(
-                        SttChoice("tiny", "Tiny", PREVIEW_MODEL_BYTES, installed = false),
-                        SttChoice("base", "Base", 141_314_910, installed = false),
-                        SttChoice("whisper", "Whisper", 375_502_142, installed = false),
+                        SttChoice("small", "Small", PREVIEW_MODEL_BYTES, installed = false),
+                        SttChoice("tiny", "Tiny", 45_247_839, installed = false),
+                        SttChoice("medium", "Medium", 269_155_803, installed = false),
                     ),
-                chosen = "tiny",
+                chosen = "small",
             ),
     )
 
@@ -1574,4 +1574,4 @@ fun CallScreenWalkieTranscriptDownloadingPreview() =
             ),
     )
 
-private const val PREVIEW_MODEL_BYTES = 44_256_550L
+private const val PREVIEW_MODEL_BYTES = 142_315_154L

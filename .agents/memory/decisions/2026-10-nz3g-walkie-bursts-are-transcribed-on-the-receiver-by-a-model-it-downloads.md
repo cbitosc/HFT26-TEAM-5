@@ -79,3 +79,37 @@ C-3.11-9). It is debug-only, as the walkie is, and nothing reaches the wire.
 - **Hosting.** The files must be uploaded, unchanged, to `https://getknit.app/models/stt/moonshine-tiny-en-2026-02-27/`.
   Until they are, the download fails with "answered 404". The bridge's `STT --es op sideload` installs from pushed
   files through the same pins.
+- **Amendment 2026-10-14: streaming, through Moonshine's own runtime.** Whisper small.en read well on the Pixel 9, but
+  its text came only after the release, and every pass costs a full 30 s encode however short the audio, so there is
+  no cheap way to show words while a burst plays. Moonshine v2's *streaming* models are built for exactly that: the
+  encoder caches what it has seen, the library's voice detector closes a stretch at each pause, and a look costs the
+  new audio and one decode. They also read better: Small Streaming scores 7.84 % on the Open ASR average against
+  Whisper Small's 8.59, and Medium 6.65 % against Whisper Large v3's 7.44 (Moonshine's own table, float reference; the
+  shipped int8 files are within 0.31 % on LibriSpeech-clean). So:
+  - **Models.** The picks are Small (default, 142 MB), Tiny (45 MB) and Medium (269 MB) Streaming EN, Moonshine's own
+    files from its CDN's `quantized_26_08_21` directory (the per-channel quantization; the sherpa-onnx exports we used
+    predate it, and Moonshine measured the old scheme at 7.57 % against 4.83 % for Tiny on LibriSpeech-clean). The
+    Whisper, Moonshine tiny and base offline picks are gone, and with them `segments` and its ≤ 8 s cut: the stream's
+    own voice detector cuts at pauses, at most every 15 s.
+  - **Runtime.** sherpa-onnx has no streaming Moonshine, and keeping it beside `moonshine-voice` (Maven Central,
+    0.1.5) would put two different `libonnxruntime.so` in one APK. sherpa-onnx is removed; `moonshine-voice` is taken
+    with `isTransitive = false` (its appcompat, material, okhttp and WorkManager serve wrappers we never call) and
+    called through its `JNI` class alone (`MoonshineSpeech`), so no thread or cadence of the library's runs. Its
+    native half binds by name, hence `src/calls/keepRules/moonshine.keep`.
+  - **Flow.** `WalkieTranscriber` opens one `SpeechStream` per burst at its first audio, feeds it as the tap delivers,
+    and looks on `PassGate`'s cadence — every 500 ms of new audio, or as much audio as the last look took, up to 5 s
+    (the library's own `isUpdateDue`, so a slow phone batches instead of falling behind). The line carries the words
+    so far (`TranscriptLine.live`, dimmed and not read out) and settles on the stream's last look at the burst's end.
+    Every stream call runs inside the lease's `use`, so the idle reaper never frees the model under a burst, and a
+    stream whose model was freed or replaced fails instead of reaching a dead handle.
+  - **Measured** (x86_64 emulator on a 16 KB-page image, `…debug.STT`): Small loaded in 345 ms; a 10 s clip streamed
+    at full speed took 2.3 s of model time over 19 looks and read verbatim; a 44 s one 22.6 s over 88 looks, and through
+    the `loop` op's 8 kbps Opus in real time it read near-verbatim, the received line's final text 2–3 ms after the
+    burst ended. Tiny took about half Small's time. On phones (`pcm`, Small, the same clips): the Pixel 9 Pro XL loaded
+    it in 314 ms and spent 2.7 s and 23.8 s over the 10 s and 44 s clips, the Pixel 7 586 ms, 3.4 s and 27.3 s — both
+    near 60 % of real time at two looks a second, both verbatim, the last look 1–5 ms. Still to measure: live bursts
+    phone to phone, and the P3 and Moto G, against the Whisper build this replaces.
+  - **Hosting.** As before, each model's nine files must be uploaded unchanged to
+    `https://getknit.app/models/stt/<model id>/` (`scripts/stt-model.py --out`); until then the card's Download answers
+    404 and `…debug.STT --es op sideload` installs from pushed files through the same pins.
+

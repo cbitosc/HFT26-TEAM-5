@@ -469,3 +469,24 @@ What it costs and what it misses:
 
 Owed: a P9 ↔ P7 walk-apart on Coded, both phones with a relay. `bt fade … on` should come before the eof, the burst
 lines should read `via Bluetooth · fading, relay too`, and no burst should be lost across the drop.
+
+## Amendment 2026-10-14 (10): the platform's noise suppressor on the burst's microphone
+
+A walkie burst went out with no noise suppression at all. A live call has WebRTC's or the phone's own, but
+`VOICE_RECOGNITION` runs no pre-processing (the CDD has it off there), and `TalkGain` raises the level without removing
+anything. The burst's transcript (ADR 2026-10.nz3g) reads that raw audio too, so a noisy place costs both the listener
+and the model.
+
+`TalkRecorder` now attaches `android.media.audiofx.NoiseSuppressor` to the record's session and enables it, wherever
+the phone implements one (`docs/VOICE_CALLS.md` C-3.11-5). It is released before the record. The source stays
+`VOICE_RECOGNITION`, so the call path's echo canceller and gain still stay out of a half-duplex burst. A phone without
+the effect, or one that refuses it, records as before, and each burst's `walkie in:` line says which: `noise suppressor
+on`, `unavailable` or `refused`. The suppressor runs ahead of `TalkGain`, so the gain's noise floor reads the
+suppressed background.
+
+The suppressor is the vendor's, so its strength varies from phone to phone, and it is tuned for steady noise. A
+neural denoiser (RNNoise and the like) on the PCM before the gain would be the same on every phone, and is the next
+step if this one falls short.
+
+Owed: a by-ear and transcript A/B in a noisy room on the P9 and the P7, using `…debug.CALL --es op ns --ez on false`
+for the "before" bursts.

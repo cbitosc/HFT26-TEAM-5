@@ -69,8 +69,9 @@ internal data class SttChoice(
 
 /**
  * The walkie session's transcript (docs/VOICE_CALLS.md C-3.11-9), in the call screen's card slot while the header's
- * diagnostics toggle is off: each burst from [name] as text once it has played, and each burst spoken here as the
- * model heard it from the microphone, before Opus — newest at the bottom — and while the speech model is not on the
+ * diagnostics toggle is off: each burst from [name] as text while it plays, settled once it has ended, and each burst
+ * spoken here as the model heard it from the microphone, before Opus — newest at the bottom — and while the speech
+ * model is not on the
  * phone, what it costs and the button that fetches it. Experimental, debug only: a spoken line set beside the other
  * phone's for the same burst shows what the codec cost the model. Nothing here leaves the phone.
  */
@@ -87,9 +88,9 @@ internal fun WalkieTranscript(
     val ready = ui.model == SttModelState.Ready
     val list = rememberLazyListState()
     val reduceMotion = LocalReduceMotion.current
-    // The newest burst in view as it comes, and again as its text lands — once the model is in. Before that the
-    // panel at the top is what matters, and a short screen would scroll it away.
-    LaunchedEffect(ui.lines.size, ui.lines.lastOrNull()?.state, ready) {
+    // The newest burst in view as it comes, as its words stream in and as its text lands — once the model is in. Before
+    // that the panel at the top is what matters, and a short screen would scroll it away.
+    LaunchedEffect(ui.lines.size, ui.lines.lastOrNull()?.state, ui.lines.lastOrNull()?.live, ready) {
         if (!ready || ui.lines.isEmpty()) return@LaunchedEffect
         val last = ui.lines.lastIndex
         if (reduceMotion) list.scrollToItem(last) else list.animateScrollToItem(last)
@@ -136,7 +137,7 @@ private fun LazyListScope.transcriptItems(
     } else if (ui.lines.isEmpty()) {
         item(key = "empty") {
             Text(
-                "What you and ${name.ifBlank { "the other phone" }} say shows here as text, once each burst has ended.",
+                "What you and ${name.ifBlank { "the other phone" }} say shows here as text, as you talk.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -174,13 +175,26 @@ private fun Line(
 
 @Composable
 private fun Said(line: TranscriptLine) {
-    when (val state = line.state) {
-        is TranscriptLine.State.Text -> {
+    val state = line.state
+    // A line still listening or finishing carries the words so far; a settled one, none.
+    val streaming = state is TranscriptLine.State.Listening || state is TranscriptLine.State.Pending
+    when {
+        state is TranscriptLine.State.Text -> {
             // Read out as it lands, for a user who cannot hear the burst; their own words they know.
             Text(
                 state.text,
                 style = MaterialTheme.typography.bodyLarge,
                 modifier = if (line.mine) Modifier else Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+            )
+        }
+
+        // The words so far, while the burst is still coming or being finished: dimmed, since they may yet change, and
+        // never read out — the settled text is, once.
+        streaming && line.live.isNotBlank() -> {
+            Text(
+                line.live + "…",
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
 

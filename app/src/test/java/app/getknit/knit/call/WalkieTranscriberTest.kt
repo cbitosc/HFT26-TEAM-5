@@ -15,22 +15,65 @@ import org.junit.Test
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
-/** The walkie's transcript (C-3.11-9): a burst heard becomes a line, and its text once the model has had it. */
+/**
+ * The walkie's transcript (C-3.11-9): a burst heard becomes a line, its words stream in while it plays, and its text
+ * settles once the model has finished it.
+ */
 @OptIn(ExperimentalCoroutinesApi::class)
 class WalkieTranscriberTest {
     private var now = 1_000L
     private var modelReady = true
-    private val heard = mutableListOf<Int>()
     private val logs = mutableListOf<String>()
 
+    /** A model whose every stream hears "n samples" for the n samples it was fed: live while open, settled at the end. */
+    private inner class FakeSpeech(
+        private val opens: Boolean = true,
+        // What finish answers, given the samples fed; null fails.
+        private val final: (Int) -> String? = { "words $it" },
+        private val lookCostMs: Long = 0,
+        private val finishGate: CompletableDeferred<Unit>? = null,
+    ) : SpeechToText {
+        val streams = mutableListOf<FakeStream>()
+
+        override suspend fun open(): SpeechStream? = if (opens) FakeStream().also { streams += it } else null
+
+        inner class FakeStream : SpeechStream {
+            val adds = mutableListOf<Int>()
+            var looks = 0
+            var finished = false
+            var closed = false
+            var failLook = false
+            val fed get() = adds.sum()
+
+            override suspend fun add(samples: FloatArray): Boolean {
+                check(!closed)
+                adds += samples.size
+                return true
+            }
+
+            override suspend fun look(): Heard? {
+                check(!closed)
+                looks++
+                now += lookCostMs
+                return if (failLook) null else Heard("", "heard $fed")
+            }
+
+            override suspend fun finish(): Heard? {
+                check(!closed)
+                finishGate?.await()
+                finished = true
+                closed = true
+                return final(fed)?.let { Heard(it) }
+            }
+
+            override suspend fun close() {
+                closed = true
+            }
+        }
+    }
+
     // On the test's scheduler but outside backgroundScope, whose work advanceUntilIdle leaves alone.
-    private fun TestScope.transcriber(
-        speech: SpeechToText =
-            SpeechToText { s ->
-                heard += s.size
-                "words ${s.size}"
-            },
-    ): WalkieTranscriber {
+    private fun TestScope.transcriber(speech: SpeechToText = FakeSpeech()): WalkieTranscriber {
         val dispatcher = StandardTestDispatcher(testScheduler)
         return WalkieTranscriber(
             speech = speech,
@@ -42,31 +85,76 @@ class WalkieTranscriberTest {
         )
     }
 
+    private fun WalkieTranscriber.line(index: Int = 0) = lines.value[index]
+
     @Test
-    fun aBurstIsListenedToThenTranscribed() =
+    fun aBurstsWordsStreamInWhileItPlaysAndSettleAtItsEnd() =
         runTest {
-            val t = transcriber()
+            val speech = FakeSpeech()
+            val t = transcriber(speech)
             t.begin(0)
             assertEquals(listOf(TranscriptLine(0, 1_000, TranscriptLine.State.Listening)), t.lines.value)
             t.pcm(pcm(ms = 2_000), 48_000, 1)
-            t.end(0)
-            assertEquals(
-                TranscriptLine.State.Pending,
-                t.lines.value
-                    .single()
-                    .state,
-            )
             advanceUntilIdle()
-            val line = t.lines.value.single()
+            // Still playing: the model has looked once, and the line shows what it heard.
+            assertEquals(TranscriptLine.State.Listening, t.line().state)
+            assertEquals("heard 32000", t.line().live)
+            t.end(0)
+            // Ended: the words so far stay up while the model finishes.
+            assertEquals(TranscriptLine.State.Pending, t.line().state)
+            assertEquals("heard 32000", t.line().live)
+            advanceUntilIdle()
+            val line = t.line()
             assertEquals(TranscriptLine.State.Text("words 32000"), line.state)
+            assertEquals("", line.live)
             assertEquals(2_000, line.audioMs)
-            assertEquals(listOf(32_000), heard)
+            assertEquals(1, line.looks)
+            val stream = speech.streams.single()
+            assertEquals(listOf(32_000), stream.adds)
+            assertTrue(stream.finished)
+        }
+
+    @Test
+    fun audioIsFedInTheOrderItCameAndLooksKeepTheCadence() =
+        runTest {
+            val speech = FakeSpeech()
+            val t = transcriber(speech)
+            t.begin(0)
+            // Two seconds in the decoder's 100 ms of buffers, each fed before the next arrives.
+            repeat(20) {
+                t.pcm(pcm(ms = 100), 48_000, 1)
+                advanceUntilIdle()
+            }
+            t.end(0)
+            advanceUntilIdle()
+            val stream = speech.streams.single()
+            assertEquals(List(20) { 1_600 }, stream.adds)
+            // A look every 500 ms of audio.
+            assertEquals(4, stream.looks)
+            assertEquals(TranscriptLine.State.Text("words 32000"), t.line().state)
+        }
+
+    @Test
+    fun aSlowPhoneLooksLessOften() =
+        runTest {
+            // Each look takes a second and a half: the next must wait for as much audio.
+            val speech = FakeSpeech(lookCostMs = 1_500)
+            val t = transcriber(speech)
+            t.begin(0)
+            repeat(40) {
+                t.pcm(pcm(ms = 100), 48_000, 1)
+                advanceUntilIdle()
+            }
+            t.end(0)
+            advanceUntilIdle()
+            // At 0.5 s, then every 1.5 s after: 2.0 and 3.5.
+            assertEquals(3, speech.streams.single().looks)
         }
 
     @Test
     fun theTextIsNeverLogged() =
         runTest {
-            val t = transcriber(SpeechToText { "meet me at the gate" })
+            val t = transcriber(FakeSpeech(final = { "meet me at the gate" }))
             t.begin(0)
             t.pcm(pcm(ms = 1_000), 48_000, 1)
             t.end(0)
@@ -76,45 +164,58 @@ class WalkieTranscriberTest {
         }
 
     @Test
-    fun aSlippedThumbIsNoSpeechAndNeverReachesTheModel() =
+    fun aSlippedThumbIsNoSpeechAndItsStreamIsClosedUnfinished() =
         runTest {
-            val t = transcriber()
+            val speech = FakeSpeech()
+            val t = transcriber(speech)
             t.begin(0)
             t.pcm(pcm(ms = 200), 48_000, 1)
+            // Fed as it played, so its stream is open by the release.
+            advanceUntilIdle()
             t.end(0)
             advanceUntilIdle()
-            assertEquals(
-                TranscriptLine.State.NoSpeech,
-                t.lines.value
-                    .single()
-                    .state,
-            )
-            assertTrue(heard.isEmpty())
+            assertEquals(TranscriptLine.State.NoSpeech, t.line().state)
+            val stream = speech.streams.single()
+            assertTrue(stream.closed)
+            assertFalse(stream.finished)
         }
 
     @Test
-    fun withoutTheModelABurstIsMarkedSo() =
+    fun withoutTheModelABurstIsMarkedSoAndNoStreamOpens() =
         runTest {
             modelReady = false
-            val t = transcriber()
+            val speech = FakeSpeech()
+            val t = transcriber(speech)
             t.begin(0)
             t.pcm(pcm(ms = 1_000), 48_000, 1)
             t.end(0)
             advanceUntilIdle()
-            assertEquals(
-                TranscriptLine.State.NoModel,
-                t.lines.value
-                    .single()
-                    .state,
-            )
-            assertTrue(heard.isEmpty())
+            assertEquals(TranscriptLine.State.NoModel, t.line().state)
+            assertTrue(speech.streams.isEmpty())
+        }
+
+    @Test
+    fun aModelThatArrivesMidBurstIsFedTheWholeBurst() =
+        runTest {
+            modelReady = false
+            val speech = FakeSpeech()
+            val t = transcriber(speech)
+            t.begin(0)
+            t.pcm(pcm(ms = 1_000), 48_000, 1)
+            advanceUntilIdle()
+            modelReady = true
+            t.pcm(pcm(ms = 1_000), 48_000, 1)
+            t.end(0)
+            advanceUntilIdle()
+            assertEquals(listOf(32_000), speech.streams.single().adds)
+            assertEquals(TranscriptLine.State.Text("words 32000"), t.line().state)
         }
 
     @Test
     fun anEmptyAnswerIsNoSpeechAndANullOneAFailure() =
         runTest {
             val answers = ArrayDeque(listOf<String?>("  ", null))
-            val t = transcriber(SpeechToText { answers.removeFirst() })
+            val t = transcriber(FakeSpeech(final = { answers.removeFirst() }))
             for (b in 0..1) {
                 t.begin(b)
                 t.pcm(pcm(ms = 1_000), 48_000, 1)
@@ -125,67 +226,41 @@ class WalkieTranscriberTest {
         }
 
     @Test
-    fun aLongBurstGoesToTheModelInStretchesAndComesBackAsOneLine() =
+    fun aModelThatWillNotRunIsAFailure() =
         runTest {
-            val t = transcriber()
-            t.begin(0)
-            t.pcm(pcm(ms = 20_000), 48_000, 1)
-            t.end(0)
-            advanceUntilIdle()
-            // Even loudness throughout: no pause to find, so cut anywhere from 5 s to 8 s in.
-            assertTrue("${heard.size}", heard.size in 3..4)
-            assertTrue(heard.all { it <= 16_000 * 8 })
-            assertEquals(16_000 * 20, heard.sum())
-            val text =
-                (
-                    t.lines.value
-                        .single()
-                        .state as TranscriptLine.State.Text
-                ).text
-            assertEquals(heard.joinToString(" ") { "words $it" }, text)
-        }
-
-    @Test
-    fun burstsAreTranscribedOneAtATimeInTheOrderTheyEnded() =
-        runTest {
-            val gate = CompletableDeferred<Unit>()
-            val order = mutableListOf<Int>()
-            val t =
-                transcriber(
-                    SpeechToText { s ->
-                        val n = s.size / 16_000
-                        order += n
-                        if (n == 1) gate.await()
-                        "burst of $n s"
-                    },
-                )
+            val t = transcriber(FakeSpeech(opens = false))
             t.begin(0)
             t.pcm(pcm(ms = 1_000), 48_000, 1)
             t.end(0)
-            t.begin(1)
-            t.pcm(pcm(ms = 2_000), 48_000, 1)
-            t.end(1)
             advanceUntilIdle()
-            // The second waits behind the first, which waits on the gate.
-            assertEquals(listOf(1), order)
-            assertEquals(TranscriptLine.State.Pending, t.lines.value[1].state)
-            gate.complete(Unit)
+            assertEquals(TranscriptLine.State.Failed, t.line().state)
+        }
+
+    @Test
+    fun aLookTheModelFailsOnFailsTheBurstAndClosesItsStream() =
+        runTest {
+            val speech = FakeSpeech()
+            val t = transcriber(speech)
+            t.begin(0)
+            t.pcm(pcm(ms = 100), 48_000, 1)
             advanceUntilIdle()
-            assertEquals(listOf(1, 2), order)
-            assertEquals(listOf("burst of 1 s", "burst of 2 s"), t.lines.value.map { (it.state as TranscriptLine.State.Text).text })
+            val stream = speech.streams.single()
+            stream.failLook = true
+            t.pcm(pcm(ms = 1_000), 48_000, 1)
+            t.pcm(pcm(ms = 1_000), 48_000, 1)
+            t.end(0)
+            advanceUntilIdle()
+            assertTrue(stream.closed)
+            assertFalse(stream.finished)
+            assertEquals(1, speech.streams.size)
+            assertEquals(TranscriptLine.State.Failed, t.line().state)
         }
 
     @Test
     fun aNewSessionStartsEmptyAndTheOldOnesTextNeverLandsInIt() =
         runTest {
             val gate = CompletableDeferred<Unit>()
-            val t =
-                transcriber(
-                    SpeechToText {
-                        gate.await()
-                        "from the last session"
-                    },
-                )
+            val t = transcriber(FakeSpeech(finishGate = gate))
             t.begin(4)
             t.pcm(pcm(ms = 1_000), 48_000, 1)
             t.end(4)
@@ -198,9 +273,27 @@ class WalkieTranscriberTest {
         }
 
     @Test
-    fun aBurstCutOffByTheSessionsEndIsDropped() =
+    fun aBurstStillPlayingAtANewSessionIsClosedUnheard() =
         runTest {
-            val t = transcriber()
+            val speech = FakeSpeech()
+            val t = transcriber(speech)
+            t.begin(0)
+            t.pcm(pcm(ms = 1_000), 48_000, 1)
+            advanceUntilIdle()
+            t.reset()
+            t.end(0)
+            advanceUntilIdle()
+            val stream = speech.streams.single()
+            assertTrue(stream.closed)
+            assertFalse(stream.finished)
+            assertTrue(t.lines.value.isEmpty())
+        }
+
+    @Test
+    fun aBurstCutOffByTheSessionsEndIsDroppedAndItsStreamClosed() =
+        runTest {
+            val speech = FakeSpeech()
+            val t = transcriber(speech)
             t.begin(0)
             t.pcm(pcm(ms = 1_000), 48_000, 1)
             t.abandon()
@@ -208,21 +301,23 @@ class WalkieTranscriberTest {
             t.end(0)
             advanceUntilIdle()
             assertTrue(t.lines.value.isEmpty())
-            assertTrue(heard.isEmpty())
+            assertTrue(speech.streams.all { it.closed && !it.finished })
         }
 
     @Test
     fun aSpokenBurstIsTranscribedFromTheMicBesideOneHeardUnderTheSameNumber() =
         runTest {
-            val t = transcriber()
+            val speech = FakeSpeech()
+            val t = transcriber(speech)
             t.begin(0)
             t.pcm(pcm(ms = 1_000), 48_000, 1)
-            // Talking holds the playback mid-burst: both are open at once, and each keeps its own audio.
+            // Talking holds the playback mid-burst: both are open at once, and each has its own stream.
             t.begin(0, mine = true)
             t.mic.pcm(pcm(ms = 2_000, rate = 16_000), 16_000, 1)
             t.end(0, mine = true)
             t.end(0)
             advanceUntilIdle()
+            assertEquals(2, speech.streams.size)
             assertEquals(
                 listOf(false to "words 16000", true to "words 32000"),
                 t.lines.value.map { it.mine to (it.state as TranscriptLine.State.Text).text },
@@ -239,12 +334,7 @@ class WalkieTranscriberTest {
             t.abandon(mine = true)
             t.end(3, mine = true)
             assertEquals(listOf(false), t.lines.value.map { it.mine })
-            assertEquals(
-                TranscriptLine.State.Listening,
-                t.lines.value
-                    .single()
-                    .state,
-            )
+            assertEquals(TranscriptLine.State.Listening, t.line().state)
         }
 
     @Test
@@ -256,6 +346,28 @@ class WalkieTranscriberTest {
         lines = withLine(lines, TranscriptLine(20, 20, TranscriptLine.State.NoSpeech), max = 50)
         assertEquals(50, lines.size)
         assertEquals(TranscriptLine.State.NoSpeech, lines[10].state)
+    }
+
+    @Test
+    fun aLookIsDueEveryIntervalOrAsMuchAudioAsTheLastTookToMake() {
+        val gate = PassGate(intervalMs = 500)
+        assertFalse(gate.fed(400.0))
+        assertTrue(gate.fed(100.0))
+        // A look that took 2 s: the next waits for 2 s of audio.
+        gate.took(2_000)
+        assertFalse(gate.fed(1_900.0))
+        assertTrue(gate.fed(100.0))
+        // Never past ten intervals, however slow the last look was.
+        gate.took(60_000)
+        assertFalse(gate.fed(4_999.0))
+        assertTrue(gate.fed(1.0))
+    }
+
+    @Test
+    fun heardTextJoinsWhatIsSettledAndWhatIsLive() {
+        assertEquals("meet me at the gate", Heard("meet me", " at the gate ").text)
+        assertEquals("at the gate", Heard("", "at the gate").text)
+        assertEquals("", Heard(" ", "").text)
     }
 
     // [ms] of a quiet tone at [rate], as the player's tap (48 kHz) or the recorder's (16 kHz) hands it on.

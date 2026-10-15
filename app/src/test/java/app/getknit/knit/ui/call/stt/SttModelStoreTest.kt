@@ -3,6 +3,7 @@ package app.getknit.knit.ui.call.stt
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import app.getknit.knit.call.SttArch
 import app.getknit.knit.call.SttFile
 import app.getknit.knit.call.SttModel
 import app.getknit.knit.call.SttModelState
@@ -22,7 +23,12 @@ class SttModelStoreTest {
     private val scope = CoroutineScope(SupervisorJob())
 
     private fun model(id: String) =
-        SttModel(id = id, baseUrl = "https://example.test/$id/", files = listOf(SttFile("tokens.txt", 1, "00")))
+        SttModel(
+            id = id,
+            baseUrl = "https://example.test/$id/",
+            files = listOf(SttFile("tokens.txt", 1, "00")),
+            arch = SttArch.TINY_STREAMING,
+        )
 
     private val tiny = model("tiny")
     private val base = model("base")

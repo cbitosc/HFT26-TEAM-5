@@ -7,6 +7,7 @@ import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.media.MediaRecorder
+import android.media.audiofx.NoiseSuppressor
 import android.util.Log
 import app.getknit.knit.call.TalkGain
 import app.getknit.knit.call.TalkPcmTap
@@ -24,7 +25,8 @@ import kotlin.math.abs
 
 /**
  * Records a walkie burst as Opus packets while it is spoken (docs/VOICE_CALLS.md §3.11): the microphone through
- * [AudioRecord] at 16 kHz mono, through [TalkGain], into the platform Opus encoder at [WalkiePolicy.BIT_RATE], each
+ * [AudioRecord] at 16 kHz mono, with the platform's noise suppressor on its session where the phone has one
+ * ([suppressNoise], C-3.11-5), through [TalkGain], into the platform Opus encoder at [WalkiePolicy.BIT_RATE], each
  * 20 ms packet handed on the moment it comes out. There is no container, no file, and nothing on disk. The chat's
  * `VoiceRecorder` writes AAC through `MediaRecorder`, which at a speech rate is about twice Opus's size and buffers
  * besides.
@@ -58,6 +60,18 @@ internal class TalkRecorder(
 
     // One gain per microphone, kept across bursts and sessions (§3.11, C-3.11-5): the phone's and a headset's differ.
     private val gains = mapOf(false to TalkGain(), true to TalkGain())
+
+    /**
+     * Whether a burst asks for the platform's noise suppressor (`android.media.audiofx.NoiseSuppressor`) on its
+     * microphone. On by default; the debug bridge turns it off for an A/B. A burst read from [nextFrom] has none.
+     */
+    @Volatile
+    var suppressNoise = true
+
+    /** What the last burst's microphone had: `on`, `off` (not asked for), `unavailable` or `refused`; null before one. */
+    @Volatile
+    var suppressor: String? = null
+        private set
 
     /** Raw 16 kHz mono 16-bit little-endian PCM the next burst reads in place of the microphone, once. */
     @Volatile
@@ -221,6 +235,7 @@ internal class TalkRecorder(
 
     private class Microphone(
         private val record: AudioRecord,
+        private val effect: NoiseSuppressor?,
     ) : Capture {
         override fun read(
             buffer: ByteArray,
@@ -228,7 +243,9 @@ internal class TalkRecorder(
             size: Int,
         ) = record.read(buffer, offset, size)
 
+        // The effect first: it is attached to the record's session, and outliving it leaks the native effect.
         override fun close() {
+            runCatching { effect?.release() }
             runCatching { record.stop() }
             runCatching { record.release() }
         }
@@ -287,14 +304,41 @@ internal class TalkRecorder(
             if (record.state == AudioRecord.STATE_INITIALIZED) {
                 runCatching { record.startRecording() }
                 if (record.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
-                    Log.i(TAG, "walkie in: source $source, ${record.routedDevice?.type?.let(::deviceName) ?: "unrouted"}")
-                    return Microphone(record)
+                    val effect = suppressorOn(record)
+                    Log.i(
+                        TAG,
+                        "walkie in: source $source, ${record.routedDevice?.type?.let(::deviceName) ?: "unrouted"}, " +
+                            "noise suppressor $suppressor",
+                    )
+                    return Microphone(record, effect)
                 }
             }
             runCatching { record.release() }
         }
         Log.w(TAG, "walkie microphone would not open")
         return null
+    }
+
+    /**
+     * The platform's noise suppressor on [record]'s session, enabled, where [suppressNoise] asks for it and the phone
+     * implements one (C-3.11-5); null otherwise, with [suppressor] saying why. `VOICE_RECOGNITION` carries no
+     * pre-processing of its own, so this is the only suppression a walkie burst gets; on a headset's
+     * `VOICE_COMMUNICATION` the vendor may already run one, and this asks for it explicitly.
+     */
+    private fun suppressorOn(record: AudioRecord): NoiseSuppressor? {
+        if (!suppressNoise) {
+            suppressor = "off"
+            return null
+        }
+        if (!NoiseSuppressor.isAvailable()) {
+            suppressor = "unavailable"
+            return null
+        }
+        val effect = runCatching { NoiseSuppressor.create(record.audioSessionId) }.getOrNull()
+        val on = effect != null && runCatching { effect.setEnabled(true) == NoiseSuppressor.SUCCESS && effect.enabled }.getOrDefault(false)
+        if (!on) runCatching { effect?.release() }
+        suppressor = if (on) "on" else "refused"
+        return effect.takeIf { on }
     }
 
     private fun openEncoder(): MediaCodec? =

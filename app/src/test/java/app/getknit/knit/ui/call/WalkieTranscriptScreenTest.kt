@@ -92,6 +92,14 @@ class WalkieTranscriptScreenTest {
     }
 
     @Test
+    fun aBurstStillPlayingShowsTheWordsSoFar() {
+        render(ui(lines = listOf(TranscriptLine(0, 0, TranscriptLine.State.Listening, live = "Meet me at"))))
+        compose.onNodeWithContentDescription("Show transcript").performClick()
+        compose.onNodeWithText("Meet me at…").assertIsDisplayed()
+        compose.onNodeWithText("Listening…").assertDoesNotExist()
+    }
+
+    @Test
     fun withoutTheModelTheCardOffersItsDownload() {
         render(ui(model = SttModelState.Absent, lines = listOf(TranscriptLine(0, 0, TranscriptLine.State.NoModel))))
         compose.onNodeWithContentDescription("Show transcript").performClick()
@@ -125,18 +133,18 @@ class WalkieTranscriptScreenTest {
             ui(model = SttModelState.Absent).copy(
                 choices =
                     listOf(
-                        SttChoice("tiny", "Tiny", 44_256_550, installed = true),
-                        SttChoice("base", "Base", 141_314_910, installed = false),
-                        SttChoice("whisper", "Whisper", 375_502_142, installed = false),
+                        SttChoice("small", "Small", 142_315_154, installed = true),
+                        SttChoice("tiny", "Tiny", 45_247_839, installed = false),
+                        SttChoice("medium", "Medium", 269_155_803, installed = false),
                     ),
-                chosen = "tiny",
+                chosen = "small",
             ),
         )
         compose.onNodeWithContentDescription("Show transcript").performClick()
         compose.onNodeWithText("on phone").assertIsDisplayed()
-        compose.onNodeWithText("376 MB").assertIsDisplayed()
-        compose.onNodeWithText("Base").performClick()
-        assertEquals(listOf("base"), picked)
+        compose.onNodeWithText("269 MB").assertIsDisplayed()
+        compose.onNodeWithText("Medium").performClick()
+        assertEquals(listOf("medium"), picked)
     }
 
     @Test

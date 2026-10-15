@@ -4,7 +4,6 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -17,7 +16,8 @@ import java.nio.ByteOrder
 
 /**
  * The walkie's transcript (docs/VOICE_CALLS.md §3.11, C-3.11-9): each burst this phone hears is written out as text on
- * the call screen by a speech model run here, on the receiver, after the burst has played — and each burst this phone
+ * the call screen by a streaming speech model run here, on the receiver, fed as the burst plays — so its words show
+ * while the other phone is still talking, and are final a moment after the burst ends — and each burst this phone
  * speaks, from the microphone's PCM before Opus, so the two phones' lines side by side show what the codec cost the
  * model. Nothing about it is on the wire: the sender sends the same frames, and the text never leaves the phone or
  * outlives the session.
@@ -26,18 +26,18 @@ object SttPolicy {
     /** What the model takes: 16 kHz mono, as the burst was captured before Opus. */
     const val SAMPLE_RATE = 16_000
 
-    /** A burst shorter than this is a slipped thumb, not speech: no model run. */
+    /** A burst shorter than this is a slipped thumb, not speech: its text, if any, is dropped. */
     const val MIN_SPEECH_MS = 300L
 
     /**
-     * The longest stretch handed to the model at once. Moonshine v2 tiny returns nothing past about 9 s (its encoder's
-     * 540 frames; desktop-measured), so a longer burst is cut at its quietest point between [SEGMENT_MIN_MS] and this.
+     * How much new audio a stream takes before the model looks at it again ([PassGate]): the live text's cadence.
+     * Moonshine's own default; the streaming encoder has cached what came before, so a look costs the new audio and
+     * a decode, not the whole burst.
      */
-    const val SEGMENT_MAX_MS = 8_000L
-    const val SEGMENT_MIN_MS = 5_000L
+    const val UPDATE_MS = 500L
 
-    /** The window [segments] measures loudness over when it looks for the quietest place to cut. */
-    const val QUIET_WINDOW_MS = 50L
+    /** The most a slow phone stretches the cadence to ([PassGate]), as a multiple of [UPDATE_MS]. */
+    const val MAX_UPDATE_FACTOR = 10
 
     /** The transcript keeps this many bursts; older ones fall off the top. */
     const val MAX_LINES = 50
@@ -60,27 +60,87 @@ fun interface TalkPcmTap {
     )
 }
 
-/** A speech model: [SttPolicy.SAMPLE_RATE] mono samples in −1..1 to their text, or null when it could not run. */
+/**
+ * A streaming speech model: one [SpeechStream] per burst, fed [SttPolicy.SAMPLE_RATE] mono samples in −1..1 as they
+ * arrive. [open] answers null when the model could not run (it would not load, or faulted).
+ */
 fun interface SpeechToText {
-    suspend fun transcribe(samples: FloatArray): String?
-
-    /** Where a burst is cut for this model ([segments]): the stretches it is handed one at a time. */
-    fun cut(samples: FloatArray): List<IntRange> = segments(samples)
+    suspend fun open(): SpeechStream?
 }
 
 /**
- * One burst's audio gathered for the model: the player's PCM, whatever its rate and layout, mixed to mono and brought to
- * [SttPolicy.SAMPLE_RATE] as it comes — by averaging whole blocks where the rate is a multiple (the decoder's 48 kHz,
- * three to one), by linear interpolation where it is not — and capped at [capMs] so a stuck burst cannot grow without
- * bound. At 8 kbps Opus codes speech narrowband, so a block average's soft low-pass costs nothing the model would hear.
- * Pure (`BurstPcmTest`); not thread-safe.
+ * One burst inside the model. The transcriber calls it from one coroutine at a time, never two at once; every call may
+ * run the model, so each suspends, and none is made on a thread that must not wait. A call that answers null or false is the model
+ * failing on this burst: the stream is closed by then, and every later call is a no-op that fails again.
+ */
+interface SpeechStream {
+    /** Takes more of the burst's audio; false when the model failed on it. */
+    suspend fun add(samples: FloatArray): Boolean
+
+    /** Looks at everything taken so far: what it has heard, or null when the model failed. */
+    suspend fun look(): Heard?
+
+    /** The burst has ended: the last look, final, and the stream closed. Null when the model failed. */
+    suspend fun finish(): Heard?
+
+    /** Drops the stream with no last look. Idempotent, and a no-op once [finish] has run. */
+    suspend fun close()
+}
+
+/**
+ * What a stream has heard so far: [settled], the text of the stretches the model has closed at a pause and will not
+ * change again, and [live], its current guess at the stretch still open. After [SpeechStream.finish] nothing is live.
+ */
+data class Heard(
+    val settled: String,
+    val live: String = "",
+) {
+    /** Both, as the line shows them. */
+    val text: String get() = listOf(settled, live).map { it.trim() }.filter { it.isNotEmpty() }.joinToString(" ")
+}
+
+/**
+ * When a stream is worth another look: once [SttPolicy.UPDATE_MS] of audio has come in since the last, or — on a phone
+ * that cannot keep up — once as much audio as the last look took to make, up to [SttPolicy.MAX_UPDATE_FACTOR] times the
+ * cadence. A look's cost is mostly a fixed start-up, so a slow phone that kept the cadence would fall further behind
+ * every look; earning each look turns that into larger, rarer ones that stay within a look or two of the talker.
+ * Moonshine's own `isUpdateDue`, here so it is tested. Pure; not thread-safe.
+ */
+class PassGate(
+    private val intervalMs: Long = SttPolicy.UPDATE_MS,
+) {
+    private var pendingMs = 0.0
+    private var lastLookMs = 0L
+
+    /** [ms] more audio has been taken; true when a look is due now, and the count starts again. */
+    fun fed(ms: Double): Boolean {
+        pendingMs += ms
+        val needed = lastLookMs.coerceIn(intervalMs, intervalMs * SttPolicy.MAX_UPDATE_FACTOR)
+        if (pendingMs < needed) return false
+        pendingMs = 0.0
+        return true
+    }
+
+    /** A look took [ms] of wall time. */
+    fun took(ms: Long) {
+        lastLookMs = ms
+    }
+}
+
+/**
+ * One burst's audio on its way to the model: the player's PCM, whatever its rate and layout, mixed to mono and brought
+ * to [SttPolicy.SAMPLE_RATE] as it comes — by averaging whole blocks where the rate is a multiple (the decoder's 48 kHz,
+ * three to one), by linear interpolation where it is not — and held until [drain] takes it. The whole burst is capped
+ * at [capMs] so a stuck one cannot grow without bound. At 8 kbps Opus codes speech narrowband, so a block average's
+ * soft low-pass costs nothing the model would hear. Pure (`BurstPcmTest`); not thread-safe.
  */
 class BurstPcm(
     capMs: Long = WalkiePolicy.MAX_BURST_MS + CAP_SLACK_MS,
 ) {
     private val cap = (capMs * SttPolicy.SAMPLE_RATE / MS_PER_S).toInt()
-    private var out = FloatArray(INITIAL_SAMPLES)
-    private var size = 0
+    private var held = FloatArray(INITIAL_SAMPLES)
+    private var heldSize = 0
+    private var total = 0
 
     // The block being averaged (an integer ratio), or the resampler's phase and last sample (any other).
     private var blockSum = 0f
@@ -89,8 +149,8 @@ class BurstPcm(
     private var previous = 0f
     private var rate = 0
 
-    /** How much audio is held, in milliseconds. */
-    val audioMs: Long get() = size * MS_PER_S / SttPolicy.SAMPLE_RATE
+    /** How much audio the burst has had, drained or not, in milliseconds. */
+    val audioMs: Long get() = total * MS_PER_S / SttPolicy.SAMPLE_RATE
 
     /** Takes [pcm]'s samples between its position and its limit; [pcm] itself is left as it was. */
     fun add(
@@ -113,8 +173,12 @@ class BurstPcm(
         }
     }
 
-    /** The audio held, at [SttPolicy.SAMPLE_RATE]. */
-    fun samples(): FloatArray = out.copyOf(size)
+    /** The audio held since the last drain, at [SttPolicy.SAMPLE_RATE], and no longer held here. */
+    fun drain(): FloatArray {
+        val out = held.copyOf(heldSize)
+        heldSize = 0
+        return out
+    }
 
     private fun take(sample: Float) {
         val r = rate
@@ -138,15 +202,16 @@ class BurstPcm(
     }
 
     private fun put(sample: Float) {
-        if (size >= cap) return
-        if (size == out.size) out = out.copyOf(minOf(cap, out.size * 2))
-        out[size++] = sample
+        if (total >= cap) return
+        if (heldSize == held.size) held = held.copyOf(minOf(cap, held.size * 2))
+        held[heldSize++] = sample
+        total++
     }
 
     private companion object {
         const val MS_PER_S = 1_000L
         const val FULL_SCALE = 32_768f
-        const val INITIAL_SAMPLES = SttPolicy.SAMPLE_RATE * 4
+        const val INITIAL_SAMPLES = SttPolicy.SAMPLE_RATE
 
         // A burst ends a little after the recorder's cap: the encoder's tail and the last chunk's rounding.
         const val CAP_SLACK_MS = 2_000L
@@ -154,63 +219,29 @@ class BurstPcm(
 }
 
 /**
- * Where [samples] (at [rate]) is cut for the model: stretches no longer than [maxMs], each ending at the quietest
- * [SttPolicy.QUIET_WINDOW_MS] between [minMs] and [maxMs] from its start — a pause between words, as a rule, so no word
- * is cut in two. Audio no longer than [maxMs] is one stretch. Pure (`BurstPcmTest`).
- */
-fun segments(
-    samples: FloatArray,
-    rate: Int = SttPolicy.SAMPLE_RATE,
-    minMs: Long = SttPolicy.SEGMENT_MIN_MS,
-    maxMs: Long = SttPolicy.SEGMENT_MAX_MS,
-): List<IntRange> {
-    val max = (maxMs * rate / MS_PER_SECOND).toInt()
-    val min = (minMs * rate / MS_PER_SECOND).toInt()
-    val window = (SttPolicy.QUIET_WINDOW_MS * rate / MS_PER_SECOND).toInt().coerceAtLeast(1)
-    val hop = (window / 2).coerceAtLeast(1)
-    val cuts = mutableListOf<IntRange>()
-    var start = 0
-    while (samples.size - start > max) {
-        var quietest = start + max
-        var least = Double.MAX_VALUE
-        var at = start + min
-        while (at + window <= start + max) {
-            var energy = 0.0
-            for (i in at until at + window) energy += samples[i] * samples[i]
-            if (energy < least) {
-                least = energy
-                quietest = at + window / 2
-            }
-            at += hop
-        }
-        cuts += start until quietest
-        start = quietest
-    }
-    if (start < samples.size) cuts += start until samples.size
-    return cuts
-}
-
-private const val MS_PER_SECOND = 1_000L
-
-/**
  * One burst, as the transcript shows it: [burst] is the sender's number, [heardAt] when it began to play — or, [mine],
  * a burst this phone spoke, numbered by its own count and stamped when the button went down, transcribed from the
- * microphone before Opus touched it.
+ * microphone before Opus touched it. [live] is what the model has heard so far, while the burst is still coming
+ * ([State.Listening]) or being finished ([State.Pending]).
  */
 data class TranscriptLine(
     val burst: Int,
     val heardAt: Long,
     val state: State,
-    // The burst's audio and the model's time over it, for the diagnostics; 0 until known.
+    val live: String = "",
+    // For the diagnostics, 0 until known: the burst's audio, the time from its end to its final text, how many looks the
+    // model took while it came, and the model's time over it all (its share of the phone).
     val audioMs: Long = 0,
     val tookMs: Long = 0,
+    val looks: Int = 0,
+    val modelMs: Long = 0,
     val mine: Boolean = false,
 ) {
     sealed interface State {
         /** The burst is playing, or being spoken. */
         data object Listening : State
 
-        /** Played; the model has it. */
+        /** It has ended; the model is finishing it. */
         data object Pending : State
 
         data class Text(
@@ -243,18 +274,20 @@ fun withLine(
 private fun TranscriptLine.sameBurst(other: TranscriptLine) = burst == other.burst && mine == other.mine
 
 /**
- * Writes the peer's walkie bursts out as text (C-3.11-9). The player's loop opens a burst ([begin]) as it starts to
- * play it, its decoded PCM comes through [pcm] (this is the player's [TalkPcmTap]), and the burst is handed to the
- * model when it has played to its end ([end]) — on [dispatcher], one burst at a time in the order they ended (a fair
- * lock, since the model suspends), so a long one never holds up the playback of the next. [ready] says whether the
- * model is on the phone; a burst that ends without it is marked [TranscriptLine.State.NoModel] and its audio dropped.
+ * Writes the peer's walkie bursts out as text (C-3.11-9), as they play. The player's loop opens a burst ([begin]) as it
+ * starts to play it, its decoded PCM comes through [pcm] (this is the player's [TalkPcmTap]) and is fed to a stream of
+ * the model's as it comes, the line showing what the model has heard so far each time it looks ([PassGate]), and the
+ * stream is finished when the burst has played to its end ([end]). All of it runs on [dispatcher], one model call at a
+ * time behind a fair lock, so a burst's audio reaches the model in order and the player's thread never waits on it.
+ * [ready] says whether the model is on the phone; a burst heard while it is not is held, and fed in full should the
+ * model arrive before the burst ends — else the burst is marked [TranscriptLine.State.NoModel] and its audio dropped.
  *
  * The bursts this phone speaks go the same way through [mic], the recorder's tap, opened and ended with `mine = true`
  * — the microphone's PCM before the encoder, so set beside the other phone's line for the same burst it shows what
  * Opus cost the model and what the model gets wrong on its own. One of each can be open at once: talking holds the
  * playback mid-burst, it does not end it.
  *
- * A session ([reset]) starts the transcript afresh; a burst still with the model from the last one is abandoned. The
+ * A session ([reset]) starts the transcript afresh; a burst of the last one still with the model is closed unheard. The
  * text is held here and nowhere else: it is never logged, stored or sent. Thread-safe: [pcm] comes on the player's
  * thread and [mic] on the recorder's, the rest from the player's loop, the talk button and the call screen.
  */
@@ -271,42 +304,49 @@ class WalkieTranscriber(
     /** This session's bursts, oldest first. */
     val lines: StateFlow<List<TranscriptLine>> = _lines.asStateFlow()
 
-    private val work = SupervisorJob(scope.coroutineContext[Job])
-    private val workScope = CoroutineScope(scope.coroutineContext + work)
+    private val workScope = CoroutineScope(scope.coroutineContext + SupervisorJob(scope.coroutineContext[Job]))
     private val lock = Any()
     private val serial = Mutex()
 
-    /** The burst open on one side and its audio so far. */
-    private class Slot {
-        var open: Int? = null
-        var audio: BurstPcm? = null
+    /** One burst on its way through: its audio under [lock], its stream under [serial]. */
+    private class Burst(
+        val number: Int,
+        val mine: Boolean,
+        val session: Int,
+    ) {
+        // Under [lock]: the audio not yet fed, whether a feed is already on its way, and whether the burst was dropped.
+        val audio = BurstPcm()
+        var queued = false
+        var dropped = false
 
-        fun clear() {
-            open = null
-            audio = null
-        }
+        // Under [serial]: the model's stream, once open, and what the model has cost so far.
+        var stream: SpeechStream? = null
+        var failed = false
+        val gate = PassGate()
+        var looks = 0
+        var modelMs = 0L
     }
 
-    // The burst playing now, the one being spoken, and the session's number, which a finished transcription must still
-    // match.
-    private val heard = Slot()
-    private val spoken = Slot()
+    // The burst playing now, the one being spoken, and the session's number, which every piece of work must still match.
+    private var heard: Burst? = null
+    private var spoken: Burst? = null
     private var session = 0
 
-    private fun slot(mine: Boolean) = if (mine) spoken else heard
-
     /** The recorder's tap: the microphone's PCM for the burst being spoken. */
-    val mic = TalkPcmTap { pcm, rate, channels -> synchronized(lock) { spoken.audio?.add(pcm, rate, channels) } }
+    val mic = TalkPcmTap { pcm, rate, channels -> take(mine = true, pcm, rate, channels) }
 
     /** A new session: an empty transcript, and nothing from the last one still to come. */
     fun reset() {
-        synchronized(lock) {
-            session++
-            heard.clear()
-            spoken.clear()
-        }
-        work.cancelChildren()
+        val gone =
+            synchronized(lock) {
+                session++
+                listOfNotNull(heard, spoken).onEach { it.dropped = true }.also {
+                    heard = null
+                    spoken = null
+                }
+            }
         _lines.value = emptyList()
+        gone.forEach(::closeLater)
     }
 
     /** The burst [burst] has begun to play, or ([mine]) to be spoken. */
@@ -314,10 +354,15 @@ class WalkieTranscriber(
         burst: Int,
         mine: Boolean = false,
     ) {
-        synchronized(lock) {
-            slot(mine).open = burst
-            slot(mine).audio = BurstPcm()
-        }
+        val replaced =
+            synchronized(lock) {
+                val before = if (mine) spoken else heard
+                before?.dropped = true
+                val next = Burst(burst, mine, session)
+                if (mine) spoken = next else heard = next
+                before
+            }
+        replaced?.let(::closeLater)
         _lines.update { withLine(it, TranscriptLine(burst, clock(), TranscriptLine.State.Listening, mine = mine)) }
     }
 
@@ -325,84 +370,168 @@ class WalkieTranscriber(
         pcm: ByteBuffer,
         rate: Int,
         channels: Int,
+    ) = take(mine = false, pcm, rate, channels)
+
+    private fun take(
+        mine: Boolean,
+        pcm: ByteBuffer,
+        rate: Int,
+        channels: Int,
     ) {
-        synchronized(lock) { heard.audio?.add(pcm, rate, channels) }
+        val burst =
+            synchronized(lock) {
+                val b = (if (mine) spoken else heard) ?: return
+                b.audio.add(pcm, rate, channels)
+                if (b.queued) return
+                b.queued = true
+                b
+            }
+        workScope.launch(dispatcher) { serial.withLock { feed(burst) } }
     }
 
-    /** The burst [burst] has played, or ([mine]) been spoken, to its end: to the model with it. */
+    /** The burst [burst] has played, or ([mine]) been spoken, to its end: the model finishes it. */
     fun end(
         burst: Int,
         mine: Boolean = false,
     ) {
-        val (held, gen) =
+        val b =
             synchronized(lock) {
-                val slot = slot(mine)
-                if (slot.open != burst) return
-                val held = slot.audio
-                slot.clear()
-                held to session
+                val b = (if (mine) spoken else heard)?.takeIf { it.number == burst } ?: return
+                if (mine) spoken = null else heard = null
+                b
             }
-        val line = _lines.value.firstOrNull { it.burst == burst && it.mine == mine } ?: return
-        val samples = held?.samples() ?: FloatArray(0)
-        val audioMs = held?.audioMs ?: 0L
+        val endedAt = clock()
+        val audioMs = synchronized(lock) { b.audio.audioMs }
         val state =
             when {
                 audioMs < SttPolicy.MIN_SPEECH_MS -> TranscriptLine.State.NoSpeech
                 !ready() -> TranscriptLine.State.NoModel
                 else -> TranscriptLine.State.Pending
             }
-        _lines.update { withLine(it, line.copy(state = state, audioMs = audioMs)) }
-        if (state != TranscriptLine.State.Pending) return
-        workScope.launch(dispatcher) { serial.withLock { transcribe(line.copy(audioMs = audioMs), samples, gen) } }
+        updateLine(b) { it.copy(state = state, audioMs = audioMs, live = if (state == TranscriptLine.State.Pending) it.live else "") }
+        if (state != TranscriptLine.State.Pending) {
+            synchronized(lock) { b.dropped = true }
+            closeLater(b)
+            return
+        }
+        workScope.launch(dispatcher) { serial.withLock { finish(b, endedAt) } }
     }
 
     /** The session ended with a burst still playing, or ([mine]) a spoken one was dropped: drop it, and its line with it. */
     fun abandon(mine: Boolean = false) {
-        val burst =
+        val b =
             synchronized(lock) {
-                val slot = slot(mine)
-                val burst = slot.open ?: return
-                slot.clear()
-                burst
+                val b = (if (mine) spoken else heard) ?: return
+                if (mine) spoken = null else heard = null
+                b.dropped = true
+                b
             }
         _lines.update { lines ->
-            lines.filterNot { it.burst == burst && it.mine == mine && it.state == TranscriptLine.State.Listening }
+            lines.filterNot { it.burst == b.number && it.mine == mine && it.state == TranscriptLine.State.Listening }
+        }
+        closeLater(b)
+    }
+
+    // Under [serial]: the audio come in since the last feed, to the model — opening its stream first, once the model is
+    // on the phone — and, unless the burst is about to be finished anyway, a look when one is due.
+    private suspend fun feed(
+        b: Burst,
+        look: Boolean = true,
+    ) {
+        val samples =
+            synchronized(lock) {
+                b.queued = false
+                if (b.dropped || b.session != session || !ready()) return
+                b.audio.drain()
+            }
+        val stream = streamOf(b) ?: return
+        if (samples.isEmpty()) return
+        if (!timed(b) { stream.add(samples) }) return fail(b)
+        if (!look) return
+        if (!b.gate.fed(samples.size * MS_PER_S.toDouble() / SttPolicy.SAMPLE_RATE)) return
+        val began = clock()
+        val heard = timed(b) { stream.look() } ?: return fail(b)
+        b.gate.took(clock() - began)
+        b.looks++
+        updateLine(b) { if (it.state == TranscriptLine.State.Listening) it.copy(live = heard.text) else it }
+    }
+
+    // Under [serial]: what is left of the burst to the model, and its last look as the line's text.
+    private suspend fun finish(
+        b: Burst,
+        endedAt: Long,
+    ) {
+        if (b.session != synchronized(lock) { session }) {
+            b.stream?.close()
+            b.stream = null
+            return
+        }
+        feed(b, look = false)
+        val heard = streamOf(b)?.let { stream -> timed(b) { stream.finish() } }
+        b.stream = null
+        val took = clock() - endedAt
+        val state =
+            when {
+                heard == null -> TranscriptLine.State.Failed
+                heard.text.isBlank() -> TranscriptLine.State.NoSpeech
+                else -> TranscriptLine.State.Text(heard.text)
+            }
+        // Timings only: the text itself is never logged.
+        val audioMs = synchronized(lock) { b.audio.audioMs }
+        log(
+            "walkie: transcribed ${if (b.mine) "spoken" else "heard"} burst ${b.number}: $audioMs ms of audio, " +
+                "${b.looks} look(s), ${b.modelMs} ms in the model, final $took ms after its end, ${state.label()}",
+        )
+        updateLine(b) { it.copy(state = state, live = "", tookMs = took, looks = b.looks, modelMs = b.modelMs) }
+    }
+
+    // Under [serial]: the burst's stream, opened on first use; null once the model would not run for it.
+    private suspend fun streamOf(b: Burst): SpeechStream? {
+        if (b.stream != null || b.failed) return b.stream
+        val opened = timed(b) { speech.open() }
+        b.failed = opened == null
+        // Dropped while the model loaded: nothing will finish it.
+        if (opened != null && synchronized(lock) { b.dropped || b.session != session }) {
+            opened.close()
+            return null
+        }
+        b.stream = opened
+        return opened
+    }
+
+    private suspend fun fail(b: Burst) {
+        b.failed = true
+        b.stream?.close()
+        b.stream = null
+    }
+
+    private inline fun <R> timed(
+        b: Burst,
+        call: () -> R,
+    ): R {
+        val began = clock()
+        return call().also { b.modelMs += clock() - began }
+    }
+
+    // A dropped burst's stream, closed behind whatever work for it is already queued.
+    private fun closeLater(b: Burst) {
+        workScope.launch(dispatcher) {
+            serial.withLock {
+                b.stream?.close()
+                b.stream = null
+            }
         }
     }
 
-    private suspend fun transcribe(
-        line: TranscriptLine,
-        samples: FloatArray,
-        gen: Int,
+    // [change] to the line for [b], if it is still in this session's transcript: one that fell off the top stays off.
+    private fun updateLine(
+        b: Burst,
+        change: (TranscriptLine) -> TranscriptLine,
     ) {
-        val began = clock()
-        val parts = speech.cut(samples)
-        val texts = mutableListOf<String>()
-        var failed = false
-        for (range in parts) {
-            val text = speech.transcribe(samples.copyOfRange(range.first, range.last + 1))
-            if (text == null) {
-                failed = true
-                break
-            }
-            if (text.isNotBlank()) texts += text.trim()
-        }
-        val took = clock() - began
-        val state =
-            when {
-                failed -> TranscriptLine.State.Failed
-                texts.isEmpty() -> TranscriptLine.State.NoSpeech
-                else -> TranscriptLine.State.Text(texts.joinToString(" "))
-            }
-        // Timings only: the text itself is never logged.
-        log(
-            "walkie: transcribed ${if (line.mine) "spoken" else "heard"} burst ${line.burst}: " +
-                "${line.audioMs} ms of audio in $took ms, ${parts.size} part(s), ${state.label()}",
-        )
-        synchronized(lock) { if (gen != session) return }
-        // A line that fell off the top meanwhile stays off: put back, it would land out of order.
         _lines.update { lines ->
-            if (lines.none { it.sameBurst(line) }) lines else withLine(lines, line.copy(state = state, tookMs = took))
+            if (b.session != synchronized(lock) { session }) return@update lines
+            val line = lines.firstOrNull { it.burst == b.number && it.mine == b.mine } ?: return@update lines
+            withLine(lines, change(line))
         }
     }
 
@@ -411,4 +540,8 @@ class WalkieTranscriber(
             is TranscriptLine.State.Text -> "${text.length} chars"
             else -> javaClass.simpleName
         }
+
+    private companion object {
+        const val MS_PER_S = 1_000L
+    }
 }

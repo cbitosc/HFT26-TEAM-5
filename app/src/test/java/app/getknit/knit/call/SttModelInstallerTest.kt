@@ -25,6 +25,7 @@ class SttModelInstallerTest {
             id = "test-model",
             baseUrl = "https://example.org/m/",
             files = listOf(pin("encoder.ort", encoder), pin("tokens.txt", tokens)),
+            arch = SttArch.TINY_STREAMING,
         )
     private val dir = File(Files.createTempDirectory("stt").toFile(), "models/test-model")
     private val installer = SttModelInstaller(model, dir)
@@ -144,14 +145,16 @@ class SttModelInstallerTest {
 
     @Test
     fun aModelIsFetchedOverHttpsByPlainNames() {
-        assertThrows(IllegalArgumentException::class.java) { SttModel("x", "http://example.org/m/", model.files) }
-        assertThrows(IllegalArgumentException::class.java) { SttModel("x", "https://example.org/m/", listOf(SttFile("../x", 1, "00"))) }
+        assertThrows(IllegalArgumentException::class.java) { SttModel("x", "http://example.org/m/", model.files, SttArch.TINY_STREAMING) }
+        assertThrows(IllegalArgumentException::class.java) {
+            SttModel("x", "https://example.org/m/", listOf(SttFile("../x", 1, "00")), SttArch.TINY_STREAMING)
+        }
         assertEquals("https://example.org/m/tokens.txt", model.urlOf(model.files[1]))
     }
 
     @Test
     fun theShippedPinsAreWellFormed() {
-        assertEquals(SttModel.MOONSHINE_TINY_EN_V2, SttModel.ALL.first())
+        assertEquals(SttModel.MOONSHINE_SMALL_STREAMING_EN, SttModel.ALL.first())
         assertEquals(
             SttModel.ALL.size,
             SttModel.ALL
@@ -163,14 +166,10 @@ class SttModelInstallerTest {
             assertTrue(shipped.baseUrl.startsWith("https://getknit.app/"))
             assertTrue(shipped.baseUrl.contains(shipped.id))
             assertTrue(shipped.files.all { it.sha256.matches(Regex("[0-9a-f]{64}")) && it.bytes > 0 })
-            // One file for each part the engine is wired with (found by name), and the licence.
-            val names = shipped.files.map { it.name }
-            for (part in listOf("encoder", "decoder", "tokens")) assertEquals(shipped.id, 1, names.count { part in it })
-            assertTrue(shipped.id, "LICENSE" in names)
-            // Moonshine returns nothing past about 9 s; Whisper reads no more than 30.
-            val window = if (shipped.engine == SttEngine.MOONSHINE) 9_000L else 30_000L
-            assertTrue(shipped.id, shipped.segmentMinMs < shipped.segmentMaxMs && shipped.segmentMaxMs < window)
+            // Every file a streaming model loads from (the runtime's catalog), and the licence.
+            assertEquals(shipped.id, STREAMING_FILES + "LICENSE", shipped.files.map { it.name })
         }
+        assertEquals(SttArch.entries.toSet(), SttModel.ALL.map { it.arch }.toSet())
     }
 
     private fun pin(
@@ -182,4 +181,18 @@ class SttModelInstallerTest {
         n: Int,
         seed: Int,
     ) = ByteArray(n) { ((it * 31 + seed) % 251).toByte() }
+
+    private companion object {
+        val STREAMING_FILES =
+            listOf(
+                "adapter.ort",
+                "cross_kv.ort",
+                "decoder_kv.ort",
+                "encoder.ort",
+                "frontend.model.ort",
+                "frontend.weights.ort",
+                "streaming_config.json",
+                "tokenizer.bin",
+            )
+    }
 }

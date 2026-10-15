@@ -701,8 +701,10 @@ an experiment behind `BuildConfig.WALKIE` (`-Pwalkie=`, on in debug and off in r
   a peer sends it (`CallManager.dropToWalkie`, off), so a lost live call ends `no_route`. In a P9↔P7 call over the
   Internet the drop left the two phones in a walkie session neither could send on, because the peer was off every
   radio. A walkie session placed on purpose is unchanged.
-- **C-3.11-5** A burst is Opus at 8 kbps, captured at 16 kHz mono, in 20 ms packets, up to 60 s. Before the encoder
-  the capture passes a gain stage (`call/TalkGain`), because the phone's flat microphone path has no gain control and
+- **C-3.11-5** A burst is Opus at 8 kbps, captured at 16 kHz mono, in 20 ms packets, up to 60 s. The microphone's
+  session carries the platform's noise suppressor (`android.media.audiofx.NoiseSuppressor`), enabled, where the phone
+  implements one; `VOICE_RECOGNITION` has no processing of its own, and a phone without the effect records the burst
+  as it comes. Before the encoder the capture passes a gain stage (`call/TalkGain`), because the phone's flat microphone path has no gain control and
   a live call's audio has WebRTC's. Speech is brought toward −18 dBFS RMS, gaining at most 24 dB and never losing.
   The gain falls at once and rises at most 5 dB per second of speech. It holds between words, where a frame is within
   12 dB of the quietest frame of the last 2 s. No peak passes −1 dBFS. Each microphone keeps its own gain across
@@ -770,34 +772,38 @@ an experiment behind `BuildConfig.WALKIE` (`-Pwalkie=`, on in debug and off in r
 
   With neither a link nor a relay that would cast, nothing is sealed, and the burst says it did not go.
 - **C-3.11-9** *(experimental, where `BuildConfig.CALLS` is on; ADR 2026-10.nz3g)*
-  The receiver may write each burst it hears out as text, on the phone, after the burst has played. Nothing about
-  it is on the wire: no field, no frame, no capability bit, and the text is never sent, stored, logged or kept past
-  the session.
+  The receiver may write each burst it hears out as text, on the phone, as the burst plays: the words so far while it
+  is still coming, settled a moment after it ends. Nothing about it is on the wire: no field, no frame, no capability
+  bit, and the text is never sent, stored, logged or kept past the session.
   - **The audio.** The player's decoded PCM (48 kHz mono s16) is tapped on its way to the track
-    (`TalkPlayer`'s `TalkPcmTap`), averaged down to 16 kHz (`BurstPcm`), capped at the burst's 60 s. A burst under
-    300 ms is no speech, and never reaches the model.
+    (`TalkPlayer`'s `TalkPcmTap`), averaged down to 16 kHz (`BurstPcm`), capped at the burst's 60 s, and fed to the
+    model as it comes. A burst under 300 ms is no speech: its stream is closed unfinished.
   - **The sender's own.** Each burst this phone speaks is transcribed the same way from the recorder's PCM before
     the encoder (`TalkRecorder`'s tap, 16 kHz already), opened at the press and ended at the release — sent or not —
     and shown as the user's own line. Set beside the other phone's line for the same burst, it separates what Opus
     at 8 kbps cost the model from what the model gets wrong on clean audio. A cancelled burst drops its line.
-  - **The model.** Moonshine EN v2 (int8, ORT; MIT) through sherpa-onnx 1.13.8's ONNX Runtime, packaged
-    only where calls are, like libwebrtc: tiny (44 MB, the default) or base (141 MB, about 170 MB of native heap while held) — or
-    Whisper small.en (375 MB, ~920 MB of native heap, several times slower; cut at 20–28 s, not 5–8) — the user's pick
-    on the card. Each is fetched and kept on its own; the transcript uses the one picked. It reads at most about 9 s at once, so a longer burst is cut at its quietest 50 ms
-    between 5 s and 8 s from each cut (`segments`) and the parts' text joined. Bursts go to it one at a time, in the
-    order they ended, off the player's loop. Its recognizer is held on a `ModelLease` (released after 2 min idle;
-    about 60 MB of native heap while held) and built under `ModelLoadGuard` as `stt`, a probe decode included.
-  - **The download.** Not in the APK: 44 MB in four files under `https://getknit.app/models/stt/<model id>/`,
+  - **The model.** Moonshine v2 Streaming, English (int8 `.ort`, MIT), through Moonshine's own runtime
+    (`moonshine-voice`, `MoonshineSpeech`; its slim ONNX Runtime inside), packaged only where calls are, like
+    libwebrtc: Small (142 MB, the default; 7.84 % on the Open ASR average), Tiny (45 MB, 12.0 %) or Medium (269 MB,
+    6.65 %) — the user's pick on the card. Each is fetched and kept on its own; the transcript uses the one picked.
+    Each burst is one stream of the model's: its streaming encoder caches what it has seen, so a look costs the new
+    audio and a decode, and its own voice detector closes a stretch at each pause, whose text then stands. The model
+    looks every 500 ms of new audio, or — on a phone that cannot keep up — once as much audio has come as its last
+    look took (`PassGate`, at most 5 s). One model call runs at a time, off the player's and the recorder's threads.
+    The model is held on a `ModelLease` (released after 2 min idle) and loaded under `ModelLoadGuard` as `stt`, a
+    probe stream included.
+  - **The download.** Not in the APK: nine files under `https://getknit.app/models/stt/<model id>/`,
     fetched only on the user's tap (the card's Download), each pinned by size and SHA-256 in `SttModel`, streamed
     through the hash to a `.part` and renamed in, the model counted as installed only once a marker follows the last
     file. Stored in `noBackupFilesDir`. The fetch binds to the validated default network
     (`AndroidInternetGate.currentNetwork`, never the Wi-Fi Aware link) through `Network.openConnection`: https,
     `Accept-Encoding: identity`, no redirect followed, the server's declared length checked first. The pins come
-    from `scripts/stt-model.py`, which also stages the files for upload.
+    from `scripts/stt-model.py`, which reads Moonshine's own CDN (one dated directory, never rewritten) and stages
+    the files for upload.
   - **The screen.** With the walkie's diagnostics toggled off, the card's place shows the transcript: each burst
-    `Listening…` while it plays, `Transcribing…` while the model has it, then its text (a polite live region) or why
-    not (no speech, no model, failed). While the model is not on the phone, the card says what it costs, flags a
-    metered or Data Saver route, and offers Download, Cancel or Try again.
+    `Listening…` until the model has heard something, then its words so far (dimmed, not read out), then its text (a
+    polite live region) or why not (no speech, no model, failed). While the model is not on the phone, the card says
+    what it costs, flags a metered or Data Saver route, and offers Download, Cancel or Try again.
 
 ### 3.12 Call records in the thread
 
