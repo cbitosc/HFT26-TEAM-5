@@ -115,7 +115,7 @@ fun BadgeMark(
 internal fun markSize(avatarSize: Dp): Dp = (avatarSize * MARK_FRACTION).coerceIn(MIN_MARK, MAX_MARK)
 
 private const val MARK_FRACTION = 0.36f
-private const val GLYPH_FRACTION = 0.6f
+private const val GLYPH_FRACTION = 0.7f
 private val MIN_MARK = 14.dp
 private val MAX_MARK = 28.dp
 private val RING = 1.5.dp
