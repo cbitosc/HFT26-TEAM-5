@@ -387,6 +387,8 @@ internal class RatchetDmVectors(
             }
             // Stage 3b's rules, after stage 3a's entries (which do not move).
             for ((key, value) in RatchetSessionVectors.formatAdditions()) put(key, value)
+            // Stage 4's group section, after every earlier key (which do not move).
+            put("group", RatchetGroupVectors.formatJson())
         }
 
     companion object {

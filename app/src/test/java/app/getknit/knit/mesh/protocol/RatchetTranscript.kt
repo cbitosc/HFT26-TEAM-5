@@ -6,12 +6,16 @@ import app.getknit.knit.mesh.crypto.AesGcm
 import app.getknit.knit.mesh.crypto.MessageContent
 import app.getknit.knit.mesh.crypto.MessageContentV2
 import app.getknit.knit.mesh.crypto.MessageCrypto
+import app.getknit.knit.mesh.crypto.ratchet.GroupRatchetCrypto
+import app.getknit.knit.mesh.crypto.ratchet.GroupRatchetEngine
+import app.getknit.knit.mesh.crypto.ratchet.GroupRatchetSessions
 import app.getknit.knit.mesh.crypto.ratchet.RatchetCrypto
 import app.getknit.knit.mesh.crypto.ratchet.RatchetEngine
 import app.getknit.knit.mesh.crypto.ratchet.RatchetEngine.OpenOutcome
 import app.getknit.knit.mesh.crypto.ratchet.RatchetSessions
 import app.getknit.knit.mesh.crypto.ratchet.RatchetStore
 import app.getknit.knit.mesh.crypto.sealBytes
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -49,6 +53,11 @@ internal sealed class Draw(
     class Iv(
         seed: Int,
     ) : Draw(seed)
+
+    /** A group epoch seed (`GroupRatchetEngine`'s `newSeed`): `fixtureBytes(32, seed)`. */
+    class GroupSeed(
+        seed: Int,
+    ) : Draw(seed)
 }
 
 internal fun keyPairFrom(seed: Int): RatchetCrypto.KeyPair {
@@ -76,8 +85,14 @@ internal class DrawSource(
 
     fun iv(): ByteArray {
         val draw = next()
-        check(draw is Draw.Iv) { "$owner drew an IV where its plan has a key pair (seed ${draw.seed})" }
+        check(draw is Draw.Iv) { "$owner drew an IV where its plan has another kind (seed ${draw.seed})" }
         return fixtureBytes(AesGcm.IV_BYTES, draw.seed)
+    }
+
+    fun groupSeed(): ByteArray {
+        val draw = next()
+        check(draw is Draw.GroupSeed) { "$owner drew a group seed where its plan has another kind (seed ${draw.seed})" }
+        return fixtureBytes(GroupRatchetCrypto.SEED_BYTES, draw.seed)
     }
 
     private fun next(): Draw {
@@ -105,6 +120,11 @@ internal class DrawSource(
                             is Draw.Iv -> {
                                 put("kind", "iv")
                                 put("iv", fixtureBytes(AesGcm.IV_BYTES, draw.seed).toHex())
+                            }
+
+                            is Draw.GroupSeed -> {
+                                put("kind", "groupSeed")
+                                put("groupSeed", fixtureBytes(GroupRatchetCrypto.SEED_BYTES, draw.seed).toHex())
                             }
                         }
                     },
@@ -230,14 +250,42 @@ internal class TranscriptParty(
     val identityName: String = name,
 ) {
     val draws = DrawSource(name, plan)
-    val store = MemoryRatchetStore()
-    val sessions =
+
+    // The one ratchet lock both facades share, as production wires them (`ratchetMutex`).
+    private var mutex = Mutex()
+    var store = MemoryRatchetStore()
+        private set
+    var sessions = newSessions()
+        private set
+    var groupStore = MemoryGroupRatchetStore()
+        private set
+    var groupSessions = newGroupSessions()
+        private set
+
+    private fun newSessions() =
         RatchetSessions(
             store = store,
             dhIdentityPriv = { identity.agreementScalar },
             spkPrivFor = { id -> holds.firstOrNull { it.id == id }?.keys?.priv },
             engine = RatchetEngine(newKeyPair = draws::keyPair, newIv = draws::iv),
+            mutex = mutex,
         )
+
+    private fun newGroupSessions() = GroupRatchetSessions(groupStore, GroupRatchetEngine(draws::groupSeed, draws::iv), mutex)
+
+    /**
+     * What a database wipe leaves (the `DatabaseKey` loss ADR 2026-10.47rw describes): every ratchet table and the
+     * in-memory floors gone, the identity and the prekey privates kept (`IdentityKeyStore` survives it). The draw
+     * plan runs on.
+     */
+    fun wipe() {
+        mutex = Mutex()
+        store = MemoryRatchetStore()
+        sessions = newSessions()
+        groupStore = MemoryGroupRatchetStore()
+        groupSessions = newGroupSessions()
+    }
+
     val nodeId: String get() = identity.nodeId
 }
 
@@ -303,6 +351,8 @@ internal class SealOptions(
     /** The step whose frame this re-seals (same id, same sentAt, new bytes). */
     val resealOf: Int? = null,
     val note: String? = null,
+    /** False for a seal site that passes no prekey (`InboundPipeline.ackGroupSeed`: the session exists by construction). */
+    val peerPrekey: Boolean = true,
 )
 
 /**
@@ -321,6 +371,33 @@ internal class Transcript(
     private val pins = HashMap<Pair<String, String>, VectorPrekey>()
     private val steps = mutableListOf<JsonObject>()
     private val caseFields = LinkedHashMap<String, JsonElement>()
+
+    /**
+     * A second state digest every step adds under `groupState` — the group section's per-party group-ratchet and
+     * roster state. Null for the `dm` and `negative` transcripts, whose steps it never touches.
+     */
+    var extraState: ((TranscriptParty) -> JsonObject)? = null
+
+    /**
+     * Whether `InboundPipelineTest` checks a step of [actor]'s ([op], whether it states `applies`) — the group
+     * section's `pipelineChecked`. Null for the `dm` and `negative` transcripts, which carry no such key.
+     */
+    var pipelineChecked: ((actor: String, op: String, hasApplies: Boolean) -> Boolean)? = null
+
+    /** The index the next recorded step takes. */
+    val nextStep: Int get() = steps.size
+
+    /** The frame id a step kind outside this class mints for its next frame, as [sealContent] mints its own. */
+    fun nextFrameId(): String = frameIdFor("$name/${steps.size}")
+
+    /** Appends a step a step kind outside this class built (the group section's). */
+    fun record(step: JsonObject) {
+        steps += step
+    }
+
+    private fun JsonObjectBuilder.extra(party: TranscriptParty) {
+        extraState?.let { put("groupState", it(party)) }
+    }
 
     fun party(name: String): TranscriptParty = parties.getValue(name)
 
@@ -378,13 +455,13 @@ internal class Transcript(
         val aad = MessageCrypto.header(id, from.nodeId, sentAt, to.nodeId)
         val (plaintext, scheme) = content.sealBytes(v3)
         val drawsBefore = from.draws.count
-        val prekey = pins[actor to peer]
+        val prekey = pins[actor to peer]?.takeIf { options.peerPrekey }
         val enc =
             checkNotNull(
                 from.sessions.sealDm(
                     peerId = to.nodeId,
                     peerIkPub = to.identity.bundle.dhPublicKey(),
-                    peerSpk = prekeyFor(actor, peer),
+                    peerSpk = prekeyFor(actor, peer)?.takeIf { options.peerPrekey },
                     plaintext = plaintext,
                     aad = aad,
                     now = at,
@@ -412,6 +489,8 @@ internal class Transcript(
                 options.resealOf?.let { put("resealOf", it) }
                 options.note?.let { put("note", it) }
                 floors?.let { put("floorsBefore", it) }
+                pipelineChecked?.let { put("pipelineChecked", it(actor, "seal", false)) }
+                extra(from)
             }
         return frame
     }
@@ -503,6 +582,8 @@ internal class Transcript(
                 put("state", TranscriptJson.state(from, to))
                 note?.let { put("note", it) }
                 floors?.let { put("floorsBefore", it) }
+                pipelineChecked?.let { put("pipelineChecked", it(actor, "reset", false)) }
+                extra(from)
             }
         return frame
     }
@@ -520,6 +601,10 @@ internal class Transcript(
         expect: String,
         applies: JsonObject? = null,
         note: String? = null,
+        // What production runs inside the commit with the opened content (a seed's adoption, an ack's outbox stamp).
+        onOpened: (suspend (MessageContent?) -> Unit)? = null,
+        // [applies] when it is only known once [onOpened] has run.
+        appliesFrom: (() -> JsonObject)? = null,
     ) {
         val floors = floorsBefore(actor, frame.sender.name)
         val me = party(actor)
@@ -540,12 +625,12 @@ internal class Transcript(
         val outcome = me.sessions.peekOpen(me.nodeId, env.senderId, peerIk, header, nonce, enc.ct, aad, at)
         var plaintext: ByteArray? = null
         if (outcome is OpenOutcome.Opened) {
+            val decoded = if (v3) MessageContentV2.decode(outcome.plaintext) else MessageContent.decode(outcome.plaintext)
             assertTrue(
                 "$name: commits what it peeked",
-                me.sessions.commitOpen(me.nodeId, env.senderId, peerIk, header, nonce, enc.ct, aad, at) {},
+                me.sessions.commitOpen(me.nodeId, env.senderId, peerIk, header, nonce, enc.ct, aad, at) { onOpened?.invoke(decoded) },
             )
             plaintext = outcome.plaintext
-            val decoded = if (v3) MessageContentV2.decode(outcome.plaintext) else MessageContent.decode(outcome.plaintext)
             frame.body?.let { assertEquals("$name: the body survives", it, decoded?.body) }
         }
         val name = outcomeName(outcome)
@@ -554,9 +639,12 @@ internal class Transcript(
             openStep(actor, sender.name, frame, at, Layer.ENGINE, name, dropFor(outcome)) {
                 put("plaintext", plaintext?.toHex())
                 put("state", TranscriptJson.state(me, sender))
-                applies?.let { put("applies", it) }
+                val stated = applies ?: appliesFrom?.invoke()
+                stated?.let { put("applies", it) }
                 note?.let { put("note", it) }
                 floors?.let { put("floorsBefore", it) }
+                pipelineChecked?.let { put("pipelineChecked", it(actor, "open", stated != null)) }
+                extra(me)
             }
     }
 
@@ -672,7 +760,7 @@ internal class Transcript(
             }
     }
 
-    private fun floorsBefore(
+    fun floorsBefore(
         actor: String,
         peer: String,
     ): JsonObject? = if (recordFloors) TranscriptJson.floors(party(actor), party(peer)) else null
@@ -743,17 +831,25 @@ internal class Transcript(
         }
     }
 
-    private fun JsonObjectBuilder.frameFields(frame: TranscriptFrame) {
+    fun JsonObjectBuilder.frameFields(frame: TranscriptFrame) {
         val enc = frame.enc
         put("frameId", frame.env.id)
         put("sentAt", frame.env.sentAt)
-        val thread = frame.env.recipientId.orEmpty()
+        // A group-form frame's AAD names the group (InboundPipeline.decryptAndDeliverGroup); every DM shape, the
+        // negatives' group-addressed v3 included, names the recipient.
+        val thread = if (enc.g != null) checkNotNull(frame.env.group).id else frame.env.recipientId.orEmpty()
         val aadText = "${frame.env.id}|${frame.env.senderId}|${frame.env.sentAt}|$thread"
         put("aadText", aadText)
         put("aad", aadText.encodeToByteArray().toHex())
         put("scheme", if (enc.v == EncEnvelope.VERSION_DM_V3) "v3" else "v${enc.v}")
         put("v", enc.v)
         enc.r?.let { put("header", TranscriptJson.header(it)) }
+        enc.g?.let {
+            putJsonObject("groupHeader") {
+                put("se", it.se)
+                put("n", it.n)
+            }
+        }
         put("nonce", enc.nonce.toHex())
         put("ct", enc.ct.toHex())
         put("encEnvelope", WireCodec.encodePayload(enc).toHex())

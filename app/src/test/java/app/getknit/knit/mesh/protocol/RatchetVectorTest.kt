@@ -2,6 +2,7 @@ package app.getknit.knit.mesh.protocol
 
 import app.getknit.knit.data.message.Conversations
 import app.getknit.knit.identity.DeviceTag
+import app.getknit.knit.mesh.MeshManager
 import app.getknit.knit.mesh.crypto.AesGcm
 import app.getknit.knit.mesh.crypto.MessageCrypto
 import app.getknit.knit.mesh.crypto.ratchet.GroupRatchetCrypto
@@ -144,6 +145,33 @@ class RatchetVectorTest {
 
     private fun negativeJson() = runBlocking { transcripts.negatives() }
 
+    private fun groupSectionJson() =
+        runBlocking {
+            RatchetGroupVectors(
+                alice,
+                bob,
+                carol,
+                prekeys.getValue("aliceSpk1").vector(),
+                prekeys.getValue("bobSpk1").vector(),
+                prekeys.getValue("carolSpk1").vector(),
+                SESSION_AT,
+            ).scenarios()
+        }
+
+    @Test
+    fun `the group mirror's seed floor is MeshManager's`() {
+        // Private to MeshManager's companion, so a const compiled onto the class: reflection pins the mirror to it.
+        val field = MeshManager::class.java.getDeclaredField("SEED_RESEND_FLOOR_MS").apply { isAccessible = true }
+        assertEquals(field.getLong(null), GroupWorld.SEED_RESEND_FLOOR_MS)
+    }
+
+    @Test
+    fun `the group transcripts rebuild exactly and open as they state`() {
+        val group = groupSectionJson()
+        assumeFalse(VectorFiles.writing)
+        assertEquals("ratchet vector section 'group' drifted; regenerate with KNIT_WRITE_VECTORS=1", group, file.getValue("group"))
+    }
+
     @Test
     fun `the dm transcripts rebuild exactly and open as they state`() {
         // Building them asserts every stated outcome against the engine, so this half runs in write mode too.
@@ -173,6 +201,7 @@ class RatchetVectorTest {
                 put("transcriptFormat", transcripts.formatJson())
                 put("dm", dmJson())
                 put("negative", negativeJson())
+                put("group", groupSectionJson())
             },
         )
     }

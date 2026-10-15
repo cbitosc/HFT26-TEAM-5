@@ -186,6 +186,13 @@ scheme. **Advance rules** (sender-local; no cross-member coordination by constru
    is the only restart: a wipe takes the seed outbox with it (as does a restore, which carries neither
    table — `BackupTables.TRANSIENT`), so no recorded ack counts the old numbering, and an ack of the old
    numbering still in flight was sealed under a DM session the wipe's session reset has left behind.
+   Which eras a receiver keeps depends on the order it meets the two seeds. One that adopted the old era's
+   seed first keeps both (below). One that meets the re-mint's seed first holds the new era only for the
+   epoch numbers both mints share: an old seed of such a number is an older mint of a held epoch, refused as
+   stale (`GroupRatchetEngine.adoptSeed` compares `mintedAt` with the newest row of that epoch alone, so an
+   old seed of a number it holds no row for still adopts), and the old era's frames of those numbers are lost — `GROUP_RATCHET_DUPLICATE` for one whose index the re-mint's chain has already
+   passed, `GROUP_RATCHET_AEAD_FAIL` for one that lands before it does. The second feeds §7, and nothing can
+   answer it: the wiped sender holds no old seed.
 
 A local leave or delete retires the chain exactly as rule 4 does, receive state and outbox aside: the same
 people put together again are the same group id (§1), and a re-created group's first mint must number past
@@ -197,7 +204,8 @@ key material) for as long as the database lives.
 **Wipe recovery is mint-stamped, not session-replaced.** Receivers key rows by
 `(group, sender, epoch, mintedAt)`: adopting a newer mint of an epoch they already hold keeps the
 older era's rows draining for 48 h (the DM `prevRoot` pattern), so both eras' custody re-serves
-still open; the open ladder tries chains newest-mint-first and the AEAD arbitrates. There is no era
+still open for a receiver that held the older mint first (rule 5 says what one that meets the
+re-mint first loses); the open ladder tries chains newest-mint-first and the AEAD arbitrates. There is no era
 identifier on the wire.
 
 ## 5. Wire form (additive; see docs/WIRE_COMPAT.md)
@@ -245,9 +253,10 @@ storing keys across any index gap, ≤200/epoch) → draining older-mint chains 
 
 - `GROUP_RATCHET_NO_KEY` — no adopted seed covers `(sender, se)`: the seed DM hasn't arrived or was
   lost. Feeds the key-request heuristic (§7).
-- `GROUP_RATCHET_AEAD_FAIL` — key material present but wrong (stale/foreign mint era). The frame
-  signature was already verified, so this is never third-party tamper; it is the post-wipe signal
-  and also feeds §7.
+- `GROUP_RATCHET_AEAD_FAIL` — key material present but wrong (stale/foreign mint era: a pre-wipe frame
+  landing on the re-mint's chain before that chain has passed its index, §4 rule 5 — one it has passed is
+  `GROUP_RATCHET_DUPLICATE`). The frame signature was already verified, so this is never third-party
+  tamper; it is the post-wipe signal and also feeds §7.
 - `GROUP_RATCHET_DUPLICATE` (benign re-serve) / `GROUP_RATCHET_BAD_HEADER` (bound violations).
 
 All failures are delivery-local; the frame still relays and custodies (the no-throw contract of

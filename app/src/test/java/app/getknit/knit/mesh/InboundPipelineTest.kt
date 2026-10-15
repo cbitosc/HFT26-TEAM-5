@@ -42,6 +42,7 @@ import app.getknit.knit.identity.Alias
 import app.getknit.knit.identity.IdentitySource
 import app.getknit.knit.identity.NodeId
 import app.getknit.knit.identity.PeerLabels
+import app.getknit.knit.mesh.crypto.AesGcm
 import app.getknit.knit.mesh.crypto.AttachmentCrypto
 import app.getknit.knit.mesh.crypto.MessageContent
 import app.getknit.knit.mesh.crypto.MessageContentV2
@@ -92,6 +93,7 @@ import app.getknit.knit.mesh.protocol.VideoInfo
 import app.getknit.knit.mesh.protocol.WireCodec
 import app.getknit.knit.mesh.protocol.WireEnvelope
 import app.getknit.knit.mesh.protocol.fromHex
+import app.getknit.knit.mesh.protocol.toHex
 import app.getknit.knit.mesh.sha256Hex
 import app.getknit.knit.mesh.spool.ScopeSync
 import app.getknit.knit.moderation.ImageScreeningService
@@ -122,6 +124,7 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.int
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -250,6 +253,8 @@ class InboundPipelineTest {
         holdsSpk: Boolean = true,
         // Spies the ratchet facade, so a test can see what it is asked to seal (the vector replay's tick check).
         spyRatchet: Boolean = false,
+        // The facade's engine — a vector replay injects the recorded draws for the party's own seals.
+        ratchetEngine: RatchetEngine = RatchetEngine(),
     ) {
         val transport = FakeLoopTransport(self.nodeId)
         val metrics = MeshMetrics()
@@ -338,8 +343,16 @@ class InboundPipelineTest {
                 store = ratchetStore,
                 dhIdentityPriv = { self.dhPriv },
                 spkPrivFor = { id -> if (holdsSpk && id == SPK_ID) selfSpk.priv else null },
+                engine = ratchetEngine,
                 mutex = ratchetMutex,
             ).let { if (spyRatchet) spyk(it) else it }
+
+        /** `(sender, payload)` for every gossiped root the pipeline asked MeshManager to adopt, and what it answers. */
+        val rootAdoptions = mutableListOf<Pair<String, GroupKeyPayload>>()
+        var adoptRoot: (GroupKeyPayload) -> Boolean = { false }
+
+        /** `(sender, payload, adopted)` for every post-commit root exchange the pipeline handed MeshManager. */
+        val rootCtls = mutableListOf<Triple<String, GroupKeyPayload, Boolean>>()
 
         /** Every peer the ratchet reported a scope-root change for (ADR 2026-09.dcah), in order. */
         val rootChanges = mutableListOf<String>()
@@ -516,6 +529,11 @@ class InboundPipelineTest {
                     flushGroupKeys = { member, force -> groupKeysFlushed += member to force },
                     replayGroupCustody = { groupId, senderId -> custodyReplays += groupId to senderId },
                     replaySeedCustody = { groupId, except -> seedCustodyReplays += groupId to except },
+                    adoptGroupRoot = { sender, gk, _ ->
+                        rootAdoptions += sender to gk
+                        adoptRoot(gk)
+                    },
+                    onGroupRootCtl = { sender, gk, adopted -> rootCtls += Triple(sender, gk, adopted) },
                     onTransferCtl = { sender, xf, at ->
                         transferSignals += Triple(sender, xf, at)
                         admitTransfer
@@ -6429,6 +6447,440 @@ class InboundPipelineTest {
             }
         }
     }
+
+    /**
+     * `ratchet-v1.json`'s `group` scenarios through the real pipeline as each of their `pipelineReceivers`, every other
+     * party pinned ratchet-capable, every step marked `pipelineChecked` checked. An open must apply exactly what its
+     * `applies` says and nothing else — message and notice rows, receipts and reaction, the roster pinned from a seed
+     * (and the first-sight seed-custody replay with it), the chains adopted, an ack's outbox stamp, the seals sent back
+     * (a delivery tick, a `CTL_GROUP_KEY_ACK`), the custody replay after an adoption, the key-request answer, a reset's
+     * answer, the root handed to MeshManager — and a stated drop. A receiver marked `replaysOwnSeals` also re-seals its
+     * own DM seal steps through its `RatchetSessions` from the step's recorded draws, and the bytes must match.
+     *
+     * Clocks: the rig's `clock()` and every re-seal take the step's `now`, but `decryptAndDeliverV2` and
+     * `decryptAndDeliverGroup` read `System.currentTimeMillis()`, so a replayed open runs at wall time — fine for
+     * these scenarios, whose outcomes do not hang on it. The 48 h age gate before a key request reads that wall clock
+     * too, so `keyRequestDue` is the mirror's alone — and Carol's own-seal replay is exact only because the gate fails
+     * at wall time: if it ever passed, her pipeline would seal its own `CTL_GROUP_KEY_REQ`, spend that chain index,
+     * and her re-sealed request would no longer match. MeshManager's root verdict answers as the file says
+     * (RatchetVectorTest checks it against GroupRootPolicy).
+     */
+    @Test
+    fun theRatchetVectorGroupScenariosApplyAsTheFileSays() =
+        runTest {
+            val file = VectorFiles.read("ratchet-v1.json")
+            val cases = file.getValue("group").jsonArray.map { it.jsonObject }
+            assertTrue("the file has group scenarios", cases.isNotEmpty())
+            var checked = 0
+            for (case in cases) {
+                for (receiver in case.getValue("pipelineReceivers").jsonArray.map { it.jsonObject }) {
+                    checked += replayGroupCase(file, case, receiver.getValue("name").jsonPrimitive.content)
+                }
+            }
+            val marked =
+                cases.sumOf { case ->
+                    case.getValue("steps").jsonArray.count { it.jsonObject["pipelineChecked"]?.jsonPrimitive?.boolean == true }
+                }
+            assertEquals("every pipelineChecked step was checked", marked, checked)
+        }
+
+    /** One scenario as [receiver]; returns how many steps it checked. */
+    private suspend fun TestScope.replayGroupCase(
+        file: JsonObject,
+        case: JsonObject,
+        receiver: String,
+    ): Int {
+        val keys = vectorPrekeys(file)
+        val entries = case.getValue("parties").jsonObject.mapValues { it.value.jsonObject }
+        val parties =
+            entries.mapValues {
+                vectorParty(
+                    file,
+                    it.value
+                        .getValue("identity")
+                        .jsonPrimitive.content,
+                )
+            }
+
+        fun prekeyName(name: String) =
+            entries
+                .getValue(name)
+                .getValue("holdsPrekeys")
+                .jsonArray
+                .first()
+                .jsonPrimitive.content
+        val draws = OwnDraws()
+        val rig =
+            Rig(
+                backgroundScope,
+                self = parties.getValue(receiver),
+                selfSpk = keys.getValue(prekeyName(receiver)),
+                spyRatchet = true,
+                ratchetEngine = RatchetEngine(newKeyPair = draws::keyPair, newIv = draws::iv),
+            )
+        for ((name, party) in parties) if (name != receiver) rig.pinRatchetCapable(party, keys.getValue(prekeyName(name)).pub)
+        val groupId = case.getValue("groupId").jsonPrimitive.content
+        val founders = case.getValue("founders").jsonArray.map { parties.getValue(it.jsonPrimitive.content).nodeId }
+        if (case.getValue("holdsAtStart").jsonArray.any { it.jsonPrimitive.content == receiver }) {
+            rig.seedGroup(groupId, members = founders, createdBy = parties.getValue("alice").nodeId)
+        }
+        val plan =
+            case
+                .getValue("draws")
+                .jsonObject
+                .getValue(receiver)
+                .jsonArray
+                .map { it.jsonObject }
+        val replay = GroupReplay(rig, parties, groupId)
+        var checked = 0
+        for (step in case.getValue("steps").jsonArray.map { it.jsonObject }) {
+            val mine = step.getValue("actor").jsonPrimitive.content == receiver && step["pipelineChecked"]?.jsonPrimitive?.boolean == true
+            if (!mine) continue
+            val label = "${case.getValue("name").jsonPrimitive.content} as $receiver, step ${step.getValue("step").jsonPrimitive.content}"
+            if (step.getValue("op").jsonPrimitive.content == "seal") {
+                resealOwn(rig, draws, plan, parties, keys, entries, groupId, label, step)
+            } else {
+                replay.step(label, step)
+            }
+            checked++
+        }
+        return checked
+    }
+
+    /** The receiver's own recorded draws, served to its rig's engine only while one of its own seals is re-sealed. */
+    private class OwnDraws {
+        var pending: ArrayDeque<JsonObject>? = null
+
+        fun keyPair(): RatchetCrypto.KeyPair {
+            val draw = pending?.removeFirst() ?: return RatchetCrypto.generateKeyPair()
+            check(draw.getValue("kind").jsonPrimitive.content == "keyPair")
+            return RatchetCrypto.KeyPair(draw.hex("priv"), draw.hex("pub"))
+        }
+
+        fun iv(): ByteArray {
+            val draw = pending?.removeFirst() ?: return AesGcm.randomIv()
+            check(draw.getValue("kind").jsonPrimitive.content == "iv")
+            return draw.hex("iv")
+        }
+
+        private fun JsonObject.hex(key: String): ByteArray = getValue(key).jsonPrimitive.content.fromHex()
+    }
+
+    /**
+     * Re-seals one of the receiver's own DM seal steps through its rig's `RatchetSessions.sealDm` with the step's
+     * draws, plaintext, AAD and clock, and asserts the envelope bytes; a seed DM also stamps the outbox as
+     * `MeshManager.sendSeedDm` does, so a later ack has a row to land on.
+     */
+    @Suppress("LongParameterList") // the replay's whole context for one seal; a holder would only rename it
+    private suspend fun resealOwn(
+        rig: Rig,
+        draws: OwnDraws,
+        plan: List<JsonObject>,
+        parties: Map<String, Party>,
+        keys: Map<String, RatchetCrypto.KeyPair>,
+        entries: Map<String, JsonObject>,
+        groupId: String,
+        label: String,
+        step: JsonObject,
+    ) {
+        val peer = parties.getValue(step.getValue("peer").jsonPrimitive.content)
+        val prekeyName = step["peerPrekey"]?.jsonPrimitive?.contentOrNull
+        val prekey =
+            prekeyName?.let { name ->
+                val owner =
+                    entries.entries.first { (_, e) ->
+                        e.getValue("holdsPrekeys").jsonArray.any { it.jsonPrimitive.content == name }
+                    }
+                check(owner.key == step.getValue("peer").jsonPrimitive.content)
+                RatchetEngine.PeerPrekey(SPK_ID, keys.getValue(name).pub)
+            }
+        draws.pending = ArrayDeque(step.getValue("drawsUsed").jsonArray.map { plan[it.jsonPrimitive.int] })
+        val now = step.getValue("now").jsonPrimitive.long
+        val plaintext = step.hex("plaintext")
+        val enc =
+            checkNotNull(
+                rig.ratchet.sealDm(
+                    peer.nodeId,
+                    peer.bundle.dhPublicKey(),
+                    prekey,
+                    plaintext,
+                    step.hex("aad"),
+                    now,
+                    step.getValue("v").jsonPrimitive.int,
+                ),
+            )
+        assertTrue("$label: every recorded draw was drawn", draws.pending?.isEmpty() == true)
+        draws.pending = null
+        assertEquals(
+            "$label: the re-sealed envelope",
+            step.getValue("encEnvelope").jsonPrimitive.content,
+            WireCodec.encodePayload(enc).toHex(),
+        )
+        val content = MessageContent.decode(plaintext)
+        val epoch =
+            content
+                ?.gk
+                ?.keys
+                ?.firstOrNull()
+                ?.epoch
+        if (content?.ctl == MessageContent.CTL_GROUP_KEY && epoch != null) rig.groupRatchet.markKeySent(groupId, peer.nodeId, epoch, now)
+    }
+
+    /** One group scenario's replay: every delta a step may cause, checked exactly. */
+    private inner class GroupReplay(
+        private val rig: Rig,
+        private val parties: Map<String, Party>,
+        private val groupId: String,
+    ) {
+        private val sealed = mutableListOf<Triple<String, ByteArray, Int>>()
+        private var reactionApplies = 0
+
+        init {
+            coEvery { rig.ratchet.sealDm(any(), any(), any(), any(), any(), any(), any()) } coAnswers {
+                sealed += Triple(arg<String>(0), arg<ByteArray>(3), arg<Int>(6))
+                callOriginal()
+            }
+        }
+
+        private fun counts() =
+            listOf(
+                rig.redistributed.size,
+                rig.groupKeysFlushed.size,
+                rig.resealed.size,
+                rig.custodyReplays.size,
+                rig.seedCustodyReplays.size,
+                rig.rootAdoptions.size,
+                rig.rootCtls.size,
+                sealed.size,
+            )
+
+        suspend fun step(
+            label: String,
+            step: JsonObject,
+        ) {
+            val wire = checkNotNull(WireCodec.decodeWire(step.hex("wire")))
+            val env = checkNotNull(WireCodec.decodeEnvelope(wire.signed))
+            val sender = env.senderId
+            val applies = step.getValue("applies").jsonObject
+            val seeds = applies["seeds"]?.jsonArray?.map { it.jsonObject }
+            val epochs = seeds.orEmpty().map { it.getValue("epoch").jsonPrimitive.int }
+
+            suspend fun mints(): Map<Int, List<Long>> {
+                val out = LinkedHashMap<Int, List<Long>>()
+                for (e in epochs) out[e] = rig.groupRatchetStore.recvChains(groupId, sender, e).map { it.mintedAt }
+                return out
+            }
+            val before = Snapshot(rig.msgMap.keys.toSet(), rig.receiptMap.keys.toSet(), rig.groupMap[groupId], counts(), totalDrops())
+            val reasonBefore = step["drop"]?.jsonPrimitive?.contentOrNull?.let { rig.drops(DropReason.valueOf(it)) } ?: 0L
+            val mintsBefore = mints()
+            rig.adoptRoot = {
+                applies["groupRoot"]
+                    ?.jsonObject
+                    ?.getValue("adopted")
+                    ?.jsonPrimitive
+                    ?.boolean == true
+            }
+            rig.nowMs = step.getValue("now").jsonPrimitive.long
+            rig.pipeline.onDeliver(wire, env, sender, TransportKind.Other)
+            checkDrop(label, step, before.drops, reasonBefore)
+            val message = applies["message"]?.jsonObject
+            val notices = applies["statusNotices"]?.jsonArray?.map { it.jsonPrimitive.content }.orEmpty()
+            val newRows = listOfNotNull(message?.getValue("id")?.jsonPrimitive?.content) + notices
+            assertEquals("$label: rows", before.rows + newRows, rig.msgMap.keys.toSet())
+            message?.let {
+                assertEquals(
+                    label,
+                    it.getValue("body").jsonPrimitive.content,
+                    rig.msgMap[it.getValue("id").jsonPrimitive.content]?.body,
+                )
+            }
+            val receipts =
+                applies.getValue("receipts").jsonArray.map {
+                    it.jsonObject
+                        .getValue("id")
+                        .jsonPrimitive.content to sender
+                }
+            assertEquals("$label: receipts", receipts.toSet(), rig.receiptMap.keys - before.receipts)
+            checkReaction(sender, applies["reaction"]?.jsonObject)
+            checkRoster(label, applies["groupPinned"]?.jsonObject, before.group)
+            for (seed in seeds.orEmpty()) {
+                val epoch = seed.getValue("epoch").jsonPrimitive.int
+                val mintedAt = seed.getValue("mintedAt").jsonPrimitive.long
+                val adopted = seed.getValue("outcome").jsonPrimitive.content == "ADOPT"
+                val expected = if (adopted) mintsBefore.getValue(epoch) + mintedAt else mintsBefore.getValue(epoch)
+                assertEquals("$label: epoch $epoch chains", expected.toSet(), mints().getValue(epoch).toSet())
+            }
+            checkCalls(label, applies, env, before.counts, seeds != null)
+            checkSealsBack(label, applies, env, before.counts.last(), requestDue = step["keyRequestDue"] != null)
+            applies["groupKeyAcked"]?.jsonPrimitive?.int?.let {
+                assertEquals("$label: the outbox stamp", it, rig.groupRatchetStore.keySend(groupId, sender)?.ackedEpoch)
+            }
+        }
+
+        private fun totalDrops(): Long =
+            rig.metrics
+                .frames()
+                .dropsByReason.values
+                .sum()
+
+        private fun checkDrop(
+            label: String,
+            step: JsonObject,
+            dropsBefore: Long,
+            reasonBefore: Long,
+        ) {
+            val drop = step["drop"]?.jsonPrimitive?.contentOrNull
+            if (drop == null) {
+                assertEquals("$label: nothing dropped", dropsBefore, totalDrops())
+            } else {
+                // One drop, of the stated reason: the reason's own count is the last one the step added.
+                assertEquals("$label: one drop", dropsBefore + 1, totalDrops())
+                assertTrue("$label: dropped as $drop", rig.drops(DropReason.valueOf(drop)) >= 1L)
+                assertEquals(label, totalDrops() - dropsBefore, rig.drops(DropReason.valueOf(drop)) - reasonBefore)
+            }
+        }
+
+        private fun checkReaction(
+            sender: String,
+            reaction: JsonObject?,
+        ) {
+            if (reaction != null) {
+                reactionApplies++
+                val expected =
+                    ReactionEntity(
+                        reaction.getValue("messageId").jsonPrimitive.content,
+                        sender,
+                        reaction.getValue("emoji").jsonPrimitive.contentOrNull,
+                        reaction.getValue("at").jsonPrimitive.long,
+                    )
+                coVerify(exactly = 1) { rig.reactions.apply(expected) }
+            }
+            coVerify(exactly = reactionApplies) { rig.reactions.apply(any()) }
+        }
+
+        private fun checkRoster(
+            label: String,
+            pinned: JsonObject?,
+            before: GroupEntity?,
+        ) {
+            val row = rig.groupMap[groupId]
+            if (pinned == null) {
+                assertEquals("$label: the group row untouched", before, row)
+                return
+            }
+            assertNull("$label: pinned from nothing", before)
+
+            fun ids(key: String) = pinned.getValue(key).jsonArray.map { parties.getValue(it.jsonPrimitive.content).nodeId }
+            assertEquals(label, ids("members"), GroupMembersStore.decode(checkNotNull(row).members))
+            assertEquals(label, ids("departed"), GroupMembersStore.decode(row.departed))
+            assertEquals(label, parties.getValue(pinned.getValue("createdBy").jsonPrimitive.content).nodeId, row.createdBy)
+        }
+
+        private fun checkCalls(
+            label: String,
+            applies: JsonObject,
+            env: RelayEnvelope,
+            before: List<Int>,
+            isSeedDm: Boolean,
+        ) {
+            val sender = env.senderId
+
+            fun <T> delta(
+                list: List<T>,
+                index: Int,
+            ) = list.drop(before[index])
+            assertEquals(
+                "$label: key-request answer",
+                listOfNotNull(
+                    (groupId to sender).takeIf {
+                        applies["redistribute"] != null
+                    },
+                ),
+                delta(rig.redistributed, 0),
+            )
+            val reset = applies["resetAnswer"] != null
+            assertEquals("$label: seed flush", listOfNotNull((sender to true).takeIf { reset }), delta(rig.groupKeysFlushed, 1))
+            assertEquals("$label: re-seal", listOfNotNull(sender.takeIf { reset }), delta(rig.resealed, 2))
+            val replay = applies["custodyReplay"]?.jsonPrimitive?.boolean == true
+            assertEquals("$label: custody replay", listOfNotNull((groupId to sender).takeIf { replay }), delta(rig.custodyReplays, 3))
+            val pinned = applies["groupPinned"] != null
+            assertEquals(
+                "$label: seed custody replay",
+                listOfNotNull((groupId to env.id).takeIf { pinned }),
+                delta(rig.seedCustodyReplays, 4),
+            )
+            val root = applies["groupRoot"]?.jsonObject
+            val adoptions = delta(rig.rootAdoptions, 5)
+            assertEquals("$label: root asks", if (isSeedDm) 1 else 0, adoptions.size)
+            adoptions.forEach { (from, gk) ->
+                assertEquals(label, sender, from)
+                assertEquals(label, root?.getValue("version")?.jsonPrimitive?.int, gk.gr?.version)
+                val minter =
+                    root
+                        ?.getValue("minter")
+                        ?.jsonPrimitive
+                        ?.content
+                        ?.let { parties.getValue(it).nodeId }
+                assertEquals("$label: the root's minter", minter, gk.gr?.minter)
+                assertEquals("$label: the root", root?.getValue("rootSha256")?.jsonPrimitive?.contentOrNull, gk.gr?.root?.let(::sha256Hex))
+            }
+            val ctls = delta(rig.rootCtls, 6)
+            assertEquals("$label: root exchange", if (isSeedDm) 1 else 0, ctls.size)
+            ctls.forEach { assertEquals(label, root?.getValue("adopted")?.jsonPrimitive?.boolean == true, it.third) }
+        }
+
+        private fun checkSealsBack(
+            label: String,
+            applies: JsonObject,
+            env: RelayEnvelope,
+            sealsBefore: Int,
+            requestDue: Boolean,
+        ) {
+            val seals =
+                sealed.drop(sealsBefore).filterNot { (_, plaintext, _) ->
+                    // A key request's seal hangs on the wall-clock age gate (see the test's KDoc): neither required nor
+                    // forbidden here.
+                    requestDue && MessageContent.decode(plaintext)?.ctl == MessageContent.CTL_GROUP_KEY_REQ
+                }
+            val expected =
+                listOfNotNull(
+                    "receipt:${env.id}".takeIf { applies.getValue("acksBack").jsonPrimitive.boolean },
+                    applies["groupKeyAckBack"]?.jsonPrimitive?.intOrNull?.let { "groupKeyAck:$it" },
+                )
+            val actual =
+                seals.map { (to, plaintext, scheme) ->
+                    assertEquals("$label: sealed back to the sender", env.senderId, to)
+                    val content =
+                        if (scheme ==
+                            EncEnvelope.VERSION_DM_V3
+                        ) {
+                            MessageContentV2.decode(plaintext)
+                        } else {
+                            MessageContent.decode(plaintext)
+                        }
+                    when (content?.ctl) {
+                        MessageContent.CTL_RECEIPT -> "receipt:${content.ack}"
+                        MessageContent.CTL_GROUP_KEY_ACK -> "groupKeyAck:${content.gk?.ackEpoch}"
+                        else -> "other:${content?.ctl}"
+                    }
+                }
+            assertEquals("$label: seals back", expected.sorted(), actual.sorted())
+        }
+    }
+
+    private fun sha256Hex(bytes: ByteArray): String =
+        java.security.MessageDigest
+            .getInstance("SHA-256")
+            .digest(bytes)
+            .joinToString("") { "%02x".format(it) }
+
+    private class Snapshot(
+        val rows: Set<String>,
+        val receipts: Set<Pair<String, String>>,
+        val group: GroupEntity?,
+        val counts: List<Int>,
+        val drops: Long,
+    )
 
     private fun JsonObject.hex(key: String): ByteArray = getValue(key).jsonPrimitive.content.fromHex()
 
