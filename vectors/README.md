@@ -7,7 +7,7 @@ Byte-exact fixtures that every Knit port is tested against. The Android tests he
 | --- | --- | --- | --- |
 | `wire-v1.json` | `GoldenVectorTest` | `GoldenVectorTest`, knit-ios | The definite-length CBOR of one fixed instance of every wire type (and a second where an optional field changes what it means, such as a resumed `blobreq`), and the raw-key bundle probe with its node id |
 | `keyed-v1.json` | `KeyedVectorTest` | `KeyedVectorTest`, knit-ios | Two identities from fixed keys, the profile and room post Alice signs, a v1 DM she seals to Bob, their safety number, and the HELLO, DIGEST, file headers (whole and resumed), custody fingerprint and advert |
-| `ratchet-v1.json` | `RatchetVectorTest` | `RatchetVectorTest`, knit-ios | The forward-secrecy ratchet's known answers for the iOS port (companion change A9): X3DH, epoch derivation, the message chain, the v3 nonce and header binding, prekey signing, the root tag, the group form's chain and a fixed-IV AES-GCM seal, walked through one first exchange with every key draw recorded |
+| `ratchet-v1.json` | `RatchetVectorTest` | `RatchetVectorTest`, knit-ios | The forward-secrecy ratchet's known answers for the iOS port (companion change A9): X3DH, epoch derivation, the message chain, the v3 nonce and header binding, prekey signing, the root tag, the group form's chain and a fixed-IV AES-GCM seal, walked through one first exchange with every key draw recorded, and the signed ratchet profiles with the prekey pin each leaves (replayed through `InboundPipeline` by `InboundPipelineTest`) |
 | `ios-emitted-v1.json` | knit-ios | `IosEmittedVectorTest` | Carol's identity, the profile and room post she signs on iOS, a v1 DM she seals to Bob, and their safety number |
 
 ## Regenerating

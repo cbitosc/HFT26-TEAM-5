@@ -1,6 +1,7 @@
 package app.getknit.knit.mesh.protocol
 
 import app.getknit.knit.data.message.Conversations
+import app.getknit.knit.identity.DeviceTag
 import app.getknit.knit.mesh.crypto.AesGcm
 import app.getknit.knit.mesh.crypto.MessageCrypto
 import app.getknit.knit.mesh.crypto.ratchet.GroupRatchetCrypto
@@ -50,6 +51,8 @@ class RatchetVectorTest {
     private val aliceEph = pair(SEED_ALICE_EPH)
     private val aliceEpoch1 = pair(SEED_ALICE_EPOCH1)
     private val bobEpoch1 = pair(SEED_BOB_EPOCH1)
+    private val carolSpk = pair(SEED_CAROL_SPK)
+    private val aliceSpk2 = pair(SEED_ALICE_SPK2)
 
     private val root = RatchetCrypto.x3dhInitiate(alice.agreementScalar, aliceEph.priv, bob.bundle.dhPublicKey(), bobSpk.pub)
 
@@ -110,6 +113,25 @@ class RatchetVectorTest {
     }
 
     @Test
+    fun `the signed profiles rebuild exactly and carry what they claim`() {
+        assumeFalse(VectorFiles.writing)
+        assertEquals(
+            "ratchet vector section 'profiles' drifted; regenerate with KNIT_WRITE_VECTORS=1",
+            profilesJson(),
+            file.getValue("profiles"),
+        )
+        for (profile in profiles()) {
+            val envelope = checkNotNull(WireCodec.decodeWire(profile.author.signedWire(profile.frame())))
+            assertTrue(MessageCrypto.verify(profile.author.bundle, envelope.sig, envelope.signed))
+            val prekey = profile.prekeyInfo()
+            if (prekey != null) {
+                val valid = MessageCrypto.verify(profile.author.bundle, prekey.sig, RatchetCrypto.spkSigningBytes(prekey.id, prekey.pub))
+                assertEquals(profile.name, profile.prekeyValid, valid)
+            }
+        }
+    }
+
+    @Test
     fun `KNIT_WRITE_VECTORS=1 rewrites the ratchet vectors`() {
         assumeTrue(VectorFiles.writing)
         VectorFiles.write(
@@ -118,6 +140,7 @@ class RatchetVectorTest {
                 put("about", ABOUT)
                 put("identities", identitiesJson())
                 put("kats", katsJson())
+                put("profiles", profilesJson())
             },
         )
     }
@@ -269,6 +292,133 @@ class RatchetVectorTest {
             put("groupExportSeal", GroupRatchetCrypto.exportEpochSeal(groupKeys.export).toHex())
         }
 
+    /** A prekey as `IdentityKeyStore` keeps it: the private half and the mint time never ride the wire. */
+    private inner class StoredPrekey(
+        val name: String,
+        val owner: VectorParty,
+        val ownerName: String,
+        val id: Int,
+        val seed: Int,
+        val keys: RatchetCrypto.KeyPair,
+        val createdAt: Long,
+    ) {
+        val sig: ByteArray = owner.sign(RatchetCrypto.spkSigningBytes(id, keys.pub))
+    }
+
+    private val prekeys =
+        listOf(
+            StoredPrekey("aliceSpk1", alice, "alice", ALICE_SPK_ID, SEED_ALICE_SPK, aliceSpk, PREKEY_AT),
+            StoredPrekey("aliceSpk2", alice, "alice", ALICE_SPK_ID + 1, SEED_ALICE_SPK2, aliceSpk2, PREKEY_AT + DAY_MS),
+            StoredPrekey("bobSpk1", bob, "bob", BOB_SPK_ID, SEED_BOB_SPK, bobSpk, PREKEY_AT),
+            StoredPrekey("carolSpk1", carol, "carol", CAROL_SPK_ID, SEED_CAROL_SPK, carolSpk, PREKEY_AT),
+        ).associateBy { it.name }
+
+    /** One signed ratchet profile; [tamperSig] flips the prekey signature's last bit so it fails to verify. */
+    private inner class VectorProfile(
+        val name: String,
+        val author: VectorParty,
+        val authorName: String,
+        val version: Long,
+        val publishedAt: Long,
+        val prekey: StoredPrekey?,
+        val tamperSig: Boolean = false,
+    ) {
+        val prekeyValid: Boolean get() = prekey != null && !tamperSig
+
+        fun prekeyInfo(): PrekeyInfo? =
+            prekey?.let {
+                val sig = it.sig.copyOf()
+                if (tamperSig) sig[sig.lastIndex] = (sig.last().toInt() xor 1).toByte()
+                PrekeyInfo(id = it.id, pub = it.keys.pub, sig = sig)
+            }
+
+        fun frame(): RelayEnvelope =
+            RelayEnvelope(
+                type = FrameType.PROFILE,
+                id = "profile-${author.nodeId}-$publishedAt",
+                senderId = author.nodeId,
+                sentAt = publishedAt,
+                payload =
+                    WireCodec.encodePayload(
+                        ProfileContent(
+                            name = authorName.replaceFirstChar(Char::uppercase),
+                            status = "Ratchet vectors",
+                            pubKey = author.bundle.encoded,
+                            deviceTag = DeviceTag.derive("vector-device-$authorName"),
+                            protoVersion = Protocol.VERSION,
+                            capabilities = RATCHET_CAPABILITIES,
+                            prekey = prekeyInfo(),
+                            version = version,
+                        ),
+                    ),
+            )
+    }
+
+    // Alice's run walks the pin through every outcome: pinned, cleared by omission, re-pinned, cleared by a bad sig.
+    private fun profiles(): List<VectorProfile> =
+        listOf(
+            VectorProfile("aliceV1", alice, "alice", 1L, PROFILE_AT, prekeys.getValue("aliceSpk1")),
+            VectorProfile("aliceV2NoPrekey", alice, "alice", 2L, PROFILE_AT + 1_000L, null),
+            VectorProfile("aliceV3", alice, "alice", 3L, PROFILE_AT + 2_000L, prekeys.getValue("aliceSpk2")),
+            VectorProfile("aliceV4BadPrekeySig", alice, "alice", 4L, PROFILE_AT + 3_000L, prekeys.getValue("aliceSpk2"), tamperSig = true),
+            VectorProfile("bobV1", bob, "bob", 1L, PROFILE_AT, prekeys.getValue("bobSpk1")),
+            VectorProfile("carolV1", carol, "carol", 1L, PROFILE_AT, prekeys.getValue("carolSpk1")),
+        )
+
+    private fun profilesJson(): JsonObject =
+        buildJsonObject {
+            put(
+                "note",
+                "deliver 'sequence' in order to one fresh receiver; after each step its pin for that sender is 'expect' " +
+                    "(prekey null = no pin). InboundPipelineTest replays it through the real pipeline.",
+            )
+            put("capabilities", RATCHET_CAPABILITIES)
+            put("capabilitiesHex", "0x%x".format(RATCHET_CAPABILITIES))
+            putJsonArray("prekeys") {
+                for (prekey in prekeys.values) {
+                    add(
+                        buildJsonObject {
+                            put("name", prekey.name)
+                            put("owner", prekey.ownerName)
+                            put("id", prekey.id)
+                            put("seed", prekey.seed)
+                            put("priv", prekey.keys.priv.toHex())
+                            put("pub", prekey.keys.pub.toHex())
+                            put("sig", prekey.sig.toHex())
+                            put("createdAt", prekey.createdAt)
+                        },
+                    )
+                }
+            }
+            putJsonObject("frames") {
+                for (profile in profiles()) {
+                    putJsonObject(profile.name) {
+                        put("sender", profile.authorName)
+                        put("version", profile.version)
+                        put("publishedAt", profile.publishedAt)
+                        put("prekey", profile.prekey?.name)
+                        put("prekeySigValid", profile.prekeyValid)
+                        put("wire", profile.author.signedWire(profile.frame()).toHex())
+                    }
+                }
+            }
+            putJsonArray("sequence") {
+                for (profile in profiles()) {
+                    add(
+                        buildJsonObject {
+                            put("deliver", profile.name)
+                            putJsonObject("expect") {
+                                val pinned = profile.prekey?.takeIf { profile.prekeyValid }
+                                put("prekeyId", pinned?.id)
+                                put("prekeyPub", pinned?.keys?.pub?.toHex())
+                                put("prekeyProfileAt", profile.version)
+                            }
+                        },
+                    )
+                }
+            }
+        }
+
     private fun JsonObjectBuilder.draw(
         name: String,
         seed: Int,
@@ -390,9 +540,12 @@ class RatchetVectorTest {
         const val SEED_GCM_KEY = 48
         const val SEED_GCM_IV = 49
         const val SEED_GCM_AAD = 50
+        const val SEED_CAROL_SPK = 51
+        const val SEED_ALICE_SPK2 = 52
 
         const val BOB_SPK_ID = 1
         const val ALICE_SPK_ID = 1
+        const val CAROL_SPK_ID = 1
         const val GROUP_EPOCH = 1
         const val CHAIN_STEPS = 4
         const val GCM_AAD_BYTES = 20
@@ -401,5 +554,15 @@ class RatchetVectorTest {
         /** keyed-v1's clock: Alice's profile stamp. The session is established on it, the frame sent 3 s later. */
         const val SESSION_AT = 1_756_100_000_000L
         const val SENT_AT = SESSION_AT + 3_000L
+
+        /** E2E, store-and-forward, the ratchet, inline acks and crypto v3: pinned, so a new local bit moves nothing. */
+        const val RATCHET_CAPABILITIES =
+            0x9L or Protocol.CAP_RATCHET or Protocol.CAP_INLINE_ACK or Protocol.CAP_CRYPTO_V3
+
+        const val DAY_MS = 86_400_000L
+
+        /** The prekeys are minted a week before the session, and the profiles published a day before it. */
+        const val PREKEY_AT = SESSION_AT - 7 * DAY_MS
+        const val PROFILE_AT = SESSION_AT - DAY_MS
     }
 }

@@ -85,9 +85,11 @@ import app.getknit.knit.mesh.protocol.RelayEnvelope
 import app.getknit.knit.mesh.protocol.ReplyRef
 import app.getknit.knit.mesh.protocol.TransferPayload
 import app.getknit.knit.mesh.protocol.TypingContent
+import app.getknit.knit.mesh.protocol.VectorFiles
 import app.getknit.knit.mesh.protocol.VideoInfo
 import app.getknit.knit.mesh.protocol.WireCodec
 import app.getknit.knit.mesh.protocol.WireEnvelope
+import app.getknit.knit.mesh.protocol.fromHex
 import app.getknit.knit.mesh.sha256Hex
 import app.getknit.knit.mesh.spool.ScopeSync
 import app.getknit.knit.moderation.ImageScreeningService
@@ -115,6 +117,12 @@ import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -6139,6 +6147,51 @@ class InboundPipelineTest {
 
             assertEquals(null, rig.peerMap[alice.nodeId]?.prekeyPub)
             assertEquals("Ann", rig.peerMap[alice.nodeId]?.name)
+        }
+
+    // The pin outcomes `vectors/ratchet-v1.json` states for its signed profiles (companion change A9) are this
+    // pipeline's, not a copy of its rule: each frame goes through onDeliver as it would arrive off the air.
+    @Test
+    fun theRatchetVectorProfilesPinAsTheFileSays() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val profiles = VectorFiles.read("ratchet-v1.json").getValue("profiles").jsonObject
+            val frames = profiles.getValue("frames").jsonObject
+            rig.nowMs =
+                frames.values.maxOf {
+                    it.jsonObject
+                        .getValue("publishedAt")
+                        .jsonPrimitive.long
+                }
+            for (step in profiles.getValue("sequence").jsonArray.map { it.jsonObject }) {
+                val name = step.getValue("deliver").jsonPrimitive.content
+                val wire =
+                    checkNotNull(
+                        WireCodec.decodeWire(
+                            frames
+                                .getValue(name)
+                                .jsonObject
+                                .getValue("wire")
+                                .jsonPrimitive.content
+                                .fromHex(),
+                        ),
+                    )
+                val env = checkNotNull(WireCodec.decodeEnvelope(wire.signed))
+                rig.pipeline.onDeliver(wire, env, env.senderId, TransportKind.Other)
+                val expect = step.getValue("expect").jsonObject
+                val row = checkNotNull(rig.peerMap[env.senderId]) { "$name pinned no row" }
+                assertEquals(name, expect.getValue("prekeyId").jsonPrimitive.intOrNull, row.prekeyId)
+                assertEquals(
+                    name,
+                    expect
+                        .getValue("prekeyPub")
+                        .jsonPrimitive.contentOrNull
+                        ?.fromHex()
+                        ?.let(::b64),
+                    row.prekeyPub,
+                )
+                assertEquals(name, expect.getValue("prekeyProfileAt").jsonPrimitive.long, row.prekeyProfileAt)
+            }
         }
 
     @Test
