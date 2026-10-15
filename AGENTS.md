@@ -153,6 +153,7 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   is cast through the spools, signed, never stored, never answered and never a request, and on an `ent` spool only
   where one subscriber's cast ticket unlocks the scope.
   **Before touching `call/WalkieTranscript.kt` (`BurstPcm`, `PassGate`, `SpeechStream`, `WalkieTranscriber`, `SttPolicy`),
+  `call/WalkieClips.kt` and `WalkieClipFiles` (a debug build's saved bursts, off by default),
   `call/SttModel.kt` (the pins, `SttModelInstaller`), `ui/call/stt/` (`MoonshineSpeech`), `TalkPlayer`'s `TalkPcmTap`,
   `WalkieTranscriptCard`, `ModelLoadGuard.STT`, the `moonshineVoice` pin or `scripts/stt-model.py`:** READ ADR
   2026-10.nz3g and `docs/VOICE_CALLS.md` C-3.11-9 — the receiver writes each heard burst out as text while it plays,

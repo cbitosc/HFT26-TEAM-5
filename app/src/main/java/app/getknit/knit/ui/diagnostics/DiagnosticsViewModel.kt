@@ -12,6 +12,7 @@ import app.getknit.knit.data.PeerRepository
 import app.getknit.knit.data.relay.RelayStatusRepository
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.di.CALLS_WIRED
+import app.getknit.knit.di.WALKIE_WIRED
 import app.getknit.knit.identity.Identity
 import app.getknit.knit.identity.displayNameFor
 import app.getknit.knit.mesh.MeshController
@@ -247,6 +248,19 @@ class DiagnosticsViewModel(
     fun setDirectCallsOff(off: Boolean) {
         if (!directCallsSwitchOffered) return
         viewModelScope.launch { settings.setDebugDirectCallsOff(off) }
+    }
+
+    /** Whether this build offers the walkie clips switch — a debug build with the walkie. */
+    val walkieClipsOffered: Boolean = BuildConfig.DEBUG && WALKIE_WIRED
+
+    /** Whether the debug switch saves each walkie burst's audio and transcript for the lab's speech eval (C-3.11-9). */
+    val walkieClips: StateFlow<Boolean> =
+        settings.debugWalkieClips.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
+    /** Starts or stops saving walkie clips; what was saved stays. A no-op outside a debug build. */
+    fun setWalkieClips(on: Boolean) {
+        if (!walkieClipsOffered) return
+        viewModelScope.launch { settings.setDebugWalkieClips(on) }
     }
 
     /**

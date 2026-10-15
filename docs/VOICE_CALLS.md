@@ -787,7 +787,8 @@ an experiment behind `BuildConfig.WALKIE` (`-Pwalkie=`, on in debug and off in r
     libwebrtc: Small (142 MB, the default; 7.84 % on the Open ASR average), Tiny (45 MB, 12.0 %) or Medium (269 MB,
     6.65 %) — the user's pick on the card. Each is fetched and kept on its own; the transcript uses the one picked.
     Each burst is one stream of the model's: its streaming encoder caches what it has seen, so a look costs the new
-    audio and a decode, and its own voice detector closes a stretch at each pause, whose text then stands. The model
+    audio and a decode. Its own voice detector is off (`MoonshineSpeech.splitAtPauses`): a burst is one line of up to
+    30 s, since a split at a pause decodes each half without the other. The model
     looks every 500 ms of new audio, or — on a phone that cannot keep up — once as much audio has come as its last
     look took (`PassGate`, at most 5 s). One model call runs at a time, off the player's and the recorder's threads.
     The model is held on a `ModelLease` (released after 2 min idle) and loaded under `ModelLoadGuard` as `stt`, a
@@ -804,6 +805,10 @@ an experiment behind `BuildConfig.WALKIE` (`-Pwalkie=`, on in debug and off in r
     `Listening…` until the model has heard something, then its words so far (dimmed, not read out), then its text (a
     polite live region) or why not (no speech, no model, failed). While the model is not on the phone, the card says
     what it costs, flags a metered or Data Saver route, and offers Download, Cancel or Try again.
+  - **The lab's clips.** A debug build only: while Diagnostics' "Save walkie clips" is on (off by default), each burst
+    the transcript finishes is written by `WalkieClipFiles` as a 16 kHz mono WAV and a JSON sidecar, its text
+    included, to the app's external files, unencrypted, for scoring the model off the phone. This is the one exception
+    to the text never being stored; a release build has no switch.
 
 ### 3.12 Call records in the thread
 

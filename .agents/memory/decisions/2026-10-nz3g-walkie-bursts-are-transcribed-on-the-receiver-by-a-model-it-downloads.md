@@ -113,3 +113,19 @@ C-3.11-9). It is debug-only, as the walkie is, and nothing reaches the wire.
     `https://getknit.app/models/stt/<model id>/` (`scripts/stt-model.py --out`); until then the card's Download answers
     404 and `…debug.STT --es op sideload` installs from pushed files through the same pins.
 
+- **Amendment 2026-10-14: one line a burst.** The model's voice detector no longer splits a burst at its pauses
+  (`MoonshineSpeech.splitAtPauses`, off; `vad_threshold=0`, a line up to 30 s): the talk button already bounds the
+  speech, and a split decodes each half without the other. On the phones, Small, the noisy 10 s clip read 16.7 % word
+  error split and 0 % whole; the cost is 1.5–2.3× the model time and 170–390 ms more from a burst's end to its text.
+  The 44 s clip ran 104–157 % of real time whole and lost its last words at the 30 s cut (cause not yet known).
+  `…debug.STT --es op split --ez on true` brings the split back for an A/B.
+- **Amendment 2026-10-14: clips for the lab's eval.** To score the models on real conversations rather than read
+  clips, a debug build has a Diagnostics switch, "Save walkie clips" (`SettingsStore.debugWalkieClips`, off by
+  default, out of backups by its `debug_` prefix). While it is on, every burst the transcript finishes, heard or
+  spoken (a slipped thumb and a dropped burst excepted, one heard with no model included), is handed to
+  `WalkieClips` with the 16 kHz mono audio the model got and its final line; `WalkieClipFiles` writes a WAV and a JSON
+  sidecar (the line, its text included, and the model, the split setting, the call id and the mic's suppressor) to the
+  app's external files, unencrypted so `adb pull` reads them, capped at 256 MiB. This is the one place the
+  transcript's text, or its audio, is written down, and only a debug build, on the user's switch, does it; release has
+  no switch and its store key reads false. `…debug.STT --es op clips` reports, sets and clears them, and `pcm` reads a
+  clip's WAV back.

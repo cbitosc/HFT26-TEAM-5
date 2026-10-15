@@ -60,6 +60,7 @@ import app.getknit.knit.ui.call.WalkieTalk
 import app.getknit.knit.ui.call.WebRtcCallMedia
 import app.getknit.knit.ui.call.stt.MoonshineSpeech
 import app.getknit.knit.ui.call.stt.SttModelStore
+import app.getknit.knit.ui.call.stt.WalkieClipFiles
 import app.getknit.knit.ui.callsettings.CallSettingsViewModel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -211,6 +212,23 @@ private fun callGraph(): Module =
             // The transcript (C-3.11-9): a model the user downloads, fed here the bursts this phone hears as they play.
             single { SttModelStore(androidContext(), get<AndroidInternetGate>(), get<CoroutineScope>(), log = { Log.i(TAG, it) }) }
             single { MoonshineSpeech(get(), get<ModelLoadGuard>(), get<CoroutineScope>(), log = { Log.i(TAG, it) }) }
+            // A debug build's lab switch, off by default (`SettingsStore.debugWalkieClips`): each burst's audio and line.
+            single {
+                WalkieClipFiles(
+                    androidContext(),
+                    get<CoroutineScope>(),
+                    switch = get<SettingsStore>().debugWalkieClips.stateIn(get<CoroutineScope>(), SharingStarted.Eagerly, false),
+                    about = { line ->
+                        mapOf(
+                            "model" to get<SttModelStore>().model.id,
+                            "splitAtPauses" to get<MoonshineSpeech>().splitAtPauses,
+                            "call" to get<CallManager>().state.value?.id,
+                            "suppressor" to if (line.mine) get<TalkRecorder>().suppressor else null,
+                        )
+                    },
+                    log = { Log.i(TAG, it) },
+                )
+            }
             single {
                 WalkieTranscriber(
                     speech = get<MoonshineSpeech>(),
@@ -219,6 +237,7 @@ private fun callGraph(): Module =
                     // One model call at a time, in the order the audio came, off the player's and the recorder's threads.
                     dispatcher = Dispatchers.Default.limitedParallelism(1),
                     log = { Log.i(TAG, it) },
+                    clips = get<WalkieClipFiles>(),
                 )
             }
             single { TalkPlayer(tap = get<WalkieTranscriber>()) }

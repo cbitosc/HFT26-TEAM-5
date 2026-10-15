@@ -288,8 +288,9 @@ private fun TranscriptLine.sameBurst(other: TranscriptLine) = burst == other.bur
  * playback mid-burst, it does not end it.
  *
  * A session ([reset]) starts the transcript afresh; a burst of the last one still with the model is closed unheard. The
- * text is held here and nowhere else: it is never logged, stored or sent. Thread-safe: [pcm] comes on the player's
- * thread and [mic] on the recorder's, the rest from the player's loop, the talk button and the call screen.
+ * text is held here and nowhere else: it is never logged, stored or sent — save to [clips], a debug build's lab switch,
+ * which keeps each finished burst's audio and line while it is on. Thread-safe: [pcm] comes on the player's thread and
+ * [mic] on the recorder's, the rest from the player's loop, the talk button and the call screen.
  */
 class WalkieTranscriber(
     private val speech: SpeechToText,
@@ -298,6 +299,7 @@ class WalkieTranscriber(
     private val dispatcher: CoroutineDispatcher,
     private val clock: () -> Long = System::currentTimeMillis,
     private val log: (String) -> Unit = {},
+    private val clips: WalkieClips? = null,
 ) : TalkPcmTap {
     private val _lines = MutableStateFlow<List<TranscriptLine>>(emptyList())
 
@@ -313,6 +315,8 @@ class WalkieTranscriber(
         val number: Int,
         val mine: Boolean,
         val session: Int,
+        // Under [lock], like [audio]: everything drained from it, while [clips] keeps this burst.
+        val tape: SampleTape?,
     ) {
         // Under [lock]: the audio not yet fed, whether a feed is already on its way, and whether the burst was dropped.
         val audio = BurstPcm()
@@ -358,7 +362,7 @@ class WalkieTranscriber(
             synchronized(lock) {
                 val before = if (mine) spoken else heard
                 before?.dropped = true
-                val next = Burst(burst, mine, session)
+                val next = Burst(burst, mine, session, tape = SampleTape().takeIf { clips?.on == true })
                 if (mine) spoken = next else heard = next
                 before
             }
@@ -412,6 +416,8 @@ class WalkieTranscriber(
         if (state != TranscriptLine.State.Pending) {
             synchronized(lock) { b.dropped = true }
             closeLater(b)
+            // A burst heard with no model on the phone is still one to score a model on; a slipped thumb is not.
+            if (state == TranscriptLine.State.NoModel) keepClip(b)
             return
         }
         workScope.launch(dispatcher) { serial.withLock { finish(b, endedAt) } }
@@ -442,7 +448,7 @@ class WalkieTranscriber(
             synchronized(lock) {
                 b.queued = false
                 if (b.dropped || b.session != session || !ready()) return
-                b.audio.drain()
+                b.audio.drain().also { b.tape?.add(it) }
             }
         val stream = streamOf(b) ?: return
         if (samples.isEmpty()) return
@@ -483,6 +489,21 @@ class WalkieTranscriber(
                 "${b.looks} look(s), ${b.modelMs} ms in the model, final $took ms after its end, ${state.label()}",
         )
         updateLine(b) { it.copy(state = state, live = "", tookMs = took, looks = b.looks, modelMs = b.modelMs) }
+        keepClip(b)
+    }
+
+    // [b]'s whole audio and its line as it stands, to [clips] — if it kept this burst and the burst is still this
+    // session's. What the model was never fed (no model on the phone) is drained here.
+    private fun keepClip(b: Burst) {
+        val tape = b.tape ?: return
+        val samples =
+            synchronized(lock) {
+                if (b.session != session) return
+                tape.add(b.audio.drain())
+                tape.samples()
+            }
+        val line = _lines.value.firstOrNull { it.burst == b.number && it.mine == b.mine } ?: return
+        clips?.keep(WalkieClip(line, samples))
     }
 
     // Under [serial]: the burst's stream, opened on first use; null once the model would not run for it.

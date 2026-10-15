@@ -73,7 +73,22 @@ class WalkieTranscriberTest {
     }
 
     // On the test's scheduler but outside backgroundScope, whose work advanceUntilIdle leaves alone.
-    private fun TestScope.transcriber(speech: SpeechToText = FakeSpeech()): WalkieTranscriber {
+
+    /** A debug build's clip switch: [on] as set, every clip kept in [kept]. */
+    private class FakeClips(
+        override var on: Boolean = true,
+    ) : WalkieClips {
+        val kept = mutableListOf<WalkieClip>()
+
+        override fun keep(clip: WalkieClip) {
+            kept += clip
+        }
+    }
+
+    private fun TestScope.transcriber(
+        speech: SpeechToText = FakeSpeech(),
+        clips: WalkieClips? = null,
+    ): WalkieTranscriber {
         val dispatcher = StandardTestDispatcher(testScheduler)
         return WalkieTranscriber(
             speech = speech,
@@ -82,6 +97,7 @@ class WalkieTranscriberTest {
             dispatcher = dispatcher,
             clock = { now },
             log = { logs += it },
+            clips = clips,
         )
     }
 
@@ -371,6 +387,106 @@ class WalkieTranscriberTest {
     }
 
     // [ms] of a quiet tone at [rate], as the player's tap (48 kHz) or the recorder's (16 kHz) hands it on.
+    @Test
+    fun withClipsOnAFinishedBurstIsKeptWholeWithItsFinalLine() =
+        runTest {
+            val clips = FakeClips()
+            val t = transcriber(clips = clips)
+            t.begin(3)
+            t.pcm(pcm(ms = 1_000), 48_000, 1)
+            advanceUntilIdle()
+            t.pcm(pcm(ms = 500), 48_000, 1)
+            t.end(3)
+            advanceUntilIdle()
+            val clip = clips.kept.single()
+            assertEquals(24_000, clip.samples.size)
+            assertEquals(TranscriptLine.State.Text("words 24000"), clip.line.state)
+            assertEquals(3, clip.line.burst)
+        }
+
+    @Test
+    fun withClipsOnASpokenBurstIsKeptAsMine() =
+        runTest {
+            val clips = FakeClips()
+            val t = transcriber(clips = clips)
+            t.begin(0, mine = true)
+            t.mic.pcm(pcm(ms = 1_000, rate = 16_000), 16_000, 1)
+            t.end(0, mine = true)
+            advanceUntilIdle()
+            val clip = clips.kept.single()
+            assertTrue(clip.line.mine)
+            assertEquals(16_000, clip.samples.size)
+        }
+
+    @Test
+    fun withClipsOffNothingIsKept() =
+        runTest {
+            val clips = FakeClips(on = false)
+            val t = transcriber(clips = clips)
+            t.begin(0)
+            t.pcm(pcm(ms = 1_000), 48_000, 1)
+            t.end(0)
+            advanceUntilIdle()
+            assertEquals(TranscriptLine.State.Text("words 16000"), t.line().state)
+            assertTrue(clips.kept.isEmpty())
+        }
+
+    @Test
+    fun aBurstHeardWithNoModelIsStillKeptWithAllItsAudio() =
+        runTest {
+            modelReady = false
+            val clips = FakeClips()
+            val t = transcriber(clips = clips)
+            t.begin(0)
+            t.pcm(pcm(ms = 1_000), 48_000, 1)
+            advanceUntilIdle()
+            t.end(0)
+            advanceUntilIdle()
+            val clip = clips.kept.single()
+            assertEquals(TranscriptLine.State.NoModel, clip.line.state)
+            assertEquals(16_000, clip.samples.size)
+        }
+
+    @Test
+    fun aSlippedThumbADroppedBurstAndALastSessionsBurstAreNotKept() =
+        runTest {
+            val clips = FakeClips()
+            val gate = CompletableDeferred<Unit>()
+            val t = transcriber(FakeSpeech(finishGate = gate), clips = clips)
+            t.begin(0)
+            t.pcm(pcm(ms = 100), 48_000, 1)
+            t.end(0)
+            t.begin(1, mine = true)
+            t.mic.pcm(pcm(ms = 1_000, rate = 16_000), 16_000, 1)
+            t.abandon(mine = true)
+            t.begin(2)
+            t.pcm(pcm(ms = 1_000), 48_000, 1)
+            t.end(2)
+            advanceUntilIdle()
+            // Burst 2 is with the model when the session ends.
+            t.reset()
+            gate.complete(Unit)
+            advanceUntilIdle()
+            assertTrue(clips.kept.isEmpty())
+        }
+
+    @Test
+    fun aClipIsACanonicalWavOfSixteenBitSamples() {
+        val wav = wavOf(floatArrayOf(0f, 0.5f, -1f, 2f), rate = 16_000)
+        val b = ByteBuffer.wrap(wav).order(ByteOrder.LITTLE_ENDIAN)
+        assertEquals(44 + 8, wav.size)
+        assertEquals("RIFF", String(wav, 0, 4))
+        assertEquals(wav.size - 8, b.getInt(4))
+        assertEquals("WAVEfmt ", String(wav, 8, 8))
+        assertEquals(1, b.getShort(22).toInt())
+        assertEquals(16_000, b.getInt(24))
+        assertEquals(32_000, b.getInt(28))
+        assertEquals(16, b.getShort(34).toInt())
+        assertEquals("data", String(wav, 36, 4))
+        assertEquals(8, b.getInt(40))
+        assertEquals(listOf(0, 16_383, -32_767, 32_767), (0 until 4).map { b.getShort(44 + it * 2).toInt() })
+    }
+
     private fun pcm(
         ms: Int,
         rate: Int = 48_000,

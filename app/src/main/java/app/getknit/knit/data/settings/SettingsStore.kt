@@ -502,6 +502,14 @@ class SettingsStore(
         dataStore.data.map { prefs -> BuildConfig.DEBUG && prefs[KEY_DEBUG_DIRECT_CALLS_OFF] == true }
 
     /**
+     * Whether the debug build saves each walkie burst's audio and transcript to the app's external files, unencrypted, for
+     * scoring the speech model in the lab (`WalkieClipFiles`, C-3.11-9). Off by default; set from Diagnostics. Gated on
+     * `BuildConfig.DEBUG` like [debugNanOff]; the `debug_` prefix keeps it out of a backup.
+     */
+    val debugWalkieClips: Flow<Boolean> =
+        dataStore.data.map { prefs -> BuildConfig.DEBUG && prefs[KEY_DEBUG_WALKIE_CLIPS] == true }
+
+    /**
      * The BLE Coded PHY's mode (ADR 2026-10.yvn6), or null where the build keeps it dark (`BuildConfig.BLE_CODED_PHY`).
      * Unset reads [CodedPhyMode.AUTO]: a build that carries the feature runs it. Only a debug build reads the stored
      * mode, set from Diagnostics or `…debug.PHY` for a walk test; a release build is always AUTO, whatever a debug
@@ -804,6 +812,16 @@ class SettingsStore(
                 it[KEY_DEBUG_NAN_OFF] = true
             } else {
                 it.remove(KEY_DEBUG_NAN_OFF)
+            }
+        }
+
+    /** Sets [debugWalkieClips]; off clears the key. */
+    suspend fun setDebugWalkieClips(on: Boolean) =
+        dataStore.edit {
+            if (on) {
+                it[KEY_DEBUG_WALKIE_CLIPS] = true
+            } else {
+                it.remove(KEY_DEBUG_WALKIE_CLIPS)
             }
         }
 
@@ -1140,6 +1158,7 @@ class SettingsStore(
         val KEY_DEBUG_BLE_PHY_MODE = stringPreferencesKey("debug_ble_phy_mode")
         val KEY_DEBUG_NAN_OFF = booleanPreferencesKey("debug_nan_off")
         val KEY_DEBUG_DIRECT_CALLS_OFF = booleanPreferencesKey("debug_direct_calls_off")
+        val KEY_DEBUG_WALKIE_CLIPS = booleanPreferencesKey("debug_walkie_clips")
         val KEY_LORA_NODE = longPreferencesKey("lora_board_node")
         val KEY_LORA_KEY = stringPreferencesKey("lora_board_key")
         val KEY_LORA_SETUP_ADDRESS = stringPreferencesKey("lora_setup_address")

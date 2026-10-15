@@ -142,6 +142,7 @@ import app.getknit.knit.ui.call.WalkieTalk
 import app.getknit.knit.ui.call.WebRtcCallMedia
 import app.getknit.knit.ui.call.stt.MoonshineSpeech
 import app.getknit.knit.ui.call.stt.SttModelStore
+import app.getknit.knit.ui.call.stt.WalkieClipFiles
 import app.getknit.knit.ui.chat.ChatWindow
 import app.getknit.knit.ui.chat.quoteLabels
 import app.getknit.knit.ui.invite.prepareKnitApk
@@ -2670,7 +2671,9 @@ class DebugBridgeReceiver :
      * encoder at 8 kbps, the player's decoder and its tap, the transcriber — as burst [LOOP_BURST] of a fresh transcript,
      * in real time, and replies at once; poll `status` for its two lines, the spoken one (`mine`, the file before Opus)
      * and the heard one (after it), whose texts differ by the codec, and whose `live` shows the text while it streams. It
-     * plays aloud, and refuses while a walkie call is up.
+     * plays aloud, and refuses while a walkie call is up. `pcm` also reads a saved walkie clip's WAV. `clips` reports
+     * Diagnostics' "Save walkie clips" (where, how many, how big), `--ez on true|false` sets it and `--ez clear true`
+     * deletes them.
      */
     @Suppress("CyclomaticComplexMethod", "ReturnCount") // a flat dispatch over the ops
     private suspend fun handleStt(intent: Intent): JSONObject {
@@ -2716,6 +2719,20 @@ class DebugBridgeReceiver :
                 // `--ez on true|false`: the model's voice detector splitting a burst at pauses (off by default), for an
                 // A/B. In memory until the process ends; the next burst reloads the model with it.
                 speech.splitAtPauses = intent.getBooleanExtra("on", false)
+            }
+
+            "clips" -> {
+                // Diagnostics' "Save walkie clips": `--ez on true|false` sets the persisted switch, `--ez clear true`
+                // deletes what was saved; either way the reply says where they are and how many.
+                val clips = getKoin().get<WalkieClipFiles>()
+                if (intent.hasExtra("on")) getKoin().get<SettingsStore>().setDebugWalkieClips(intent.getBooleanExtra("on", false))
+                if (intent.getBooleanExtra("clear", false)) clips.clear()
+                val (count, bytes) = clips.count()
+                return reply("ok", "walkie clips")
+                    .put("on", getKoin().get<SettingsStore>().debugWalkieClips.first())
+                    .put("dir", clips.dir.path)
+                    .put("clips", count)
+                    .put("bytes", bytes)
             }
 
             "loop" -> {
@@ -2856,11 +2873,14 @@ class DebugBridgeReceiver :
             }
         }
 
-    // Raw 16-bit little-endian mono PCM at the model's rate, as −1..1 floats; null when the file won't read.
+    // Raw 16-bit little-endian mono PCM at the model's rate, as −1..1 floats — or a WAV of it (a saved walkie clip), its
+    // header skipped; null when the file won't read.
     private fun readPcm16(file: File): FloatArray? =
         runCatching {
             val bytes = file.readBytes()
-            val shorts = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
+            val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+            if (bytes.size >= WAV_HEADER && String(bytes, 0, 4, Charsets.US_ASCII) == "RIFF") buffer.position(WAV_HEADER)
+            val shorts = buffer.slice().order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
             FloatArray(shorts.remaining()) { shorts.get(it) / PCM_FULL_SCALE }
         }.getOrNull()
 
@@ -3706,6 +3726,9 @@ private const val TALK_MAX_MS = 8_000
 private const val PCM_BYTES_PER_MS = 32L
 private const val TALK_PCM_TAIL_MS = 400L
 private const val PCM_FULL_SCALE = 32_768f
+
+// The canonical header `wavOf` writes a walkie clip with.
+private const val WAV_HEADER = 44
 
 // The burst number `…debug.STT --es op loop` gives its one burst.
 private const val LOOP_BURST = 0

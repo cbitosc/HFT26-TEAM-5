@@ -1005,6 +1005,9 @@
     <!-- Debug builds only: calls' Wi-Fi Direct leg (SettingsStore.debugDirectCallsOff, ADR 2026-10.kxnw). -->
     <string name="diagnostics_direct_calls_switch_label">Wi-Fi Direct calls (debug)</string>
     <string name="diagnostics_direct_calls_switch_body">Turn off to send calls with a nearby phone over the internet path, STUN and TURN, as if it were far away. Applies to the next call and stays off until you turn it back on.</string>
+    <!-- Debug builds only: saving walkie bursts for the speech eval (SettingsStore.debugWalkieClips, ADR 2026-10.nz3g). -->
+    <string name="diagnostics_walkie_clips_label">Save walkie clips (debug)</string>
+    <string name="diagnostics_walkie_clips_body">Saves the audio and transcript of every walkie burst, heard and spoken, to this app\'s files in Android/data, unencrypted, for testing speech recognition. Turning it off keeps what was saved.</string>
     <string name="diagnostics_transport_debug_off">off</string>
     <!-- A plane low-power mode has switched off (ADR 2026-10.d44b), as a tag beside the transport. -->
     <string name="diagnostics_transport_low_power">low power</string>

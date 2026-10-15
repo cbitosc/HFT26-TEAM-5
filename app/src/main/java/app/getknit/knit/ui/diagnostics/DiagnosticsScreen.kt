@@ -118,6 +118,7 @@ fun DiagnosticsScreen(
     val bleLinkCap by viewModel.bleLinkCap.collectAsStateWithLifecycle()
     val nanOff by viewModel.nanOff.collectAsStateWithLifecycle()
     val directCallsOff by viewModel.directCallsOff.collectAsStateWithLifecycle()
+    val walkieClips by viewModel.walkieClips.collectAsStateWithLifecycle()
     val directHost by viewModel.directHost.collectAsStateWithLifecycle()
     val callCapture by viewModel.callCapture.collectAsStateWithLifecycle()
     val blePhyMode by viewModel.blePhyMode.collectAsStateWithLifecycle()
@@ -183,6 +184,9 @@ fun DiagnosticsScreen(
         directCallsSwitchOffered = viewModel.directCallsSwitchOffered,
         directCallsOff = directCallsOff,
         onSetDirectCallsOff = viewModel::setDirectCallsOff,
+        walkieClipsOffered = viewModel.walkieClipsOffered,
+        walkieClips = walkieClips,
+        onSetWalkieClips = viewModel::setWalkieClips,
         directHost = directHost,
         onResetDirectHost = viewModel::resetDirectHost,
         callCapture = callCapture,
@@ -240,6 +244,10 @@ internal fun DiagnosticsScreenContent(
     directCallsSwitchOffered: Boolean = false,
     directCallsOff: Boolean = false,
     onSetDirectCallsOff: (Boolean) -> Unit = {},
+    // The debug-only walkie clips switch, defaulted off likewise: [walkieClips] true saves each burst for the speech eval.
+    walkieClipsOffered: Boolean = false,
+    walkieClips: Boolean = false,
+    onSetWalkieClips: (Boolean) -> Unit = {},
     // Whether this phone may host a Wi-Fi Direct group (ADR 2026-10.w3dw); the row shows only when it may not.
     directHost: HostVerdict = HostVerdict.Allowed,
     onResetDirectHost: () -> Unit = {},
@@ -333,6 +341,17 @@ internal fun DiagnosticsScreenContent(
                         tag = "direct_calls_switch",
                         off = directCallsOff,
                         onSet = onSetDirectCallsOff,
+                    )
+                }
+            }
+            if (walkieClipsOffered) {
+                item {
+                    DebugSwitchRow(
+                        label = R.string.diagnostics_walkie_clips_label,
+                        body = R.string.diagnostics_walkie_clips_body,
+                        tag = "walkie_clips_switch",
+                        off = !walkieClips,
+                        onSet = { off -> onSetWalkieClips(!off) },
                     )
                 }
             }
@@ -1230,7 +1249,8 @@ private fun BleLinkCapRow(
 /**
  * A debug build's on/off switch, persisted: the Wi-Fi Aware plane (`SettingsStore.debugNanOff`, applied by the
  * transport without a restart, so the mesh runs on Bluetooth alone) or calls' Wi-Fi Direct leg
- * (`SettingsStore.debugDirectCallsOff`, read when the next call starts). The whole row toggles; [off] reads unchecked.
+ * (`SettingsStore.debugDirectCallsOff`, read when the next call starts) or saving walkie clips
+ * (`SettingsStore.debugWalkieClips`, read as each burst begins). The whole row toggles; [off] reads unchecked.
  */
 @Composable
 private fun DebugSwitchRow(

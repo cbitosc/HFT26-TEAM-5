@@ -177,9 +177,8 @@ internal class MoonshineSpeech(
                 log("walkie stt: ${model.id} failed its probe")
                 return null
             }
-            log(
-                "walkie stt: ${model.id} loaded in ${System.currentTimeMillis() - started} ms, ${if (split) "split at pauses" else "one line a burst"}",
-            )
+            val lines = if (split) "split at pauses" else "one line a burst"
+            log("walkie stt: ${model.id} loaded in ${System.currentTimeMillis() - started} ms, $lines")
             Engine(handle)
         } catch (e: Throwable) {
             log("walkie stt: ${model.id} not loaded: ${e.javaClass.simpleName}: ${e.message}")
