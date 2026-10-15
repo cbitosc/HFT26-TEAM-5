@@ -115,6 +115,7 @@ import app.getknit.knit.data.MessageRepository
 import app.getknit.knit.data.PeerRepository
 import app.getknit.knit.data.message.MessageEntity
 import app.getknit.knit.data.settings.SettingsStore
+import app.getknit.knit.data.settings.TranscriptStore
 import app.getknit.knit.identity.Identity
 import app.getknit.knit.mesh.protocol.CallPayload
 import app.getknit.knit.notifications.MessageNotifier
@@ -128,6 +129,7 @@ import app.getknit.knit.ui.theme.LocalReduceMotion
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.launch
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
@@ -160,6 +162,7 @@ class CallActivity :
     // The walkie's transcript and its speech model; null where the walkie is.
     private val transcriber: WalkieTranscriber? = getKoin().getOrNull()
     private val stt: SttModelStore? = getKoin().getOrNull()
+    private val transcriptStore: TranscriptStore? = getKoin().getOrNull()
     private var pendingAnswer: String? = null
     private var serviceStarted = false
 
@@ -263,6 +266,9 @@ class CallActivity :
         val routing by system.routing.collectAsState()
         val lines by (transcriber?.lines ?: NO_LINES).collectAsState()
         val model by (stt?.state ?: NO_MODEL).collectAsState()
+        // Off until read, so the card never flashes up on a phone that switched transcripts off or closed the offer.
+        val transcriptsOn by (transcriptStore?.enabled ?: NO_SWITCH).collectAsState(initial = false)
+        val offerDismissed by (transcriptStore?.offerDismissed ?: NO_SWITCH).collectAsState(initial = true)
         // Read again as the model's state moves: a tap on Download is when the route matters.
         val metered = remember(model) { stt?.metered() == true }
         CallScreen(
@@ -291,9 +297,14 @@ class CallActivity :
             onTalkSend = { lifecycleScope.launch { walkie?.release() } },
             onTalkCancel = { lifecycleScope.launch { walkie?.cancel() } },
             walkieStats = walkieStats.takeIf { walkieUp },
-            transcript = stt?.let { store -> TranscriptUi(lines, model, store.model.bytes, metered) },
+            // No card with transcripts switched off, nor while the model is absent once its offer was closed.
+            transcript =
+                stt
+                    ?.takeIf { transcriptsOn && (model == SttModelState.Ready || !offerDismissed) }
+                    ?.let { store -> TranscriptUi(lines, model, store.model.bytes, metered) },
             onSttDownload = { stt?.download() },
             onSttCancel = { stt?.cancel() },
+            onSttDismiss = { lifecycleScope.launch { transcriptStore?.dismissOffer() } },
         )
     }
 
@@ -368,6 +379,7 @@ private val NO_TALK = MutableStateFlow<Talk>(Talk.Idle())
 private val NO_LINK = MutableStateFlow<TalkLink?>(null)
 private val NO_LINES = MutableStateFlow<List<TranscriptLine>>(emptyList())
 private val NO_MODEL = MutableStateFlow<SttModelState>(SttModelState.Absent)
+private val NO_SWITCH = emptyFlow<Boolean>()
 internal val ToggleSize = 64.dp
 private const val RING_MS = 1_800
 private const val RING_ALPHA = 0.28f
@@ -421,6 +433,7 @@ internal fun CallScreen(
     transcript: TranscriptUi? = null,
     onSttDownload: () -> Unit = {},
     onSttCancel: () -> Unit = {},
+    onSttDismiss: () -> Unit = {},
 ) {
     val phase = state?.phase
     var showStats by rememberSaveable { mutableStateOf(statsShown) }
@@ -458,7 +471,7 @@ internal fun CallScreen(
                 if (transcribed != null) {
                     // The transcript scrolls itself, to keep its newest line in view.
                     Box(Modifier.weight(1f).fillMaxWidth().padding(vertical = 16.dp)) {
-                        WalkieTranscript(transcribed, name, onSttDownload, onSttCancel, Modifier.fillMaxSize())
+                        WalkieTranscript(transcribed, name, onSttDownload, onSttCancel, Modifier.fillMaxSize(), onSttDismiss)
                     }
                 } else if (diagnostics != null) {
                     // The room between the face and the controls; a short screen scrolls the card rather than clip it.

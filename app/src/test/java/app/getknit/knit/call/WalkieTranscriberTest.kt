@@ -23,6 +23,7 @@ import java.nio.ByteOrder
 class WalkieTranscriberTest {
     private var now = 1_000L
     private var modelReady = true
+    private var switchedOn = true
     private val logs = mutableListOf<String>()
 
     /** A model whose every stream hears "n samples" for the n samples it was fed: live while open, settled at the end. */
@@ -34,14 +35,24 @@ class WalkieTranscriberTest {
         private val finishGate: CompletableDeferred<Unit>? = null,
     ) : SpeechToText {
         val streams = mutableListOf<FakeStream>()
+        var releases = 0
 
         override suspend fun open(): SpeechStream? = if (opens) FakeStream().also { streams += it } else null
+
+        override suspend fun release() {
+            releases++
+        }
 
         inner class FakeStream : SpeechStream {
             val adds = mutableListOf<Int>()
             var looks = 0
             var finished = false
             var closed = false
+                set(value) {
+                    if (value && !field) closedBeforeRelease = releases == 0
+                    field = value
+                }
+            var closedBeforeRelease = false
             var failLook = false
             val fed get() = adds.sum()
 
@@ -94,6 +105,7 @@ class WalkieTranscriberTest {
             speech = speech,
             ready = { modelReady },
             scope = CoroutineScope(SupervisorJob() + dispatcher),
+            enabled = { switchedOn },
             dispatcher = dispatcher,
             clock = { now },
             log = { logs += it },
@@ -128,6 +140,35 @@ class WalkieTranscriberTest {
             val stream = speech.streams.single()
             assertEquals(listOf(32_000), stream.adds)
             assertTrue(stream.finished)
+        }
+
+    /** Transcripts switched off: a burst gets no line and no stream, and one begun before the switch never takes its audio. */
+    @Test
+    fun switchedOffABurstIsNotTaken() =
+        runTest {
+            val speech = FakeSpeech()
+            val t = transcriber(speech)
+            t.begin(0)
+            t.pcm(pcm(ms = 1_000), 48_000, 1)
+            advanceUntilIdle()
+            switchedOn = false
+            t.begin(1)
+            t.pcm(pcm(ms = 1_000), 48_000, 1)
+            t.end(1)
+            t.begin(0, mine = true)
+            t.mic.pcm(pcm(ms = 1_000, rate = 16_000), 16_000, 1)
+            t.end(0, mine = true)
+            advanceUntilIdle()
+            // Only the burst begun while on, closed unfinished when the next began, and nothing after it.
+            assertEquals(listOf(0), t.lines.value.map { it.burst })
+            assertFalse(
+                t.lines.value
+                    .single()
+                    .mine,
+            )
+            val stream = speech.streams.single()
+            assertEquals(listOf(16_000), stream.adds)
+            assertTrue(stream.closed)
         }
 
     @Test
@@ -318,6 +359,32 @@ class WalkieTranscriberTest {
             advanceUntilIdle()
             assertTrue(t.lines.value.isEmpty())
             assertTrue(speech.streams.all { it.closed && !it.finished })
+        }
+
+    @Test
+    fun atTheCallsEndTheModelIsReleasedAfterTheLastBurstFinishesAndEveryStreamIsClosed() =
+        runTest {
+            val gate = CompletableDeferred<Unit>()
+            val speech = FakeSpeech(finishGate = gate)
+            val t = transcriber(speech)
+            t.begin(0)
+            t.pcm(pcm(ms = 1_000), 48_000, 1)
+            t.end(0)
+            t.begin(1, mine = true)
+            t.mic.pcm(pcm(ms = 1_000), 48_000, 1)
+            t.begin(2)
+            t.pcm(pcm(ms = 1_000), 48_000, 1)
+            advanceUntilIdle()
+            t.release()
+            advanceUntilIdle()
+            // Burst 0 is still with the model: the release waits behind it.
+            assertEquals(0, speech.releases)
+            gate.complete(Unit)
+            advanceUntilIdle()
+            assertEquals(1, speech.releases)
+            assertTrue(speech.streams.all { it.closedBeforeRelease })
+            // The finished burst keeps its line; the two cut off lose theirs.
+            assertEquals(listOf(TranscriptLine.State.Text("words 16000")), t.lines.value.map { it.state })
         }
 
     @Test

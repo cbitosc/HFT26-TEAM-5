@@ -5,10 +5,13 @@ import androidx.lifecycle.viewModelScope
 import app.getknit.knit.call.IceProbe
 import app.getknit.knit.call.OwnIceServers
 import app.getknit.knit.call.ProbeResult
+import app.getknit.knit.call.SttModelState
 import app.getknit.knit.call.StunServers
 import app.getknit.knit.call.TurnUrls
 import app.getknit.knit.data.settings.OwnIceStore
 import app.getknit.knit.data.settings.SettingsStore
+import app.getknit.knit.data.settings.TranscriptStore
+import app.getknit.knit.ui.call.stt.SttModelStore
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -18,6 +21,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -94,6 +98,17 @@ data class CallSettingsUiState(
     val turnWaiting: Boolean get() = saved.turnOn && !saved.turnValid
 }
 
+/**
+ * The walkie transcripts section (docs/VOICE_CALLS.md C-3.11-9): the switch, where the speech model stands on this phone,
+ * what it costs to fetch, and whether the route a fetch would take now is mobile data or under Data Saver.
+ */
+data class TranscriptsUi(
+    val on: Boolean = true,
+    val model: SttModelState = SttModelState.Absent,
+    val bytes: Long = 0,
+    val metered: Boolean = false,
+)
+
 /** One-shot outcomes for the screen's snackbar. */
 sealed interface CallSettingsEvent {
     data object Saved : CallSettingsEvent
@@ -103,14 +118,18 @@ sealed interface CallSettingsEvent {
 }
 
 /**
- * The Calls screen (docs/VOICE_CALLS.md §3.14, ADR 2026-10.mr88): "Relay all calls", and the person's own STUN and TURN
- * servers. The switches write as they are touched, as every Settings switch does; the fields are a draft, loaded once
- * and written by Save, and a Test tries the draft before it is saved.
+ * The Calls screen (docs/VOICE_CALLS.md §3.14, ADR 2026-10.mr88): "Relay all calls", the person's own STUN and TURN
+ * servers and, where the walkie is wired, its transcripts and their speech model (C-3.11-9). The switches write as they
+ * are touched, as every Settings switch does; the fields are a draft, loaded once and written by Save, and a Test tries
+ * the draft before it is saved.
  */
 class CallSettingsViewModel(
     private val settings: SettingsStore,
     private val ownIce: OwnIceStore,
     private val probe: IceProbe,
+    // The walkie transcript's speech model and switch; null, and no section, in a build without the walkie.
+    private val stt: SttModelStore? = null,
+    private val transcriptStore: TranscriptStore? = null,
 ) : ViewModel() {
     private val draft = MutableStateFlow(CallServerDraft())
     private val testing = MutableStateFlow(false)
@@ -129,6 +148,18 @@ class CallSettingsViewModel(
             CallSettingsUiState(relayAll = relayAll, saved = saved, draft = draft, testing = testing, result = result)
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CallSettingsUiState())
 
+    /** The transcripts section; null without the walkie. The route is read again as the model's state moves. */
+    val transcripts: StateFlow<TranscriptsUi?> =
+        (
+            if (stt == null || transcriptStore == null) {
+                flowOf(null)
+            } else {
+                combine(transcriptStore.enabled, stt.state) { on, model ->
+                    TranscriptsUi(on = on, model = model, bytes = stt.model.bytes, metered = stt.metered())
+                }
+            }
+        ).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
     init {
         viewModelScope.launch {
             draft.value = CallServerDraft.of(ownIce.ownIce.first())
@@ -146,6 +177,25 @@ class CallSettingsViewModel(
 
     fun setTurnOn(value: Boolean) {
         viewModelScope.launch { ownIce.setTurnOn(value) }
+    }
+
+    fun setTranscripts(value: Boolean) {
+        val store = transcriptStore ?: return
+        viewModelScope.launch { store.setEnabled(value) }
+    }
+
+    /** Fetches the speech model; the download runs on the app's scope, so it outlasts this screen. */
+    fun downloadSpeechModel() {
+        stt?.download()
+    }
+
+    fun cancelSpeechModel() {
+        stt?.cancel()
+    }
+
+    fun removeSpeechModel() {
+        val store = stt ?: return
+        viewModelScope.launch { store.delete() }
     }
 
     fun editDraft(change: (CallServerDraft) -> CallServerDraft) {

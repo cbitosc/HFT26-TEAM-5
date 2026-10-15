@@ -6,12 +6,17 @@ import app.getknit.knit.call.IceProbe
 import app.getknit.knit.call.OwnIceServers
 import app.getknit.knit.call.ProbeResult
 import app.getknit.knit.call.ProbeVerdict
+import app.getknit.knit.call.SttModel
+import app.getknit.knit.call.SttModelState
 import app.getknit.knit.call.TurnServer
 import app.getknit.knit.data.settings.OwnIceStore
 import app.getknit.knit.data.settings.SettingsStore
+import app.getknit.knit.data.settings.TranscriptStore
+import app.getknit.knit.ui.call.stt.SttModelStore
 import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.verify
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -35,6 +40,15 @@ class CallSettingsViewModelTest {
     private val store = mockk<OwnIceStore>(relaxed = true)
     private val relayAll = MutableStateFlow(false)
     private val ownIce = MutableStateFlow(SAVED)
+    private val transcriptsOn = MutableStateFlow(true)
+    private val modelState = MutableStateFlow<SttModelState>(SttModelState.Absent)
+    private val stt =
+        mockk<SttModelStore>(relaxed = true) {
+            every { state } returns modelState
+            every { model } returns SttModel.MOONSHINE_SMALL_STREAMING_EN
+            every { metered() } returns true
+        }
+    private val transcriptStore = mockk<TranscriptStore>(relaxed = true) { every { enabled } returns transcriptsOn }
 
     private var probed: Pair<List<String>, TurnServer?>? = null
     private var probeAnswer: ProbeResult? = ProbeResult(ProbeVerdict.Reached, ProbeVerdict.AuthFailed)
@@ -56,9 +70,41 @@ class CallSettingsViewModelTest {
         Dispatchers.resetMain()
     }
 
-    private fun kotlinx.coroutines.test.TestScope.vm(): CallSettingsViewModel =
-        CallSettingsViewModel(settings, store, probe).also { vm ->
+    private fun kotlinx.coroutines.test.TestScope.vm(speech: SttModelStore? = null): CallSettingsViewModel =
+        CallSettingsViewModel(settings, store, probe, speech, transcriptStore.takeIf { speech != null }).also { vm ->
             backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.state.collect {} }
+            backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.transcripts.collect {} }
+        }
+
+    @Test
+    fun withoutTheWalkieThereIsNoTranscriptsSection() =
+        runTest {
+            val vm = vm()
+            advanceUntilIdle()
+            assertNull(vm.transcripts.value)
+        }
+
+    @Test
+    fun theTranscriptsSectionFollowsTheSwitchAndTheModel() =
+        runTest {
+            val vm = vm(stt)
+            advanceUntilIdle()
+            val bytes = SttModel.MOONSHINE_SMALL_STREAMING_EN.bytes
+            assertEquals(TranscriptsUi(on = true, model = SttModelState.Absent, bytes = bytes, metered = true), vm.transcripts.value)
+            transcriptsOn.value = false
+            modelState.value = SttModelState.Ready
+            advanceUntilIdle()
+            assertEquals(TranscriptsUi(on = false, model = SttModelState.Ready, bytes = bytes, metered = true), vm.transcripts.value)
+
+            vm.setTranscripts(true)
+            vm.downloadSpeechModel()
+            vm.cancelSpeechModel()
+            vm.removeSpeechModel()
+            advanceUntilIdle()
+            coVerify { transcriptStore.setEnabled(true) }
+            verify { stt.download() }
+            verify { stt.cancel() }
+            coVerify { stt.delete() }
         }
 
     @Test

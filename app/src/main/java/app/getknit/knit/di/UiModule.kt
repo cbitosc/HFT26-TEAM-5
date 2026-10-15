@@ -26,7 +26,6 @@ import app.getknit.knit.ui.StorageGate
 import app.getknit.knit.ui.addcontact.AddContactViewModel
 import app.getknit.knit.ui.backup.BackupViewModel
 import app.getknit.knit.ui.blocked.BlockedUsersViewModel
-import app.getknit.knit.ui.call.stt.SttModelStore
 import app.getknit.knit.ui.chat.ChatViewModel
 import app.getknit.knit.ui.chat.MessageDetailsViewModel
 import app.getknit.knit.ui.chatlist.ChatListViewModel
@@ -156,7 +155,6 @@ val uiModule =
                 get<OwnIceStore>().ownIce,
                 get(),
                 get<LowPowerSource>().posture,
-                stt = getOrNull<SttModelStore>(),
             )
         }
         viewModel { BackupViewModel(androidContext(), get(), get()) }

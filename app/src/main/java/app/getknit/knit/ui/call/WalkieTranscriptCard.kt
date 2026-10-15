@@ -33,6 +33,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
@@ -60,8 +61,10 @@ internal data class TranscriptUi(
  * diagnostics toggle is off: each burst from [name] as text while it plays, settled once it has ended, and each burst
  * spoken here as the model heard it from the microphone, before Opus — newest at the bottom — and while the speech
  * model is not on the
- * phone, what it costs and the button that fetches it. Experimental, debug only: a spoken line set beside the other
- * phone's for the same burst shows what the codec cost the model. Nothing here leaves the phone.
+ * phone, what it costs, the button that fetches it and Dismiss ([onDismiss]: the offer is closed for good, the caller
+ * draws no card while the model is absent, and the download stays on the Calls screen). Experimental, debug only:
+ * a spoken line set beside the other phone's for the same burst shows what the codec cost the model. Nothing here
+ * leaves the phone.
  */
 @Composable
 internal fun WalkieTranscript(
@@ -70,6 +73,7 @@ internal fun WalkieTranscript(
     onDownload: () -> Unit,
     onCancel: () -> Unit,
     modifier: Modifier = Modifier,
+    onDismiss: () -> Unit = {},
     zone: ZoneId = ZoneId.systemDefault(),
 ) {
     val ready = ui.model == SttModelState.Ready
@@ -99,7 +103,7 @@ internal fun WalkieTranscript(
                 contentPadding = PaddingValues(start = 16.dp, top = 12.dp, end = 16.dp, bottom = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                transcriptItems(ui, name, ready, times, onDownload, onCancel)
+                transcriptItems(ui, name, ready, times, onDownload, onCancel, onDismiss)
             }
         }
     }
@@ -112,11 +116,12 @@ private fun LazyListScope.transcriptItems(
     times: DateTimeFormatter,
     onDownload: () -> Unit,
     onCancel: () -> Unit,
+    onDismiss: () -> Unit,
 ) {
     if (!ready) {
         item(key = "model") {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                ModelPanel(ui, onDownload, onCancel)
+                ModelPanel(ui, onDownload, onCancel, onDismiss)
                 if (ui.lines.isNotEmpty()) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
         }
@@ -208,12 +213,16 @@ private fun noteOf(
         is TranscriptLine.State.Text -> state.text
     }
 
-/** Where the speech model stands, with the one action that moves it on. */
+/**
+ * Where the speech model stands, with the one action that moves it on and, beside a Download, Dismiss: only the offer
+ * closes, since once the model is in the Calls screen's switch is the way out.
+ */
 @Composable
 private fun ModelPanel(
     ui: TranscriptUi,
     onDownload: () -> Unit,
     onCancel: () -> Unit,
+    onDismiss: () -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         when (val model = ui.model) {
@@ -223,11 +232,11 @@ private fun ModelPanel(
             SttModelState.Absent -> {
                 Text(
                     "Turn the bursts you hear and speak into text, on this phone. The speech model is a one-time ${mb(ui.modelBytes)} " +
-                        "download from getknit.app.",
+                        "download from getknit.app, here or any time in Settings › Calls.",
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 if (ui.metered) MeteredNote()
-                DownloadButton("Download", onDownload)
+                OfferButtons("Download", onDownload, onDismiss)
             }
 
             is SttModelState.Downloading -> {
@@ -253,7 +262,7 @@ private fun ModelPanel(
                     color = MaterialTheme.colorScheme.error,
                 )
                 if (ui.metered) MeteredNote()
-                DownloadButton("Try again", onDownload)
+                OfferButtons("Try again", onDownload, onDismiss)
             }
         }
     }
@@ -269,13 +278,17 @@ private fun MeteredNote() {
 }
 
 @Composable
-private fun DownloadButton(
+private fun OfferButtons(
     label: String,
-    onClick: () -> Unit,
+    onDownload: () -> Unit,
+    onDismiss: () -> Unit,
 ) {
-    FilledTonalButton(onClick = onClick, contentPadding = ButtonDefaults.ButtonWithIconContentPadding) {
-        Icon(Icons.Outlined.Download, contentDescription = null, modifier = Modifier.size(ButtonDefaults.IconSize))
-        Text(label, Modifier.padding(start = ButtonDefaults.IconSpacing))
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FilledTonalButton(onClick = onDownload, contentPadding = ButtonDefaults.ButtonWithIconContentPadding) {
+            Icon(Icons.Outlined.Download, contentDescription = null, modifier = Modifier.size(ButtonDefaults.IconSize))
+            Text(label, Modifier.padding(start = ButtonDefaults.IconSpacing))
+        }
+        TextButton(onClick = onDismiss, modifier = Modifier.testTag("walkie_transcript_dismiss")) { Text("Dismiss") }
     }
 }
 

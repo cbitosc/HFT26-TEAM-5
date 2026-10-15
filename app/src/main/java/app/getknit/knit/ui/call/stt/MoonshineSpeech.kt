@@ -23,11 +23,12 @@ import java.io.File
  * [app.getknit.knit.call.PassGate]'s, under the transcriber's lock.
  *
  * The loaded model lives on a [ModelLease] like the moderation models (ADR 2026-09.cq9z) — built on the first burst,
- * released after [SttPolicy.IDLE_UNLOAD_MS] without one — and every build, a probe stream included, runs under
- * [ModelLoadGuard] (ADR 037), so a runtime that faults natively on this phone is latched off instead of taking the process
- * down on every burst. A model installed afresh gets a fresh lease: a lease whose load failed stays spent, by design, and
- * the new files deserve their own try. Every call a stream makes holds the lease, so the reaper never frees the model
- * under a burst; a stream whose model was freed or replaced meanwhile fails rather than reach a handle that is gone.
+ * released when the call ends ([release]) or after [SttPolicy.IDLE_UNLOAD_MS] without one — and every build, a probe
+ * stream included, runs under [ModelLoadGuard] (ADR 037), so a runtime that faults natively on this phone is latched
+ * off instead of taking the process down on every burst. A model installed afresh gets a fresh lease: a lease whose load
+ * failed stays spent, by design, and the new files deserve their own try. Every call a stream makes holds the lease, so
+ * the reaper never frees the model under a burst; a stream whose model was freed or replaced meanwhile fails rather than
+ * reach a handle that is gone.
  */
 internal class MoonshineSpeech(
     private val store: SttModelStore,
@@ -101,6 +102,8 @@ internal class MoonshineSpeech(
     suspend fun unload() {
         synchronized(lock) { lease }?.unload()
     }
+
+    override suspend fun release() = unload()
 
     /** Whether a model is in memory now (the debug bridge). */
     val resident: Boolean get() = synchronized(lock) { lease }?.isResident == true

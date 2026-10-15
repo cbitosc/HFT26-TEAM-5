@@ -1,9 +1,11 @@
 package app.getknit.knit.ui.callsettings
 
 import android.content.Context
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsOff
+import androidx.compose.ui.test.assertIsOn
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -15,6 +17,7 @@ import app.getknit.knit.R
 import app.getknit.knit.call.OwnIceServers
 import app.getknit.knit.call.ProbeResult
 import app.getknit.knit.call.ProbeVerdict
+import app.getknit.knit.call.SttModelState
 import app.getknit.knit.ui.theme.KnitTheme
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -37,6 +40,11 @@ class CallSettingsScreenContentTest {
         onToggleRelayAll: (Boolean) -> Unit = {},
         onToggleTurn: (Boolean) -> Unit = {},
         onTest: () -> Unit = {},
+        transcripts: TranscriptsUi? = null,
+        onToggleTranscripts: (Boolean) -> Unit = {},
+        onDownloadSpeechModel: () -> Unit = {},
+        onCancelSpeechModel: () -> Unit = {},
+        onRemoveSpeechModel: () -> Unit = {},
     ) {
         compose.setContent {
             KnitTheme {
@@ -46,6 +54,11 @@ class CallSettingsScreenContentTest {
                     onToggleRelayAll = onToggleRelayAll,
                     onToggleTurn = onToggleTurn,
                     onTest = onTest,
+                    transcripts = transcripts,
+                    onToggleTranscripts = onToggleTranscripts,
+                    onDownloadSpeechModel = onDownloadSpeechModel,
+                    onCancelSpeechModel = onCancelSpeechModel,
+                    onRemoveSpeechModel = onRemoveSpeechModel,
                 )
             }
         }
@@ -111,5 +124,84 @@ class CallSettingsScreenContentTest {
             .assertIsEnabled()
             .performClick()
         assertEquals(true, tested)
+    }
+
+    // The walkie transcripts (docs/VOICE_CALLS.md C-3.11-9): their switch, and the speech model they need.
+    @Test
+    fun theTranscriptsSectionIsAbsentWithoutTheWalkie() {
+        render(CallSettingsUiState())
+        compose.onNodeWithTag("call_settings_transcripts").assertDoesNotExist()
+        compose.onNodeWithTag("call_settings_speech_model").assertDoesNotExist()
+    }
+
+    @Test
+    fun theTranscriptsSwitchWritesThrough() {
+        var toggled: Boolean? = null
+        render(CallSettingsUiState(), transcripts = TranscriptsUi(on = true, bytes = MODEL_BYTES), onToggleTranscripts = { toggled = it })
+        compose
+            .onNodeWithTag("call_settings_transcripts")
+            .performScrollTo()
+            .assertIsOn()
+            .performClick()
+        assertEquals(false, toggled)
+    }
+
+    @Test
+    fun theSpeechModelRowOffersTheDownloadAndSaysItsCost() {
+        var downloads = 0
+        render(
+            CallSettingsUiState(),
+            transcripts = TranscriptsUi(on = true, model = SttModelState.Absent, bytes = MODEL_BYTES, metered = true),
+            onDownloadSpeechModel = { downloads++ },
+        )
+        compose.onNodeWithText("142 MB", substring = true).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText(context.getString(R.string.call_settings_speech_model_metered)).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText(context.getString(R.string.call_settings_speech_model_download)).performScrollTo().performClick()
+        assertEquals(1, downloads)
+    }
+
+    @Test
+    fun aSpeechModelDownloadUnderWayCanBeCancelled() {
+        var cancels = 0
+        render(
+            CallSettingsUiState(),
+            transcripts = TranscriptsUi(on = true, model = SttModelState.Downloading(17_400_000, MODEL_BYTES), bytes = MODEL_BYTES),
+            onCancelSpeechModel = { cancels++ },
+        )
+        compose.onNodeWithText("17 MB of 142 MB", substring = true).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText(context.getString(R.string.call_settings_speech_model_cancel)).performScrollTo().performClick()
+        assertEquals(1, cancels)
+    }
+
+    @Test
+    fun aFailedSpeechModelDownloadSaysWhyAndOffersAnotherTry() {
+        var downloads = 0
+        render(
+            CallSettingsUiState(),
+            transcripts = TranscriptsUi(on = true, model = SttModelState.Failed("No Internet connection"), bytes = MODEL_BYTES),
+            onDownloadSpeechModel = { downloads++ },
+        )
+        compose.onNodeWithText("No Internet connection", substring = true).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText(context.getString(R.string.call_settings_speech_model_retry)).performScrollTo().performClick()
+        assertEquals(1, downloads)
+    }
+
+    /** Switched off, a model already on the phone can still be removed. */
+    @Test
+    fun anInstalledSpeechModelCanBeRemovedWithTranscriptsOff() {
+        var removes = 0
+        render(
+            CallSettingsUiState(),
+            transcripts = TranscriptsUi(on = false, model = SttModelState.Ready, bytes = MODEL_BYTES),
+            onRemoveSpeechModel = { removes++ },
+        )
+        compose.onNodeWithTag("call_settings_transcripts").performScrollTo().assertIsOff()
+        compose.onNodeWithText(context.getString(R.string.call_settings_speech_model_download)).assertDoesNotExist()
+        compose.onNodeWithText(context.getString(R.string.call_settings_speech_model_remove)).performScrollTo().performClick()
+        assertEquals(1, removes)
+    }
+
+    private companion object {
+        const val MODEL_BYTES = 142_315_154L
     }
 }

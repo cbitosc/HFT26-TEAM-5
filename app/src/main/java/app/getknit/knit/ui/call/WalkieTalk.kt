@@ -380,9 +380,14 @@ internal class WalkieTalk(
         meter.reset()
         transcript?.reset()
         log("walkie: session ${call.id} with ${call.peerId}${if (call.degraded) " (degraded from a live call)" else ""}")
-        coroutineScope {
-            launch { hangUpWhenIdle() }
-            hear(call.id)
+        try {
+            coroutineScope {
+                launch { hangUpWhenIdle() }
+                hear(call.id)
+            }
+        } finally {
+            // The model's native heap goes with the call, not two idle minutes later.
+            transcript?.release()
         }
     }
 

@@ -17,10 +17,14 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -52,14 +56,16 @@ import app.getknit.knit.R
 import app.getknit.knit.call.OwnIceServers
 import app.getknit.knit.call.ProbeResult
 import app.getknit.knit.call.ProbeVerdict
+import app.getknit.knit.call.SttModelState
+import app.getknit.knit.ui.call.mb
 import app.getknit.knit.ui.components.noAutofillMenu
 import app.getknit.knit.ui.preview.KnitPreview
 import org.koin.androidx.compose.koinViewModel
 
 /**
  * Calls (experimental, docs/VOICE_CALLS.md §3.14, ADR 2026-10.mr88): "Relay all calls", and the person's own STUN and
- * TURN servers, each replacing what the relays supply. Reached only where calls are wired (`CALLS_WIRED`): the route
- * is not registered otherwise.
+ * TURN servers, each replacing what the relays supply; where the walkie is wired, its transcripts' switch and their
+ * speech model (C-3.11-9). Reached only where calls are wired (`CALLS_WIRED`): the route is not registered otherwise.
  */
 @Composable
 fun CallSettingsScreen(
@@ -68,6 +74,7 @@ fun CallSettingsScreen(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val loaded by viewModel.loaded.collectAsStateWithLifecycle()
+    val transcripts by viewModel.transcripts.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     val saved = stringResource(R.string.call_settings_saved)
     val busy = stringResource(R.string.call_settings_test_busy)
@@ -92,6 +99,11 @@ fun CallSettingsScreen(
         onEdit = viewModel::editDraft,
         onSave = viewModel::save,
         onTest = viewModel::test,
+        transcripts = transcripts,
+        onToggleTranscripts = viewModel::setTranscripts,
+        onDownloadSpeechModel = viewModel::downloadSpeechModel,
+        onCancelSpeechModel = viewModel::cancelSpeechModel,
+        onRemoveSpeechModel = viewModel::removeSpeechModel,
     )
 }
 
@@ -108,6 +120,12 @@ internal fun CallSettingsScreenContent(
     onEdit: ((CallServerDraft) -> CallServerDraft) -> Unit = {},
     onSave: () -> Unit = {},
     onTest: () -> Unit = {},
+    // The walkie transcripts section; null, and no section, in a build without the walkie.
+    transcripts: TranscriptsUi? = null,
+    onToggleTranscripts: (Boolean) -> Unit = {},
+    onDownloadSpeechModel: () -> Unit = {},
+    onCancelSpeechModel: () -> Unit = {},
+    onRemoveSpeechModel: () -> Unit = {},
 ) {
     Scaffold(
         modifier = Modifier.testTag("screen_call_settings"),
@@ -166,6 +184,18 @@ internal fun CallSettingsScreenContent(
             Note(stringResource(R.string.call_settings_turn_disclosure))
             HorizontalDivider()
             TestRow(state, onTest)
+            if (transcripts != null) {
+                HorizontalDivider()
+                ToggleRow(
+                    title = stringResource(R.string.call_settings_transcripts_title),
+                    subtitle = stringResource(R.string.call_settings_transcripts_subtitle),
+                    enabled = transcripts.on,
+                    onToggle = onToggleTranscripts,
+                    modifier = Modifier.testTag("call_settings_transcripts"),
+                )
+                // Switched off too, so a model already here can be removed and one can be had over Wi-Fi in advance.
+                SpeechModelRow(transcripts, onDownloadSpeechModel, onCancelSpeechModel, onRemoveSpeechModel)
+            }
         }
     }
 }
@@ -273,6 +303,79 @@ private fun verdictText(
         ProbeVerdict.NoAnswer -> stringResource(R.string.call_settings_no_answer)
     }
 
+/**
+ * The walkie transcript's speech model (docs/VOICE_CALLS.md C-3.11-9): what it costs and Download, the progress and
+ * Cancel while it comes (the download runs on the app's scope and a foreground service, so leaving the screen does not
+ * stop it), or that it is here and Remove.
+ */
+@Composable
+private fun SpeechModelRow(
+    ui: TranscriptsUi,
+    onDownload: () -> Unit,
+    onCancel: () -> Unit,
+    onRemove: () -> Unit,
+) {
+    val size = mb(ui.bytes)
+    Column(
+        modifier = Modifier.fillMaxWidth().testTag("call_settings_speech_model"),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(stringResource(R.string.call_settings_speech_model_title), style = MaterialTheme.typography.titleSmall)
+        when (val model = ui.model) {
+            SttModelState.Absent, is SttModelState.Failed -> {
+                val failed = model as? SttModelState.Failed
+                Text(
+                    if (failed != null) {
+                        stringResource(R.string.call_settings_speech_model_failed, failed.reason)
+                    } else {
+                        stringResource(R.string.call_settings_speech_model_absent, size)
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (failed != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (ui.metered) Note(stringResource(R.string.call_settings_speech_model_metered))
+                FilledTonalButton(onClick = onDownload, contentPadding = ButtonDefaults.ButtonWithIconContentPadding) {
+                    Icon(Icons.Outlined.Download, contentDescription = null, modifier = Modifier.size(ButtonDefaults.IconSize))
+                    Text(
+                        stringResource(
+                            if (failed != null) R.string.call_settings_speech_model_retry else R.string.call_settings_speech_model_download,
+                        ),
+                        Modifier.padding(start = ButtonDefaults.IconSpacing),
+                    )
+                }
+            }
+
+            is SttModelState.Downloading -> {
+                LinearProgressIndicator(
+                    progress = { if (model.total > 0) (model.done.toFloat() / model.total).coerceIn(0f, 1f) else 0f },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        stringResource(R.string.call_settings_speech_model_downloading, mb(model.done), mb(model.total)),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = onCancel) { Text(stringResource(R.string.call_settings_speech_model_cancel)) }
+                }
+            }
+
+            SttModelState.Ready -> {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        stringResource(R.string.call_settings_speech_model_ready, size),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = onRemove) { Text(stringResource(R.string.call_settings_speech_model_remove)) }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun Note(text: String) {
     Text(text = text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -313,6 +416,18 @@ private fun ToggleRow(
 fun CallSettingsScreenPreview() =
     KnitPreview {
         CallSettingsScreenContent(state = CallSettingsUiState(), onBack = {})
+    }
+
+// A walkie build: transcripts on, the speech model not yet on the phone, and the phone on mobile data.
+@Preview(showBackground = true, heightDp = 1000)
+@Composable
+fun CallSettingsScreenTranscriptsPreview() =
+    KnitPreview {
+        CallSettingsScreenContent(
+            state = CallSettingsUiState(),
+            onBack = {},
+            transcripts = TranscriptsUi(on = true, model = SttModelState.Absent, bytes = 142_315_154, metered = true),
+        )
     }
 
 // Both kinds switched on and saved, after a Test whose TURN password was wrong.

@@ -31,6 +31,7 @@ import app.getknit.knit.data.settings.CallTombStore
 import app.getknit.knit.data.settings.CaptureStore
 import app.getknit.knit.data.settings.OwnIceStore
 import app.getknit.knit.data.settings.SettingsStore
+import app.getknit.knit.data.settings.TranscriptStore
 import app.getknit.knit.device.DeviceImage
 import app.getknit.knit.identity.Identity
 import app.getknit.knit.mesh.BulkRoute
@@ -170,7 +171,15 @@ private fun callGraph(): Module =
         single<CallMedia> { get<WebRtcCallMedia>() }
         // The Calls screen's Test (C-3.14-5): the same factory, and refused while a call holds it.
         single<IceProbe> { get<WebRtcCallMedia>() }
-        viewModel { CallSettingsViewModel(settings = get(), ownIce = get(), probe = get()) }
+        viewModel {
+            CallSettingsViewModel(
+                settings = get(),
+                ownIce = get(),
+                probe = get(),
+                stt = getOrNull(),
+                transcriptStore = getOrNull(),
+            )
+        }
         single { CallTombStore(get()) }
         single {
             // C-3.7-3's "Relay all calls", read as each call opens its media. Until the store's first read lands it
@@ -212,6 +221,7 @@ private fun callGraph(): Module =
         }
         if (WALKIE_WIRED) {
             // The transcript (C-3.11-9): a model the user downloads, fed here the bursts this phone hears as they play.
+            single { TranscriptStore(get()) }
             single {
                 SttModelStore(
                     androidContext(),
@@ -253,10 +263,13 @@ private fun callGraph(): Module =
                 )
             }
             single {
+                // The Calls screen's "Walkie transcripts" switch, on by default, read as each burst begins.
+                val on = get<TranscriptStore>().enabled.stateIn(get<CoroutineScope>(), SharingStarted.Eagerly, true)
                 WalkieTranscriber(
                     speech = get<MoonshineSpeech>(),
                     ready = { get<SttModelStore>().paths() != null },
                     scope = get<CoroutineScope>(),
+                    enabled = { on.value },
                     // One model call at a time, in the order the audio came, off the player's and the recorder's threads.
                     dispatcher = Dispatchers.Default.limitedParallelism(1),
                     log = { Log.i(TAG, it) },

@@ -3,7 +3,6 @@ package app.getknit.knit.ui.settings
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.getknit.knit.call.OwnIceServers
-import app.getknit.knit.call.SttModelState
 import app.getknit.knit.data.relay.RelayFacts
 import app.getknit.knit.data.settings.BluetoothDownloadLimit
 import app.getknit.knit.data.settings.LowPowerSwitch
@@ -16,7 +15,6 @@ import app.getknit.knit.mesh.lora.LoraFacts
 import app.getknit.knit.mesh.lora.LoraPlane
 import app.getknit.knit.mesh.power.LowPowerPosture
 import app.getknit.knit.mesh.power.LowPowerReason
-import app.getknit.knit.ui.call.stt.SttModelStore
 import app.getknit.knit.ui.theme.ThemeMode
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -78,13 +76,6 @@ data class ProfileHeader(
     val nodeId: String = "",
 )
 
-/** The walkie transcript's speech model, as Settings draws it. */
-data class SpeechModelUi(
-    val state: SttModelState,
-    val bytes: Long,
-    val metered: Boolean,
-)
-
 class SettingsViewModel(
     private val settings: SettingsStore,
     identity: Identity,
@@ -98,8 +89,6 @@ class SettingsViewModel(
     private val lowPowerSwitch: LowPowerSwitch,
     // `LowPowerSource.posture`: the switch with Battery Saver and the charger applied.
     lowPowerPosture: Flow<LowPowerPosture>,
-    // The walkie transcript's speech model (docs/VOICE_CALLS.md C-3.11-9); null in a build without the walkie.
-    private val stt: SttModelStore? = null,
 ) : ViewModel() {
     private val nodeId = MutableStateFlow("")
     private val alias = MutableStateFlow("")
@@ -178,31 +167,6 @@ class SettingsViewModel(
     val cloneVisible: StateFlow<Boolean> =
         combine(settings.cloneSeenAt, settings.cloneDismissedAt) { seen, dismissed -> seen > dismissed }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
-
-    /**
-     * The speech model's row: where the download stands, what it costs, and whether the route a fetch would take now is
-     * metered (read again as the state moves). Null, and no row, in a build without the walkie.
-     */
-    val speechModel: StateFlow<SpeechModelUi?> =
-        stt
-            ?.state
-            ?.map { SpeechModelUi(it, stt.model.bytes, stt.metered()) }
-            ?.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
-            ?: MutableStateFlow(null)
-
-    /** Fetches the speech model; the download runs on the app's scope, so it outlasts this screen. */
-    fun downloadSpeechModel() {
-        stt?.download()
-    }
-
-    fun cancelSpeechModel() {
-        stt?.cancel()
-    }
-
-    fun removeSpeechModel() {
-        val store = stt ?: return
-        viewModelScope.launch { store.delete() }
-    }
 
     /** Summary of the LoRa plane for the row that navigates to its own screen: settings + the live link. */
     val loraSummary: StateFlow<LoraSummary> =

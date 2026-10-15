@@ -42,8 +42,9 @@ C-3.11-9). It is debug-only, as the walkie is, and nothing reaches the wire.
 **What it costs.**
 
 - **Size and memory.** The debug APK is about 32 MB larger per ABI (uncompressed `.so`). While held, the recognizer takes about 60 MB of
-  native heap (192 to 132 MB on unload, emulator-measured). It sits on a `ModelLease` that lets go after 2 idle
-  minutes and is built under `ModelLoadGuard` as `stt`.
+  native heap (192 to 132 MB on unload, emulator-measured). It sits on a `ModelLease` that lets go when the walkie
+  session ends (`WalkieTranscriber.release`, queued behind the session's last finish and stream closes, since a close
+  after the unload would load the model again) or after 2 idle minutes, and is built under `ModelLoadGuard` as `stt`.
 - **The ~9 s limit.** Moonshine v2 returns *nothing* for input longer than about 9 s (540 encoder frames). It
   fails silently: an empty string, not an error. `segments` therefore cuts a long burst at its quietest 50 ms
   between 5 s and 8 s, and the parts are transcribed separately.
@@ -174,3 +175,14 @@ C-3.11-9). It is debug-only, as the walkie is, and nothing reaches the wire.
   service never reads the state it would stop on. On Android 15's `dataSync` time limit the service cancels the
   download, and the next tap fetches only the files still missing. A start the platform refuses (Android 12+, from
   the background, so only the debug bridge's) is logged, and the download runs without the service.
+- **Amendment 2026-10-15: the Calls screen, a switch, and an offer that closes.** The speech model's row moved from
+  Settings to the Calls screen (`ui/callsettings/`), beside the call servers, under a "Walkie transcripts" switch
+  (`TranscriptStore.enabled`, on by default, riding a backup; a store of its own beside `OwnIceStore`, as
+  `SettingsStore` is already past detekt's size limit). Off, `WalkieTranscriber` takes no burst: its
+  `enabled` is asked as each burst begins, and a burst begun while off still clears the slot, so the one before never
+  takes its audio. The call screen draws no card then. The model row stays while the switch is off, so a model can be
+  removed or fetched ahead. The walkie card's offer (Download or Try again) gains Dismiss, which writes
+  `TranscriptStore.offerDismissed` for good: while the model is absent no card is drawn on any later call,
+  and the download is the Calls screen's alone. Once the model is in, the card is the transcript, and the switch is
+  how it goes away. The dismiss is a button beside Download rather than a close in the card's title, because a 48 dp
+  title row pushed the first line off a 360 × 640 screen (`WalkieTranscriptScreenTest`).

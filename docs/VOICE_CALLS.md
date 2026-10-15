@@ -794,8 +794,8 @@ an experiment behind `BuildConfig.WALKIE` (`-Pwalkie=`, on in debug and off in r
     The model is held on a `ModelLease` (released after 2 min idle) and loaded under `ModelLoadGuard` as `stt`, a
     probe stream included.
   - **The download.** Not in the APK: nine files under `https://getknit.app/models/stt/<model id>/`,
-    fetched only on the user's tap (the card's Download on a walkie call, or the "Walkie transcripts" row in Settings
-    at any time), each pinned by size and SHA-256 in `SttModel`, streamed
+    fetched only on the user's tap (the card's Download on a walkie call, or the speech model's row on the Calls
+    screen at any time), each pinned by size and SHA-256 in `SttModel`, streamed
     through the hash to a `.part` and renamed in, the model counted as installed only once a marker follows the last
     file. Stored in `noBackupFilesDir`. The fetch runs on the app scope and holds a `dataSync` foreground service
     (`SttDownloadService`, its notification the progress and Cancel) until it ends, so it outlives the call or screen
@@ -807,7 +807,10 @@ an experiment behind `BuildConfig.WALKIE` (`-Pwalkie=`, on in debug and off in r
   - **The screen.** With the walkie's diagnostics toggled off, the card's place shows the transcript: each burst
     `Listening…` until the model has heard something, then its words so far (dimmed, not read out), then its text (a
     polite live region) or why not (no speech, no model, failed). While the model is not on the phone, the card says
-    what it costs, flags a metered or Data Saver route, and offers Download, Cancel or Try again.
+    what it costs, flags a metered or Data Saver route, and offers Download, Cancel or Try again, and Dismiss: once
+    dismissed (`TranscriptStore.offerDismissed`), no call draws the card while the model is absent.
+  - **The switch.** The Calls screen's "Walkie transcripts" (`TranscriptStore.enabled`, on by default) turns
+    the whole thing off: no burst is taken, nothing reaches the model, and no card is drawn.
   - **The names.** As a call begins, the model is given a short list of names to listen for (`SttKeytermFeed`,
     `sttKeyterms`; Moonshine's key-term biasing at its default strength): the peer's and this phone's names, the latest
     threads' (DMs and groups), and the capitalised words the thread with the peer keeps using — at most 40, ranked in

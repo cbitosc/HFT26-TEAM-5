@@ -35,6 +35,7 @@ class WalkieTranscriptScreenTest {
 
     private var downloads = 0
     private var cancels = 0
+    private var dismisses = 0
 
     private fun render(
         transcript: TranscriptUi,
@@ -67,6 +68,7 @@ class WalkieTranscriptScreenTest {
                     transcript = transcript,
                     onSttDownload = { downloads++ },
                     onSttCancel = { cancels++ },
+                    onSttDismiss = { dismisses++ },
                     statsShown = true,
                 )
             }
@@ -105,6 +107,22 @@ class WalkieTranscriptScreenTest {
         compose.onNodeWithText("Not transcribed", substring = true).assertIsDisplayed()
         compose.onNodeWithText("Download").performClick()
         assertEquals(1, downloads)
+    }
+
+    @Test
+    fun theDownloadsOfferCanBeClosedButTheTranscriptCannot() {
+        render(ui(model = SttModelState.Absent))
+        compose.onNodeWithContentDescription("Show transcript").performClick()
+        compose.onNodeWithText("Settings › Calls", substring = true).assertIsDisplayed()
+        compose.onNodeWithText("Dismiss").performClick()
+        assertEquals(1, dismisses)
+    }
+
+    @Test
+    fun aTranscriptWithItsModelHasNoClose() {
+        render(ui(lines = listOf(TranscriptLine(0, 0, TranscriptLine.State.Text("Meet me at the north gate")))))
+        compose.onNodeWithContentDescription("Show transcript").performClick()
+        compose.onNodeWithText("Dismiss").assertDoesNotExist()
     }
 
     @Test

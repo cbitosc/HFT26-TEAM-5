@@ -66,6 +66,9 @@ fun interface TalkPcmTap {
  */
 fun interface SpeechToText {
     suspend fun open(): SpeechStream?
+
+    /** Lets the model go now, with no stream open on it; the next [open] loads it again. */
+    suspend fun release() {}
 }
 
 /**
@@ -281,6 +284,7 @@ private fun TranscriptLine.sameBurst(other: TranscriptLine) = burst == other.bur
  * time behind a fair lock, so a burst's audio reaches the model in order and the player's thread never waits on it.
  * [ready] says whether the model is on the phone; a burst heard while it is not is held, and fed in full should the
  * model arrive before the burst ends — else the burst is marked [TranscriptLine.State.NoModel] and its audio dropped.
+ * [enabled] is the person's switch: a burst that begins while it is off gets no line and none of its audio is taken.
  *
  * The bursts this phone speaks go the same way through [mic], the recorder's tap, opened and ended with `mine = true`
  * — the microphone's PCM before the encoder, so set beside the other phone's line for the same burst it shows what
@@ -296,6 +300,8 @@ class WalkieTranscriber(
     private val speech: SpeechToText,
     private val ready: () -> Boolean,
     scope: CoroutineScope,
+    // The person's switch (`TranscriptStore.enabled`), asked as each burst begins: off, the burst is not taken.
+    private val enabled: () -> Boolean = { true },
     private val dispatcher: CoroutineDispatcher,
     private val clock: () -> Long = System::currentTimeMillis,
     private val log: (String) -> Unit = {},
@@ -358,15 +364,18 @@ class WalkieTranscriber(
         burst: Int,
         mine: Boolean = false,
     ) {
+        // Switched off, the slot is still cleared, so the burst before never takes this one's audio.
+        val on = enabled()
         val replaced =
             synchronized(lock) {
                 val before = if (mine) spoken else heard
                 before?.dropped = true
-                val next = Burst(burst, mine, session, tape = SampleTape().takeIf { clips?.on == true })
+                val next = if (on) Burst(burst, mine, session, tape = SampleTape().takeIf { clips?.on == true }) else null
                 if (mine) spoken = next else heard = next
                 before
             }
         replaced?.let(::closeLater)
+        if (!on) return
         _lines.update { withLine(it, TranscriptLine(burst, clock(), TranscriptLine.State.Listening, mine = mine)) }
     }
 
@@ -436,6 +445,18 @@ class WalkieTranscriber(
             lines.filterNot { it.burst == b.number && it.mine == mine && it.state == TranscriptLine.State.Listening }
         }
         closeLater(b)
+    }
+
+    /**
+     * The call is over: a burst still open either way is dropped, and the model is let go once the work queued for it
+     * — a burst ended just before still finishes, and every dropped stream is closed — has run. Closing a stream after
+     * the model has gone would load it again only to free the stream, so the release waits its turn on [serial]. The
+     * lines stay until the next session's [reset].
+     */
+    fun release() {
+        abandon()
+        abandon(mine = true)
+        workScope.launch(dispatcher) { serial.withLock { speech.release() } }
     }
 
     // Under [serial]: the audio come in since the last feed, to the model — opening its stream first, once the model is
