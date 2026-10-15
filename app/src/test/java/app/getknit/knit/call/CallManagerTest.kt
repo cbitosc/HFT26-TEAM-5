@@ -485,6 +485,53 @@ class CallManagerTest {
         }
 
     @Test
+    fun aLinkThatCarriesTheOfferButNoRingingBackEndsNoRouteNotUnanswered() =
+        runTest {
+            val (net, alice, bob) = pair()
+            // 2026-10-14: a live link both ways in the tables, but the peer's Bluetooth stack wedged outbound — the
+            // OFFER and the CANCEL reach it, and nothing it sends comes back.
+            net.drop = { from, _ -> from == BOB }
+            alice.manager.start(BOB)
+            runCurrent()
+            assertEquals(CallPhase.Alerting, bob.state!!.phase)
+            assertEquals(CallPhase.Calling, alice.state!!.phase)
+            assertFalse(alice.state!!.unproven)
+            // C-3.3-6: past the time a RINGING over that link would be back, the ring is unproven.
+            advanceTimeBy(TIMINGS.ringingMs + TIMINGS.reachLookMs)
+            runCurrent()
+            assertTrue(alice.state!!.unproven)
+            assertFalse(alice.state!!.unreachable)
+            advanceTimeBy(TIMINGS.ringOutMs)
+            runCurrent()
+            assertEquals(CallPayload.REASON_NO_ROUTE, alice.state!!.reason)
+            assertEquals(CallPayload.PHASE_CANCEL, alice.sent.last().ph)
+            assertEquals(CallOutcome.Unreachable, alice.onlyOutcome())
+            // The callee heard the CANCEL: a missed call there, though the caller never knew it rang.
+            assertEquals(CallPhase.Ended, bob.state!!.phase)
+            assertEquals(listOf(ALICE), bob.missed.map { it.peerId })
+        }
+
+    @Test
+    fun aRingingClearsAnUnprovenRing() =
+        runTest {
+            val (net, alice, _) = pair()
+            var held: CallPayload? = null
+            net.drop = { from, p -> (from == BOB && p.ph == CallPayload.PHASE_RINGING).also { if (it) held = p } }
+            alice.manager.start(BOB)
+            runCurrent()
+            advanceTimeBy(TIMINGS.ringingMs + TIMINGS.reachLookMs)
+            runCurrent()
+            assertTrue(alice.state!!.unproven)
+            alice.manager.onSignal(BOB, checkNotNull(held), testScheduler.currentTime)
+            runCurrent()
+            assertEquals(CallPhase.Ringing, alice.state!!.phase)
+            assertFalse(alice.state!!.unproven)
+            advanceTimeBy(TIMINGS.ringOutMs)
+            runCurrent()
+            assertEquals(CallPayload.REASON_TIMEOUT, alice.state!!.reason)
+        }
+
+    @Test
     fun aRingWhoseCancelIsLostStopsOnItsOwnAndIsMissed() =
         runTest {
             val (net, alice, bob) = pair()

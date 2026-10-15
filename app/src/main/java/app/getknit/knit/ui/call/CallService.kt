@@ -178,7 +178,12 @@ class CallService :
 
     private fun textOf(state: CallState?): String =
         when (state?.phase) {
-            CallPhase.Calling -> if (state.unreachable) "Can't reach them right now" else "Calling…"
+            CallPhase.Calling ->
+                when {
+                    state.unreachable -> "Can't reach them right now"
+                    state.unproven -> "Waiting for their phone to respond"
+                    else -> "Calling…"
+                }
             CallPhase.Ringing -> "Ringing…"
             CallPhase.Connecting -> "Connecting…"
             CallPhase.Connected -> connectedText(state)

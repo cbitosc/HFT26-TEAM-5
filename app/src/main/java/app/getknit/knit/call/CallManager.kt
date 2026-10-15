@@ -54,6 +54,9 @@ data class CallState(
     // C-3.3-5: an outgoing call with no RINGING back, and nothing this phone can see reaches the peer ([CallReach]).
     // Held once the call ends for that reason, so the screen can say why.
     val unreachable: Boolean = false,
+    // C-3.3-6: an outgoing call that something reaches, yet no RINGING came back within [CallTimings.ringingMs]: the
+    // link is unproven — the peer's phone may hear us and not be heard (a stack wedged outbound).
+    val unproven: Boolean = false,
 )
 
 /**
@@ -96,6 +99,9 @@ data class CallTimings(
     val unreachMs: Long = 15_000L,
     // C-3.3-5: how often a caller with no RINGING looks again at whether anything reaches the peer.
     val reachLookMs: Long = 2_000L,
+    // C-3.3-6: a RINGING over a live link is back within a second or two; a caller still without one by now calls the
+    // path unproven, and a ring-out with none ends no_route rather than unanswered.
+    val ringingMs: Long = 8_000L,
     // How long the callee alerts on its own: the caller's CANCEL can be lost, so a ring never outlives this.
     val alertMs: Long = 50_000L,
     // C-3.3-3: Connecting that has not reached ICE connected by now ends with END no_route.
@@ -149,7 +155,9 @@ data class CallTimings(
  * **A call to a peer nothing reaches says so** ([reach], C-3.3-5): until a RINGING comes back, the caller looks every
  * [CallTimings.reachLookMs] at whether any link, mesh path, Wi-Fi Aware sighting or shared spool reaches the peer, flags
  * the call [CallState.unreachable] while none does, and withdraws it with `CANCEL no_route` once none has for
- * [CallTimings.unreachMs] — never on the inbound path, and a RINGING ends the watch.
+ * [CallTimings.unreachMs] — never on the inbound path, and a RINGING ends the watch. One that something reaches but
+ * that has no RINGING after [CallTimings.ringingMs] is [CallState.unproven] (C-3.3-6), and if none ever comes its
+ * ring-out ends no_route: with no RINGING there is no evidence the peer's phone rang at all.
  *
  * **A connected call whose path is lost reconnects by ICE restart** (§3.8): it is [CallPhase.Reconnecting] for
  * [CallTimings.reconnectWindowMs], in which the caller — only the caller, so two restarts never cross — sends
@@ -228,6 +236,7 @@ class CallManager(
         // C-3.3-5: the caller's look at whether anything reaches the peer, until a RINGING; and what it last saw.
         var reachWatch: Job? = null
         var unreachable = false
+        var unproven = false
     }
 
     private class Send(
@@ -1107,12 +1116,13 @@ class CallManager(
         l.earlyCands.clear()
     }
 
+    /** C-3.3-1, and C-3.3-6: a ring-out that never heard a RINGING has no evidence the peer rang, so it is no_route. */
     private fun armRingOut(l: Live) =
         armTimer(l, timings.ringOutMs) {
-            if (it.phase == CallPhase.Calling || it.phase == CallPhase.Ringing) {
-                finish(it, CallPayload.REASON_TIMEOUT, CallPayload.PHASE_CANCEL)
-            } else {
-                emptyList()
+            when (it.phase) {
+                CallPhase.Calling -> finish(it, CallPayload.REASON_NO_ROUTE, CallPayload.PHASE_CANCEL)
+                CallPhase.Ringing -> finish(it, CallPayload.REASON_TIMEOUT, CallPayload.PHASE_CANCEL)
+                else -> emptyList()
             }
         }
 
@@ -1135,11 +1145,7 @@ class CallManager(
                     val sends =
                         mutex.withLock {
                             if (!calling(l)) return@launch
-                            if (l.unreachable == reached) {
-                                l.unreachable = !reached
-                                log("call ${l.id}: ${if (reached) "the peer is reachable" else "nothing reaches the peer"}")
-                                publish()
-                            }
+                            noteReach(l, reached, now)
                             val since = lostSince ?: return@withLock null
                             if (now - since < timings.unreachMs) return@withLock null
                             l.reachWatch = null
@@ -1156,11 +1162,30 @@ class CallManager(
 
     private fun calling(l: Live): Boolean = current(l) && l.phase == CallPhase.Calling
 
+    /**
+     * What [watchReach] saw for [l] at [now]: unreachable when nothing [reached] its peer (C-3.3-5), unproven when
+     * something did and still no RINGING came back past [CallTimings.ringingMs] (C-3.3-6). Published when it changes.
+     */
+    private fun noteReach(
+        l: Live,
+        reached: Boolean,
+        now: Long,
+    ) {
+        val unproven = reached && now - l.startedAt >= timings.ringingMs
+        if (l.unreachable != reached && l.unproven == unproven) return
+        if (l.unreachable == reached) log("call ${l.id}: ${if (reached) "the peer is reachable" else "nothing reaches the peer"}")
+        if (unproven && !l.unproven) log("call ${l.id}: the peer is reachable but no RINGING came back")
+        l.unreachable = !reached
+        l.unproven = unproven
+        publish()
+    }
+
     /** A RINGING proved the peer reachable: no more looks, and no flag. */
     private fun stopReachWatch(l: Live) {
         l.reachWatch?.cancel()
         l.reachWatch = null
         l.unreachable = false
+        l.unproven = false
     }
 
     private fun armConnect(l: Live) =
@@ -1265,6 +1290,8 @@ class CallManager(
         missed: Boolean = false,
     ): List<Send> {
         val tell = tellPhase?.let { CallPayload(id = l.id, ph = it, rsn = reason) }
+        // C-3.3-5/6: withdrawn before any RINGING or ANSWER — nothing reached the peer, or nothing came back from it.
+        val unreached = l.outgoing && l.phase == CallPhase.Calling && reason == CallPayload.REASON_NO_ROUTE
         drop(l, tell)
         l.phase = CallPhase.Ended
         l.reason = reason
@@ -1282,7 +1309,7 @@ class CallManager(
                 missed = missed,
                 connectedAt = l.connectedAt,
                 endedAt = clock(),
-                unreached = l.unreachable && reason == CallPayload.REASON_NO_ROUTE,
+                unreached = unreached,
             )
         loggedCalls.trySend(CallLogged(l.peerId, l.startedAt, record))
         log("call ${l.id}: ended ($reason${tellPhase?.let { ", telling the peer with $it" }.orEmpty()})")
@@ -1380,6 +1407,7 @@ class CallManager(
                     degraded = it.degraded,
                     peerCastTicketed = it.peerCastTicketed,
                     unreachable = it.unreachable,
+                    unproven = it.unproven,
                 )
             }
     }

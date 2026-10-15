@@ -449,11 +449,12 @@ both:   Connected ─path lost→ Reconnecting ─ICE ok→ Connected
 
 | ID          | Requirement                                                                                                                                                            |
 |-------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **C-3.3-1** | A caller MUST send `CANCEL rsn=timeout` after 45 s without an `ANSWER`.                                                                                                |
+| **C-3.3-1** | A caller MUST send `CANCEL rsn=timeout` after 45 s without an `ANSWER`, or `CANCEL rsn=no_route` when no `RINGING` came back either (C-3.3-6). |
 | **C-3.3-2** | A callee already in a call answers a new `OFFER` with `DECLINE rsn=busy` and does not alert.                                                                           |
 | **C-3.3-3** | Connecting that does not reach ICE `connected` within 20 s ends with `END rsn=no_route`.                                                                               |
 | **C-3.3-4** | Every phase is idempotent on `(id, ph, gen)`. Custody and the spool can deliver a frame twice, and the second copy MUST change nothing.                                |
 | **C-3.3-5** | Until a `RINGING` (or an `ANSWER`) comes back, a caller looks every 2 s at whether anything it can see reaches the peer, and says so on the call screen while nothing does. It withdraws with `CANCEL rsn=no_route` once nothing has for 15 s. |
+| **C-3.3-6** | A caller that something reaches (C-3.3-5) but that has no `RINGING` 8 s in says it is waiting for the peer's phone. With no `RINGING` at its ring-out, the call ends `no_route`, since nothing shows the peer's phone rang. |
 
 > **What counts as reaching the peer (C-3.3-5).** Any one of these, read off state already in memory (`call/CallReach`,
 > `CallReachRule`), never on the inbound path:
@@ -468,7 +469,9 @@ both:   Connected ─path lost→ Reconnecting ─ICE ok→ Connected
 > chunk never rides it. A quiet peer on a shared relay leaves no evidence, but its RINGING comes back within seconds,
 > and a RINGING ends the look. Device-observed 2026-10-14: a P9 on one relay called a Moto on another, with the Moto's
 > Bluetooth wedged and no Wi-Fi Aware on its image. The call rang out its full 45 s, and the walkie path read "Through
-> the relay". The withdrawal is a CANCEL, so an OFFER a carrier brings the peer later is recorded as missed (C-3.4-2),
+> the relay". Fifteen minutes later the Moto's Bluetooth stack wedged outbound only: the link stood both ways in the
+> tables, the OFFER and the CANCEL reached it and it alerted, but its RINGING never left the phone. That is C-3.3-6's
+> case: a link is evidence the OFFER can go, never that the RINGING can come back. Either withdrawal is a CANCEL, so an OFFER a carrier brings the peer later is recorded as missed (C-3.4-2),
 > and the caller's record reads "Couldn't reach them" (§3.12).
 
 ### 3.4 Staleness and ordering

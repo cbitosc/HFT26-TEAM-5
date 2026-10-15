@@ -508,9 +508,9 @@ private fun StackedFace(
         )
         // One slot for the reason or the route, held empty otherwise so the face doesn't jump as the call moves on.
         Box(Modifier.heightIn(min = 48.dp), contentAlignment = Alignment.Center) {
-            if (phase == CallPhase.Calling && state.unreachable) {
+            if (phase == CallPhase.Calling && (state.unreachable || state.unproven)) {
                 Text(
-                    unreachableNote(name),
+                    callingNote(state, name),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.error,
                     textAlign = TextAlign.Center,
@@ -573,9 +573,9 @@ private fun InlineFace(
                 style = MaterialTheme.typography.titleSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            if (state?.phase == CallPhase.Calling && state.unreachable) {
+            if (state?.phase == CallPhase.Calling && (state.unreachable || state.unproven)) {
                 Text(
-                    unreachableNote(name),
+                    callingNote(state, name),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error,
                     maxLines = 2,
@@ -1138,14 +1138,26 @@ internal fun statusOf(
     }
 }
 
-/** C-3.3-5: an outgoing call with no RINGING back, and nothing this phone can see reaches [name]. */
-private fun unreachableNote(name: String): String = "Can't reach $name right now"
+/**
+ * An outgoing call with no RINGING back: nothing this phone can see reaches [name] (C-3.3-5), or something does and
+ * still no RINGING came back (C-3.3-6).
+ */
+private fun callingNote(
+    state: CallState,
+    name: String,
+): String = if (state.unreachable) "Can't reach $name right now" else "Waiting for $name's phone to respond"
 
-/** Why [state] ended, when it is anything but somebody hanging up: [reasonOf], or that nothing reached [name]. */
+/** Why [state] ended, when it is anything but somebody hanging up: [reasonOf], or that it never reached [name]. */
 private fun endedNote(
     state: CallState,
     name: String,
-): String? = if (state.unreachable && state.reason == CallPayload.REASON_NO_ROUTE) "Couldn't reach $name" else reasonOf(state.reason)
+): String? =
+    when {
+        state.reason != CallPayload.REASON_NO_ROUTE || state.connectedAt != null -> reasonOf(state.reason)
+        state.unreachable -> "Couldn't reach $name"
+        state.unproven -> "$name's phone didn't respond"
+        else -> reasonOf(state.reason)
+    }
 
 /** Why it ended, when it is anything but somebody hanging up. */
 private fun reasonOf(reason: Int?): String? =
