@@ -6,8 +6,8 @@
 |--------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | Protocol version   | 1                                                                                                                                                                       |
 | Status             | Normative. Implemented and shipping (see Appendix A)                                                                                                                    |
-| This revision      | 2026-08-30                                                                                                                                                              |
-| Decision record    | ADR 019 (+ M4/M5/M6 amendments, ADR 020, ADR 021, ADR 042, ADR 062)                                                                                                              |
+| This revision      | 2026-10-15                                                                                                                                                              |
+| Decision record    | ADR 019 (+ M4/M5/M6 amendments, ADR 020, ADR 021, ADR 042, ADR 062); §7.6–§7.7: knit-spool ADR 2026-10.bxsg, knit-spool ADR 2026-10.h6pt, knit-spool ADR 2026-10.3wdy                                                                                                              |
 | Client reference   | `mesh/crypto/scope/` (`ScopeCrypto`, `SpoolPow`), `mesh/spool/` (`SpoolRecords`, `ScopeFrames`, `ScopeAttachments`, `GroupRootPolicy`, `ScopeRegistry`, `ScopeSync`)    |
 | Spool reference    | [`knit-spool`](https://github.com/getknit/knit-spool) (AGPL-3.0, separate repository) + its conformance suite                                                           |
 | Executable anchors | `ScopeCryptoTest`, `ScopeVectorTest`, `SpoolPowTest`, `SpoolRecordsTest`, `ScopeAttachmentsTest`, `ScopeFramesTest`, `GroupRootPolicyTest`, `AttachmentDeferPolicyTest` |
@@ -852,7 +852,7 @@ index. Chunks are opaque, exactly like frame blobs.
 | **B-7.1-5** | Each direction sends `hello` first. The spool advertises `v` (highest supported record-layer version), `min`, `limits` and `powBits`; the client answers with the chosen `v` in `[min, v]`, and nothing else identifying in either direction. |
 | **B-7.1-6** | No version overlap closes `4002`.                                                                                                                                                                                                             |
 | **B-7.1-7** | A `hello` *after* negotiation is malformed in-band traffic: answer `err malformed` and keep the connection. Close `4000` covers pre-hello traffic only.                                                                                       |
-| **B-7.1-8** | The client stamps `q`, monotonically increasing per connection; terminal responses (`ok`/`err`) echo it. Server-initiated records (`digest`, `event`, `blob`, `achunk`) carry no `q`.                                                         |
+| **B-7.1-8** | The client stamps `q`, monotonically increasing per connection; terminal responses (`ok`/`err`) echo it. Server-initiated records (`digest`, `event`, `blob`, `achunk`, a relayed `cast`) carry no `q`. A client's `cast` (§7.7) is the one client record that carries no `q`, and it is never answered (S-7.7-2).                                                         |
 | **B-7.1-9** | All scope operations require a prior `sub` for that scope on the same connection, `not_subscribed` otherwise.                                                                                                                                 |
 | **S-7.1-10** | A spool at its connection cap MAY refuse the upgrade at the transport layer with `503`, and SHOULD send `Retry-After`. It MUST NOT use a close code to say so.                                                                              |
 | **C-7.1-11** | A client MUST treat a refused upgrade as a transient transport failure and keep its own reconnect backoff. It SHOULD apply a `Retry-After` as a *floor* on the next wait, and MUST keep its jitter on top.                                  |
@@ -882,14 +882,20 @@ Field names are the CBOR map keys. `bstr32`/`bstr8` are byte strings of that len
 | `ok`     | s→c         | `t, q: Long, missing?: [bstr32]`                                                                                             | Terminal ack                                                                                                                                                                                                                    |
 | `err`    | s→c         | `t, code: String, q?: Long, scope?: bstr32, msg?: String, retryMs?: Long`                                                    | Terminal error, connection-scoped when `q` is absent                                                                                                                                                                            |
 
+A spool's `hello` may also carry optional capability fields, each defined in its own section and each
+signalled by its presence: `commons` (§7.4), `moderation` (§7.5), `turn`, `ent`, `entGates` and `stun`
+(§7.6), and `cast` (§7.7).
+
 **Error registry** (append-only; unknown codes are terminal-generic): `version`, `pow`,
 `tombstoned`,
-`quota`, `too_large`, `bad_id`, `rate`, `not_subscribed`, `malformed`, `internal`, `conflict`.
+`quota`, `too_large`, `bad_id`, `rate`, `not_subscribed`, `malformed`, `internal`, `conflict`,
+`ticket`.
 
 | ID          | Requirement                                                                                                                                                                           |
 |-------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | **B-7.2-1** | `version` is reserved and MUST NOT be emitted in v1. A hello mismatch is close `4002`, not a record. The code exists so a future record-level versioning use never has to recycle it. |
 | **B-7.2-2** | `conflict` is emitted only by `aput` (§7.3).                                                                                                                                          |
+| **B-7.2-8** | `ticket` is emitted only in answer to `ent`, or to a `turnreq` or `aput` that a ticket gate refused (§7.6). Its `msg` names the reason.                                              |
 | **S-7.2-3** | A spool SHOULD send a fresh `digest` to a scope's subscribers whenever the live set changes beyond a single acked push: eviction pressure, TTL expiry, a watermark shed.              |
 | **C-7.2-4** | A client MUST NOT *rely* on unsolicited `digest`. It is best-effort fan-out like `event`; §9.1 on reconnect is the correctness anchor.                                                |
 | **S-7.2-5** | A `pull` beyond `maxPull` MUST be truncated to `maxPull`, never answered with an error. Ids beyond the cap appear in neither `blob`s nor `missing`.                                   |
@@ -1026,6 +1032,228 @@ HELLO, and a conforming client honours it before it seals. The reference daemon 
 > **Why "originates".** The bridge and the heal loop relay sealed bytes. A relaying member may be
 > unable to open them at all, and where it can, the frame was already screened by the client that
 > was bound to screen it.
+
+### 7.6 TURN credentials, entitlement tickets and STUN
+
+A spool MAY hand its members short-lived credentials for a TURN server its operator runs, so that two
+members whose networks block a direct path can still hold a call. The spool never relays media itself
+(S-7.6-10): it signs a credential that the TURN server checks against a secret the two share, the TURN
+REST shared-secret scheme coturn's `use-auth-secret` verifies. An operator that sells TURN, or other
+capabilities, may also require an **entitlement ticket** and advertise **STUN**. The reference daemon
+exposes these as `SPOOL_TURN_*`, `SPOOL_TICKET_*` and `SPOOL_STUN_URLS` (knit-spool ADR 2026-10.bxsg,
+knit-spool ADR 2026-10.h6pt).
+
+What a call does with a credential (signalling, ICE, media) is the client's, and outside this protocol.
+This section covers what crosses the record layer and the rules that bound it. Identifiers in this section
+were drafted before it was written, so its rows are numbered in drafting order, not reading order.
+
+#### Advertisement
+
+| ID          | Requirement                                                                                                                                                      |
+|-------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **S-7.6-1** | A spool that issues TURN credentials advertises `turn: true` in HELLO. A spool that does not MUST omit the field; `false` is never sent. Presence is the signal. |
+| **S-7.6-2** | A spool MUST NOT advertise `turn` unless it is configured with a TURN secret and at least one TURN URL.                                                          |
+| **C-7.6-3** | A client MUST NOT send `turnreq` to a spool that omitted `turn`.                                                                                                 |
+
+> **Why a gate, not a hint.** The §7.3 reasoning, reapplied: an unknown record is skipped, and a skipped
+> request is never answered, so a `turnreq` to an older spool would hang until the client's request
+> timeout, once per call.
+
+#### Credentials
+
+| Record     | Direction | Fields                                                              | Semantics                                                                             |
+|------------|-----------|---------------------------------------------------------------------|---------------------------------------------------------------------------------------|
+| `turnreq`  | c→s       | `t, q: Long`                                                        | Ask for one TURN credential. Answered by `turncred`, or by `err`                      |
+| `turncred` | s→c       | `t, q: Long, urls: [String], user: String, pass: String, exp: Long` | The credential. `exp` is Unix **seconds**. `urls` are RFC 7065 `turn:`/`turns:` URIs |
+
+`turncred` carries `q` and is itself terminal, as `ahas` is. `not_subscribed`, `rate` and `internal`
+cover every refusal, plus `ticket` on a spool that takes entitlement tickets.
+
+| ID           | Requirement                                                                                                                                                                                                                                                                                                                                                               |
+|--------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **S-7.6-4**  | A spool MUST refuse `turnreq` with `not_subscribed` on a connection that holds no subscription. The request names **no scope**, and the spool MUST NOT ask for one. On a connection whose HELLO carried `ent`, S-7.6-16 replaces this gate.                                                                                                                              |
+| **S-7.6-5**  | A spool MUST rate-limit `turnreq` per connection and per IP, refusing with `rate` and `retryMs`. Suggested: 4 per connection per 10 min, burst 2.                                                                                                                                                                                                                         |
+| **S-7.6-6**  | `user = decimal(exp) ‖ ":" ‖ base32lower(random(10))`, and `pass = base64(HMAC-SHA1(turnSecret, UTF8(user)))`.                                                                                                                                                                                                                                                             |
+| **S-7.6-7**  | The random suffix MUST be fresh per issue. It MUST NOT be derived from a scope id, an IP, a token or any connection state. A ticketed issue (S-7.6-17) is the one exception.                                                                                                                                                                                               |
+| **S-7.6-8**  | `exp = now + turnTtl`. Suggested default 5 min, at most 1 h.                                                                                                                                                                                                                                                                                                               |
+| **S-7.6-9**  | A spool MUST NOT log or persist issued credentials. Metrics MAY count issues and refusals.                                                                                                                                                                                                                                                                                 |
+| **S-7.6-10** | The spool process MUST NOT relay media. TURN is a separate service that shares only the secret.                                                                                                                                                                                                                                                                            |
+| **S-7.6-25** | A spool SHOULD hand out one TURN URL per transport for each TURN server, in this order: `turn:<host>:3478?transport=udp`, then `turns:<host>:<TLS port>?transport=tcp`. A plain `turn:…?transport=tcp` URL adds an allocation per network to every call, and seldom reaches a network that the other two miss.                                                         |
+| **C-7.6-11** | A client SHOULD fetch a credential per call, or reuse a cached one only while `exp` is at least 1 h away. It MUST NOT send a credential to its peer or into any frame.                                                                                                                                                                                                    |
+| **C-7.6-12** | A client SHOULD request from every spool of the DM scope that advertises `turn` and is connected, and SHOULD offer relay candidates from at most two TURN servers, to bound ICE checks.                                                                                                                                                                                    |
+| **C-7.6-26** | A client SHOULD prune its relay allocations once one is ready: on each network, a relay that ranks below the best ready one (relay protocol first, UDP over TCP over TLS, then IPv6 over IPv4) is released. This refines C-7.6-12, which still asks up to two spools. With one spool, a pruned call holds about one allocation per network; ties are kept. |
+
+> **Why no scope.** Asking for a credential "for scope S" would tell the spool which conversation is
+> calling, a fact it otherwise never learns. Holding *some* subscription is the whole gate: it costs a
+> squatter a PoW stamp (§8) and admits any member of any conversation the spool carries. On a private
+> spool, the `k` token (S-7.1-3) already gates the connection, so TURN inherits that gate.
+>
+> **Why minutes, not hours.** coturn checks a REST credential's expiry only when a session first
+> authenticates, which is its Allocate; refreshes reuse the cached key (4.18.0, `check_stun_auth`). So
+> `exp` bounds when a credential can *start* relaying, not how long a call lasts, and a few minutes is
+> enough for ICE to allocate. The flip side: an allocation refreshed past `exp` lives on, so what a leaked
+> or farmed credential is worth is bounded by the TURN server's quotas, not by `exp`.
+>
+> **Why HMAC-SHA1.** It is what coturn, and every TURN server implementing the REST scheme, verifies. It
+> is not a choice this protocol makes, and a short-lived credential needs nothing from it beyond a MAC.
+>
+> **Why prune (C-7.6-26).** Unpruned, a phone keeps an allocation for every network, address family and
+> TURN URL it tries, for the length of the call: two URLs on a phone with Wi-Fi and mobile data, each with
+> IPv4 and IPv6, make about 8. Those count against the TURN server's per-user and total quotas.
+>
+> **The TURN server is the operator's.** Its quotas, bandwidth caps and denied peer ranges bound what any
+> credential holder can do with it, and on a public spool anyone can get a credential. The reference
+> daemon's deployment guide (knit-spool `HOSTING.md`) gives a starting configuration. Without a
+> `denied-peer-ip` list covering loopback, private and link-local ranges, the relay reaches the host's own
+> network.
+
+#### Entitlement tickets
+
+A **ticket** is an Ed25519 grant that an issuer signs and the spool checks with only the public half, so
+the spool can tell a paying member from anyone else without holding an account. Which capabilities need
+a ticket is the operator's choice, advertised in HELLO as `entGates`. How a client obtains a ticket is
+between it and the issuer the operator names: the spool sees only the ticket.
+
+| Record | Direction | Fields                                  | Semantics                                                         |
+|--------|-----------|-----------------------------------------|-------------------------------------------------------------------|
+| `ent`  | c→s       | `t, q: Long, tk: bstr, sig: bstr(64)`   | Present a ticket. Answered by `ok`, or by `err ticket` with `msg` |
+
+```
+Ticket {                 // tk: the house CBOR (§2), every field but ab required, unknown keys ignored
+    v:   1
+    kid: bstr(8)         // SHA-256(raw Ed25519 public key)[0..8]
+    aud: String          // the one spool it is good for
+    nbf: uint            // Unix seconds
+    exp: uint            // Unix seconds, exp - nbf <= 48 h
+    ps:  bstr(16)        // the holder's pseudonym for the day, opaque to the spool
+    fl:  uint            // bit 0: may ask for TURN; bit 1: may upload attachments;
+                         // bit 3: may cast, and unlocks casts for the scope (§7.7). Bit 2 is reserved.
+    ab:  uint?           // upload budget in bytes for this pseudonym's day; absent: the spool's own
+}
+sig = Ed25519(issuer key, "knit/spool/v1/ticket" ‖ tk)
+```
+
+The same bits name the gates in `entGates`: bit 0 gates `turnreq`, bit 1 gates `aput`, bit 3 gates `cast`.
+
+| ID           | Requirement                                                                                                                                                                                                                                                                                                                                                                                       |
+|--------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **S-7.6-13** | A spool configured with a ticket key advertises `ent: true` in HELLO; one that is not MUST omit it. Beside `ent` it sends `entGates: uint`, the `fl` bits it requires a ticket for; a client that sees `ent` without `entGates` reads it as 9 (bits 0 and 3). A spool that advertises STUN puts a non-empty `stun: [String]` of `stun:`/`stuns:` URIs in HELLO, with no credential.               |
+| **S-7.6-14** | On `ent`, a spool MUST refuse with `err ticket` and a `msg` of `malformed`, `key`, `signature`, `audience`, `early` or `expired` unless `tk` decodes, `kid` names its key, `sig` verifies, `aud` is its own, and `nbf - 300 s <= now <= exp + 300 s`.                                                                                                                                             |
+| **S-7.6-15** | An accepted ticket binds to the connection until it expires, and a later accepted `ent` replaces it. A refused `ent` MUST leave an earlier ticket in place, and is never a strike.                                                                                                                                                                                                              |
+| **S-7.6-16** | On a connection whose HELLO carried `ent` with bit 0 in `entGates`, `turnreq` needs a live ticket with bit 0 of `fl`, else `err ticket` with `msg` `missing`, `expired` or `flags`. With one, no subscription is needed. S-7.6-5's limits still apply.                                                                                                                                          |
+| **S-7.6-17** | A ticketed credential's suffix is `SHA-256("knit/spool/v1/turn-user" ‖ ps)[0..10]`, so every issue under one pseudonym shares it, and the TURN server's per-user quota counts the holder, not the credential.                                                                                                                                                                                  |
+| **S-7.6-18** | A spool MUST NOT log or persist a ticket or a pseudonym. Metrics MAY count acceptances and refusals by `msg`.                                                                                                                                                                                                                                                                                    |
+| **C-7.6-19** | A client that holds a ticket for a spool sends `ent` right after HELLO when the spool advertised `ent`, and again before the ticket expires. It MUST NOT retry a refused ticket on every round.                                                                                                                                                                                                  |
+| **C-7.6-21** | A client that holds a ticket for a spool SHOULD ask that spool for TURN on every call, whether or not the DM scope is subscribed there; this refines C-7.6-12.                                                                                                                                                                                                                                    |
+| **S-7.6-22** | On a connection whose HELLO carried `ent` with bit 1 in `entGates`, `aput` needs the uploading connection's own live ticket with bit 1 of `fl` and budget left, else `err ticket` with `q`, `scope` and a `msg` of `missing`, `expired`, `flags` or `budget`. Another subscriber's ticket never admits it. The budget is `min(ab, the spool's own)` bytes per pseudonym, charged only for chunks stored, at the size the spool charges them. A refusal is never a strike. |
+| **S-7.6-23** | A ticket never gates `aget`: a member without one fetches every attachment a member with one stored.                                                                                                                                                                                                                                                                                             |
+| **C-7.6-24** | A client without a files ticket for a spool whose `entGates` has bit 1 does not offer to send attachments through it, and still fetches the ones it receives. After `budget` it does not upload there again under that ticket's pseudonym (`ps`).                                                                                                                                                |
+| **C-7.6-30** | A client reads each gate from its own bit of `entGates` (S-7.6-13): `turnreq` needs a ticket only under bit 0, `aput` only under bit 1, a cast only under bit 3. A gate the HELLO doesn't name needs no ticket, whatever the spool's `ent`.                                                                                                                                                     |
+
+C-7.6-27 to C-7.6-29 are reserved. They number the reference client's exchange with a ticket issuer,
+which is outside this protocol.
+
+> **Why one ticket per connection.** The spool already ties a connection to every scope it subscribes,
+> so a ticket on each record would buy no unlinkability and cost a signature check per record. The
+> pseudonym does let the spool link one holder's connections across addresses within a day;
+> blind-signed tickets are the later answer if that becomes a concern (§11).
+>
+> **Why the suffix is hashed.** coturn's `user-quota` counts the part of the username after the colon
+> (4.18.0, `get_real_username`), so a stable suffix per pseudonym is what makes a quota per holder
+> possible. Hashing it keeps the spool-side pseudonym out of the TURN server's logs.
+>
+> **Why only the uploader's ticket admits an upload.** TURN and casts let one payer unlock a
+> conversation, because a call or a walkie-talkie that only one side can use is broken. Attachments are
+> not: a member without a ticket still receives every one. A rule under which sending works in some
+> conversations and not others, for reasons the sender cannot see, would need explaining in every client.
+>
+> **Why the budget is per day, not a storage cap.** The pseudonym changes daily, so a holder keeps at most
+> `ab × (⌈retention / 1 day⌉ + 1)` bytes, where retention is the scope's `ttlMs`: 3 × `ab` at the 48 h
+> default. An exact cap would need a stable account handle on every attachment, which would let the spool
+> link one holder's uploads across days. The storage watermark (S-6.4-5) still bounds the disk.
+>
+> **No allocation or bandwidth claim.** A ticket carries none, because neither the spool nor the TURN
+> server could keep the promise per holder: coturn's quotas are one number for the whole server.
+
+#### STUN
+
+A member with no TURN credential can still learn its own public address from a STUN server, and the
+address is what lets a peer's relay reach it: coturn keys a relay's permissions on IP alone, so a member
+that offers only private host addresses cannot be reached through its peer's relay. S-7.6-13 puts the
+list in HELLO.
+
+| ID           | Requirement                                                                                                                                  |
+|--------------|----------------------------------------------------------------------------------------------------------------------------------------------|
+| **C-7.6-20** | A client SHOULD gather from every `stun` URI its connected spools advertise, on every call, whether or not it obtained a TURN credential. |
+
+> **Why STUN rides HELLO.** A caller without a credential gathers before any answer arrives, so a STUN
+> URI carried in its peer's signalling would come too late. coturn answers STUN without a credential,
+> so advertising it costs the operator nothing a TURN allocation would.
+
+### 7.7 Casts
+
+Some traffic is live or worthless: a push-to-talk voice chunk, streamed about twice a second, that no
+member needs a minute later. A stored blob is the wrong carrier for it. Each one costs a digest entry, an
+eviction, a tombstone, a place in every listing and a pull per member per heal round, and two a second
+push a scope's real history out within minutes. A **cast** is one sealed frame that the spool hands to
+the scope's other live subscribers and keeps nothing of. The reference daemon exposes it as
+`SPOOL_RATE_CASTS`, `SPOOL_MAX_CAST` and `SPOOL_RATE_CASTS_TOTAL` (knit-spool ADR 2026-10.3wdy).
+
+| Record  | Direction | Fields                                  | Semantics                                                                                                                                            |
+|---------|-----------|-----------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `hello` | s→c       | `…, cast: { maxBytes: Int, rate: Int }` | Present when the spool fans out casts: `maxBytes` caps a cast's `data`, `rate` is casts per second per connection, with a burst of four times that |
+| `cast`  | c→s       | `t, scope: bstr32, data: bstr`          | One sealed frame for the scope's other subscribers. No `q`, and never answered                                                                     |
+| `cast`  | s→c       | `t, scope: bstr32, data: bstr`          | The same record, relayed unchanged to every other subscriber of the scope, caster excluded                                                         |
+
+| ID           | Requirement                                                                                                                                                                                                                                                                                       |
+|--------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **S-7.7-1**  | A spool that fans out casts advertises `cast` in HELLO; one that does not MUST omit it. Presence is the signal.                                                                                                                                                                                  |
+| **S-7.7-2**  | A spool MUST NOT answer a cast, with `ok` or with `err`, whatever becomes of it. This is B-7.1-8's one exception: a client record that carries no `q`.                                                                                                                                           |
+| **S-7.7-3**  | A cast is fanned out only when its connection holds a `sub` for the scope, its `data` is at most `maxBytes`, it is within the per-connection, per-IP and spool-wide budgets, the scope is not the commons, and the ticket rule (S-7.7-6) holds. Anything else is dropped, and MAY be counted. |
+| **S-7.7-4**  | A spool MUST NOT store a cast or let one touch a stored scope: no blob, digest fold, tombstone, listing, `maxScopes` hold, creation gate or disk write. A cast for a scope the store has shed still fans out while subscribers hold the scope.                                                  |
+| **S-7.7-5**  | Fan-out is best-effort, and a dropped copy MUST NOT count toward the slow-consumer close: a subscriber whose channel is full loses that cast and nothing else.                                                                                                                                   |
+| **S-7.7-6**  | On a connection whose HELLO carried `ent` with bit 3 in `entGates`, a cast fans out only while some live subscriber of its scope on this spool holds an accepted ticket with bit 3 of `fl`: the caster first, then the others. Liveness and skew are S-7.6-14's. A spool without a ticket key admits any subscriber's cast. |
+| **S-7.7-7**  | A dropped cast MUST NOT be a strike. A flood still pays the per-record budget that every record pays, and that budget strikes.                                                                                                                                                                   |
+| **S-7.7-8**  | A spool MUST NOT log or persist a cast, the scope it names, a ticket or a pseudonym. Metrics MAY count casts, copies fanned out and drops by reason.                                                                                                                                             |
+| **C-7.7-9**  | A client MUST NOT cast to a spool whose HELLO omitted `cast`, and MUST keep within its `maxBytes` and `rate` unprompted, because a refusal is silent. On a spool whose `entGates` has bit 3, it casts only while it holds a cast ticket there, or its peer has said in the conversation that it holds one. |
+| **C-7.7-10** | A client casts only into a scope whose SUB that spool has answered.                                                                                                                                                                                                                              |
+| **C-7.7-11** | Every cast is signed: its `sig` is the Ed25519 frame signature over `signed` (§4.1), whatever the same frame's radio copy carries.                                                                                                                                                               |
+| **C-7.7-12** | The seal is the one below: its own version byte, nonce label and aad, the plaintext padded to a multiple of 128 bytes. An opener refuses any plaintext but the canonical one: whole blocks, a nonzero length inside them, at most one block of padding, all of it zero.                         |
+| **C-7.7-13** | The cast set: on a pair's own DM scope (never a pair scope, §3.5, a group or the commons), `type = talk`, no group, sender and recipient the scope's two members in the direction of travel; then the signature verifies against the pinned sender key (C-4.4-1's step). Nothing else is sealed into a cast or accepted out of one. |
+| **C-7.7-14** | A received cast re-enters delivery as a frame for this device alone (`ttl = 0`, `relay = false`): never through §9.4, and never custodied, accounted (§9.6), quarantined (§9.3) or taken as presence. A cast that fails is dropped and forgotten.                                                |
+| **C-7.7-15** | One frame may arrive over the radios and from several spools at once. The receiver keeps the first copy by frame id.                                                                                                                                                                            |
+
+```
+pt    = sig(64) ‖ u16be(|signed|) ‖ signed ‖ 0x00…              // padded to a multiple of 128 bytes
+nonce = HKDF(ikm = nonceKey, info = "knit/scope/v1/cnonce" ‖ SHA-256(pt), L = 12)
+aad   = "knit/scope/v1/cast" ‖ scopeId                            // 50 bytes: a frame's is 45, a chunk's 52
+data  = 0x04 ‖ nonce(12) ‖ AES-256-GCM(key = sealKey, nonce, pt, aad)
+```
+
+`sealKey` and `nonceKey` are the scope's own (§4.2). `talk` is the frame type of a walkie-talkie chunk,
+which the reference client adds with its client half of this section (Appendix A). A 480 ms voice chunk's frame is about 693 bytes, so
+its plaintext pads to 768 and its cast is 797 bytes: about 1.7 KB/s at two a second.
+
+> **Why no answer.** A scoped `err` with no `q` reads as a refused `sub` (§7.2), and a client would drop
+> the conversation. A `q` would put an ack, a pending request slot and the silent-request strike (C-9.1-4)
+> on every chunk. A chunk is live or lost, and HELLO already states every bound a refusal could have
+> named.
+>
+> **Why a seal of its own.** With `0x04` and its own aad, a cast never opens as a frame blob (§4.3) or a
+> chunk (§4.5), and neither of those opens as a cast. So nothing can slip a custodial frame into the one
+> lane that skips custody and the digest, or a cast into a scope's digest. It is deterministic for §4.3's
+> reason, though nothing dedups a cast: the same frame cast to two spools is the same bytes.
+>
+> **Why signed when the radio copy is not.** §4.4's invariant holds on this plane too: every frame the
+> Internet carries is checked against the pinned key before any ratchet work. The 64 bytes land only on
+> the spool's copy, which has no radio airtime budget to keep.
+>
+> **Why one payer unlocks the scope.** As one payer is enough for TURN. A ticket on every caster would make
+> a free member's walkie-talkie one-way. It ties the payer's pseudonym to nothing the spool had not already
+> tied it to.
+>
+> **Why `push` with a marker was rejected.** An older spool ignores an unknown key (B-2-2) and stores the
+> chunk. The HELLO gate is what makes an unstored lane safe to add.
 
 ## 8. Proof of work [Both]
 
@@ -1347,6 +1575,18 @@ a relay.
   the object class that already leaks a size and a time, and it buys not shipping a second copy of
   every
   photo that already crossed a radio link. A member that never defers gives up nothing here.
+- With TURN (§7.6), that an IP asked for a credential at a given time, but not which scope it is calling
+  from. **The TURN server** sees both endpoint IPs of a relayed call, its duration and its byte counts,
+  never its content. **Joined**, as one operator can join them, this sharpens the IP edge above: "these k
+  IPs touch the same scope" becomes "these two IPs talked for 14 minutes at 09:14". Tor cannot cover it,
+  because media is UDP.
+- With entitlement tickets (§7.6), a **pseudonym per holder per day**, which lets the spool link that
+  holder's connections across addresses within the day, and ties each gated upload to it.
+- With casts (§7.7), live and never on disk: that a DM scope is in a walkie-talkie session, which side
+  talks when and for how long (about two casts a second per talking side), and both subscribers' IPs.
+  Padding (C-7.7-12) and a constant-bitrate encoder keep a chunk's size from saying what was said; nothing
+  hides that something was. On a spool that gates casts, the ticket rule (S-7.7-6) ties the payer's
+  pseudonym to that timing, which the spool could already tie to the payer's subscriptions.
 
 ### 10.2 What it cannot do
 
@@ -1405,6 +1645,8 @@ Deliberately open, additively reachable, in no particular order.
 | Client→spool `digest`                      | The record is direction-agnostic already                                                             |
 | `CAP_SPOOL` capability bit                 | Only if client UX ever needs a peer-support signal                                                   |
 | **Persisted partial attachment downloads** | §9.5 keeps them in memory, so a process death re-fetches                                             |
+| Blind-signed tickets                       | Would stop a spool linking one holder's connections within a day (§7.6, §10.1)                       |
+| Ticket-gated scope creation                | `fl` bit 2 is reserved for it. The reference deployment keeps creation open (knit-spool ADR 2026-10.x9gq) |
 
 ## 12. Constants [Both]
 
@@ -1420,6 +1662,10 @@ Deliberately open, additively reachable, in no particular order.
 | digest                          | FNV-1a-64 XOR fold, empty = 0, 8 B BE byte string | §6.3; the mesh custody digest's shape                                                    |
 | `aChunkBytes`                   | 49152 (48 KiB)                                    | §4.5 — **not tunable**: it is what makes a chunk's position derivable without a manifest |
 | sealed chunk size               | 49221 B (`1 + 12 + 40 + 49152 + 16`)              | §4.5 — sized to stay inside the 64 KiB `maxBlob`                                         |
+| cast `sealv` / padding block    | `0x04` / 128 B                                    | §7.7                                                                                     |
+| ticket `kid` / `ps`             | 8 B / 16 B                                        | §7.6                                                                                     |
+| ticket lifetime / skew          | ≤ 48 h / ±300 s                                   | §7.6 (S-7.6-14)                                                                          |
+| TURN username suffix            | 10 B, 16 base32 characters                        | §7.6 (S-7.6-6, S-7.6-17)                                                                 |
 
 ### 12.2 Defaults and suggestions: operator- or config-tunable
 
@@ -1447,6 +1693,10 @@ Deliberately open, additively reachable, in no particular order.
 | suggested silent-request strike count    | 3 consecutive, at a 30 s request timeout                | §9.1 (C-9.1-4) — the reference client                                                                                  |
 | suggested refused-scope park             | 5 min floor, 1 h cap                                    | §9.1 (C-9.1-5) — `retryMs` honoured inside that window only                                                            |
 | intro re-send / answer floors            | 20 h / 1 h                                              | §3.5 client policy: re-send an unconfirmed intro under the 24 h custody TTL; answer an init-bearing peer at most hourly |
+| TURN credential lifetime                 | 5 min, at most 1 h                                      | §7.6 (S-7.6-8) — bounds when a credential can start relaying, not a call's length                                      |
+| suggested `turnreq` rate                 | 4 per connection per 10 min, burst 2                    | §7.6 (S-7.6-5) — and per IP                                                                                             |
+| default ticket upload budget             | 32 MiB per pseudonym per day                            | §7.6 (S-7.6-22) — the reference daemon's; a ticket's `ab` may lower it                                                  |
+| casts                                    | off by default; suggested `rate` 4/s, burst 4×; `maxBytes` 2048; spool-wide 200/s, burst 4× | §7.7                                                                     |
 
 ## 13. Test vectors [Both]
 
@@ -1629,6 +1879,73 @@ aput             = a9617464617075746171076573636f7065582001080f161d242b323940474
                    6e182a61641950c8
 ```
 
+TURN credentials (§7.6; `turnSecret = "knit-turn-test-secret"`, `exp = 1800000000`, suffix bytes
+`fixture(10, 11)`, and a `turncred` with `q = 7` and the URLs
+`turn:spool.example:3478?transport=udp`, `turns:spool.example:5349?transport=tcp`):
+
+```
+user           = 1800000000:bmjbsibhfy2tyq2k
+pass           = yV18C+LcL6biIfL7ZVOuV9xVuoU=
+helloSpoolTurn = a661746568656c6c6f617601636d696e01666c696d697473a6676d6178426c6f621a00010000696d
+                 61785265636f72641a00020000696d617853636f7065731840676d617850756c6c18406c6d617846
+                 72616d65734361701903e8686d617854746c4d731a240c840067706f774269747314647475726ef5
+turnreq        = a26174677475726e726571617107
+turncred       = a66174687475726e637265646171076475726c738278257475726e3a73706f6f6c2e6578616d706c
+                 653a333437383f7472616e73706f72743d75647078267475726e733a73706f6f6c2e6578616d706c
+                 653a353334393f7472616e73706f72743d7463706475736572781b313830303030303030303a626d
+                 6a6273696268667932747971326b6470617373781c79563138432b4c634c36626949664c375a564f
+                 7556397856756f553d636578701a6b49d200
+```
+
+Entitlement tickets (§7.6). The key pair is RFC 8032 §7.1 TEST 1, so the public half comes from the RFC;
+`aud = "lab.example"`, `nbf = 1800000000`, `exp = 1800086400`, `ps = 00 01 … 0f`, `fl = 1`, and the `ent` record with `q = 7`. Then the same fixture with `fl = 3` and
+`ab = 134217728`; a HELLO with `ent` and `entGates = 11`; and one with `ent` and
+`stun = ["stun:lab.example:3478"]`:
+
+```
+seed          = 9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60
+public        = d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a
+kid           = 21fe31dfa154a261
+tk            = a7617601636b69644821fe31dfa154a261636175646b6c61622e6578616d706c65636e62661a6b49d200
+                636578701a6b4b238062707350000102030405060708090a0b0c0d0e0f62666c01
+sig           = c0740d14d5f46f2771721c593fa34a6e926b39182955cc6f8fb15365dddcf229
+                da2cb33bdf6f23881cf4b153eedc4238e143fa53ef1a834961040bb55818b809
+ent           = a4617463656e7461710762746b584ba7617601636b69644821fe31dfa154a261636175646b6c61622e
+                6578616d706c65636e62661a6b49d200636578701a6b4b238062707350000102030405060708090a0b
+                0c0d0e0f62666c01637369675840c0740d14d5f46f2771721c593fa34a6e926b39182955cc6f8fb153
+                65dddcf229da2cb33bdf6f23881cf4b153eedc4238e143fa53ef1a834961040bb55818b809
+tkFiles       = a8617601636b69644821fe31dfa154a261636175646b6c61622e6578616d706c65636e62661a6b49d200
+                636578701a6b4b238062707350000102030405060708090a0b0c0d0e0f62666c036261621a08000000
+sigFiles      = 1942b4b07f1ef10f7e4061e822d909876b2e5a1597469c5aa70c87c5909dbc9c
+                c24dc7703dfcb8a33ea190b19e4b9a9f460319f9ec2d11d17e787afe551b5d0a
+helloEntGates = a461746568656c6c6f61760163656e74f568656e7447617465730b
+helloEntStun  = a461746568656c6c6f61760163656e74f5647374756e81757374756e3a6c61622e6578616d706c653a
+                33343738
+```
+
+Casts (§7.7): one record for both directions, with `scope = 00 01 … 1f` and `data = a0 a1 … af`; a HELLO
+with `ent` and `cast = {2048, 4}`; and the ticket fixture with `fl = 9` (TURN and cast). Then the seal on
+the DM fixture above (`dmSealKey`, `dmNonceKey`, `dmScopeId`), with the `sig` and `signed` inputs above
+(64 and 40 bytes):
+
+```
+cast      = a3617464636173746573636f70655820000102030405060708090a0b0c0d0e0f101112131415161718191a
+            1b1c1d1e1f646461746150a0a1a2a3a4a5a6a7a8a9aaabacadaeaf
+helloCast = a461746568656c6c6f61760163656e74f56463617374a2686d61784279746573190800647261746504
+tkCast    = a7617601636b69644821fe31dfa154a261636175646b6c61622e6578616d706c65636e62661a6b49d200
+            636578701a6b4b238062707350000102030405060708090a0b0c0d0e0f62666c09
+sigCast   = 9f0d82c5e15ddc486fc693a848dd2e937df32e505f22631dde6a49f82435d147
+            b64da30b5ac432ef18ee9e2349c4c8915cc8e9d5a3e829f95c2784bc5a5f530f
+castSeal  = 0486dfeaff6b30c3cebc549d35183a43023f9b0c354d6f49d5cc1bac81def2774409f7f4ef746f0f4491271f
+            09f7d2635d2534931edda7a37adf7b73bd7c0e4a7a08e381a0861afaa8d7bd57436bf0bf26a80fd14a99a9ae
+            adc356cc58a785ee926ca293e1632be7c7da48dbbb51a7949e6743e392774d9f469d69cdd86b02f9c71f9141
+            5ca1b114fe8db955ad94fa4679cffb59ade46563a3650fd4b3
+```
+
+The §7.6 and §7.7 vectors are pinned by knit-spool's `TurnRecordVectorTest`, `TicketVectorTest` and
+`CastRecordVectorTest`, and `castSeal` by the reference client's cast seal tests. This client pins none of
+them until its half of those sections lands (Appendix A).
+
 ## Appendix A. Implementation status
 
 Non-normative. What the spec describes that runs today, and what is specified but not yet on the
@@ -1641,6 +1958,8 @@ wire.
 | §3.2 group root, §3.3 group scopes              | Shipped                                                                                                                                    | `GroupRootPolicy`, `GroupRootStore`, `GroupKeyPayload.gr`, DB v3 |
 | §3.5 pair scopes                                | Shipped                                                                                                                                    | `ScopeCrypto.pairSecret`, `ScopeRegistry.pairs`, `IntroSync`      |
 | §7.4 the commons                                | Shipped both sides; text and reply quotes only — the room takes no attachments yet whatever the spool advertises                          | `ScopeCrypto.commons*`, `CommonsInvite`, `ScopeSync`, `knit-spool` |
+| §7.6 TURN credentials, tickets, STUN            | Spool side built in `knit-spool` (experimental, off by default); client half in development, not in a shipped build                     | `knit-spool`                                                     |
+| §7.7 casts                                      | Spool side built in `knit-spool` (experimental, off by default); client half in development, not in a shipped build                     | `knit-spool`                                                     |
 | §7.5 send-side moderation                       | Spool side shipped (`SPOOL_REQUIRE_MODERATION`); client half not yet implemented — a current client tolerates the field and ignores it (B-2-2) | `knit-spool`                                                     |
 | §4.1–§4.4 sealing and frame rules               | Shipped                                                                                                                                    | `ScopeCrypto`, `ScopeFrames`                                     |
 | §4.5 attachments                                | Shipped                                                                                                                                    | `ScopeCrypto.sealChunk`, `ScopeAttachments`                      |
@@ -1689,3 +2008,4 @@ the plane itself was unaffected either time, since a spool never decodes a frame
 | 2026-09-13 | **The direct push (§9.4 C-9.4-3, ADR 2026-09.y5f3).** A member may push a frame it does not custody — today one class, a room post's `relay = false` delivery tick at its ride deadline — under the ordinary §4.4 rule, C-9.2-1 and the size bounds, and must account it per §9.6 (C-9.6-1 gains the second writer). Appendix A row for `ScopeSync.pushDirect`. All client-side | None for spools: a pushed blob is a pushed blob. Clients: none of it is observable on the wire — no record, derivation or vector moved |
 | 2026-09-15 | **The deferral reads both ends, and not before an ack could exist (ADR 2026-09.p7j8).** §9.5's non-normative reference-client paragraph again: the evidence half is one fact read from whichever end of the DM the member is — the author's receipt over a radio, or the recipient's own arrival plane — and a missing ack counts for nothing until 60 s after the frame's `sentAt`, because a client that wakes on a local custody change asks first on the send itself. Without the first, a recipient re-uploaded every photo a radio had just handed it; without the second, the gate never fired at all. C-9.5-5…9 are unchanged | None for spools. Clients: a member that defers more, which no spool can tell apart; no record, derivation or vector moved |
 | 2026-09-14 | **The relay invite link (§7.4 note, `docs/RELAY_INVITE.md`).** A non-normative pointer: the reference client mints and accepts the relay, its token and its commons secret as one `https://getknit.app/r#…` link, applied on one confirmation. Client-side only; the link never reaches a spool | None for spools. Daemons SHOULD print the link beside `knit-commons:v1:…`; no record, derivation or vector moved |
+| 2026-10-15 | **TURN credentials, entitlement tickets, STUN and casts (§7.6, §7.7; knit-spool ADR 2026-10.bxsg, knit-spool ADR 2026-10.h6pt, knit-spool ADR 2026-10.3wdy).** Four optional HELLO capabilities, each signalled by its presence: `turn` with `turnreq`/`turncred`, short-lived TURN REST credentials that name no scope; `ent`/`entGates` with an `ent` record presenting an Ed25519 ticket that gates `turnreq`, `aput` and `cast` per connection, and a TURN username suffix hashed from the ticket's daily pseudonym; `stun`, a credential-free STUN list; and `cast`, a sealed frame fanned out live to a scope's other subscribers and never stored, under its own seal (`sealv = 0x04`). New error code `ticket` (B-7.2-8); B-7.1-8 gains its one exception, a client record with no `q`. §10.1 bullets, §11 rows, §12 constants and §13 vectors appended | **Spools:** optional; a spool that enables none of them omits every field and is unaffected. **Clients:** tolerate-and-ignore until the client half lands; no existing record, derivation or vector moved |
