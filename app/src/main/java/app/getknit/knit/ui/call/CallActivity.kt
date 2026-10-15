@@ -1562,4 +1562,4 @@ fun CallScreenWalkieTranscriptDownloadingPreview() =
             ),
     )
 
-private const val PREVIEW_MODEL_BYTES = 142_315_154L
+private const val PREVIEW_MODEL_BYTES = 269_155_803L

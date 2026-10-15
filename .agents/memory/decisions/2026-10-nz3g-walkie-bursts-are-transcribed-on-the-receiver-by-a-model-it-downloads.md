@@ -165,6 +165,7 @@ C-3.11-9). It is debug-only, as the walkie is, and nothing reaches the wire.
   Small's fetch and model time for a gain the clips have not shown, so the card's picker, `SttModel.ALL`, the
   `models/stt-model` pick file and the bridge's `use` op are gone. `SttModelStore.start` deletes whatever else sits
   under `noBackupFilesDir/models`, which is the other picks' files and the pick itself.
+  <!-- doc-lint: allow MOONSHINE_SMALL_STREAMING_EN — the 2026-10-14 pick, superseded by the 2026-10-15 Medium amendment -->
   The download could only be started on a walkie call, from the card. It is now also a row in Settings ("Walkie
   transcripts": Download, progress and Cancel, Try again, Remove), shown only where `WALKIE_WIRED` is on, through
   `SettingsViewModel`'s nullable store. Either door starts the same job on the app scope. As it starts, the store asks
@@ -186,3 +187,10 @@ C-3.11-9). It is debug-only, as the walkie is, and nothing reaches the wire.
   and the download is the Calls screen's alone. Once the model is in, the card is the transcript, and the switch is
   how it goes away. The dismiss is a button beside Download rather than a close in the card's title, because a 48 dp
   title row pushed the first line off a 360 × 640 screen (`WalkieTranscriptScreenTest`).
+- **Amendment 2026-10-15: Medium after all.** The walkie's one model is now Moonshine Medium Streaming
+  (`SttModel.MOONSHINE_MEDIUM_STREAMING_EN`, id `moonshine-medium-streaming-en-2026-08-21`, 245M parameters, 6.65 %
+  on the Open ASR average against Small's 7.84), taken for its accuracy at about twice Small's fetch (269 MB against
+  142 MB) and model time. Nothing else moves: the same runtime, the same per-channel quantization
+  (`medium-streaming-en/quantized_26_08_21`), pins from `scripts/stt-model.py`, and files rehosted under getknit.app.
+  A phone holding the Small model has it swept by `SttModelStore.start` (it is not the shipped id) and sees the model
+  as absent until the Medium one is fetched.

@@ -354,7 +354,7 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
     route; its foreground service may be refused from a broadcast, and the download then runs without it);
     `sideload --es dir <dir>` installs it from its nine files pushed there (`scripts/stt-model.py --out` stages
     them; `chmod 755` the directory and `644` the files), each checked against the same pins; `cancel`; `delete`;
-    `unload` releases the model now (otherwise 2 min idle). The model is Moonshine Small Streaming alone; `status` names
+    `unload` releases the model now (otherwise 2 min idle). The model is Moonshine Medium Streaming alone; `status` names
     it (`model`).
   - `pcm --es path <file>` streams a raw 16 kHz mono s16le file through the model in 100 ms chunks as fast as it takes
     them, looking as a burst does — in the background, since a long clip outlasts a broadcast's timeout (an ANR). It

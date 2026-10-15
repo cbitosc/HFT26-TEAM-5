@@ -426,7 +426,7 @@ fun CallSettingsScreenTranscriptsPreview() =
         CallSettingsScreenContent(
             state = CallSettingsUiState(),
             onBack = {},
-            transcripts = TranscriptsUi(on = true, model = SttModelState.Absent, bytes = 142_315_154, metered = true),
+            transcripts = TranscriptsUi(on = true, model = SttModelState.Absent, bytes = 269_155_803, metered = true),
         )
     }
 

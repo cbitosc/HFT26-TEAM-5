@@ -159,7 +159,7 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   `SttDownloadService`), the Calls screen's transcripts section (`data/settings/TranscriptStore`), `TalkPlayer`'s `TalkPcmTap`,
   `WalkieTranscriptCard`, `ModelLoadGuard.STT`, the `moonshineVoice` pin or `scripts/stt-model.py`:** READ ADR
   2026-10.nz3g and `docs/VOICE_CALLS.md` C-3.11-9 — the receiver writes each heard burst out as text while it plays,
-  behind `BuildConfig.CALLS` and never on the wire; the model (Moonshine v2 Small Streaming alone, through
+  behind `BuildConfig.CALLS` and never on the wire; the model (Moonshine v2 Medium Streaming alone, through
   Moonshine's own runtime, called by its `JNI` class alone and taken without its transitive dependencies) is a
   tap-to-download from getknit.app (the walkie card, whose offer can be dismissed for good, or the Calls screen, held
   past a hang-up by a `dataSync` service; the Calls screen's switch turns transcripts off), pinned by size and SHA-256 (never hand-edit the pins: the script derives them),

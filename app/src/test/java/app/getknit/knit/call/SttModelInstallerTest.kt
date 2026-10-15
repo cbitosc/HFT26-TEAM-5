@@ -154,13 +154,13 @@ class SttModelInstallerTest {
 
     @Test
     fun theShippedPinsAreWellFormed() {
-        val shipped = SttModel.MOONSHINE_SMALL_STREAMING_EN
+        val shipped = SttModel.MOONSHINE_MEDIUM_STREAMING_EN
         assertTrue(shipped.baseUrl.startsWith("https://getknit.app/"))
         assertTrue(shipped.baseUrl.contains(shipped.id))
         assertTrue(shipped.files.all { it.sha256.matches(Regex("[0-9a-f]{64}")) && it.bytes > 0 })
         // Every file a streaming model loads from (the runtime's catalog), and the licence.
         assertEquals(shipped.id, STREAMING_FILES + "LICENSE", shipped.files.map { it.name })
-        assertEquals(SttArch.SMALL_STREAMING, shipped.arch)
+        assertEquals(SttArch.MEDIUM_STREAMING, shipped.arch)
     }
 
     private fun pin(

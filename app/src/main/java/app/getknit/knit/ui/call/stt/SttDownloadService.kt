@@ -22,7 +22,7 @@ import org.koin.core.component.inject
 /**
  * Holds the process while the walkie transcript's speech model downloads (docs/VOICE_CALLS.md C-3.11-9; experimental,
  * `WALKIE_WIRED`): a `dataSync` foreground service, started by [SttModelStore] as a download begins, so a hang-up, a
- * screen left or the cached-app freezer does not stall a fetch of 142 MB half way. It does none of the work — the
+ * screen left or the cached-app freezer does not stall a fetch of 269 MB half way. It does none of the work — the
  * download is the store's job on the app scope — and stops itself as soon as the store's state is anything but
  * [SttModelState.Downloading].
  *
