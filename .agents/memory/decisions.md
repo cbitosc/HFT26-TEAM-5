@@ -243,6 +243,7 @@ carries; never renumber an old one.
 | [2026-10.kw29](decisions/2026-10-kw29-a-call-whose-microphone-captures-only-zeros-falls-back-to-the-recognition-source.md) | A call whose microphone captures only zeros falls back to the recognition source | calls, audio, reliability |
 | [2026-10.kxnw](decisions/2026-10-kxnw-a-call-between-neighbours-carries-its-media-over-a-wi-fi-direct-group.md) | A call between neighbours carries its media over a Wi-Fi Direct group | calls, wifi-direct, transfer |
 | [2026-10.mptm](decisions/2026-10-mptm-an-attachment-keeps-the-identity-it-arrived-under.md) | An attachment keeps the identity it arrived under | attachments, crypto, privacy, custody |
+| [2026-10.mr88](decisions/2026-10-mr88-own-stun-and-turn-servers-replace-the-spool-s-per-kind.md) | Own STUN and TURN servers replace the spool's per kind | calls, spool, settings |
 | [2026-10.nsr7](decisions/2026-10-nsr7-a-file-s-receiver-reports-its-progress.md) | A file's receiver reports its progress, and the holder times parked asks by it | ble, mesh, blobs |
 | [2026-10.nxfb](decisions/2026-10-nxfb-a-blob-is-not-asked-of-a-peer-streaming-to-us.md) | A blob is not asked of a peer streaming to us, and a fed file stays in flight while its link keeps feeding | mesh, attachments, blob-exchange, bluetooth |
 | [2026-10.pj9w](decisions/2026-10-pj9w-ble-discovery-waits-run-on-the-elapsed-clock.md) | BLE discovery waits run on the elapsed clock, and a dial wakes when its dwell ripens | ble, transport, power |

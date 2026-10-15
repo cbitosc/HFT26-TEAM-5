@@ -37,6 +37,7 @@ import app.getknit.knit.R
 import app.getknit.knit.badge.PeerBadges
 import app.getknit.knit.data.message.Conversations
 import app.getknit.knit.data.settings.SettingsStore
+import app.getknit.knit.di.CALLS_WIRED
 import app.getknit.knit.legal.License
 import app.getknit.knit.mesh.MeshController
 import app.getknit.knit.mesh.MeshService
@@ -51,6 +52,7 @@ import app.getknit.knit.ui.addcontact.AddContactScreen
 import app.getknit.knit.ui.addcontact.ContactCardInbox
 import app.getknit.knit.ui.backup.BackupScreen
 import app.getknit.knit.ui.blocked.BlockedUsersScreen
+import app.getknit.knit.ui.callsettings.CallSettingsScreen
 import app.getknit.knit.ui.chat.ChatScreen
 import app.getknit.knit.ui.chat.MessageDetailsScreen
 import app.getknit.knit.ui.chatlist.ChatListScreen
@@ -104,6 +106,7 @@ private object Routes {
     const val ADD_CONTACT = "addContact"
     const val INTERNET_RELAYS = "relays"
     const val LORA_RADIO = "lora"
+    const val CALLS = "calls"
     const val SHARE = "share"
     const val SEARCH = "search"
     const val ABOUT = "about"
@@ -535,6 +538,7 @@ fun KnitApp(startRoute: String? = null) {
                     onOpenProfile = { navController.navigate(Routes.PROFILE) },
                     onOpenRelays = { navController.navigate(Routes.INTERNET_RELAYS) },
                     onOpenLora = { navController.navigate(Routes.LORA_RADIO) },
+                    onOpenCalls = { navController.navigate(Routes.CALLS) },
                     onOpenAbout = { navController.navigate(Routes.ABOUT) },
                     onOpenLicenses = { navController.navigate(Routes.LICENSES) },
                     onOpenBackup = { navController.navigate(Routes.backup()) },
@@ -587,6 +591,12 @@ fun KnitApp(startRoute: String? = null) {
             if (BuildConfig.LORA_PLANE) {
                 composable(Routes.LORA_RADIO) {
                     LoraRadioScreen(onBack = { navController.popBackStack() })
+                }
+            }
+            // Calls (experimental): only a build that wires them has the screen, or the view model it resolves.
+            if (CALLS_WIRED) {
+                composable(Routes.CALLS) {
+                    CallSettingsScreen(onBack = { navController.popBackStack() })
                 }
             }
             composable(Routes.DIAGNOSTICS) {

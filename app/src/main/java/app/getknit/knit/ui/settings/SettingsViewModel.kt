@@ -2,10 +2,10 @@ package app.getknit.knit.ui.settings
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import app.getknit.knit.call.OwnIceServers
 import app.getknit.knit.data.relay.RelayFacts
 import app.getknit.knit.data.settings.BluetoothDownloadLimit
 import app.getknit.knit.data.settings.SettingsStore
-import app.getknit.knit.di.CALLS_WIRED
 import app.getknit.knit.identity.Alias
 import app.getknit.knit.identity.Identity
 import app.getknit.knit.identity.displayNameFor
@@ -30,6 +30,13 @@ data class LoraSummary(
     val plane: LoraPlane = LoraPlane.Off,
     /** The connected board's battery, once it has reported one. */
     val battery: BoardBattery? = null,
+)
+
+/** The Calls row's subtitle (docs/VOICE_CALLS.md §3.14): which of the person's own servers a call uses, and relay-all. */
+data class CallsSummary(
+    val relayAll: Boolean = false,
+    val ownStun: Boolean = false,
+    val ownTurn: Boolean = false,
 )
 
 /** The Internet-relay plane, as the Settings row summarises it before handing off to its own screen. */
@@ -64,6 +71,8 @@ class SettingsViewModel(
     // would spin. Taking the flow lets a test supply a finite one.
     relayFacts: Flow<RelayFacts>,
     loraFacts: Flow<LoraFacts>,
+    // The person's own call servers (§3.14), for the Calls row's summary.
+    ownIce: Flow<OwnIceServers>,
 ) : ViewModel() {
     private val nodeId = MutableStateFlow("")
     private val alias = MutableStateFlow("")
@@ -94,10 +103,15 @@ class SettingsViewModel(
         settings.linkPreviewsEnabled
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
-    /** Whether every call goes through a relay's TURN server (docs/VOICE_CALLS.md C-3.7-3). Off by default. */
-    val relayAllCalls: StateFlow<Boolean> =
-        settings.callsRelayAll
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+    /**
+     * What the Calls row says: "Relay all calls" (C-3.7-3) and the own servers a call actually uses — switched on and
+     * valid, as [app.getknit.knit.call.OwnIceServers.effective] reads them.
+     */
+    val callsSummary: StateFlow<CallsSummary> =
+        combine(settings.callsRelayAll, ownIce) { relayAll, own ->
+            val ice = own.effective()
+            CallsSummary(relayAll = relayAll, ownStun = ice.stun.isNotEmpty(), ownTurn = ice.turn != null)
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CallsSummary())
 
     /** Whether to colour the app from the wallpaper. Off by default; hidden entirely below API 31. */
     val dynamicColor: StateFlow<Boolean> =
@@ -162,12 +176,6 @@ class SettingsViewModel(
 
     fun setBluetoothDownloadLimit(value: BluetoothDownloadLimit) {
         viewModelScope.launch { settings.setBluetoothDownloadLimit(value) }
-    }
-
-    /** A no-op in a build that wires no calls, where the row never shows. */
-    fun setRelayAllCalls(value: Boolean) {
-        if (!CALLS_WIRED) return
-        viewModelScope.launch { settings.setCallsRelayAll(value) }
     }
 
     fun setDynamicColor(value: Boolean) {

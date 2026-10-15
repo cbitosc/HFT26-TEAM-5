@@ -11,6 +11,7 @@ import app.getknit.knit.data.crypto.IdentityKeyStore
 import app.getknit.knit.data.forward.ForwardRepository
 import app.getknit.knit.data.relay.RelayStatusRepository
 import app.getknit.knit.data.settings.BadgeStore
+import app.getknit.knit.data.settings.OwnIceStore
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.data.settings.TicketKeyStore
 import app.getknit.knit.linkpreview.LinkPreviewService
@@ -143,7 +144,13 @@ val uiModule =
         }
         viewModel { OnboardingViewModel(get(), get()) }
         viewModel {
-            SettingsViewModel(get(), get(), get<RelayStatusRepository>().facts, get<LoraStatusRepository>().facts)
+            SettingsViewModel(
+                get(),
+                get(),
+                get<RelayStatusRepository>().facts,
+                get<LoraStatusRepository>().facts,
+                get<OwnIceStore>().ownIce,
+            )
         }
         viewModel { BackupViewModel(androidContext(), get(), get()) }
         // ProfileDetailsViewModel takes the tapped peer's node id as a runtime param.

@@ -27,6 +27,7 @@ import app.getknit.knit.call.CaptureHealth
 import app.getknit.knit.call.CaptureProfile
 import app.getknit.knit.call.DirectCallPath
 import app.getknit.knit.call.DirectMode
+import app.getknit.knit.call.OverridingTurnSource
 import app.getknit.knit.call.StunServers
 import app.getknit.knit.call.SystemCallSync
 import app.getknit.knit.call.WalkieStats
@@ -56,6 +57,7 @@ import app.getknit.knit.data.message.quoteSnippet
 import app.getknit.knit.data.peer.PeerEntity
 import app.getknit.knit.data.settings.BadgeStore
 import app.getknit.knit.data.settings.KnitBoardSetup
+import app.getknit.knit.data.settings.OwnIceStore
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.data.settings.TicketKeyStore
 import app.getknit.knit.data.webp.WebpTranscode
@@ -2367,14 +2369,30 @@ class DebugBridgeReceiver :
 
             "turn" -> {
                 val peer = intent.getStringExtra("peer") ?: return reply("error", "missing 'peer' extra")
-                val servers = getKoin().get<MeshManager>().turnServers(peer)
+                // What a call would gather from (§3.14): the person's own servers replace the spools' per kind, so an
+                // own TURN server sends no turnreq here either.
+                val own =
+                    getKoin()
+                        .get<OwnIceStore>()
+                        .ownIce
+                        .first()
+                        .effective()
+                val source = OverridingTurnSource({ own }, getKoin().get<MeshManager>())
+                val servers = source.turnServers(peer)
                 val list = JSONArray()
                 servers.forEach { server ->
-                    list.put(JSONObject().put("urls", JSONArray(server.urls)).put("expires", server.user.substringBefore(':')))
+                    val entry = JSONObject().put("urls", JSONArray(server.urls))
+                    // A spool's credential names its expiry first; an own server's username is a name, never printed.
+                    if (own.turn == null) entry.put("expires", server.user.substringBefore(':'))
+                    list.put(entry)
                 }
-                // C-7.6-20: the STUN URLs a call would gather from beside them, as the call picks them from the hellos.
-                val stun = StunServers.pick(getKoin().get<MeshManager>().stunUrls())
-                return reply("ok", "${servers.size} credential(s), ${stun.size} STUN url(s)").put("turn", list).put("stun", JSONArray(stun))
+                // C-7.6-20: the STUN URLs a call would gather from beside them, as the call picks them.
+                val stun = StunServers.pick(source.stunUrls())
+                return reply("ok", "${servers.size} credential(s), ${stun.size} STUN url(s)")
+                    .put("turn", list)
+                    .put("stun", JSONArray(stun))
+                    .put("turnSource", if (own.turn != null) "own" else "relays")
+                    .put("stunSource", if (own.stun.isNotEmpty()) "own" else "relays")
             }
         }
         return JSONObject()

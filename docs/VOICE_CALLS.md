@@ -528,9 +528,10 @@ Each side sends an `OFFER` to the other before seeing the other's offer.
 | **C-3.7-3** | With "relay all calls" on, a client sets `iceTransportPolicy = relay` **and** MUST strip its own host and server-reflexive candidates from the SDP it sends. Otherwise its own IP still reaches the peer. |
 | **C-3.7-4** | Opus is mandatory; `bundle` and `rtcp-mux` are required.                                                                                                                                                 |
 
-> **"Relay all calls" on Android** is a switch in Settings, off by default, shown only by a build that wires calls. It
-> also keeps every call off a Wi-Fi Direct group (§3.10), whose pair would show a neighbour the phone's address, and
-> leaves the walkie (§3.11) alone, which carries no address. A call connects only where a spool issues TURN.
+> **"Relay all calls" on Android** is a switch on the Calls screen (Settings → Calls), off by default, shown only by a
+> build that wires calls. It also keeps every call off a Wi-Fi Direct group (§3.10), whose pair would show a neighbour
+> the phone's address, and leaves the walkie (§3.11) alone, which carries no address. A call connects only where a TURN
+> server is available: one a spool issues, or the person's own (§3.14).
 >
 > **Why C-3.7-2 is the whole E2E argument.** The SDP is authenticated by the frame signature and the DM
 > ratchet, so its fingerprint is the peer's own. DTLS then proves that whoever terminates the media
@@ -794,6 +795,25 @@ system call log. A call's line in its thread is §3.12's.
 controller with the mesh's Bluetooth links. Over 1M PHY a walkie loses nothing to it. Over Coded PHY, whose packets
 are long, the phone holding the eSCO link received 2 of each 9 chunks in the 2026-10-12 trial, against 9 of 9 with the
 link down; its own sends were all delivered. Nothing steers a link off Coded while eSCO is up yet.
+
+### 3.14 A person's own STUN and TURN servers
+
+Every ICE server a call uses comes from the spools by default (§2.2, §2.6). The Calls screen lets a person name their
+own instead: up to four STUN URLs, and one TURN server with a static long-term username and password (coturn's
+`lt-cred-mech`). Each kind has its own switch and **replaces** what the spools supply for that kind; it never adds to
+it. `call/OverridingTurnSource` is the seam, `data/settings/OwnIceStore` holds the fields, and ADR 2026-10.mr88 records
+why.
+
+| ID           | Requirement |
+|--------------|-------------|
+| **C-3.14-1** | With an own TURN server switched on and valid, a call gathers relay candidates from it alone and sends no `turnreq` to any spool, on the call or on an ICE restart (§3.8). With own STUN URLs on and valid, they replace every HELLO's `stun` list (C-7.6-20). Each kind is independent: own STUN alone still asks the spools for TURN. |
+| **C-3.14-2** | An own TURN URL is `turn[s]:host[:port]`, with at most a `?transport=udp\|tcp` query: a DNS-shaped name, an IPv4 literal or a bracketed IPv6 one, never `user@host`, never a port outside 1..65535. An own STUN URL passes `StunServers`' rule (§2.6). Both are checked as typed and again on every read, so a stored value libwebrtc would refuse never reaches a call: that kind reads as switched off. |
+| **C-3.14-3** | The username and password are non-empty and carry no control character. The password is never logged, never put in a frame and never sent to the peer (C-7.6-11). It is stored in the clear beside a relay's `?k=` token (ADR 2026-09.66cw) and rides a Knit backup, like every other choice the person made. |
+| **C-3.14-4** | "Relay all calls" (C-3.7-3) holds with an own TURN server and no spool at all. |
+| **C-3.14-5** | The screen's Test gathers against the servers as typed, before they are saved: one throwaway connection per kind on the call factory, an audio m-line that only receives, so no microphone opens. A server-reflexive candidate means STUN answered, a relay candidate that TURN allocated; error 401 means the credential, another server error (3xx-6xx) a refusal, anything else no answer. It never names an address, and it is refused while a call holds the media. |
+
+The debug bridge's `…debug.CALL --es op turn` reports `turnSource` and `stunSource` (`own` or `relays`) beside the
+servers a call would use, and never the username or password of an own server.
 
 ## 4. Tests this would add
 

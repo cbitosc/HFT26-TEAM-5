@@ -48,6 +48,7 @@ import app.getknit.knit.data.ratchet.GroupRootRepository
 import app.getknit.knit.data.ratchet.RatchetRepository
 import app.getknit.knit.data.relay.RelayInviteApplier
 import app.getknit.knit.data.settings.BadgeStore
+import app.getknit.knit.data.settings.OwnIceStore
 import app.getknit.knit.data.settings.SettingsKeys
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.data.settings.TicketKeyStore
@@ -103,6 +104,8 @@ val appModule =
             }
         }
         single { SettingsStore(get()) }
+        // §3.14: the person's own call servers, beside the settings; read by the Settings row in every build.
+        single { OwnIceStore(get()) }
         // The platform's per-app night mode (API 31+), the one UiModeManager user in the app.
         single<NightMode> { AndroidNightMode(androidContext()) }
         // Warmed at process start by KnitApplication so the first composition can read the Material You flag

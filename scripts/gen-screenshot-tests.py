@@ -44,6 +44,7 @@ SCREEN_CALLS = re.compile(r"\b(\w+ScreenContent|DonateScreen|StorageUnavailableS
 FILE_NAMES = {
     "ui": "App",
     "addcontact": "AddContact",
+    "callsettings": "CallSettings",
     "chatlist": "ChatList",
     "components": "Component",
     "signout": "SignOut",

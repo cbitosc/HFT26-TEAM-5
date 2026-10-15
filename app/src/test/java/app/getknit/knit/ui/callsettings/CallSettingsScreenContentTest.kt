@@ -1,0 +1,115 @@
+package app.getknit.knit.ui.callsettings
+
+import android.content.Context
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsOff
+import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
+import androidx.test.core.app.ApplicationProvider
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import app.getknit.knit.R
+import app.getknit.knit.call.OwnIceServers
+import app.getknit.knit.call.ProbeResult
+import app.getknit.knit.call.ProbeVerdict
+import app.getknit.knit.ui.theme.KnitTheme
+import org.junit.Assert.assertEquals
+import org.junit.Rule
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.annotation.GraphicsMode
+
+/** The Calls screen (§3.14): the switches, the fields behind them, Save and Test. */
+@RunWith(AndroidJUnit4::class)
+@GraphicsMode(GraphicsMode.Mode.NATIVE)
+class CallSettingsScreenContentTest {
+    @Suppress("DEPRECATION") // junit4.v2 rules swap in StandardTestDispatcher — a test-semantics migration, see roadmap.md
+    @get:Rule
+    val compose = createComposeRule()
+
+    private val context: Context = ApplicationProvider.getApplicationContext()
+
+    private fun render(
+        state: CallSettingsUiState,
+        onToggleRelayAll: (Boolean) -> Unit = {},
+        onToggleTurn: (Boolean) -> Unit = {},
+        onTest: () -> Unit = {},
+    ) {
+        compose.setContent {
+            KnitTheme {
+                CallSettingsScreenContent(
+                    state = state,
+                    onBack = {},
+                    onToggleRelayAll = onToggleRelayAll,
+                    onToggleTurn = onToggleTurn,
+                    onTest = onTest,
+                )
+            }
+        }
+    }
+
+    @Test
+    fun theFieldsHideWhileTheirSwitchIsOff() {
+        var toggled: Boolean? = null
+        render(CallSettingsUiState(), onToggleTurn = { toggled = it })
+        compose.onNodeWithTag("call_settings_turn_switch").assertIsOff()
+        compose.onNodeWithTag("call_settings_turn_url").assertDoesNotExist()
+        compose.onNodeWithTag("call_settings_stun_field").assertDoesNotExist()
+        compose.onNodeWithTag("call_settings_turn_switch").performClick()
+        assertEquals(true, toggled)
+    }
+
+    @Test
+    fun relayAllIsHere() {
+        var toggled: Boolean? = null
+        render(CallSettingsUiState(), onToggleRelayAll = { toggled = it })
+        compose.onNodeWithTag("call_settings_relay_all").performClick()
+        assertEquals(true, toggled)
+    }
+
+    /** Switched on with nothing valid saved: the screen says the relays' server is used meanwhile. */
+    @Test
+    fun anOnSwitchWithNothingSavedSaysSo() {
+        render(CallSettingsUiState(saved = OwnIceServers(turnOn = true)))
+        compose.onNodeWithTag("call_settings_turn_url").performScrollTo()
+        compose.onNodeWithText(context.getString(R.string.call_settings_waiting)).performScrollTo()
+        compose.onNodeWithTag("call_settings_test").performScrollTo().assertIsNotEnabled()
+        compose.onNodeWithTag("call_settings_save").assertIsNotEnabled()
+    }
+
+    @Test
+    fun aMalformedTurnUrlIsNamedAndBlocksSave() {
+        val saved = OwnIceServers(turnOn = true)
+        render(
+            CallSettingsUiState(saved = saved, draft = CallServerDraft(turnUrl = "turn:ada@t.example.org", turnUser = "a", turnPass = "b")),
+        )
+        compose.onNodeWithText(context.getString(R.string.call_settings_turn_url_invalid)).performScrollTo()
+        compose.onNodeWithTag("call_settings_save").assertIsNotEnabled()
+    }
+
+    @Test
+    fun aTestAnswerIsShownPerKind() {
+        var tested = false
+        val saved = OwnIceServers(stunOn = true, stunUrls = listOf("stun:s.example.org"))
+        render(
+            CallSettingsUiState(
+                saved = saved,
+                draft = CallServerDraft.of(saved),
+                result = ProbeResult(stun = ProbeVerdict.Reached, turn = ProbeVerdict.NotTried),
+            ),
+            onTest = { tested = true },
+        )
+        val stunLine =
+            context.getString(R.string.call_settings_result_stun, context.getString(R.string.call_settings_stun_reached))
+        compose.onNodeWithText(stunLine).performScrollTo()
+        compose
+            .onNodeWithTag("call_settings_test")
+            .performScrollTo()
+            .assertIsEnabled()
+            .performClick()
+        assertEquals(true, tested)
+    }
+}

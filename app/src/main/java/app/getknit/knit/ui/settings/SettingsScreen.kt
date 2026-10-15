@@ -92,8 +92,8 @@ internal data class SettingsFormState(
     val themeMode: ThemeMode = ThemeMode.System,
     val bluetoothDownloadLimit: BluetoothDownloadLimit = BluetoothDownloadLimit.DEFAULT,
     val linkPreviewsEnabled: Boolean = false,
-    /** "Relay all calls" (docs/VOICE_CALLS.md C-3.7-3), shown only where calls are wired. */
-    val relayAllCalls: Boolean = false,
+    /** The Calls row's subtitle (docs/VOICE_CALLS.md §3.14), shown only where calls are wired. */
+    val calls: CallsSummary = CallsSummary(),
     val dynamicColor: Boolean = false,
     val relay: RelaySummary = RelaySummary(),
     val lora: LoraSummary = LoraSummary(),
@@ -111,6 +111,7 @@ fun SettingsScreen(
     onOpenProfile: () -> Unit = {},
     onOpenRelays: () -> Unit = {},
     onOpenLora: () -> Unit = {},
+    onOpenCalls: () -> Unit = {},
     onOpenAbout: () -> Unit = {},
     onOpenLicenses: () -> Unit = {},
     onOpenBackup: () -> Unit = {},
@@ -123,7 +124,7 @@ fun SettingsScreen(
     val themeMode by viewModel.themeMode.collectAsStateWithLifecycle()
     val bluetoothDownloadLimit by viewModel.bluetoothDownloadLimit.collectAsStateWithLifecycle()
     val linkPreviewsEnabled by viewModel.linkPreviewsEnabled.collectAsStateWithLifecycle()
-    val relayAllCalls by viewModel.relayAllCalls.collectAsStateWithLifecycle()
+    val calls by viewModel.callsSummary.collectAsStateWithLifecycle()
     val dynamicColor by viewModel.dynamicColor.collectAsStateWithLifecycle()
     val relay by viewModel.relaySummary.collectAsStateWithLifecycle()
     val lora by viewModel.loraSummary.collectAsStateWithLifecycle()
@@ -149,7 +150,7 @@ fun SettingsScreen(
                 themeMode = themeMode,
                 bluetoothDownloadLimit = bluetoothDownloadLimit,
                 linkPreviewsEnabled = linkPreviewsEnabled,
-                relayAllCalls = relayAllCalls,
+                calls = calls,
                 dynamicColor = dynamicColor,
                 relay = relay,
                 lora = lora,
@@ -164,10 +165,10 @@ fun SettingsScreen(
         onSelectThemeMode = viewModel::setThemeMode,
         onSelectBluetoothDownloadLimit = viewModel::setBluetoothDownloadLimit,
         onToggleLinkPreviews = viewModel::setLinkPreviewsEnabled,
-        onToggleRelayAllCalls = viewModel::setRelayAllCalls,
         onToggleDynamicColor = viewModel::setDynamicColor,
         onOpenRelays = onOpenRelays,
         onOpenLora = onOpenLora,
+        onOpenCalls = onOpenCalls,
         onOpenAbout = onOpenAbout,
         onOpenLicenses = onOpenLicenses,
         onOpenBackup = onOpenBackup,
@@ -191,10 +192,10 @@ internal fun SettingsScreenContent(
     onSelectThemeMode: (ThemeMode) -> Unit = {},
     onSelectBluetoothDownloadLimit: (BluetoothDownloadLimit) -> Unit = {},
     onToggleLinkPreviews: (Boolean) -> Unit = {},
-    onToggleRelayAllCalls: (Boolean) -> Unit = {},
     onToggleDynamicColor: (Boolean) -> Unit = {},
     onOpenRelays: () -> Unit,
     onOpenLora: () -> Unit = {},
+    onOpenCalls: () -> Unit = {},
     onOpenAbout: () -> Unit = {},
     onOpenLicenses: () -> Unit = {},
     onOpenBackup: () -> Unit = {},
@@ -207,8 +208,8 @@ internal fun SettingsScreenContent(
     showInternetRelays: Boolean = BuildConfig.INTERNET_PLANE,
     // Same, for the LoRa plane.
     showLoraRadio: Boolean = BuildConfig.LORA_PLANE,
-    // Same, for calls (experimental): only a build that wires them (`CALLS_WIRED`) has a call to relay.
-    showCallRelay: Boolean = CALLS_WIRED,
+    // Same, for calls (experimental): only a build that wires them (`CALLS_WIRED`) has a Calls screen.
+    showCalls: Boolean = CALLS_WIRED,
     // Whether the platform can do wallpaper colours at all (API 31+). A parameter for the same reason as
     // the two above: the hidden case stays previewable and testable rather than depending on the device.
     showDynamicColor: Boolean = DYNAMIC_COLOR_SUPPORTED,
@@ -363,16 +364,8 @@ internal fun SettingsScreenContent(
                 )
             }
 
-            // A call's relay is a TURN server on one of the relays below, so the switch sits with the Internet plane.
-            if (showInternetRelays && showCallRelay) {
-                ToggleRow(
-                    title = stringResource(R.string.settings_relay_calls_title),
-                    subtitle = stringResource(R.string.settings_relay_calls_subtitle),
-                    enabled = form.relayAllCalls,
-                    onToggle = onToggleRelayAllCalls,
-                    modifier = Modifier.testTag("settings_relay_calls"),
-                )
-            }
+            // Not under the Internet plane's flag: the person's own TURN server relays a call without any relay.
+            if (showCalls) CallsRow(summary = form.calls, onClick = onOpenCalls)
 
             if (showInternetRelays) InternetRelayRow(summary = form.relay, onClick = onOpenRelays)
 
@@ -601,6 +594,29 @@ private fun InternetRelayRow(
         subtitle = subtitle,
         onClick = onClick,
         modifier = Modifier.testTag("settings_relays"),
+    )
+}
+
+/** Entry point to the Calls screen (docs/VOICE_CALLS.md §3.14): whose servers a call uses, and relay-all. */
+@Composable
+private fun CallsRow(
+    summary: CallsSummary,
+    onClick: () -> Unit,
+) {
+    val servers =
+        stringResource(
+            when {
+                summary.ownStun && summary.ownTurn -> R.string.settings_calls_summary_own_both
+                summary.ownTurn -> R.string.settings_calls_summary_own_turn
+                summary.ownStun -> R.string.settings_calls_summary_own_stun
+                else -> R.string.settings_calls_summary_relays
+            },
+        )
+    NavigatingRow(
+        title = stringResource(R.string.settings_calls_title),
+        subtitle = if (summary.relayAll) stringResource(R.string.settings_calls_summary_relayed, servers) else servers,
+        onClick = onClick,
+        modifier = Modifier.testTag("settings_calls"),
     )
 }
 
@@ -910,8 +926,8 @@ fun SettingsScreenPreview() =
             onToggleContentFiltering = {},
             onOpenRelays = {},
             onAllowBattery = {},
-            // The screen a shipped build shows: it has no calls (`CALLS_WIRED` off), and so no relay row for them.
-            showCallRelay = false,
+            // The screen a shipped build shows: it has no calls (`CALLS_WIRED` off), and so no Calls row.
+            showCalls = false,
         )
     }
 
@@ -927,7 +943,7 @@ fun SettingsScreenClonePreview() =
             onToggleContentFiltering = {},
             onOpenRelays = {},
             onAllowBattery = {},
-            showCallRelay = false,
+            showCalls = false,
         )
     }
 
@@ -944,6 +960,6 @@ fun SettingsScreenNewUserPreview() =
             onToggleContentFiltering = {},
             onOpenRelays = {},
             onAllowBattery = {},
-            showCallRelay = false,
+            showCalls = false,
         )
     }

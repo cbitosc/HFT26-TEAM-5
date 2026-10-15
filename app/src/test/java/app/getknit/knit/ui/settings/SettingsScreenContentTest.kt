@@ -25,6 +25,7 @@ import app.getknit.knit.ui.UnusedAppPause
 import app.getknit.knit.ui.theme.KnitTheme
 import app.getknit.knit.ui.theme.ThemeMode
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -61,9 +62,9 @@ class SettingsScreenContentTest {
         onSelectBluetoothDownloadLimit: (BluetoothDownloadLimit) -> Unit = {},
         linkPreviewsEnabled: Boolean = false,
         onToggleLinkPreviews: (Boolean) -> Unit = {},
-        relayAllCalls: Boolean = false,
-        onToggleRelayAllCalls: (Boolean) -> Unit = {},
-        showCallRelay: Boolean = true,
+        calls: CallsSummary = CallsSummary(),
+        onOpenCalls: () -> Unit = {},
+        showCalls: Boolean = true,
         dynamicColor: Boolean = false,
         onToggleDynamicColor: (Boolean) -> Unit = {},
         showDynamicColor: Boolean = true,
@@ -90,7 +91,7 @@ class SettingsScreenContentTest {
                             themeMode = themeMode,
                             bluetoothDownloadLimit = bluetoothDownloadLimit,
                             linkPreviewsEnabled = linkPreviewsEnabled,
-                            relayAllCalls = relayAllCalls,
+                            calls = calls,
                             dynamicColor = dynamicColor,
                             relay = relay,
                             lora = lora,
@@ -106,8 +107,8 @@ class SettingsScreenContentTest {
                     wifiAware = wifiAware,
                     onSelectBluetoothDownloadLimit = onSelectBluetoothDownloadLimit,
                     onToggleLinkPreviews = onToggleLinkPreviews,
-                    onToggleRelayAllCalls = onToggleRelayAllCalls,
-                    showCallRelay = showCallRelay,
+                    onOpenCalls = onOpenCalls,
+                    showCalls = showCalls,
                     onToggleDynamicColor = onToggleDynamicColor,
                     showDynamicColor = showDynamicColor,
                     onOpenRelays = onOpenRelays,
@@ -274,36 +275,37 @@ class SettingsScreenContentTest {
         compose.onNodeWithTag("settings_dynamic_color").assertDoesNotExist()
     }
 
-    /** "Relay all calls" (C-3.7-3) is off until the person turns it on, and turns off again. */
+    /** The Calls row (§3.14) opens the Calls screen, and says whose servers a call uses. */
     @Test
-    fun theRelayCallsRowIsOffByDefaultAndToggles() {
-        var toggled: Boolean? = null
-        render(onToggleRelayAllCalls = { toggled = it })
-        compose.onNodeWithTag("settings_relay_calls").performScrollTo().assertIsOff()
-        compose.onNodeWithTag("settings_relay_calls").performClick()
-        assertEquals(true, toggled)
+    fun theCallsRowOpensTheCallsScreen() {
+        var opened = false
+        render(onOpenCalls = { opened = true })
+        compose.onNodeWithText(context.getString(R.string.settings_calls_summary_relays)).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithTag("settings_calls").performClick()
+        assertTrue(opened)
     }
 
     @Test
-    fun theRelayCallsRowTogglesOff() {
-        var toggled: Boolean? = null
-        render(relayAllCalls = true, onToggleRelayAllCalls = { toggled = it })
-        compose.onNodeWithTag("settings_relay_calls").performScrollTo().assertIsOn()
-        compose.onNodeWithTag("settings_relay_calls").performClick()
-        assertEquals(false, toggled)
+    fun theCallsRowNamesOwnServersAndRelayAll() {
+        render(calls = CallsSummary(relayAll = true, ownStun = true, ownTurn = true))
+        val servers = context.getString(R.string.settings_calls_summary_own_both)
+        compose
+            .onNodeWithText(context.getString(R.string.settings_calls_summary_relayed, servers))
+            .performScrollTo()
+            .assertIsDisplayed()
     }
 
-    /** A build with no calls (release), or with no Internet plane to relay them through, shows no row at all. */
+    /** A build with no calls (release) shows no row; an own TURN server needs no Internet-plane relay, so it stays. */
     @Test
-    fun theRelayCallsRowIsAbsentWithoutCallsOrTheInternetPlane() {
-        render(showCallRelay = false)
-        compose.onNodeWithTag("settings_relay_calls").assertDoesNotExist()
+    fun theCallsRowIsAbsentWithoutCalls() {
+        render(showCalls = false)
+        compose.onNodeWithTag("settings_calls").assertDoesNotExist()
     }
 
     @Test
-    fun theRelayCallsRowIsAbsentWhenThePlaneIsDark() {
+    fun theCallsRowStaysWhenTheInternetPlaneIsDark() {
         render(showInternetRelays = false)
-        compose.onNodeWithTag("settings_relay_calls").assertDoesNotExist()
+        compose.onNodeWithTag("settings_calls").performScrollTo().assertIsDisplayed()
     }
 
     @Test

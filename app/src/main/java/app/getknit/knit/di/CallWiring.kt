@@ -15,7 +15,10 @@ import app.getknit.knit.call.CallTimings
 import app.getknit.knit.call.CallWalkie
 import app.getknit.knit.call.CaptureHealth
 import app.getknit.knit.call.CaptureJournal
+import app.getknit.knit.call.CustomIce
 import app.getknit.knit.call.DirectCallPath
+import app.getknit.knit.call.IceProbe
+import app.getknit.knit.call.OverridingTurnSource
 import app.getknit.knit.call.SystemCallSync
 import app.getknit.knit.call.SystemCalls
 import app.getknit.knit.call.TalkLink
@@ -24,6 +27,7 @@ import app.getknit.knit.data.MessageRepository
 import app.getknit.knit.data.PeerRepository
 import app.getknit.knit.data.settings.CallTombStore
 import app.getknit.knit.data.settings.CaptureStore
+import app.getknit.knit.data.settings.OwnIceStore
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.device.DeviceImage
 import app.getknit.knit.identity.Identity
@@ -49,6 +53,7 @@ import app.getknit.knit.ui.call.TalkRecorder
 import app.getknit.knit.ui.call.TelecomCalls
 import app.getknit.knit.ui.call.WalkieTalk
 import app.getknit.knit.ui.call.WebRtcCallMedia
+import app.getknit.knit.ui.callsettings.CallSettingsViewModel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -65,6 +70,7 @@ import kotlinx.coroutines.launch
 import org.koin.android.ext.koin.androidContext
 import org.koin.core.Koin
 import org.koin.core.module.Module
+import org.koin.core.module.dsl.viewModel
 import org.koin.core.scope.Scope
 import org.koin.dsl.module
 
@@ -147,6 +153,9 @@ private fun callGraph(): Module =
         }
         // The call screen reads the media's stats itself (its diagnostics card); the manager sees only the seam.
         single<CallMedia> { get<WebRtcCallMedia>() }
+        // The Calls screen's Test (C-3.14-5): the same factory, and refused while a call holds it.
+        single<IceProbe> { get<WebRtcCallMedia>() }
+        viewModel { CallSettingsViewModel(settings = get(), ownIce = get(), probe = get()) }
         single { CallTombStore(get()) }
         single {
             // C-3.7-3's "Relay all calls", read as each call opens its media. Until the store's first read lands it
@@ -156,14 +165,25 @@ private fun callGraph(): Module =
                     .callsRelayAll
                     .map<Boolean, Boolean?> { it }
                     .stateIn(get<CoroutineScope>(), SharingStarted.Eagerly, null)
+            // §3.14 (ADR 2026-10.mr88): the person's own servers, each kind replacing the spools'. Until the store's
+            // first read lands they read as none, so that instant's call asks the spools as it always did.
+            val ownIce =
+                get<OwnIceStore>()
+                    .ownIce
+                    .map { it.effective() }
+                    .stateIn(get<CoroutineScope>(), SharingStarted.Eagerly, CustomIce.NONE)
             CallManager(
                 signals = CallSignals { peerId, payload -> get<MeshManager>().sendCallSignal(peerId, payload) },
                 turn =
-                    object : TurnSource {
-                        override suspend fun turnServers(peerId: String) = get<MeshManager>().turnServers(peerId)
+                    OverridingTurnSource(
+                        custom = { ownIce.value },
+                        spool =
+                            object : TurnSource {
+                                override suspend fun turnServers(peerId: String) = get<MeshManager>().turnServers(peerId)
 
-                        override fun stunUrls() = get<MeshManager>().stunUrls()
-                    },
+                                override fun stunUrls() = get<MeshManager>().stunUrls()
+                            },
+                    ),
                 media = get(),
                 scope = get<CoroutineScope>(),
                 selfId = { get<Identity>().nodeId() },

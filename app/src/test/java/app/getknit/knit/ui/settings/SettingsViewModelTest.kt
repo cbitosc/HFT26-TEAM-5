@@ -2,6 +2,7 @@
 
 package app.getknit.knit.ui.settings
 
+import app.getknit.knit.call.OwnIceServers
 import app.getknit.knit.data.relay.RelayFacts
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.identity.Alias
@@ -43,6 +44,7 @@ class SettingsViewModelTest {
     private val filteringFlow = MutableStateFlow(true)
     private val linkPreviewsFlow = MutableStateFlow(false)
     private val relayAllCallsFlow = MutableStateFlow(false)
+    private val ownIceFlow = MutableStateFlow(OwnIceServers())
     private val dynamicColorFlow = MutableStateFlow(false)
     private val themeModeFlow = MutableStateFlow(ThemeMode.System)
     private val loraEnabledFlow = MutableStateFlow(false)
@@ -71,7 +73,7 @@ class SettingsViewModelTest {
         Dispatchers.resetMain()
     }
 
-    private fun vm() = SettingsViewModel(settings, identity, relayFacts, loraFacts)
+    private fun vm() = SettingsViewModel(settings, identity, relayFacts, loraFacts, ownIceFlow)
 
     /**
      * The load-bearing one. This ViewModel outlives a trip to the profile editor — Save there pops straight
@@ -144,21 +146,20 @@ class SettingsViewModelTest {
             coVerify { settings.setLinkPreviewsEnabled(false) }
         }
 
-    /** "Relay all calls" (C-3.7-3): off until the user says otherwise, and a toggle writes straight through. */
+    /** The Calls row's summary (§3.14): relay-all, and only the own servers a call would use — on and valid. */
     @Test
-    fun relayAllCallsMirrorsTheStoreAndPersistsOnToggle() =
+    fun theCallsSummaryFollowsTheStore() =
         runTest {
             val vm = vm()
-            backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.relayAllCalls.collect {} }
+            backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.callsSummary.collect {} }
             advanceUntilIdle()
-            assertFalse(vm.relayAllCalls.value)
-            relayAllCallsFlow.value = true
-            advanceUntilIdle()
-            assertTrue(vm.relayAllCalls.value)
+            assertEquals(CallsSummary(), vm.callsSummary.value)
 
-            vm.setRelayAllCalls(false)
+            relayAllCallsFlow.value = true
+            // On but unsaved: a call still uses the relays' TURN, so the row must not claim an own one.
+            ownIceFlow.value = OwnIceServers(stunOn = true, stunUrls = listOf("stun:stun.example.org"), turnOn = true)
             advanceUntilIdle()
-            coVerify { settings.setCallsRelayAll(false) }
+            assertEquals(CallsSummary(relayAll = true, ownStun = true, ownTurn = false), vm.callsSummary.value)
         }
 
     @Test

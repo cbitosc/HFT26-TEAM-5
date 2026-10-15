@@ -8,12 +8,17 @@ import app.getknit.knit.call.CallSession
 import app.getknit.knit.call.CaptureHealth
 import app.getknit.knit.call.CaptureProfile
 import app.getknit.knit.call.DirectLink
+import app.getknit.knit.call.IceProbe
 import app.getknit.knit.call.MediaEvent
+import app.getknit.knit.call.ProbeResult
+import app.getknit.knit.call.ProbeVerdict
 import app.getknit.knit.call.SdpGuard
 import app.getknit.knit.call.TurnServer
 import app.getknit.knit.call.iceSummary
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -27,11 +32,13 @@ import org.webrtc.IceCandidate
 import org.webrtc.IceCandidateErrorEvent
 import org.webrtc.MediaConstraints
 import org.webrtc.MediaStream
+import org.webrtc.MediaStreamTrack
 import org.webrtc.NetworkChangeDetector
 import org.webrtc.NetworkMonitor
 import org.webrtc.PeerConnection
 import org.webrtc.PeerConnectionFactory
 import org.webrtc.RTCStatsCollectorCallback
+import org.webrtc.RtpTransceiver
 import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
 import org.webrtc.audio.JavaAudioDeviceModule
@@ -60,6 +67,9 @@ import kotlin.coroutines.resume
  * built for the profile [capture] says — the call-tuned `VOICE_COMMUNICATION` path, or the fallback a generic system
  * image needs — and rebuilt, factory and all, between calls when that changes. Every module's [CaptureTap] watches what
  * it records and moves a call whose path hands it only zeros onto its own recorder mid-call.
+ *
+ * **It also answers the Calls screen's Test** ([IceProbe], C-3.14-5): a throwaway connection per kind on the same
+ * factory, never while a call holds it, and never rebuilding the module under one.
  */
 internal class WebRtcCallMedia(
     private val context: Context,
@@ -67,7 +77,8 @@ internal class WebRtcCallMedia(
     private val link: StateFlow<DirectLink?>,
     private val capture: CaptureHealth,
     private val log: (String) -> Unit,
-) : CallMedia {
+) : CallMedia,
+    IceProbe {
     /** One audio module and the factory over it, for one capture profile. */
     private class Audio(
         val profile: CaptureProfile,
@@ -89,6 +100,9 @@ internal class WebRtcCallMedia(
     private val audioLock = Any()
 
     @Volatile private var audio: Audio? = null
+
+    // Probes running now (under [audioLock]): their factory is not swapped under them, as an open call's is not.
+    private var probes = 0
 
     // The sessions open now, newest last: a glare's dropped one can close after its replacement opened.
     private val open = CopyOnWriteArrayList<WebRtcSession>()
@@ -120,7 +134,8 @@ internal class WebRtcCallMedia(
         synchronized(audioLock) {
             initialized
             val current = audio
-            if (current != null && (current.profile == wanted || open.isNotEmpty())) return current
+            val held = open.isNotEmpty() || probes > 0
+            if (current != null && (current.profile == wanted || held)) return current
             current?.let {
                 it.factory.dispose()
                 it.module.release()
@@ -160,6 +175,96 @@ internal class WebRtcCallMedia(
         return Audio(profile, factory, module, tap)
     }
 
+    override suspend fun probe(
+        stun: List<String>,
+        turn: TurnServer?,
+    ): ProbeResult? {
+        val factory =
+            synchronized(audioLock) {
+                if (open.isNotEmpty()) return null
+                audioFor(capture.choice.value.profile).factory.also { probes++ }
+            }
+        try {
+            return coroutineScope {
+                val stunVerdict =
+                    async {
+                        if (stun.isEmpty()) {
+                            ProbeVerdict.NotTried
+                        } else {
+                            probeOne(factory, TurnServer(urls = stun, user = "", pass = ""), relayOnly = false, wanted = "srflx")
+                        }
+                    }
+                val turnVerdict =
+                    async { turn?.let { probeOne(factory, it, relayOnly = true, wanted = "relay") } ?: ProbeVerdict.NotTried }
+                ProbeResult(stun = stunVerdict.await(), turn = turnVerdict.await())
+            }.also { log("webrtc: probe stun ${it.stun}, turn ${it.turn}") }
+        } finally {
+            synchronized(audioLock) { probes-- }
+        }
+    }
+
+    /**
+     * One kind's probe: a connection over [server] alone, an audio m-line that only receives (no source, so no
+     * microphone), an offer set locally to start gathering, then up to [PROBE_MS] for a [wanted]-typed candidate. A 401
+     * ends it early: the credential is wrong on every network. Gathering is continual, as a call's is, so the first
+     * probe of a process still gathers once the network monitor reports its networks.
+     */
+    private suspend fun probeOne(
+        factory: PeerConnectionFactory,
+        server: TurnServer,
+        relayOnly: Boolean,
+        wanted: String,
+    ): ProbeVerdict {
+        val reached = CompletableDeferred<Unit>()
+        val done = CompletableDeferred<Unit>()
+        val codes = CopyOnWriteArrayList<Int>()
+        val observer =
+            object : PeerConnection.Observer {
+                override fun onIceCandidate(candidate: IceCandidate) {
+                    if (typeOf(candidate.sdp) != wanted) return
+                    reached.complete(Unit)
+                    done.complete(Unit)
+                }
+
+                override fun onIceCandidateError(event: IceCandidateErrorEvent) {
+                    codes += event.errorCode
+                    if (event.errorCode == UNAUTHORIZED) done.complete(Unit)
+                }
+
+                override fun onSignalingChange(state: PeerConnection.SignalingState) = Unit
+
+                override fun onIceConnectionChange(state: PeerConnection.IceConnectionState) = Unit
+
+                override fun onIceConnectionReceivingChange(receiving: Boolean) = Unit
+
+                override fun onIceGatheringChange(state: PeerConnection.IceGatheringState) = Unit
+
+                override fun onIceCandidatesRemoved(candidates: Array<out IceCandidate>) = Unit
+
+                override fun onAddStream(stream: MediaStream) = Unit
+
+                override fun onRemoveStream(stream: MediaStream) = Unit
+
+                override fun onDataChannel(channel: DataChannel) = Unit
+
+                override fun onRenegotiationNeeded() = Unit
+            }
+        val config = callConfiguration(iceServersOf(listOf(server)), relayOnly, direct = false, directAsEthernet = false, prune = true)
+        val pc = factory.createPeerConnection(config, observer) ?: return ProbeVerdict.NoAnswer
+        try {
+            pc.addTransceiver(
+                MediaStreamTrack.MediaType.MEDIA_TYPE_AUDIO,
+                RtpTransceiver.RtpTransceiverInit(RtpTransceiver.RtpTransceiverDirection.RECV_ONLY),
+            )
+            val offer = createSdp(log) { pc.createOffer(it, MediaConstraints()) } ?: return ProbeVerdict.NoAnswer
+            if (!applySdp(log) { pc.setLocalDescription(it, offer) }) return ProbeVerdict.NoAnswer
+            withTimeoutOrNull(PROBE_MS) { done.await() }
+            return ProbeVerdict.of(reached.isCompleted, codes)
+        } finally {
+            pc.dispose()
+        }
+    }
+
     /** The newest open session's stats, for the call screen's diagnostics card; null with no session or no report. */
     suspend fun stats(): CallStats? = open.lastOrNull()?.stats()
 
@@ -178,6 +283,11 @@ internal class WebRtcCallMedia(
     @Volatile private var pendingFault = false
 
     companion object {
+        /** How long a probe waits for its kind's candidate: a `turns:` allocation over a slow network takes seconds. */
+        private const val PROBE_MS = 8_000L
+
+        private const val UNAUTHORIZED = 401
+
         /**
          * A diagnosis switch, never a default: true opens the next calls' `turns:` legs without checking the server's
          * certificate (`TLS_CERT_POLICY_INSECURE_NO_CHECK`). libwebrtc checks TURN/TLS against its own built-in roots,
@@ -354,7 +464,7 @@ private class WebRtcSession(
         val prune = !WebRtcCallMedia.turnPruneOff
         config =
             callConfiguration(
-                iceServers(servers),
+                iceServersOf(servers),
                 relayOnly = relayOnly,
                 direct = direct,
                 directAsEthernet = DirectNetworkDetector.reportAs == NetworkChangeDetector.ConnectionType.CONNECTION_ETHERNET,
@@ -422,7 +532,7 @@ private class WebRtcSession(
     private fun useServers(servers: List<TurnServer>): Boolean =
         synchronized(lock) {
             if (closed) return false
-            config.iceServers = iceServers(servers)
+            config.iceServers = iceServersOf(servers)
             if (!pc.setConfiguration(config)) log("webrtc: restart's ICE servers refused; keeping the old ones")
             true
         }
@@ -538,19 +648,6 @@ private class WebRtcSession(
         return sdp
     }
 
-    private fun iceServers(servers: List<TurnServer>): List<PeerConnection.IceServer> {
-        val tlsUnchecked = WebRtcCallMedia.turnTlsUnchecked
-        return servers.map {
-            val builder = PeerConnection.IceServer.builder(it.urls)
-            // A STUN-only fallback carries no credential (CallManager.servers).
-            if (it.user.isNotEmpty()) builder.setUsername(it.user).setPassword(it.pass)
-            if (tlsUnchecked && it.urls.any { url -> url.startsWith("turns:") }) {
-                builder.setTlsCertPolicy(PeerConnection.TlsCertPolicy.TLS_CERT_POLICY_INSECURE_NO_CHECK)
-            }
-            builder.createIceServer()
-        }
-    }
-
     /** Whether [line]'s address sits on the call's Wi-Fi Direct group. */
     private fun onGroup(line: String): Boolean {
         if (!direct) return false
@@ -595,45 +692,9 @@ private class WebRtcSession(
         if (lines.isNotEmpty()) events(MediaEvent.LateCandidates(lines))
     }
 
-    private suspend fun create(call: (SdpObserver) -> Unit): SessionDescription? =
-        withTimeoutOrNull(SDP_MS) {
-            suspendCancellableCoroutine { cont ->
-                call(
-                    object : SdpObserver {
-                        override fun onCreateSuccess(description: SessionDescription) = cont.resume(description)
+    private suspend fun create(call: (SdpObserver) -> Unit): SessionDescription? = createSdp(log, call)
 
-                        override fun onCreateFailure(error: String?) {
-                            log("webrtc: create failed: $error")
-                            cont.resume(null)
-                        }
-
-                        override fun onSetSuccess() = Unit
-
-                        override fun onSetFailure(error: String?) = Unit
-                    },
-                )
-            }
-        }
-
-    private suspend fun apply(call: (SdpObserver) -> Unit): Boolean =
-        withTimeoutOrNull(SDP_MS) {
-            suspendCancellableCoroutine { cont ->
-                call(
-                    object : SdpObserver {
-                        override fun onCreateSuccess(description: SessionDescription) = Unit
-
-                        override fun onCreateFailure(error: String?) = Unit
-
-                        override fun onSetSuccess() = cont.resume(true)
-
-                        override fun onSetFailure(error: String?) {
-                            log("webrtc: set failed: $error")
-                            cont.resume(false)
-                        }
-                    },
-                )
-            }
-        } == true
+    private suspend fun apply(call: (SdpObserver) -> Unit): Boolean = applySdp(log, call)
 
     private companion object {
         const val FIRST_CANDIDATE_MS = 5_000L
@@ -641,12 +702,9 @@ private class WebRtcSession(
         const val DIRECT_DEBOUNCE_MS = 250L
         const val GATHER_MS = 1_500L
         const val LATE_WINDOW_MS = 4_000L
-        const val SDP_MS = 10_000L
         const val STATS_MS = 2_000L
 
         fun typeOf(candidate: IceCandidate): String = typeOf(candidate.sdp)
-
-        fun typeOf(line: String): String = line.substringAfter(" typ ", "?").substringBefore(' ')
 
         /** "3 candidates (host 1, srflx 1, relay 1)" — the types only, never an address. */
         fun summary(lines: List<String>): String {
@@ -660,3 +718,72 @@ private class WebRtcSession(
         }
     }
 }
+
+/** A candidate line's type: host, srflx, prflx or relay. */
+private fun typeOf(line: String): String = line.substringAfter(" typ ", "?").substringBefore(' ')
+
+/**
+ * [servers] for libwebrtc: a credential only where there is one (a STUN entry carries none, CallManager.servers), and
+ * [WebRtcCallMedia.turnTlsUnchecked]'s diagnosis switch on `turns:` legs.
+ */
+private fun iceServersOf(servers: List<TurnServer>): List<PeerConnection.IceServer> {
+    val tlsUnchecked = WebRtcCallMedia.turnTlsUnchecked
+    return servers.map {
+        val builder = PeerConnection.IceServer.builder(it.urls)
+        if (it.user.isNotEmpty()) builder.setUsername(it.user).setPassword(it.pass)
+        if (tlsUnchecked && it.urls.any { url -> url.startsWith("turns:") }) {
+            builder.setTlsCertPolicy(PeerConnection.TlsCertPolicy.TLS_CERT_POLICY_INSECURE_NO_CHECK)
+        }
+        builder.createIceServer()
+    }
+}
+
+private const val SDP_MS = 10_000L
+
+/** A description created by [call], or null when it failed or took longer than [SDP_MS]. */
+private suspend fun createSdp(
+    log: (String) -> Unit,
+    call: (SdpObserver) -> Unit,
+): SessionDescription? =
+    withTimeoutOrNull(SDP_MS) {
+        suspendCancellableCoroutine { cont ->
+            call(
+                object : SdpObserver {
+                    override fun onCreateSuccess(description: SessionDescription) = cont.resume(description)
+
+                    override fun onCreateFailure(error: String?) {
+                        log("webrtc: create failed: $error")
+                        cont.resume(null)
+                    }
+
+                    override fun onSetSuccess() = Unit
+
+                    override fun onSetFailure(error: String?) = Unit
+                },
+            )
+        }
+    }
+
+/** Whether the description [call] sets was applied within [SDP_MS]. */
+private suspend fun applySdp(
+    log: (String) -> Unit,
+    call: (SdpObserver) -> Unit,
+): Boolean =
+    withTimeoutOrNull(SDP_MS) {
+        suspendCancellableCoroutine { cont ->
+            call(
+                object : SdpObserver {
+                    override fun onCreateSuccess(description: SessionDescription) = Unit
+
+                    override fun onCreateFailure(error: String?) = Unit
+
+                    override fun onSetSuccess() = cont.resume(true)
+
+                    override fun onSetFailure(error: String?) {
+                        log("webrtc: set failed: $error")
+                        cont.resume(false)
+                    }
+                },
+            )
+        }
+    } == true

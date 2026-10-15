@@ -1,0 +1,185 @@
+package app.getknit.knit.ui.callsettings
+
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import app.getknit.knit.call.IceProbe
+import app.getknit.knit.call.OwnIceServers
+import app.getknit.knit.call.ProbeResult
+import app.getknit.knit.call.StunServers
+import app.getknit.knit.call.TurnUrls
+import app.getknit.knit.data.settings.OwnIceStore
+import app.getknit.knit.data.settings.SettingsStore
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+
+/** The fields as typed: never bound to the store, whose async writes would race the keystrokes (rules/coding.md). */
+data class CallServerDraft(
+    val stunText: String = "",
+    val turnUrl: String = "",
+    val turnUser: String = "",
+    val turnPass: String = "",
+) {
+    /** One URL per line, blank lines dropped. */
+    val stunUrls: List<String> get() = stunText.lines().map(String::trim).filter(String::isNotEmpty)
+
+    /** The first line [StunServers.accepts] refuses, or null. */
+    val badStunUrl: String? get() = stunUrls.firstOrNull { !StunServers.accepts(it) }
+
+    val tooManyStun: Boolean get() = stunUrls.size > StunServers.MAX
+
+    val stunRepeats: Boolean get() = stunUrls.distinct().size != stunUrls.size
+
+    /** Nothing typed, or a list a call takes. */
+    val stunSavable: Boolean get() = stunUrls.isEmpty() || (badStunUrl == null && !tooManyStun && !stunRepeats)
+
+    val turnEmpty: Boolean get() = turnUrl.isBlank() && turnUser.isEmpty() && turnPass.isEmpty()
+
+    val turnUrlBad: Boolean get() = turnUrl.isNotBlank() && !TurnUrls.accepts(turnUrl.trim())
+
+    /** Nothing typed, or a server a call takes. */
+    val turnSavable: Boolean get() = turnEmpty || asServers(OwnIceServers()).turnValid
+
+    /** [base]'s switches with these fields. */
+    fun asServers(base: OwnIceServers): OwnIceServers =
+        base.copy(stunUrls = stunUrls, turnUrl = turnUrl.trim(), turnUser = turnUser, turnPass = turnPass)
+
+    override fun toString(): String = "CallServerDraft(stun=$stunUrls, turnUrl=$turnUrl)"
+
+    companion object {
+        fun of(saved: OwnIceServers) =
+            CallServerDraft(
+                stunText = saved.stunUrls.joinToString("\n"),
+                turnUrl = saved.turnUrl,
+                turnUser = saved.turnUser,
+                turnPass = saved.turnPass,
+            )
+    }
+}
+
+data class CallSettingsUiState(
+    /** "Relay all calls" (C-3.7-3). */
+    val relayAll: Boolean = false,
+    /** What the store holds: the switches, and the fields a call reads. */
+    val saved: OwnIceServers = OwnIceServers(),
+    val draft: CallServerDraft = CallServerDraft(),
+    val testing: Boolean = false,
+    /** The last Test's answer, cleared by an edit: it described other fields. */
+    val result: ProbeResult? = null,
+) {
+    val dirty: Boolean get() = draft != CallServerDraft.of(saved)
+
+    val canSave: Boolean get() = dirty && draft.stunSavable && draft.turnSavable
+
+    /** Something typed that a probe can try. */
+    val canTest: Boolean
+        get() = !testing && (testStun.isNotEmpty() || testTurn)
+
+    internal val testStun: List<String> get() = if (draft.stunSavable) draft.stunUrls else emptyList()
+
+    internal val testTurn: Boolean get() = !draft.turnEmpty && draft.turnSavable
+
+    /** A switch is on but what is saved for it does not pass its rule: the spools' servers are used meanwhile. */
+    val stunWaiting: Boolean get() = saved.stunOn && !saved.stunValid
+
+    val turnWaiting: Boolean get() = saved.turnOn && !saved.turnValid
+}
+
+/** One-shot outcomes for the screen's snackbar. */
+sealed interface CallSettingsEvent {
+    data object Saved : CallSettingsEvent
+
+    /** A call holds the media, so the probe was refused. */
+    data object TestBusy : CallSettingsEvent
+}
+
+/**
+ * The Calls screen (docs/VOICE_CALLS.md §3.14, ADR 2026-10.mr88): "Relay all calls", and the person's own STUN and TURN
+ * servers. The switches write as they are touched, as every Settings switch does; the fields are a draft, loaded once
+ * and written by Save, and a Test tries the draft before it is saved.
+ */
+class CallSettingsViewModel(
+    private val settings: SettingsStore,
+    private val ownIce: OwnIceStore,
+    private val probe: IceProbe,
+) : ViewModel() {
+    private val draft = MutableStateFlow(CallServerDraft())
+    private val testing = MutableStateFlow(false)
+    private val result = MutableStateFlow<ProbeResult?>(null)
+
+    private val _events = MutableSharedFlow<CallSettingsEvent>(extraBufferCapacity = 1)
+    val events: SharedFlow<CallSettingsEvent> = _events.asSharedFlow()
+
+    private val _loaded = MutableStateFlow(false)
+
+    /** True once the draft holds what was stored, so the fields never flash empty over a saved server. */
+    val loaded: StateFlow<Boolean> = _loaded.asStateFlow()
+
+    val state: StateFlow<CallSettingsUiState> =
+        combine(settings.callsRelayAll, ownIce.ownIce, draft, testing, result) { relayAll, saved, draft, testing, result ->
+            CallSettingsUiState(relayAll = relayAll, saved = saved, draft = draft, testing = testing, result = result)
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CallSettingsUiState())
+
+    init {
+        viewModelScope.launch {
+            draft.value = CallServerDraft.of(ownIce.ownIce.first())
+            _loaded.value = true
+        }
+    }
+
+    fun setRelayAll(value: Boolean) {
+        viewModelScope.launch { settings.setCallsRelayAll(value) }
+    }
+
+    fun setStunOn(value: Boolean) {
+        viewModelScope.launch { ownIce.setStunOn(value) }
+    }
+
+    fun setTurnOn(value: Boolean) {
+        viewModelScope.launch { ownIce.setTurnOn(value) }
+    }
+
+    fun editDraft(change: (CallServerDraft) -> CallServerDraft) {
+        draft.update(change)
+        result.value = null
+    }
+
+    /** Writes the fields as typed, each kind in one edit. Refused while anything typed fails its rule. */
+    fun save() {
+        val now = draft.value
+        if (!now.stunSavable || !now.turnSavable) return
+        viewModelScope.launch {
+            ownIce.setStunUrls(now.stunUrls)
+            ownIce.setTurn(url = now.turnUrl.trim(), user = now.turnUser, pass = now.turnPass)
+            // What was saved, so the draft compares equal to the store: the trimmed URL, the dropped blank lines.
+            draft.value = CallServerDraft.of(now.asServers(OwnIceServers()))
+            _events.emit(CallSettingsEvent.Saved)
+        }
+    }
+
+    /** Tries what is typed, whether or not it is saved or switched on. */
+    fun test() {
+        val current = state.value.copy(draft = draft.value, testing = testing.value)
+        if (!current.canTest) return
+        val turn = if (current.testTurn) draft.value.asServers(OwnIceServers()).turnServer() else null
+        testing.value = true
+        result.value = null
+        viewModelScope.launch {
+            try {
+                val answer = probe.probe(current.testStun, turn)
+                if (answer == null) _events.emit(CallSettingsEvent.TestBusy) else result.value = answer
+            } finally {
+                testing.value = false
+            }
+        }
+    }
+}

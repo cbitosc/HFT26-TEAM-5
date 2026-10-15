@@ -142,6 +142,11 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   C-3.13-12/13 — a generic image (and a phone where a call went silent) records calls from `VOICE_RECOGNITION` with
   WebRTC's own canceller, the module is rebuilt per profile between calls only, and the tap watches every 10 ms buffer
   and moves a call whose path hands it only zeros onto its own recorder mid-call.
+  **Before touching `call/OverridingTurnSource`, `CustomIce` / `OwnIceServers` / `TurnUrls`, `call/IceProbe`
+  (`WebRtcCallMedia.probe`), `data/settings/OwnIceStore`, the `calls_stun_` / `calls_turn_` keys or `ui/callsettings/`:**
+  READ ADR 2026-10.mr88 and `docs/VOICE_CALLS.md` §3.14 — the person's own STUN and TURN each replace the spools' for
+  that kind (an own TURN sends no `turnreq`), a stored value is re-validated on every read, the password is never
+  logged, and the Test opens no microphone and never runs under a call.
   **Before touching casts — `SpoolCast`, `SpoolConnection.castOut` / `canCast` / `ticketedCast`, `ScopeSync.cast` /
   `canCast` / `handleCast`, `ScopeCrypto.sealCast` / `openCast`, `ScopeFrames.castEligible`, `CallPayload.ct` or
   `TalkLink.SPOOL`:** READ `docs/VOICE_CALLS.md` §2.7 and ADR 2026-10.79yb's sixth amendment — a chunk with no mesh path

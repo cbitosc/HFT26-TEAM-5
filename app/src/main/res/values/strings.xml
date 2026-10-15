@@ -704,7 +704,45 @@
     <string name="settings_dynamic_color_subtitle">Color Knit from your wallpaper using Material You. Off keeps Knit\'s default.</string>
     <string name="settings_link_previews_title">Link previews</string>
     <string name="settings_relay_calls_title">Relay all calls</string>
-    <string name="settings_relay_calls_subtitle">Calls go through a relay\'s server, so the person you call never sees your IP address. The relay sees both addresses, and a call connects only through a relay that offers this.</string>
+    <string name="settings_relay_calls_subtitle">Every call goes through a TURN server, so the person you call never sees your IP address. That server sees both addresses, and a call connects only where one is available: your own, or one a relay offers.</string>
+    <string name="settings_calls_title">Calls</string>
+    <string name="settings_calls_summary_relays">Servers from your relays</string>
+    <string name="settings_calls_summary_own_stun">Your own STUN server</string>
+    <string name="settings_calls_summary_own_turn">Your own TURN server</string>
+    <string name="settings_calls_summary_own_both">Your own STUN and TURN servers</string>
+    <string name="settings_calls_summary_relayed">%1$s · every call relayed</string>
+
+    <!-- Calls settings (docs/VOICE_CALLS.md §3.14) -->
+    <string name="call_settings_stun_title">Use your own STUN server</string>
+    <string name="call_settings_stun_subtitle">Find your public address through your own server instead of your relays\'.</string>
+    <string name="call_settings_stun_label">STUN servers</string>
+    <string name="call_settings_stun_hint">One per line, like stun:stun.example.org:3478. Up to 4.</string>
+    <string name="call_settings_stun_invalid">%1$s isn\'t a STUN address Knit can use</string>
+    <string name="call_settings_stun_too_many">Up to 4 servers</string>
+    <string name="call_settings_stun_repeated">A server is listed twice</string>
+    <string name="call_settings_turn_title">Use your own TURN server</string>
+    <string name="call_settings_turn_subtitle">Relay calls through your own server. Your relays aren\'t asked for one.</string>
+    <string name="call_settings_turn_url_label">Server</string>
+    <string name="call_settings_turn_url_hint">Like turn:turn.example.org:3478 or turns:turn.example.org:5349</string>
+    <string name="call_settings_turn_url_invalid">Not a TURN address Knit can use</string>
+    <string name="call_settings_turn_user_label">Username</string>
+    <string name="call_settings_turn_pass_label">Password</string>
+    <string name="call_settings_turn_incomplete">Fill in the server, username and password</string>
+    <string name="call_settings_show_password">Show password</string>
+    <string name="call_settings_hide_password">Hide password</string>
+    <string name="call_settings_waiting">Calls use your relays\' server until a valid one is saved here.</string>
+    <string name="call_settings_turn_disclosure">Whoever runs a TURN server sees both phones\' IP addresses on the calls it relays.</string>
+    <string name="call_settings_test">Test servers</string>
+    <string name="call_settings_testing">Testing…</string>
+    <string name="call_settings_result_stun">STUN: %1$s</string>
+    <string name="call_settings_result_turn">TURN: %1$s</string>
+    <string name="call_settings_stun_reached">reached, your public address was found</string>
+    <string name="call_settings_turn_reached">reached, a relay was set up</string>
+    <string name="call_settings_auth_failed">wrong username or password</string>
+    <string name="call_settings_refused">the server refused (error %1$d)</string>
+    <string name="call_settings_no_answer">no answer. Check the address and port.</string>
+    <string name="call_settings_saved">Saved</string>
+    <string name="call_settings_test_busy">Can\'t test during a call</string>
     <string name="settings_link_previews_subtitle">When you type a link, Knit fetches the page\'s title and picture over the Internet and sends them with your message. The site sees your IP address; the people you send to never contact it.</string>
 
     <!-- Profile details (another peer) -->
