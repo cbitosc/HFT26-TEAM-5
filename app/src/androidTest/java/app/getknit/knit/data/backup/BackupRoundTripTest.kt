@@ -3,6 +3,7 @@ package app.getknit.knit.data.backup
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import app.getknit.knit.BuildConfig
 import app.getknit.knit.data.KnitDatabase
 import app.getknit.knit.data.crypto.DatabaseKey
 import app.getknit.knit.data.crypto.IdentityKeyStore
@@ -23,6 +24,7 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeFalse
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -49,6 +51,9 @@ class BackupRoundTripTest {
 
     @Before
     fun setUp() {
+        // A seeded build's own start mints an identity under the live alias in this same process, replacing the key
+        // this test's read-back needs; run it from an unseeded build.
+        assumeFalse("a seeded build mints its own identity under the same Keystore alias", BuildConfig.SEED_DEMO)
         System.loadLibrary("sqlcipher")
     }
 

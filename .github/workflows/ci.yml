@@ -177,10 +177,10 @@ jobs:
     runs-on: ubuntu-latest
     # The androidTest suites (app/src/androidTest/, .agents/context/testing.md) on the two Gradle Managed Devices
     # app/build.gradle.kts defines: headless aosp-atd emulators Gradle downloads, boots and tears down itself.
-    # Both APKs are built with -PseedDemo=true — SEED_DEMO is inlined into the test DEX, and the seeded and
-    # UIAutomator suites fail loudly without it — and the BLE pair suite skips itself (it needs a second phone).
-    # pixel7api33 runs everything; the accessibility checks are API 34+ and skip there, so pixel8api34 runs that
-    # one package. Advisory until it has been green here a few times: the hosted runner is slower than any
+    # The seeded suites (ui/, uiauto/, a11y/) need both APKs built with -PseedDemo=true — SEED_DEMO is inlined into
+    # the test DEX, and they fail loudly without it; everything else runs from an unseeded build (see the steps). The
+    # BLE pair suite needs a second phone and is left out. The accessibility checks are API 34+, so pixel8api34 runs
+    # that one package. The report XML lists an assumption skip as a <failure>; Gradle counts it as skipped. Advisory until it has been green here a few times: the hosted runner is slower than any
     # device the suites were written against, and the shade-driving tests already skip on an emulator.
     continue-on-error: true
     timeout-minutes: 75
@@ -201,11 +201,40 @@ jobs:
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
-      - name: Seeded, UIAutomator and platform suites (pixel7api33)
-        run: >-
-          ./gradlew :app:pixel7api33DebugAndroidTest -PseedDemo=true
-          -Pandroid.testoptions.manageddevices.emulator.gpu=swiftshader_indirect
-          --stacktrace --console=plain
+      # Two builds, because the seed is not neutral: a seeded app mints its own identity and database key under the
+      # live Keystore aliases as it starts, in the very process the platform suites (data/, moderation/, …) run in,
+      # and BackupRoundTripTest's read-back lost that race every time (run 38830030015).
+      # One Gradle call per package: under the orchestrator the runner keeps only the first entry of a comma-separated
+      # package / notPackage list. The APKs are built once per pass; each call boots the emulator again.
+      - name: Seeded UI and UIAutomator suites (pixel7api33)
+        env:
+          PASS: seeded
+        run: |
+          rc=0
+          keep() { mkdir -p "instrumented/$1" && cp -r app/build/reports/androidTests/managedDevice app/build/outputs/androidTest-results/managedDevice "instrumented/$1/" 2>/dev/null; true; }
+          for pkg in ui uiauto; do
+            ./gradlew :app:pixel7api33DebugAndroidTest -PseedDemo=true \
+              -Pandroid.testInstrumentationRunnerArguments.package=app.getknit.knit.$pkg \
+              -Pandroid.testoptions.manageddevices.emulator.gpu=swiftshader_indirect \
+              --stacktrace --console=plain || rc=1
+            keep "$PASS-$pkg"
+          done
+          exit $rc
+      - name: Platform suites, unseeded (pixel7api33)
+        if: success() || failure()
+        env:
+          PASS: unseeded
+        run: |
+          rc=0
+          keep() { mkdir -p "instrumented/$1" && cp -r app/build/reports/androidTests/managedDevice app/build/outputs/androidTest-results/managedDevice "instrumented/$1/" 2>/dev/null; true; }
+          for pkg in data moderation notifications text; do
+            ./gradlew :app:pixel7api33DebugAndroidTest \
+              -Pandroid.testInstrumentationRunnerArguments.package=app.getknit.knit.$pkg \
+              -Pandroid.testoptions.manageddevices.emulator.gpu=swiftshader_indirect \
+              --stacktrace --console=plain || rc=1
+            keep "$PASS-$pkg"
+          done
+          exit $rc
       - name: Accessibility suite (pixel8api34)
         if: success() || failure()
         run: >-
@@ -218,7 +247,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: instrumented-test-report
+          # One folder per Gradle call (each overwrites app/build's results), plus the last a11y run in app/build.
           path: |
+            instrumented/
             app/build/reports/androidTests/managedDevice/
             app/build/outputs/androidTest-results/managedDevice/
             app/build/outputs/managed_device_android_test_additional_output/
