@@ -1,5 +1,6 @@
 package app.getknit.knit.ui.requests
 
+import android.annotation.SuppressLint
 import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -66,7 +67,8 @@ class MessageRequestsViewModel(
     private val groups: GroupRepository,
     private val drafts: DraftRepository,
     identity: Identity,
-    private val context: Context,
+    // StaticFieldLeak: Koin hands every ViewModel the application context (`androidContext()`), never an Activity.
+    @field:SuppressLint("StaticFieldLeak") private val context: Context,
 ) : ViewModel() {
     private val myNodeId = MutableStateFlow<String?>(null)
 

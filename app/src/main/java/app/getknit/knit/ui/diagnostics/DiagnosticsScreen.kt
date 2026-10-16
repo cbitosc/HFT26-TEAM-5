@@ -344,7 +344,7 @@ internal fun DiagnosticsScreenContent(
                 items(state.knownNodes, key = { it.nodeId }) { NodeRow(it, now) }
                 val hidden = state.knownTotal - state.knownNodes.size
                 if (hidden > 0) {
-                    item { EmptyLine(stringResource(R.string.diagnostics_known_more, hidden)) }
+                    item { EmptyLine(pluralStringResource(R.plurals.diagnostics_known_more, hidden, hidden)) }
                 }
             }
         }
@@ -701,7 +701,7 @@ private fun LiveTransportRow(
                     null -> stringResource(R.string.diagnostics_transport_counts, status.nearby, status.linked)
                     LoraPlane.Off -> stringResource(R.string.lora_status_off)
                     LoraPlane.Down -> stringResource(R.string.diagnostics_transport_lora_down)
-                    LoraPlane.Live -> stringResource(R.string.diagnostics_transport_heard, status.nearby)
+                    LoraPlane.Live -> pluralStringResource(R.plurals.diagnostics_transport_heard, status.nearby, status.nearby)
                 },
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -939,8 +939,16 @@ private fun SpoolSection(spool: SpoolStatus) {
                 else -> name
             }
         var counts = stringResource(R.string.diagnostics_spool_scope_counts, scope.localCount, scope.spoolCount)
-        if (scope.accountedCount > 0) counts = stringResource(R.string.diagnostics_spool_scope_aged, counts, scope.accountedCount)
-        if (scope.invalidCount > 0) counts = stringResource(R.string.diagnostics_spool_scope_bad, counts, scope.invalidCount)
+        if (scope.accountedCount >
+            0
+        ) {
+            counts = pluralStringResource(R.plurals.diagnostics_spool_scope_aged, scope.accountedCount, counts, scope.accountedCount)
+        }
+        if (scope.invalidCount >
+            0
+        ) {
+            counts = pluralStringResource(R.plurals.diagnostics_spool_scope_bad, scope.invalidCount, counts, scope.invalidCount)
+        }
         MetricRow(SUB_ROW_INDENT + label, counts)
     }
 }

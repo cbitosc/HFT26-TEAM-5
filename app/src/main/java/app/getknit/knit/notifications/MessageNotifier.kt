@@ -1,6 +1,7 @@
 package app.getknit.knit.notifications
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.PendingIntent
 import android.content.Context
@@ -468,7 +469,15 @@ class MessageNotifier internal constructor(
         }
         val (total, chats) = summaryCounts(counts)
         val summaryText =
-            if (chats >= 2) context.getString(R.string.notif_summary, total, chats) else lines.firstOrNull() ?: ""
+            if (chats >= 2) {
+                context.getString(
+                    R.string.notif_summary,
+                    context.resources.getQuantityString(R.plurals.notif_summary_messages, total, total),
+                    context.resources.getQuantityString(R.plurals.notif_summary_chats, chats, chats),
+                )
+            } else {
+                lines.firstOrNull() ?: ""
+            }
         val inbox =
             NotificationCompat
                 .InboxStyle()
@@ -537,6 +546,8 @@ class MessageNotifier internal constructor(
             else -> NotificationChannels.NEARBY
         }
 
+    // InlinedApi: below API 33 ContextCompat answers a POST_NOTIFICATIONS check from areNotificationsEnabled().
+    @SuppressLint("InlinedApi")
     private fun canPost(): Boolean {
         if (!manager.areNotificationsEnabled()) return false
         // Explicit POST_NOTIFICATIONS check (runtime permission on API 33+). areNotificationsEnabled()

@@ -1,6 +1,7 @@
 package app.getknit.knit.ui
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
@@ -30,7 +31,9 @@ import androidx.core.content.ContextCompat
  * A device missing either radio is handled at runtime (the transport self-degrades and the composite runs
  * whichever plane is present), so an unused permission on a given device is simply a grant never exercised.
  * [sdkInt] is injectable (default [Build.VERSION.SDK_INT]) so the tiering is a pure, unit-testable function.
+ * That is also why InlinedApi is suppressed: the names are compile-time strings, and lint cannot follow [sdkInt].
  */
+@SuppressLint("InlinedApi")
 fun requiredRadioPermissions(sdkInt: Int = Build.VERSION.SDK_INT): Array<String> =
     when {
         sdkInt >= Build.VERSION_CODES.TIRAMISU -> {
@@ -65,8 +68,10 @@ fun requiredRadioPermissions(sdkInt: Int = Build.VERSION.SDK_INT): Array<String>
  * on the onboarding permissions page but **never a gate**: `MessageNotifier` checks the grant before every post
  * and skips silently without it, and the foreground service's own notification goes through `startForeground`,
  * which needs no grant. A user who declines it still meshes; they just don't hear about messages until they
- * open the app.
+ * open the app. InlinedApi is suppressed because the name is a compile-time string returned only at [sdkInt] 33+,
+ * which lint cannot follow.
  */
+@SuppressLint("InlinedApi")
 fun optionalNotificationPermission(sdkInt: Int = Build.VERSION.SDK_INT): String? =
     Manifest.permission.POST_NOTIFICATIONS.takeIf { sdkInt >= Build.VERSION_CODES.TIRAMISU }
 

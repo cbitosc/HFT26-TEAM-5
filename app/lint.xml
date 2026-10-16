@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Android Lint configuration for :app. Warnings are errors (app/build.gradle.kts `lint {}`), so every entry here
+     is a deliberate exception with its reason. Prefer a site suppression (`@SuppressLint` / `tools:ignore`); this
+     file is for issues that have no site to annotate. -->
+<lint>
+    <!-- Version advice changes with the calendar, not with this code: a new release upstream would fail a build
+         nobody touched. Dependency bumps go through the upgrade-notes skill (AGENTS.md), and the target-SDK bump
+         is a behaviour change with its own device trial. -->
+    <issue id="AndroidGradlePluginVersion" severity="ignore" />
+    <issue id="GradleDependency" severity="ignore" />
+    <issue id="NewerVersionAvailable" severity="ignore" />
+    <issue id="OldTargetApi" severity="ignore" />
+
+    <!-- The launcher icon's PNGs beside its adaptive XML are kept on purpose: F-Droid takes the app's icon from
+         the APK and cannot render an adaptive icon, so it falls back to the highest-density PNG. -->
+    <issue id="IconXmlAndPng">
+        <ignore path="src/main/res/mipmap-*/ic_launcher.png" />
+        <ignore path="src/main/res/mipmap-*/ic_launcher_round.png" />
+    </issue>
+
+    <!-- The debug build's ABI filter comes from `knit.debugAbis`, which defaults to arm64-v8a + x86_64; lint cannot
+         evaluate the property. Release and staging package every ABI. -->
+    <issue id="ChromeOsAbiSupport">
+        <ignore path="build.gradle.kts" />
+    </issue>
+</lint>

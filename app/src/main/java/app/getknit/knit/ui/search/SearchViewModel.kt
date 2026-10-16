@@ -1,5 +1,6 @@
 package app.getknit.knit.ui.search
 
+import android.annotation.SuppressLint
 import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -113,7 +114,8 @@ class SearchViewModel(
     // The facts flow rather than the repository, for the reason spelled out on ChatViewModel's copy of this
     // parameter: the production flow is an infinite poller, which a test could never let go idle.
     loraFacts: Flow<LoraFacts>,
-    private val context: Context,
+    // StaticFieldLeak: Koin hands every ViewModel the application context (`androidContext()`), never an Activity.
+    @field:SuppressLint("StaticFieldLeak") private val context: Context,
     // The joined commons (§7.4), so a room's posts search like a group's. Nullable and last for the test rigs.
     commons: CommonsRepository? = null,
 ) : ViewModel() {

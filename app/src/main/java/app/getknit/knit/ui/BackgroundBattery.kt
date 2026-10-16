@@ -1,5 +1,6 @@
 package app.getknit.knit.ui
 
+import android.annotation.SuppressLint
 import android.app.ActivityManager
 import android.content.Context
 import android.content.Intent
@@ -46,7 +47,13 @@ fun isIgnoringBatteryOptimizations(context: Context): Boolean {
 /** Whether the user (or Android, on its own suggestion) has set the app's battery use to Restricted. */
 fun isBackgroundRestricted(context: Context): Boolean = context.getSystemService(ActivityManager::class.java).isBackgroundRestricted
 
-/** Opens the system prompt to exempt the app from battery optimization (no-op if already exempt). */
+/**
+ * Opens the system prompt to exempt the app from battery optimization (no-op if already exempt).
+ *
+ * BatteryLife: a mesh relay is an accepted use under Play's policy, since it must keep its radios up to
+ * carry messages for others. The row is optional and the user's own choice (ADR 2026-09.nzpr, 2026-09.gc3m).
+ */
+@SuppressLint("BatteryLife")
 fun requestIgnoreBatteryOptimizations(context: Context) {
     if (isIgnoringBatteryOptimizations(context)) return
     val intent =

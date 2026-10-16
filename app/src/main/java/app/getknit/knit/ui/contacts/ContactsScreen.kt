@@ -46,6 +46,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextAlign
@@ -77,7 +78,11 @@ fun ContactsScreen(
     val state by viewModel.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val groupFullMessage =
-        stringResource(R.string.contacts_group_full, ContactsViewModel.MAX_OTHER_MEMBERS + 1)
+        pluralStringResource(
+            R.plurals.contacts_group_full,
+            ContactsViewModel.MAX_OTHER_MEMBERS + 1,
+            ContactsViewModel.MAX_OTHER_MEMBERS + 1,
+        )
 
     // A created group opens its chat once the row is persisted (avoids a startup race in the chat VM).
     LaunchedEffect(Unit) {

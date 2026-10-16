@@ -1,5 +1,6 @@
 package app.getknit.knit.identity
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.provider.Settings
 
@@ -27,5 +28,7 @@ fun interface DeviceIdSource {
 class AndroidDeviceIdSource(
     private val context: Context,
 ) : DeviceIdSource {
+    // HardwareIds: ANDROID_ID is the intended source here — app-scoped and permission-free (see the class doc).
+    @SuppressLint("HardwareIds")
     override fun rawDeviceId(): String? = Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
 }

@@ -450,6 +450,22 @@ android {
         compose = true
         buildConfig = true
     }
+    lint {
+        // Android Lint warnings are build errors, like the Kotlin compiler's below: the module was brought to
+        // zero warnings, so a new one fails `./gradlew lint` (the Stop hook, both CIs) instead of joining a
+        // report nobody reads. A deliberate exception is suppressed at its site (`@SuppressLint` /
+        // `tools:ignore`) with a one-line reason, or in lint.xml when it has no site. lintVital (assembleRelease)
+        // checks only fatal issues, so this cannot break the F-Droid rebuild.
+        //
+        // `-Pknit.warningsAsErrors=false` turns it back into warnings, the same escape hatch as the Kotlin flag.
+        lintConfig = file("lint.xml")
+        warningsAsErrors =
+            providers
+                .gradleProperty("knit.warningsAsErrors")
+                .map(String::toBoolean)
+                .orElse(true)
+                .get()
+    }
     androidResources {
         // On-device model files must stay uncompressed so TFLite can mmap them from the APK.
         noCompress += listOf("tflite")

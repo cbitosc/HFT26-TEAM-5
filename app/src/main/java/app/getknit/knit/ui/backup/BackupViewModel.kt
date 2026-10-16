@@ -1,5 +1,6 @@
 package app.getknit.knit.ui.backup
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -90,7 +91,8 @@ sealed interface RestorePhase {
  * or removed.
  */
 class BackupViewModel(
-    private val context: Context,
+    // StaticFieldLeak: Koin hands every ViewModel the application context (`androidContext()`), never an Activity.
+    @field:SuppressLint("StaticFieldLeak") private val context: Context,
     private val writer: BackupWriter,
     private val stager: RestoreStager,
 ) : ViewModel() {

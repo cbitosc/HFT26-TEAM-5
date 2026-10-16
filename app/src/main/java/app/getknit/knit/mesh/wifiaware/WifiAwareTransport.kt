@@ -3326,6 +3326,7 @@ class WifiAwareTransport(
          * constructor at its single call site (`di/MeshModule`).
          */
         @ChecksSdkIntAtLeast(api = Build.VERSION_CODES.S)
+        @SuppressLint("ObsoleteSdkInt") // the literal comparison is the guard lint reads (above), not dead code
         fun isSupported(context: Context): Boolean =
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && wifiAwareSupport(context) == PlaneSupport.Supported
 

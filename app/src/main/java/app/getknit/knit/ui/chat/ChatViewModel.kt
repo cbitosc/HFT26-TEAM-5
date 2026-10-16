@@ -1,5 +1,6 @@
 package app.getknit.knit.ui.chat
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -529,7 +530,8 @@ class ChatViewModel(
     private val relayFacts: Flow<RelayFacts>,
     // The LoRa plane's facts, the same way (a pushed flow in production, but a test still supplies its own).
     private val loraFacts: Flow<LoraFacts>,
-    private val context: Context,
+    // StaticFieldLeak: Koin hands every ViewModel the application context (`androidContext()`), never an Activity.
+    @field:SuppressLint("StaticFieldLeak") private val context: Context,
     // Direct Wi-Fi transfers: the app-wide state machine whose live states overlay this thread's records.
     private val transfers: TransferManager,
     // The joined commons (docs/SPOOL_PROTOCOL.md §7.4): a room's name and members, for a commons thread.

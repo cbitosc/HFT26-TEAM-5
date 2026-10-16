@@ -1,5 +1,6 @@
 package app.getknit.knit.crash
 
+import android.annotation.SuppressLint
 import app.getknit.knit.data.crypto.writeBytesAtomically
 import java.io.File
 import java.security.MessageDigest
@@ -112,7 +113,11 @@ class CrashStore(
     /**
      * The one write path: checks the directory and the free space, renders, writes atomically, prunes. A
      * render that throws writes nothing — **no path here writes an unredacted stack trace to disk.**
+     *
+     * UsableSpace: the floor only refuses a write on a nearly full disk; a crash report is too small to be worth
+     * asking the system to clear cache for.
      */
+    @SuppressLint("UsableSpace")
     private fun write(
         stamp: Long,
         render: () -> String,

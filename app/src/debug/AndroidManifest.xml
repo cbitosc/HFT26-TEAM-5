@@ -9,12 +9,14 @@
      plain `ws://`. DEBUG BUILDS ONLY — `staging` inherits `release`, has no source-set overlay here, and
      the dialer itself refuses any non-`wss://` URL unless BuildConfig.DEBUG, so no shipped artifact can
      be pointed at a plaintext relay however its settings are edited. -->
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <application android:usesCleartextTraffic="true">
         <receiver
             android:name="app.getknit.knit.debug.DebugBridgeReceiver"
-            android:exported="true">
+            android:exported="true"
+            tools:ignore="ExportedReceiver">
             <intent-filter>
                 <action android:name="app.getknit.knit.debug.SEND" />
                 <action android:name="app.getknit.knit.debug.SENDIMG" />

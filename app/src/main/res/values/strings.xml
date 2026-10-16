@@ -82,7 +82,16 @@
     <string name="notif_action_reply">Reply</string>
     <string name="notif_reply_hint">Message</string>
     <string name="notif_action_mark_read">Mark read</string>
-    <string name="notif_summary">%1$d messages in %2$d chats</string>
+    <!-- "5 messages in 2 chats": the two counts below, joined. -->
+    <string name="notif_summary">%1$s in %2$s</string>
+    <plurals name="notif_summary_messages">
+        <item quantity="one">%1$d message</item>
+        <item quantity="other">%1$d messages</item>
+    </plurals>
+    <plurals name="notif_summary_chats">
+        <item quantity="one">%1$d chat</item>
+        <item quantity="other">%1$d chats</item>
+    </plurals>
 
     <!-- Message requests (coalesced heads-up) -->
     <string name="channel_requests_name">Message requests</string>
@@ -502,7 +511,10 @@
     <string name="contacts_new_message">New message</string>
     <string name="contacts_empty">No contacts yet.\nSay hi in Nearby, scan someone\'s code, or add them from a contact link.</string>
     <string name="contacts_start_chat">Start chat</string>
-    <string name="contacts_group_full">Groups can have up to %1$d people</string>
+    <plurals name="contacts_group_full">
+        <item quantity="one">Groups can have up to %1$d person</item>
+        <item quantity="other">Groups can have up to %1$d people</item>
+    </plurals>
 
     <!-- Chat list -->
     <string name="nearby_title">Nearby</string>
@@ -748,7 +760,10 @@
     <string name="diagnostics_none_indirect">Nothing reachable indirectly</string>
     <string name="diagnostics_none_relay">Nothing reachable long-range</string>
     <string name="diagnostics_known_nodes">Known, not reachable (%1$d)</string>
-    <string name="diagnostics_known_more">…and %1$d more</string>
+    <plurals name="diagnostics_known_more">
+        <item quantity="one">…and %1$d more</item>
+        <item quantity="other">…and %1$d more</item>
+    </plurals>
     <string name="diagnostics_profile_age">Profile %1$s</string>
     <string name="diagnostics_metric_originated">Originated</string>
     <string name="diagnostics_metric_delivered">Delivered</string>
@@ -794,9 +809,15 @@
     <string name="diagnostics_spool_scope_retiring">%1$s (retiring)</string>
     <string name="diagnostics_spool_scope_pair">%1$s (pair)</string>
     <!-- One scope's convergence: messages held locally / on the relay. -->
-    <string name="diagnostics_spool_scope_counts">%1$d local / %2$d spool</string>
-    <string name="diagnostics_spool_scope_aged">%1$s · %2$d aged</string>
-    <string name="diagnostics_spool_scope_bad">%1$s · %2$d bad</string>
+    <string name="diagnostics_spool_scope_counts" tools:ignore="PluralsCandidate">%1$d local / %2$d spool</string>
+    <plurals name="diagnostics_spool_scope_aged">
+        <item quantity="one">%1$s · %2$d aged</item>
+        <item quantity="other">%1$s · %2$d aged</item>
+    </plurals>
+    <plurals name="diagnostics_spool_scope_bad">
+        <item quantity="one">%1$s · %2$d bad</item>
+        <item quantity="other">%1$s · %2$d bad</item>
+    </plurals>
     <string name="diagnostics_metric_spool_pushed">Messages sent to Internet relays</string>
     <string name="diagnostics_metric_lora_sent">LoRa frames sent</string>
     <string name="diagnostics_metric_lora_received">LoRa frames received</string>
@@ -838,8 +859,11 @@
     <string name="diagnostics_transport_wifi_aware">Wi-Fi Aware</string>
     <string name="diagnostics_transport_other">Other</string>
     <string name="diagnostics_transport_lora">LoRa</string>
-    <string name="diagnostics_transport_counts">%1$d nearby · %2$d linked</string>
-    <string name="diagnostics_transport_heard">%1$d heard</string>
+    <string name="diagnostics_transport_counts" tools:ignore="PluralsCandidate">%1$d nearby · %2$d linked</string>
+    <plurals name="diagnostics_transport_heard">
+        <item quantity="one">%1$d heard</item>
+        <item quantity="other">%1$d heard</item>
+    </plurals>
     <!-- Where the counts go on a plane the phone cannot run, or a LoRa plane with a board that is bound but
          not up (no board at all reads lora_status_off, shared with the LoRa screen). -->
     <string name="diagnostics_transport_unsupported">Not supported by this phone</string>
@@ -1115,7 +1139,7 @@
     <string name="settings_internet_relays_title">Use Internet relays</string>
     <string name="settings_internet_relays_subtitle">Keep conversations flowing when nobody is in radio range, by storing sealed copies on relay servers. Relays cannot read your messages, but they do see that a conversation is active and the IP addresses connecting to it.</string>
     <string name="relays_summary_off">Off</string>
-    <string name="relays_summary_on">On · %1$d of %2$d connected</string>
+    <string name="relays_summary_on" tools:ignore="PluralsCandidate">On · %1$d of %2$d connected</string>
     <string name="relays_summary_none">On · no relays added</string>
     <string name="relays_summary_none_active">On · no relays in use</string>
     <string name="relays_section_list">Relays</string>
@@ -1183,7 +1207,8 @@
     <string name="lora_provision_no_slot">No free channel slot on the board. Free one in the Meshtastic app, then try again.</string>
     <!-- Debug builds only (ADR 067): the dedicated-frequency setup. Not shown in any release build. -->
     <string name="lora_setup_dedicated_button">Set up on a dedicated frequency</string>
-    <string name="lora_setup_dedicated_body">Debug only. Pins the radio to slot %1$d instead of the public Meshtastic frequency.</string>
+    <!-- PluralsCandidate is a false positive: %1$d is a slot number, not a count. -->
+    <string name="lora_setup_dedicated_body" tools:ignore="PluralsCandidate">Debug only. Pins the radio to slot %1$d instead of the public Meshtastic frequency.</string>
     <string name="lora_setup_shared_button">Go back to the shared frequency</string>
     <string name="lora_setup_dedicated_active">Debug only. This board is on a dedicated frequency, so Knit is using the full airtime allowance your region permits. The Meshtastic room is hidden while it stays there, because no public radio can hear it. Going back moves only the radio; the board stays set up for Knit.</string>
     <string name="lora_setup_dedicated_unavailable">Debug only. Knit has no dedicated slot for this board\'s region, so this setup is unavailable here.</string>

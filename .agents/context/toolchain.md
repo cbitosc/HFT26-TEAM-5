@@ -117,6 +117,16 @@ Two rules that follow from this, when a warning has no clean fix:
 - **A no-op `when` branch is `-> {}`, never `-> { Unit }`.** The lone `Unit` inside a block is an unused
   expression; the braces themselves are required by ktlint whenever a sibling entry is braced.
 
+## Android Lint warnings are errors (`lint { warningsAsErrors }`)
+
+`:app`'s `lint {}` block makes every Lint warning fail `./gradlew lint`, under the same
+`knit.warningsAsErrors` switch as the Kotlin flag above. A deliberate exception is suppressed at its site
+(`@SuppressLint` / `tools:ignore`) with its reason, the same narrowest-scope rule as above; `app/lint.xml` holds
+only the ones with no site: the version-advice checks (`GradleDependency`, `NewerVersionAvailable`,
+`AndroidGradlePluginVersion`, `OldTargetApi`) are off because they change with the calendar rather than the code,
+and the launcher PNGs stay beside the adaptive icon for F-Droid's icon extraction. lintVital (`assembleRelease`)
+runs only fatal checks, so the release build is untouched.
+
 ## Static analysis: detekt / ktlint Gradle plugins
 
 `detekt` runs via the **`dev.detekt` Gradle plugin** (detekt 2.0.x — the first line that supports

@@ -1,5 +1,6 @@
 package app.getknit.knit.ui.profile
 
+import android.annotation.SuppressLint
 import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -188,7 +189,8 @@ class ProfileDetailsViewModel(
     // the linger; [spoolStatuses] re-emits on its poll, so an expiry lands within one.
     // For the one localized string a shared group can need: the fallback title of a group nobody named.
     // The same dependency, for the same reason, that `GroupDetailsViewModel` takes.
-    private val context: Context,
+    // StaticFieldLeak: Koin hands every ViewModel the application context (`androidContext()`), never an Activity.
+    @field:SuppressLint("StaticFieldLeak") private val context: Context,
     private val clock: () -> Long = System::currentTimeMillis,
 ) : ViewModel() {
     private val me = MutableStateFlow<MyIdentity?>(null)

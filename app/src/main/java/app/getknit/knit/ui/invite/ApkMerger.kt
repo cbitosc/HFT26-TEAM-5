@@ -1,5 +1,6 @@
 package app.getknit.knit.ui.invite
 
+import android.annotation.SuppressLint
 import android.content.Context
 import com.android.apksig.ApkSigner
 import com.reandroid.apk.ApkBundle
@@ -60,7 +61,11 @@ internal fun mergedApkFileName(
  * returns it, caching the result per app version under `cacheDir/apk`. Heavy (seconds + hundreds of MB of
  * heap for a large app); the caller must be off the main thread. Throws [ShareStorageException] when the
  * cache dir is too small, and propagates any merge/sign failure (IO, apksig, OOM) to the caller.
+ *
+ * UsableSpace: the free-space check is a guard that refuses early with a clear message, not an allocation, so
+ * it does not ask the system to clear other apps' caches for a one-off share.
  */
+@SuppressLint("UsableSpace")
 fun buildSharableSplitApk(
     context: Context,
     splitPaths: List<File>,
