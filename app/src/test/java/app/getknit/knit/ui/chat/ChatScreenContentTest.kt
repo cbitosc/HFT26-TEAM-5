@@ -560,6 +560,21 @@ class ChatScreenContentTest {
         assertEquals(listOf("h-big"), downloads)
     }
 
+    /** A phone without Wi-Fi Aware is never told the plane fetches the attachment on its own (the Moto G trial). */
+    @Test
+    fun theTapCardNamesWifiAwareOnlyWhereThePhoneHasIt() {
+        var wifiAware by mutableStateOf(false)
+        compose.setContent {
+            TapToDownloadCard(label = "Photo", declaredSize = 2_000_000, onDownload = {}, onLongClick = {}, wifiAware = wifiAware)
+        }
+        val card = compose.onNodeWithTag("chat_attachment_tap_to_download")
+        card
+            .assert(hasContentDescription("Can take minutes over Bluetooth.", substring = true))
+            .assert(!hasContentDescription("Wi-Fi Aware", substring = true))
+        wifiAware = true
+        card.assert(hasContentDescription("Wi-Fi Aware gets it on its own.", substring = true))
+    }
+
     /** A group is the one thread that has to say it per bubble: the header names the group, not the person. */
     @Test
     fun aVerifiedAuthorWearsTheShieldBesideTheirNameInAGroup() {

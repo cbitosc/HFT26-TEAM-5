@@ -36,6 +36,7 @@ import app.getknit.knit.ui.chat.StagedLinkTilePreview
 import app.getknit.knit.ui.chat.StagedLocationTileFailedPreview
 import app.getknit.knit.ui.chat.StagedLocationTileReadyPreview
 import app.getknit.knit.ui.chat.SystemNoticePreview
+import app.getknit.knit.ui.chat.TapToDownloadBluetoothOnlyPreview
 import app.getknit.knit.ui.chat.TapToDownloadFilePreview
 import app.getknit.knit.ui.chat.TapToDownloadPhotoPreview
 import com.android.tools.screenshot.PreviewTest
@@ -217,3 +218,8 @@ fun TapToDownloadFile() = TapToDownloadFilePreview()
 @ComponentShots
 @Composable
 fun TapToDownloadPhoto() = TapToDownloadPhotoPreview()
+
+@PreviewTest
+@ComponentShots
+@Composable
+fun TapToDownloadBluetoothOnly() = TapToDownloadBluetoothOnlyPreview()

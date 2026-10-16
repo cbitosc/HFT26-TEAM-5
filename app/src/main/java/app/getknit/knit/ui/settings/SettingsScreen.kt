@@ -74,6 +74,7 @@ import app.getknit.knit.ui.deviceSupervision
 import app.getknit.knit.ui.openUnusedAppPauseSettings
 import app.getknit.knit.ui.preview.KnitPreview
 import app.getknit.knit.ui.rememberOnResume
+import app.getknit.knit.ui.rememberWifiAwareSupported
 import app.getknit.knit.ui.requestIgnoreBatteryOptimizations
 import app.getknit.knit.ui.signout.SignOut
 import app.getknit.knit.ui.signout.SignOutDialog
@@ -205,6 +206,8 @@ internal fun SettingsScreenContent(
     // Same, for the platform's per-app night mode — a different fact that happens to carry the same
     // API level; see ui/theme/ThemeMode.kt.
     showThemeMode: Boolean = THEME_MODE_SUPPORTED,
+    // Whether this phone has Wi-Fi Aware at all, so the large-download row never promises a plane it lacks.
+    wifiAware: Boolean = rememberWifiAwareSupported(),
     onAllowBattery: () -> Unit,
     onOpenBatterySettings: () -> Unit = {},
     // Who else holds this phone's switches (a Family Link parent, an administrator). Read in the stateful
@@ -308,7 +311,10 @@ internal fun SettingsScreenContent(
             // both decide what reaches this phone from others.
             ChoiceRow(
                 title = stringResource(R.string.settings_bt_download_title),
-                subtitle = stringResource(R.string.settings_bt_download_subtitle),
+                subtitle =
+                    stringResource(
+                        if (wifiAware) R.string.settings_bt_download_subtitle else R.string.settings_bt_download_subtitle_bluetooth_only,
+                    ),
                 choices = BT_DOWNLOAD_LIMITS,
                 selected = form.bluetoothDownloadLimit,
                 onSelect = onSelectBluetoothDownloadLimit,

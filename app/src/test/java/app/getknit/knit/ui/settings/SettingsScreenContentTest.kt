@@ -56,6 +56,7 @@ class SettingsScreenContentTest {
         themeMode: ThemeMode = ThemeMode.System,
         onSelectThemeMode: (ThemeMode) -> Unit = {},
         showThemeMode: Boolean = true,
+        wifiAware: Boolean = true,
         bluetoothDownloadLimit: BluetoothDownloadLimit = BluetoothDownloadLimit.DEFAULT,
         onSelectBluetoothDownloadLimit: (BluetoothDownloadLimit) -> Unit = {},
         linkPreviewsEnabled: Boolean = false,
@@ -98,6 +99,7 @@ class SettingsScreenContentTest {
                     onToggleContentFiltering = onToggleContentFiltering,
                     onSelectThemeMode = onSelectThemeMode,
                     showThemeMode = showThemeMode,
+                    wifiAware = wifiAware,
                     onSelectBluetoothDownloadLimit = onSelectBluetoothDownloadLimit,
                     onToggleLinkPreviews = onToggleLinkPreviews,
                     onToggleDynamicColor = onToggleDynamicColor,
@@ -216,6 +218,22 @@ class SettingsScreenContentTest {
         compose.onNodeWithText("Over 1 MB").assertIsSelected()
         compose.onNodeWithText("Never").performClick()
         assertEquals(BluetoothDownloadLimit.NEVER, picked)
+    }
+
+    /** A phone without Wi-Fi Aware is never told the plane fetches anything on its own (the Moto G trial). */
+    @Test
+    fun theLargeDownloadRowNamesWifiAwareOnlyWhereThePhoneHasIt() {
+        render(wifiAware = false)
+        compose.onNodeWithTag("settings_bt_download").performScrollTo()
+        compose.onNodeWithText("Wi-Fi Aware", substring = true).assertDoesNotExist()
+        compose.onNodeWithText("before Bluetooth brings it", substring = true).assertExists()
+    }
+
+    @Test
+    fun theLargeDownloadRowNamesWifiAwareWhereThePhoneHasIt() {
+        render(wifiAware = true)
+        compose.onNodeWithTag("settings_bt_download").performScrollTo()
+        compose.onNodeWithText("over Wi-Fi Aware", substring = true).assertExists()
     }
 
     /** Below API 31 there is no per-app night mode, so the control is absent rather than dead. */

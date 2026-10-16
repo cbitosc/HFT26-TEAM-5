@@ -247,6 +247,7 @@
          turns into the progress ring by itself. -->
     <string name="chat_attachment_tap_to_download">%1$s · Tap to download</string>
     <string name="chat_attachment_tap_hint">Slow over Bluetooth. Wi-Fi Aware gets it on its own.</string>
+    <string name="chat_attachment_tap_hint_bluetooth_only">Can take minutes over Bluetooth.</string>
     <string name="chat_attachment_download_action">Download</string>
     <string name="chat_attachment_photo">Photo</string>
     <string name="chat_attachment_voice">Voice message</string>
@@ -649,6 +650,7 @@
     <string name="settings_theme_dark">Dark</string>
     <string name="settings_bt_download_title">Ask before large Bluetooth downloads</string>
     <string name="settings_bt_download_subtitle">Large files download on their own over Wi-Fi Aware. Above this size, one only Bluetooth can bring waits for your tap, since that can take minutes.</string>
+    <string name="settings_bt_download_subtitle_bluetooth_only">Above this size, an attachment waits for your tap before Bluetooth brings it, since that can take minutes.</string>
     <string name="settings_bt_download_never">Never</string>
     <string name="settings_bt_download_1mb">Over 1 MB</string>
     <string name="settings_bt_download_5mb">Over 5 MB</string>

@@ -34,6 +34,7 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import app.getknit.knit.R
 import app.getknit.knit.ui.preview.KnitPreview
+import app.getknit.knit.ui.rememberWifiAwareSupported
 
 /**
  * The stand-in for a received attachment over the user's "Ask before large Bluetooth downloads" limit (ADR
@@ -43,6 +44,7 @@ import app.getknit.knit.ui.preview.KnitPreview
  *
  * One card for a photo, a voice note and a file alike: until the bytes land there is nothing kind-specific to draw,
  * and the label says which it is. [declaredSize] is the sender's claim, the only size there is before the fetch.
+ * [wifiAware] is whether this phone has the plane at all: one without it is never promised a fetch over it.
  */
 @Composable
 fun TapToDownloadCard(
@@ -51,10 +53,12 @@ fun TapToDownloadCard(
     onDownload: () -> Unit,
     onLongClick: () -> Unit,
     modifier: Modifier = Modifier,
+    wifiAware: Boolean = rememberWifiAwareSupported(),
 ) {
     val context = LocalContext.current
     val detail = stringResource(R.string.chat_attachment_tap_to_download, Formatter.formatShortFileSize(context, declaredSize))
-    val hint = stringResource(R.string.chat_attachment_tap_hint)
+    val hint =
+        stringResource(if (wifiAware) R.string.chat_attachment_tap_hint else R.string.chat_attachment_tap_hint_bluetooth_only)
     // The card paints its own container, so it carries the matching content colour (FileAttachmentBubble's reason).
     CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurfaceVariant) {
         Row(
@@ -129,4 +133,18 @@ fun TapToDownloadFilePreview() =
 fun TapToDownloadPhotoPreview() =
     KnitPreview {
         TapToDownloadCard(label = "Photo", declaredSize = 1_800_000, onDownload = {}, onLongClick = {})
+    }
+
+/** The same card on a phone without Wi-Fi Aware: nothing promises the plane it lacks. */
+@Preview(showBackground = true)
+@Composable
+fun TapToDownloadBluetoothOnlyPreview() =
+    KnitPreview {
+        TapToDownloadCard(
+            label = "Voice message",
+            declaredSize = 2_300_000,
+            onDownload = {},
+            onLongClick = {},
+            wifiAware = false,
+        )
     }

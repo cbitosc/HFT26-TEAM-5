@@ -28,7 +28,9 @@ whole time (ADR 2026-10.g24x), and the user never chose it. Over Wi-Fi Aware the
    declaring nothing — can fetch it while a gated row shows the card, which then gives way to the progress ring once
    bytes arrive. The limit is a setting —
    Never, over 1 MB (default) or over 5 MB (`SettingsStore.bluetoothDownloadLimit`, decimal megabytes as
-   `Formatter.formatShortFileSize` prints them).
+   `Formatter.formatShortFileSize` prints them). The card's hint and the setting's subtitle name Wi-Fi Aware only on
+   a phone that has it (`ui/WifiAwareCopy.kt`'s `rememberWifiAwareSupported`, the probe onboarding and Diagnostics
+   read): the Moto G trial showed a phone without the plane being promised a fetch over it.
 2. **Judged on the declared size only.** The size is the sender's label (never a bound, ADR 2026-10.y9qh); there is
    no other number before the fetch. A named file always declared one; `BluetoothFetchGate.declaresSize` now has a
    photo or voice note of 1 MB or more (`DECLARE_SIZE_FLOOR`, the smallest selectable limit) declare its plaintext
