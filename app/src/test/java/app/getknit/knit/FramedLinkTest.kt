@@ -1260,10 +1260,17 @@ class FramedLinkTest {
 
     @Test
     fun aFileWhoseSourceIsGoneStillEndsItsFeedingEdge() {
-        val (h, pokes) = busyHarness()
+        // A file larger than the pipe holds the feed open until we read it, and the gone one queues behind it. Alone,
+        // the gone file could be taken and skipped by the writer before the enqueue's own report read the state, and
+        // a rising edge nobody saw is never reported (job 8771): the edges are the state's, not the enqueue's.
+        val (h, pokes) = busyHarness(fromLinkBuffer = 16 * 1024)
+        val held = tmp.newFile("held.bin").apply { writeBytes(ByteArray(40 * 1024)) }
+        assertTrue(h.link.sendFile(held, FileMeta(FileKind.ATTACHMENT, "2".repeat(64), "image/jpeg")))
+        assertEquals("feeding from the enqueue", true to false, pokes.poll(2, TimeUnit.SECONDS))
         h.link.sendFile(File(tmp.root, "evicted.bin"), FileMeta(FileKind.ATTACHMENT, "3".repeat(64), "image/jpeg"))
-        assertEquals(true to false, pokes.poll(2, TimeUnit.SECONDS))
+        readFileBody(h.fromLink.also { assertEquals(LinkFraming.Type.FILE_HEADER, LinkFraming.read(it)!!.type) })
         assertEquals("the skipped file ends the feed", false to false, pokes.poll(2, TimeUnit.SECONDS))
+        assertFalse(h.link.busy)
     }
 
     @Test
