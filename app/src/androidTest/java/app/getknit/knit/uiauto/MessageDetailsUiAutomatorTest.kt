@@ -1,6 +1,7 @@
 package app.getknit.knit.uiauto
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.uiautomator.Direction
 import app.getknit.knit.R
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -23,21 +24,25 @@ class MessageDetailsUiAutomatorTest : SeededUiAutomatorTest() {
     fun longPress_messageInfo_listsReactorsAndOpensAProfile() {
         openGroupChat()
 
-        requireText(SEEDED_BODY).longClick() // the bubble's long-press menu (a Popup)
+        // The chat opens on its newest message and the seeded one sits a few bubbles above it, so on a short
+        // screen it is scrolled out — and a LazyColumn has no node for a row it has not composed.
+        scrollToText(SEEDED_BODY, Direction.UP).longClick() // the bubble's long-press menu (a Popup)
         requireText(str(R.string.chat_action_details)).click() // "Message info"
 
         assertText(str(R.string.message_details_title))
         assertTag("screen_message_details")
+        // Top to bottom, scrolling as we go: the summary, the delivered and waiting-on sections and the
+        // reactors are one LazyColumn, and how much of it fits depends on the screen.
         // The ✓✓ said "delivered"; this is the part it could never say — two of the three others have it,
         // and the third is named rather than silently folded into the tick.
-        assertTag("message_details_delivered_header")
-        assertTag("recipient_row_$SAM")
-        assertTag("recipient_row_$THEO")
+        scrollToTag("message_details_delivered_header")
+        scrollToTag("recipient_row_$SAM")
+        scrollToTag("recipient_row_$THEO")
         // The chip said "👍 3"; this is the part it could never say.
-        assertTag("reactor_row_$SAM")
+        val samReacted = scrollToTag("reactor_row_$SAM")
         assertText(SAM_NAME)
 
-        requireTag("reactor_row_$SAM").click()
+        samReacted.click()
         // The peer profile's top bar carries the contact's name, not the word "Profile" (ADR 2026-09.hknx),
         // so the name is what proves we landed on Sam's profile rather than anyone's.
         assertTag("screen_profile_details")

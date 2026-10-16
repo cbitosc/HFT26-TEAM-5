@@ -10,6 +10,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.services.storage.TestStorage
 import androidx.test.uiautomator.By
 import androidx.test.uiautomator.BySelector
+import androidx.test.uiautomator.Direction
 import androidx.test.uiautomator.UiDevice
 import androidx.test.uiautomator.UiObject2
 import androidx.test.uiautomator.Until
@@ -178,6 +179,44 @@ abstract class SeededUiAutomatorTest {
         }
 
     /**
+     * Scrolls the screen's list in [direction] until a view matching [selector] is on screen, and returns it;
+     * fails the test when it never shows within [timeoutMs]. A `LazyColumn` composes only the rows in its
+     * viewport, so a row below the fold has no node at all and no plain wait can find it — how far down it
+     * sits depends on the device's screen height (a short emulator and a tall FTL phone disagree). The list
+     * itself fills in asynchronously, so a scroll that hits the end without a match waits for content and
+     * tries again rather than failing at once.
+     */
+    protected fun scrollTo(
+        selector: BySelector,
+        label: String,
+        direction: Direction = Direction.DOWN,
+        timeoutMs: Long = DEFAULT_TIMEOUT_MS,
+    ): UiObject2 {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            device.findObject(selector)?.let { return it }
+            val list = device.findObject(By.scrollable(true).pkg(PKG))
+            // scroll() is false once the list cannot move further: let the async content land, then look again.
+            if (list == null || !list.scroll(direction, SCROLL_PERCENT)) {
+                device.wait(Until.findObject(selector), SCROLL_SETTLE_MS)?.let { return it }
+            }
+        }
+        error("no view matching $label within ${timeoutMs}ms of scrolling ${direction.name.lowercase(Locale.ROOT)}")
+    }
+
+    /** [scrollTo] a view with Compose testTag [tag]. */
+    protected fun scrollToTag(
+        tag: String,
+        direction: Direction = Direction.DOWN,
+    ): UiObject2 = scrollTo(byTag(tag), "testTag '$tag'", direction)
+
+    /** [scrollTo] a view whose visible text contains [text]. */
+    protected fun scrollToText(
+        text: String,
+        direction: Direction = Direction.DOWN,
+    ): UiObject2 = scrollTo(By.textContains(text), "text '$text'", direction)
+
+    /**
      * Waits up to [timeoutMs] for a view whose visible text equals [text] **exactly**; returns it or null.
      * Use where a substring match ([waitText]) is ambiguous — a dialog's confirm button often repeats a word
      * from its title (e.g. the "Block" button vs. the "Block this person?" title).
@@ -275,5 +314,11 @@ abstract class SeededUiAutomatorTest {
 
         /** Foreground-window wait after a cold start. */
         const val LAUNCH_TIMEOUT_MS = 15_000L
+
+        /** How much of the list's height one [scrollTo] step moves: under a screen, so no row is skipped over. */
+        private const val SCROLL_PERCENT = 0.6f
+
+        /** How long [scrollTo] waits for content at the end of the list before it tries again. */
+        private const val SCROLL_SETTLE_MS = 1_000L
     }
 }

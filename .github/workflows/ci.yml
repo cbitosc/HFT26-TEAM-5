@@ -172,6 +172,58 @@ jobs:
             app/build/outputs/screenshotTest-results/preview/debug/
           if-no-files-found: ignore
 
+  instrumented:
+    name: Instrumented tests on emulators (advisory)
+    runs-on: ubuntu-latest
+    # The androidTest suites (app/src/androidTest/, .agents/context/testing.md) on the two Gradle Managed Devices
+    # app/build.gradle.kts defines: headless aosp-atd emulators Gradle downloads, boots and tears down itself.
+    # Both APKs are built with -PseedDemo=true — SEED_DEMO is inlined into the test DEX, and the seeded and
+    # UIAutomator suites fail loudly without it — and the BLE pair suite skips itself (it needs a second phone).
+    # pixel7api33 runs everything; the accessibility checks are API 34+ and skip there, so pixel8api34 runs that
+    # one package. Advisory until it has been green here a few times: the hosted runner is slower than any
+    # device the suites were written against, and the shade-driving tests already skip on an emulator.
+    continue-on-error: true
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools # NOT the default `tools platform-tools` — see ACTION PINS above
+      - uses: gradle/actions/setup-gradle@v5
+      # The hosted runner has KVM, but /dev/kvm is not open to the runner user until a udev rule says so; without
+      # it the emulator falls back to software and the boot outlasts Gradle's setup timeout.
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Seeded, UIAutomator and platform suites (pixel7api33)
+        run: >-
+          ./gradlew :app:pixel7api33DebugAndroidTest -PseedDemo=true
+          -Pandroid.testoptions.manageddevices.emulator.gpu=swiftshader_indirect
+          --stacktrace --console=plain
+      - name: Accessibility suite (pixel8api34)
+        if: success() || failure()
+        run: >-
+          ./gradlew :app:pixel8api34DebugAndroidTest -PseedDemo=true
+          -Pandroid.testInstrumentationRunnerArguments.package=app.getknit.knit.a11y
+          -Pandroid.testoptions.manageddevices.emulator.gpu=swiftshader_indirect
+          --stacktrace --console=plain
+      - name: Upload instrumented-test reports and screenshots
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: instrumented-test-report
+          path: |
+            app/build/reports/androidTests/managedDevice/
+            app/build/outputs/androidTest-results/managedDevice/
+            app/build/outputs/managed_device_android_test_additional_output/
+          if-no-files-found: ignore
+
   verify:
     name: detekt & ktlint (advisory)
     runs-on: ubuntu-latest
