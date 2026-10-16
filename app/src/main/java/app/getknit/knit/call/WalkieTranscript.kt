@@ -62,10 +62,12 @@ fun interface TalkPcmTap {
 
 /**
  * A streaming speech model: one [SpeechStream] per burst, fed [SttPolicy.SAMPLE_RATE] mono samples in −1..1 as they
- * arrive. [open] answers null when the model could not run (it would not load, or faulted).
+ * arrive. [open] answers null when the model could not run (it would not load, or faulted). A [continuous] stream — a
+ * live call's captions (C-3.7-5) — always has the model's voice detector split it at pauses; a walkie burst's follows
+ * the transcript's line mode.
  */
 fun interface SpeechToText {
-    suspend fun open(): SpeechStream?
+    suspend fun open(continuous: Boolean): SpeechStream?
 
     /** Lets the model go now, with no stream open on it; the next [open] loads it again. */
     suspend fun release() {}
@@ -239,7 +241,13 @@ data class TranscriptLine(
     val looks: Int = 0,
     val modelMs: Long = 0,
     val mine: Boolean = false,
+    // While [live] is shown: the part of the words the model has closed at a pause and will not change (a live call's
+    // captions, or a burst split at pauses); [live] is then the rest.
+    val settled: String = "",
 ) {
+    /** The words so far while the line is still coming: [settled], then [live]. */
+    val words: String get() = listOf(settled, live).filter { it.isNotBlank() }.joinToString(" ")
+
     sealed interface State {
         /** The burst is playing, or being spoken. */
         data object Listening : State
@@ -530,7 +538,7 @@ class WalkieTranscriber(
     // Under [serial]: the burst's stream, opened on first use; null once the model would not run for it.
     private suspend fun streamOf(b: Burst): SpeechStream? {
         if (b.stream != null || b.failed) return b.stream
-        val opened = timed(b) { speech.open() }
+        val opened = timed(b) { speech.open(continuous = false) }
         b.failed = opened == null
         // Dropped while the model loaded: nothing will finish it.
         if (opened != null && synchronized(lock) { b.dropped || b.session != session }) {

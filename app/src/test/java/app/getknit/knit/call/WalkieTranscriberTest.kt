@@ -37,7 +37,7 @@ class WalkieTranscriberTest {
         val streams = mutableListOf<FakeStream>()
         var releases = 0
 
-        override suspend fun open(): SpeechStream? = if (opens) FakeStream().also { streams += it } else null
+        override suspend fun open(continuous: Boolean): SpeechStream? = if (opens) FakeStream().also { streams += it } else null
 
         override suspend fun release() {
             releases++

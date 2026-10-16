@@ -99,7 +99,7 @@ data class CallSettingsUiState(
 }
 
 /**
- * The walkie transcripts section (docs/VOICE_CALLS.md C-3.11-9): the switch, where the speech model stands on this phone,
+ * The transcripts and captions section (docs/VOICE_CALLS.md C-3.11-9, C-3.7-5): the switch, where the speech model stands on this phone,
  * what it costs to fetch, and whether the route a fetch would take now is mobile data or under Data Saver.
  */
 data class TranscriptsUi(
@@ -119,7 +119,7 @@ sealed interface CallSettingsEvent {
 
 /**
  * The Calls screen (docs/VOICE_CALLS.md §3.14, ADR 2026-10.mr88): "Relay all calls", the person's own STUN and TURN
- * servers and, where the walkie is wired, its transcripts and their speech model (C-3.11-9). The switches write as they
+ * servers and the walkie's transcripts and live calls' captions with their speech model (C-3.11-9, C-3.7-5). The switches write as they
  * are touched, as every Settings switch does; the fields are a draft, loaded once and written by Save, and a Test tries
  * the draft before it is saved.
  */
@@ -127,7 +127,7 @@ class CallSettingsViewModel(
     private val settings: SettingsStore,
     private val ownIce: OwnIceStore,
     private val probe: IceProbe,
-    // The walkie transcript's speech model and switch; null, and no section, in a build without the walkie.
+    // The speech model and the transcripts switch; null, and no section, where they are not wired.
     private val stt: SttModelStore? = null,
     private val transcriptStore: TranscriptStore? = null,
 ) : ViewModel() {
@@ -148,7 +148,7 @@ class CallSettingsViewModel(
             CallSettingsUiState(relayAll = relayAll, saved = saved, draft = draft, testing = testing, result = result)
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CallSettingsUiState())
 
-    /** The transcripts section; null without the walkie. The route is read again as the model's state moves. */
+    /** The transcripts section; null where it is not wired. The route is read again as the model's state moves. */
     val transcripts: StateFlow<TranscriptsUi?> =
         (
             if (stt == null || transcriptStore == null) {

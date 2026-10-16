@@ -3,6 +3,7 @@ package app.getknit.knit.ui.call
 import android.content.Context
 import android.media.AudioManager
 import android.media.MediaRecorder
+import app.getknit.knit.call.CallCaptioner
 import app.getknit.knit.call.CallMedia
 import app.getknit.knit.call.CallSession
 import app.getknit.knit.call.CaptureHealth
@@ -26,6 +27,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
 import org.webrtc.AudioSource
 import org.webrtc.AudioTrack
+import org.webrtc.AudioTrackSink
 import org.webrtc.CandidatePairChangeEvent
 import org.webrtc.DataChannel
 import org.webrtc.IceCandidate
@@ -38,6 +40,7 @@ import org.webrtc.NetworkMonitor
 import org.webrtc.PeerConnection
 import org.webrtc.PeerConnectionFactory
 import org.webrtc.RTCStatsCollectorCallback
+import org.webrtc.RtpReceiver
 import org.webrtc.RtpTransceiver
 import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
@@ -77,6 +80,8 @@ internal class WebRtcCallMedia(
     private val link: StateFlow<DirectLink?>,
     private val capture: CaptureHealth,
     private val log: (String) -> Unit,
+    // The live call's captions (C-3.7-5), fed the peer's decoded audio; null where calls carry none.
+    private val captions: CallCaptioner? = null,
 ) : CallMedia,
     IceProbe {
     /** One audio module and the factory over it, for one capture profile. */
@@ -116,14 +121,20 @@ internal class WebRtcCallMedia(
     ): CallSession {
         val a = audioFor(capture.choice.value.profile)
         // A glare's replacement opens beside the dropped session on the same module: the call is the same call.
-        if (open.isEmpty()) a.tap.begin(a.profile.name.lowercase(), canSwitch = a.profile == CaptureProfile.STANDARD)
-        return WebRtcSession(a.factory, a.tap, servers, relayOnly, direct, link, events, scope, log, path, onClosed = ::closed)
+        if (open.isEmpty()) {
+            a.tap.begin(a.profile.name.lowercase(), canSwitch = a.profile == CaptureProfile.STANDARD)
+            captions?.begin()
+        }
+        return WebRtcSession(a.factory, a.tap, servers, relayOnly, direct, link, events, scope, log, path, captions, onClosed = ::closed)
             .also(open::add)
     }
 
     private fun closed(session: WebRtcSession) {
         open.remove(session)
-        if (open.isEmpty()) audio?.tap?.end()
+        if (open.isEmpty()) {
+            audio?.tap?.end()
+            captions?.end()
+        }
     }
 
     /**
@@ -361,6 +372,7 @@ private class WebRtcSession(
     private val scope: CoroutineScope,
     private val log: (String) -> Unit,
     private val path: DefaultPath,
+    private val captions: CallCaptioner?,
     private val onClosed: (WebRtcSession) -> Unit,
 ) : CallSession {
     private val lock = Any()
@@ -384,6 +396,10 @@ private class WebRtcSession(
 
     private val source: AudioSource = factory.createAudioSource(MediaConstraints())
     private val track: AudioTrack = factory.createAudioTrack("knit-audio", source)
+
+    // The peer's track and the sink on it that hands its decoded audio to the captions (C-3.7-5), under [lock]: taken
+    // off before the connection is disposed, so no audio thread calls into a closed session.
+    private var heard: Pair<AudioTrack, AudioTrackSink>? = null
 
     private val observer =
         object : PeerConnection.Observer {
@@ -447,6 +463,11 @@ private class WebRtcSession(
             override fun onDataChannel(channel: DataChannel) = Unit
 
             override fun onRenegotiationNeeded() = Unit
+
+            override fun onAddTrack(
+                receiver: RtpReceiver,
+                streams: Array<out MediaStream>,
+            ) = listen(receiver)
         }
 
     private val pc: PeerConnection
@@ -488,6 +509,27 @@ private class WebRtcSession(
         )
         // Also fires at once with the current default: the first call of a process gets its preference here.
         pathWatch = if (followPath) path.watch(::onDefaultNetwork) else null
+    }
+
+    // The peer's audio track has arrived: its decoded audio, as it plays, to a captions source of this session's own.
+    // Called on the signaling thread; the sink is called on the audio thread, every 10 ms, and must not wait.
+    private fun listen(receiver: RtpReceiver) {
+        val captions = captions ?: return
+        val remote = receiver.track() as? AudioTrack ?: return
+        val tap = captions.source()
+        val sink =
+            AudioTrackSink { data, bits, rate, channels, _, _ ->
+                // 16-bit PCM is all the tap reads; anything else is skipped rather than misread.
+                if (bits == PCM_BITS) tap.pcm(data, rate, channels)
+            }
+        // Added under the lock, so a close either finds it to take off or has already closed and it is never added.
+        val replaced =
+            synchronized(lock) {
+                if (closed) return
+                remote.addSink(sink)
+                heard.also { heard = remote to sink }
+            }
+        replaced?.let { (track, old) -> track.removeSink(old) }
     }
 
     override suspend fun offer(): String? {
@@ -616,6 +658,7 @@ private class WebRtcSession(
         gathered.complete(Unit)
         // What this phone held of the TURN server's quota when the call ended (C-7.6-26).
         log("webrtc: ${relays.summary()}")
+        synchronized(lock) { heard.also { heard = null } }?.let { (remote, sink) -> remote.removeSink(sink) }
         // dispose() closes the connection and its senders; the source is ours to free.
         pc.dispose()
         source.dispose()
@@ -703,6 +746,9 @@ private class WebRtcSession(
         const val GATHER_MS = 1_500L
         const val LATE_WINDOW_MS = 4_000L
         const val STATS_MS = 2_000L
+
+        // The sample width the captions' tap reads (libwebrtc's playout is 16-bit).
+        const val PCM_BITS = 16
 
         fun typeOf(candidate: IceCandidate): String = typeOf(candidate.sdp)
 

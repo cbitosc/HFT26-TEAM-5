@@ -194,3 +194,26 @@ C-3.11-9). It is debug-only, as the walkie is, and nothing reaches the wire.
   (`medium-streaming-en/quantized_26_08_21`), pins from `scripts/stt-model.py`, and files rehosted under getknit.app.
   A phone holding the Small model has it swept by `SttModelStore.start` (it is not the shipped id) and sees the model
   as absent until the Medium one is fetched.
+- **Amendment 2026-10-16: live calls are captioned too, split at pauses.** A live call's screen gains a CC button
+  (Mute, Captions, the audio route, then End, in one row so the caller's card keeps its room), off by default and
+  remembered from call to call (`TranscriptStore.liveCaptions`), drawn only while the Calls screen's switch — now
+  "Transcripts and captions" — is on. On, `LiveCaptions` fills the card slot with the peer's words as they play
+  (docs/VOICE_CALLS.md C-3.7-5); the walkie's card and the live captions share the line rendering (`Streaming`, a
+  line's settled words as they stay and the rest dimmed, `TranscriptLine.settled`) and the model panel. The audio is
+  the received track's, through `AudioTrack.addSink` on a sink `WebRtcSession.listen` adds under its lock and takes off
+  before `pc.dispose()`; `CallCaptioner` takes the newest session's `source()` alone, begun and ended with the media's
+  first and last session. A live call's streams always split at pauses (`SpeechToText.open(continuous = true)`;
+  `MoonshineSpeech` keys its lease on the mode, so a walkie after a live call reloads the model): `WHOLE` re-decodes
+  the open line on every look, which a walkie bounds by its talk button and a live call cannot, and the 2026-10-14
+  measures had `WHOLE` at 101–132 % of real time on Small against `SPLIT`'s 83–93 %. Each run ends at the first look
+  that finds every stretch closed, its words a settled line and a fresh stream taking what follows
+  (`CaptionPolicy.step`); a run silent for 30 s is dropped, one talking at 60 s finished where it stands. Captions stop
+  for the call, with a note, when over 8 s of audio waits on an open stream (`CaptionStatus.BEHIND`) or the model will
+  not run (`FAILED`); CC off and on retries. The phone's own voice is not captioned: `setSamplesReadyCallback` hands the
+  recorded PCM before WebRTC's echo canceller, so on the loudspeaker (and on the `VOICE_RECOGNITION` profile, ADR
+  2026-10.kw29) it carries the peer's words too, and a second stream would halve the cadence. On the earpiece the card
+  says captions read better on the loudspeaker; the model runs on regardless. The STT graph moved from `WALKIE_WIRED`
+  to `CALLS_WIRED` (the runtime was already packaged wherever calls are). Medium is about twice Small's model time, so
+  continuous speech may well exceed real time even split: the trial owed is a 10-minute loudspeaker call per lab phone
+  with CC on, reading `captions:` in the log and `…debug.STT` `captions.status`, plus `pcm --ez continuous true`
+  beside the plain `pcm` on the same clip for the two modes' cost.

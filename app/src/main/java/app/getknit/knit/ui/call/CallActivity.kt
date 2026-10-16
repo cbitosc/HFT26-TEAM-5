@@ -43,8 +43,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ClosedCaption
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
+import androidx.compose.material.icons.outlined.ClosedCaptionDisabled
 import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.outlined.Hub
 import androidx.compose.material.icons.outlined.Insights
@@ -98,11 +100,14 @@ import androidx.lifecycle.lifecycleScope
 import app.getknit.knit.MainActivity
 import app.getknit.knit.R
 import app.getknit.knit.call.CallAudioRoute
+import app.getknit.knit.call.CallCaptioner
 import app.getknit.knit.call.CallKind
 import app.getknit.knit.call.CallManager
 import app.getknit.knit.call.CallPhase
 import app.getknit.knit.call.CallRouting
 import app.getknit.knit.call.CallState
+import app.getknit.knit.call.CaptionStatus
+import app.getknit.knit.call.Captions
 import app.getknit.knit.call.CaptureWatch
 import app.getknit.knit.call.SttModelState
 import app.getknit.knit.call.SystemCallSync
@@ -159,8 +164,9 @@ class CallActivity :
     // Null in a build with the walkie off (`di/CallWiring.WALKIE_WIRED`): no call is ever a walkie there.
     private val walkie: WalkieTalk? = getKoin().getOrNull()
 
-    // The walkie's transcript and its speech model; null where the walkie is.
+    // The walkie's transcript, null where the walkie is; a live call's captions and the speech model both use.
     private val transcriber: WalkieTranscriber? = getKoin().getOrNull()
+    private val captioner: CallCaptioner? = getKoin().getOrNull()
     private val stt: SttModelStore? = getKoin().getOrNull()
     private val transcriptStore: TranscriptStore? = getKoin().getOrNull()
     private var pendingAnswer: String? = null
@@ -269,6 +275,9 @@ class CallActivity :
         // Off until read, so the card never flashes up on a phone that switched transcripts off or closed the offer.
         val transcriptsOn by (transcriptStore?.enabled ?: NO_SWITCH).collectAsState(initial = false)
         val offerDismissed by (transcriptStore?.offerDismissed ?: NO_SWITCH).collectAsState(initial = true)
+        val captionsOn by (transcriptStore?.liveCaptions ?: NO_SWITCH).collectAsState(initial = false)
+        val captions by (captioner?.captions ?: NO_CAPTIONS).collectAsState()
+        val earpiece = routing?.current?.kind == CallAudioRoute.Kind.EARPIECE
         // Read again as the model's state moves: a tap on Download is when the route matters.
         val metered = remember(model) { stt?.metered() == true }
         CallScreen(
@@ -305,6 +314,13 @@ class CallActivity :
             onSttDownload = { stt?.download() },
             onSttCancel = { stt?.cancel() },
             onSttDismiss = { lifecycleScope.launch { transcriptStore?.dismissOffer() } },
+            // The CC button only with transcripts switched on, its choice remembered from call to call (C-3.7-5).
+            captions =
+                stt
+                    ?.takeIf { transcriptsOn && captioner != null }
+                    ?.let { store -> CaptionsUi(captions, model, store.model.bytes, metered, earpiece) },
+            captionsOn = captionsOn,
+            onCaptions = { on -> lifecycleScope.launch { transcriptStore?.setLiveCaptions(on) } },
         )
     }
 
@@ -380,6 +396,7 @@ private val NO_LINK = MutableStateFlow<TalkLink?>(null)
 private val NO_LINES = MutableStateFlow<List<TranscriptLine>>(emptyList())
 private val NO_MODEL = MutableStateFlow<SttModelState>(SttModelState.Absent)
 private val NO_SWITCH = emptyFlow<Boolean>()
+private val NO_CAPTIONS = MutableStateFlow(Captions())
 internal val ToggleSize = 64.dp
 private const val RING_MS = 1_800
 private const val RING_ALPHA = 0.28f
@@ -434,6 +451,10 @@ internal fun CallScreen(
     onSttDownload: () -> Unit = {},
     onSttCancel: () -> Unit = {},
     onSttDismiss: () -> Unit = {},
+    // A live call's captions (C-3.7-5): null draws no CC button; [captionsOn] is the button, [onCaptions] its tap.
+    captions: CaptionsUi? = null,
+    captionsOn: Boolean = false,
+    onCaptions: (Boolean) -> Unit = {},
 ) {
     val phase = state?.phase
     var showStats by rememberSaveable { mutableStateOf(statsShown) }
@@ -445,9 +466,11 @@ internal fun CallScreen(
             walkieUp -> walkieStats?.let { s -> { m -> WalkieDiagnostics(s, m) } }
             else -> stats?.let { s -> { m -> CallDiagnostics(s, m, capture) } }
         }
-    // With the diagnostics off, a walkie session shows what the peer said in the card's place (C-3.11-9).
+    // With the diagnostics off, a walkie session shows what the peer said in the card's place (C-3.11-9), and a live
+    // call with its CC button on shows its captions there (C-3.7-5).
     val transcribed = transcript?.takeIf { walkieUp && !showStats }
-    val card = diagnostics != null || transcribed != null
+    val captioned = captions?.takeIf { captionsOn && state?.walkie != true && phase in MEDIA_UP && diagnostics == null }
+    val card = diagnostics != null || transcribed != null || captioned != null
     Surface(modifier = modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
         BoxWithConstraints(Modifier.fillMaxSize().safeDrawingPadding().padding(horizontal = 24.dp, vertical = 16.dp)) {
             // With the card up, a phone too short for the stacked face puts it beside the name instead.
@@ -473,6 +496,10 @@ internal fun CallScreen(
                     Box(Modifier.weight(1f).fillMaxWidth().padding(vertical = 16.dp)) {
                         WalkieTranscript(transcribed, name, onSttDownload, onSttCancel, Modifier.fillMaxSize(), onSttDismiss)
                     }
+                } else if (captioned != null) {
+                    Box(Modifier.weight(1f).fillMaxWidth().padding(vertical = 16.dp)) {
+                        LiveCaptions(captioned, name, onSttDownload, onSttCancel, onOff = { onCaptions(false) }, Modifier.fillMaxSize())
+                    }
                 } else if (diagnostics != null) {
                     // The room between the face and the controls; a short screen scrolls the card rather than clip it.
                     Box(Modifier.weight(1f).fillMaxWidth().padding(vertical = 16.dp), contentAlignment = Alignment.Center) {
@@ -489,7 +516,19 @@ internal fun CallScreen(
                 if (walkieUp) {
                     WalkieControls(state, name, talk, link, routing, onHangUp, onRoute, onTalk, onTalkSend, onTalkCancel)
                 } else {
-                    Controls(state, routing, onAnswer, onDecline, onHangUp, onMute, onRoute, onCallBack, onClose)
+                    Controls(
+                        state,
+                        routing,
+                        onAnswer,
+                        onDecline,
+                        onHangUp,
+                        onMute,
+                        onRoute,
+                        onCallBack,
+                        onClose,
+                        captionsOn = captionsOn.takeIf { captions != null },
+                        onCaptions = onCaptions,
+                    )
                 }
             }
         }
@@ -719,6 +758,9 @@ private fun Controls(
     onRoute: (CallAudioRoute) -> Unit,
     onCallBack: () -> Unit,
     onClose: () -> Unit,
+    // The CC button's state, or null for no button (C-3.7-5).
+    captionsOn: Boolean? = null,
+    onCaptions: (Boolean) -> Unit = {},
 ) {
     // A fixed band, so the face and name above don't jump when the controls change or go.
     Box(Modifier.fillMaxWidth().heightIn(min = 112.dp), contentAlignment = Alignment.BottomCenter) {
@@ -734,6 +776,24 @@ private fun Controls(
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
                 CallAction("Decline", Icons.Filled.CallEnd, HangUpRed, onDecline)
                 CallAction("Answer", Icons.Filled.Call, AnswerGreen, onAnswer)
+            }
+        } else if (captionsOn != null) {
+            // Three toggles, then the hang-up at the end of the row: one band as high as two buttons', so the caller's
+            // card above keeps its room.
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.Bottom,
+            ) {
+                CallToggle("Mute", if (state.muted) Icons.Filled.MicOff else Icons.Filled.Mic, state.muted, onMute)
+                CallToggle(
+                    "Captions",
+                    if (captionsOn) Icons.Filled.ClosedCaption else Icons.Outlined.ClosedCaptionDisabled,
+                    captionsOn,
+                    onCaptions,
+                )
+                AudioRouteButton(routing, onRoute)
+                CallAction("End", Icons.Filled.CallEnd, HangUpRed, onHangUp)
             }
         } else {
             Row(
@@ -1259,6 +1319,8 @@ private fun PreviewCall(
     statsShown: Boolean = transcript == null && (stats != null || walkieStats != null),
     connected: Boolean = phase == CallPhase.Connected || phase == CallPhase.Reconnecting,
     unreachable: Boolean = false,
+    captions: CaptionsUi? = null,
+    captionsOn: Boolean = captions != null,
 ) = KnitPreview {
     CallScreen(
         state =
@@ -1294,6 +1356,8 @@ private fun PreviewCall(
         locked = locked,
         statsShown = statsShown,
         transcript = transcript,
+        captions = captions,
+        captionsOn = captionsOn,
     )
 }
 
@@ -1352,7 +1416,7 @@ fun CallScreenConnectedPreview() = PreviewCall(CallPhase.Connected, route = "rel
 @Preview(name = "Connected, on a headset", widthDp = 411, heightDp = 891)
 @Composable
 fun CallScreenHeadsetPreview() =
-    PreviewCall(CallPhase.Connected, route = "host/host/wifi-direct", routing = PREVIEW_ON_BUDS, caller = PREVIEW_CALLER)
+    PreviewCall(CallPhase.Connected, route = "srflx/srflx", routing = PREVIEW_ON_BUDS, caller = PREVIEW_CALLER)
 
 @Preview(name = "Connected, breaking up", widthDp = 411, heightDp = 891)
 @Preview(name = "Connected, breaking up, dark", widthDp = 411, heightDp = 891, uiMode = Configuration.UI_MODE_NIGHT_YES)
@@ -1415,7 +1479,7 @@ fun CallScreenRelayDiagnosticsPreview() =
 fun CallScreenDiagnosticsPreview() =
     PreviewCall(
         CallPhase.Connected,
-        route = "host/host/wifi-direct",
+        route = "srflx/srflx",
         stats =
             CallStats(
                 localType = "host",
@@ -1558,6 +1622,84 @@ fun CallScreenWalkieTranscriptDownloadingPreview() =
                 lines = emptyList(),
                 model = SttModelState.Downloading(17_400_000, PREVIEW_MODEL_BYTES),
                 modelBytes = PREVIEW_MODEL_BYTES,
+                metered = false,
+            ),
+    )
+
+@Preview(name = "Live, captions", widthDp = 411, heightDp = 891)
+@Preview(name = "Live, captions, small", widthDp = 360, heightDp = 640)
+@Preview(name = "Live, captions, dark", widthDp = 411, heightDp = 891, uiMode = Configuration.UI_MODE_NIGHT_YES)
+@Composable
+fun CallScreenCaptionsPreview() =
+    PreviewCall(
+        CallPhase.Connected,
+        route = "srflx/srflx",
+        routing = PREVIEW_ON_SPEAKER,
+        captions =
+            CaptionsUi(
+                Captions(
+                    listOf(
+                        TranscriptLine(0, PREVIEW_NOW - 40_000, TranscriptLine.State.Text("Hey, can you hear me now?")),
+                        TranscriptLine(1, PREVIEW_NOW - 31_000, TranscriptLine.State.Text("I'm at the north gate, by the food trucks.")),
+                        TranscriptLine(
+                            2,
+                            PREVIEW_NOW - 6_000,
+                            TranscriptLine.State.Listening,
+                            settled = "The blue one with the long line.",
+                            live = "I'll wait here until",
+                        ),
+                    ),
+                ),
+                SttModelState.Ready,
+                PREVIEW_MODEL_BYTES,
+                metered = false,
+            ),
+    )
+
+@Preview(name = "Live, captions off", widthDp = 411, heightDp = 891)
+@Composable
+fun CallScreenCaptionsOffPreview() =
+    PreviewCall(
+        CallPhase.Connected,
+        route = "relay/srflx",
+        caller = PREVIEW_CALLER,
+        captions = CaptionsUi(Captions(), SttModelState.Ready, PREVIEW_MODEL_BYTES, metered = false),
+        captionsOn = false,
+    )
+
+@Preview(name = "Live, captions, earpiece", widthDp = 411, heightDp = 891)
+@Composable
+fun CallScreenCaptionsEarpiecePreview() =
+    PreviewCall(
+        CallPhase.Connected,
+        route = "relay/srflx",
+        captions = CaptionsUi(Captions(), SttModelState.Ready, PREVIEW_MODEL_BYTES, metered = false, earpiece = true),
+    )
+
+@Preview(name = "Live, captions, no model", widthDp = 411, heightDp = 891)
+@Composable
+fun CallScreenCaptionsNoModelPreview() =
+    PreviewCall(
+        CallPhase.Connected,
+        route = "relay/srflx",
+        captions = CaptionsUi(Captions(), SttModelState.Absent, PREVIEW_MODEL_BYTES, metered = true, earpiece = true),
+    )
+
+@Preview(name = "Live, captions, behind", widthDp = 411, heightDp = 891)
+@Composable
+fun CallScreenCaptionsBehindPreview() =
+    PreviewCall(
+        CallPhase.Connected,
+        route = "srflx/srflx",
+        routing = PREVIEW_ON_SPEAKER,
+        captions =
+            CaptionsUi(
+                Captions(
+                    listOf(TranscriptLine(0, PREVIEW_NOW - 20_000, TranscriptLine.State.Text("So the plan is still on for Saturday?"))),
+                    CaptionStatus.BEHIND,
+                ),
+                SttModelState.Ready,
+                PREVIEW_MODEL_BYTES,
                 metered = false,
             ),
     )

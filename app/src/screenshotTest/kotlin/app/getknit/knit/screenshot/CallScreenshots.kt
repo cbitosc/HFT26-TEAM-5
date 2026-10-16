@@ -8,6 +8,11 @@ import app.getknit.knit.ui.call.CallBarIncomingPreview
 import app.getknit.knit.ui.call.CallBarRingingPreview
 import app.getknit.knit.ui.call.CallScreenCallerContextPreview
 import app.getknit.knit.ui.call.CallScreenCallerLockedPreview
+import app.getknit.knit.ui.call.CallScreenCaptionsBehindPreview
+import app.getknit.knit.ui.call.CallScreenCaptionsEarpiecePreview
+import app.getknit.knit.ui.call.CallScreenCaptionsNoModelPreview
+import app.getknit.knit.ui.call.CallScreenCaptionsOffPreview
+import app.getknit.knit.ui.call.CallScreenCaptionsPreview
 import app.getknit.knit.ui.call.CallScreenConnectedPreview
 import app.getknit.knit.ui.call.CallScreenDiagnosticsPreview
 import app.getknit.knit.ui.call.CallScreenDroppedPreview
@@ -148,6 +153,31 @@ fun CallScreenWalkieTranscriptNoModel() = CallScreenWalkieTranscriptNoModelPrevi
 @ScreenShots
 @Composable
 fun CallScreenWalkieTranscriptDownloading() = CallScreenWalkieTranscriptDownloadingPreview()
+
+@PreviewTest
+@ScreenShots
+@Composable
+fun CallScreenCaptions() = CallScreenCaptionsPreview()
+
+@PreviewTest
+@ScreenShots
+@Composable
+fun CallScreenCaptionsOff() = CallScreenCaptionsOffPreview()
+
+@PreviewTest
+@ScreenShots
+@Composable
+fun CallScreenCaptionsEarpiece() = CallScreenCaptionsEarpiecePreview()
+
+@PreviewTest
+@ScreenShots
+@Composable
+fun CallScreenCaptionsNoModel() = CallScreenCaptionsNoModelPreview()
+
+@PreviewTest
+@ScreenShots
+@Composable
+fun CallScreenCaptionsBehind() = CallScreenCaptionsBehindPreview()
 
 @PreviewTest
 @ComponentShots

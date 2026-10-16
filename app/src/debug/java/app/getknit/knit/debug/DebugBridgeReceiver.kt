@@ -20,6 +20,7 @@ import app.getknit.knit.badge.BadgeKeys
 import app.getknit.knit.badge.Badges
 import app.getknit.knit.badge.PeerBadges
 import app.getknit.knit.call.CallAudioRoute
+import app.getknit.knit.call.CallCaptioner
 import app.getknit.knit.call.CallKind
 import app.getknit.knit.call.CallManager
 import app.getknit.knit.call.CallPhase
@@ -2667,7 +2668,8 @@ class DebugBridgeReceiver :
      * (release the model now) do what they say. `pcm --es path <file>` streams (in the background; poll `status`) a raw 16 kHz mono s16le file through the
      * model in 100 ms chunks, as fast as it will take them, looking as a burst does, and replies with the text, the looks,
      * the model's time over it all and the time its last look took — the time from a burst's end to its text — with no
-     * call and no radio. `loop --es path <file>` sends that file the whole walkie way but the radio — the recorder's Opus
+     * call and no radio; `--ez continuous true` opens the stream a live call's captions do (C-3.7-5), split at pauses,
+     * for the cost of the two side by side. `status` also dumps the live call's captions (`captions`). `loop --es path <file>` sends that file the whole walkie way but the radio — the recorder's Opus
      * encoder at 8 kbps, the player's decoder and its tap, the transcriber — as burst [LOOP_BURST] of a fresh transcript,
      * in real time, and replies at once; poll `status` for its two lines, the spoken one (`mine`, the file before Opus)
      * and the heard one (after it), whose texts differ by the codec, and whose `live` shows the text while it streams. It
@@ -2677,7 +2679,7 @@ class DebugBridgeReceiver :
      */
     @Suppress("CyclomaticComplexMethod", "ReturnCount") // a flat dispatch over the ops
     private suspend fun handleStt(intent: Intent): JSONObject {
-        val store = getKoin().getOrNull<SttModelStore>() ?: return reply("error", "this build wires no walkie")
+        val store = getKoin().getOrNull<SttModelStore>() ?: return reply("error", "this build wires no calls")
         val speech = getKoin().get<MoonshineSpeech>()
         // A broadcast can wake a fresh process before its own start has read the disk.
         withContext(Dispatchers.IO) { store.start() }
@@ -2764,12 +2766,14 @@ class DebugBridgeReceiver :
                 val file = intent.getStringExtra(EXTRA_PATH)?.let(::File) ?: return reply("error", "missing 'path' extra")
                 if (store.paths() == null) return reply("error", "the model isn't installed")
                 val samples = withContext(Dispatchers.IO) { readPcm16(file) } ?: return reply("error", "can't read $file")
+                // `--ez continuous true`: the stream a live call's captions open (C-3.7-5), split at every pause.
+                val continuous = intent.getBooleanExtra("continuous", false)
                 // Off the broadcast: a long clip outlasts its timeout (an ANR). The result lands in `status`'s `pcm`.
                 pcmRun?.cancel()
                 lastPcm = JSONObject().put("status", "running").put("path", file.path)
                 pcmRun =
                     getKoin().get<CoroutineScope>().launch(Dispatchers.Default) {
-                        lastPcm = streamPcm(speech, samples).put("path", file.path)
+                        lastPcm = streamPcm(speech, samples, continuous).put("path", file.path).put("continuous", continuous)
                     }
                 return reply("ok", "streaming $file; poll status for `pcm`")
             }
@@ -2793,6 +2797,11 @@ class DebugBridgeReceiver :
                     ?.lines
                     ?.value
                     ?.let(::transcriptJson) ?: JSONObject.NULL,
+            ).put(
+                "captions",
+                getKoin().getOrNull<CallCaptioner>()?.captions?.value?.let { captions ->
+                    JSONObject().put("status", captions.status.name).put("lines", transcriptJson(captions.lines))
+                } ?: JSONObject.NULL,
             )
     }
 
@@ -2822,9 +2831,10 @@ class DebugBridgeReceiver :
     private suspend fun streamPcm(
         speech: MoonshineSpeech,
         samples: FloatArray,
+        continuous: Boolean,
     ): JSONObject {
         val began = System.currentTimeMillis()
-        val stream = speech.open() ?: return reply("error", "the model would not run")
+        val stream = speech.open(continuous) ?: return reply("error", "the model would not run")
         val gate = PassGate()
         var looks = 0
         var modelMs = 0L
@@ -2875,6 +2885,7 @@ class DebugBridgeReceiver :
                         .put("state", if (state is TranscriptLine.State.Text) "Text" else state.toString())
                         .put("text", (state as? TranscriptLine.State.Text)?.text ?: JSONObject.NULL)
                         .put("live", line.live)
+                        .put("settled", line.settled)
                         .put("audioMs", line.audioMs)
                         .put("tookMs", line.tookMs)
                         .put("looks", line.looks)

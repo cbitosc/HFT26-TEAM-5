@@ -53,8 +53,8 @@ internal class MoonshineSpeech(
     private var leaseKey: Pair<Int, LineMode>? = null
 
     /**
-     * How a burst becomes lines ([LineMode]). Read when the model loads, so a change makes the next burst reload it; the
-     * debug bridge sets it for an A/B.
+     * How a walkie burst becomes lines ([LineMode]). Read when the model loads, so a change makes the next burst reload
+     * it; the debug bridge sets it for an A/B. A live call's captions always split at pauses (C-3.7-5), whatever it says.
      */
     @Volatile
     var lines = LineMode.WHOLE
@@ -66,8 +66,8 @@ internal class MoonshineSpeech(
     @Volatile
     var keyterms: List<String> = emptyList()
 
-    override suspend fun open(): SpeechStream? {
-        val current = current() ?: return null
+    override suspend fun open(continuous: Boolean): SpeechStream? {
+        val current = current(if (continuous) LineMode.SPLIT else lines) ?: return null
         return current.use { engine ->
             engine ?: return@use null
             listen(engine)
@@ -162,9 +162,10 @@ internal class MoonshineSpeech(
         }
     }
 
-    // The lease over the model on disk now, made afresh when the store's files changed; null with no model there.
-    private fun current(): ModelLease<Engine>? {
-        val key = store.generation to lines
+    // The lease over the model on disk now for [mode], made afresh when the store's files or the mode changed (a walkie
+    // and a live call build it differently); null with no model there.
+    private fun current(mode: LineMode): ModelLease<Engine>? {
+        val key = store.generation to mode
         val files = store.paths() ?: return null
         val model = store.model
         val dir = files.values.firstOrNull()?.parentFile ?: return null

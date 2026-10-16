@@ -554,11 +554,39 @@ Each side sends an `OFFER` to the other before seeing the other's offer.
 | **C-3.7-2** | The remote DTLS certificate MUST match the `a=fingerprint` in the SDP that arrived in that peer's sealed `CallPayload`, and SDP from any other source MUST NOT be applied.                              |
 | **C-3.7-3** | With "relay all calls" on, a client sets `iceTransportPolicy = relay` **and** MUST strip its own host and server-reflexive candidates from the SDP it sends. Otherwise its own IP still reaches the peer. |
 | **C-3.7-4** | Opus is mandatory; `bundle` and `rtcp-mux` are required.                                                                                                                                                 |
+| **C-3.7-5** | *(Experimental.)* A client MAY caption the peer's audio on the phone as it plays (below). Nothing about it is on the wire, and the text MUST NOT be sent, stored, logged or kept past the next call. |
 
 > **"Relay all calls" on Android** is a switch on the Calls screen (Settings → Calls), off by default, shown only by a
 > build that wires calls. It also keeps every call off a Wi-Fi Direct group (§3.10), whose pair would show a neighbour
 > the phone's address, and leaves the walkie (§3.11) alone, which carries no address. A call connects only where a TURN
 > server is available: one a spool issues, or the person's own (§3.14).
+>
+> **Captions on Android (C-3.7-5; ADR 2026-10.nz3g, its 2026-10-16 amendment).** Where `BuildConfig.CALLS` is on, a
+> live call's screen has a CC button beside Mute and the audio route, off until the person turns it on and remembered
+> from call to call (`TranscriptStore.liveCaptions`), drawn only while the Calls screen's "Transcripts and captions"
+> switch is on. On, the peer's words show in the card slot as they play, large, with no speaker or times: what the
+> model has settled as it will stay, and its guess at the rest dimmed. This phone's own voice is not captioned: the
+> module's recorded PCM is before WebRTC's echo canceller, so on the loudspeaker it holds the peer's voice too.
+>
+> - **The audio.** The peer's received track, through `AudioTrack.addSink` (`WebRtcCallMedia`), decoded and before the
+>   mix: 16-bit PCM at the track's rate, averaged down to 16 kHz (`BurstPcm`) on the audio thread and fed to the model
+>   off it (`CallCaptioner`). The sink comes off before the connection is disposed. Each session has its own source and
+>   only the newest is taken, so a glare's two sessions never double the audio.
+> - **Split at pauses.** A live call has no talk button to bound its speech, so its streams always run the model's voice
+>   detector (`SpeechToText.open(continuous = true)`), whatever the walkie's line mode. A look then decodes only the
+>   stretch still open, where a whole-line stream would decode up to 30 s again every half second, and silence costs the
+>   detector alone. A look that finds every stretch closed ends the run: its words become a settled line and a fresh
+>   stream takes the audio after (`CaptionPolicy.step`). A run that has heard nothing for 30 s is let go unheard; one
+>   still talking at 60 s is finished where it stands. A line appears with its first words, so a quiet call shows none.
+> - **When it stops.** More than 8 s of audio waiting for the model, once its stream is open, means the phone cannot keep
+>   up: the captions stop for the call and say so (`CaptionStatus.BEHIND`), keeping the lines they had. A model that
+>   will not run stops them the same way (`FAILED`). Turning CC off and on tries again. While the model is not on the
+>   phone the audio is dropped and the card offers the download, its Not now turning CC off.
+> - **The earpiece.** The screen is dark at the ear (§3.13), so on the earpiece the card says captions read better on
+>   the loudspeaker or a headset. The model keeps running, so the last line is there when the phone comes away.
+> - **The model** is the walkie's (C-3.11-9): the same download, lease, guard, key terms and one call at a time. It is
+>   built split for a live call and whole for a walkie, so a walkie after a live call reloads it. It is let go when the
+>   call's last media session closes.
 >
 > **Why C-3.7-2 is the whole E2E argument.** The SDP is authenticated by the frame signature and the DM
 > ratchet, so its fingerprint is the peer's own. DTLS then proves that whoever terminates the media
@@ -809,8 +837,9 @@ an experiment behind `BuildConfig.WALKIE` (`-Pwalkie=`, on in debug and off in r
     polite live region) or why not (no speech, no model, failed). While the model is not on the phone, the card says
     what it costs, flags a metered or Data Saver route, and offers Download, Cancel or Try again, and Dismiss: once
     dismissed (`TranscriptStore.offerDismissed`), no call draws the card while the model is absent.
-  - **The switch.** The Calls screen's "Walkie transcripts" (`TranscriptStore.enabled`, on by default) turns
-    the whole thing off: no burst is taken, nothing reaches the model, and no card is drawn.
+  - **The switch.** The Calls screen's "Transcripts and captions" (`TranscriptStore.enabled`, on by default) turns
+    the whole thing off: no burst is taken, nothing reaches the model, and no card is drawn. It governs a live call's
+    captions too (C-3.7-5).
   - **The names.** As a call begins, the model is given a short list of names to listen for (`SttKeytermFeed`,
     `sttKeyterms`; Moonshine's key-term biasing at its default strength): the peer's and this phone's names, the latest
     threads' (DMs and groups), and the capitalised words the thread with the peer keeps using — at most 40, ranked in

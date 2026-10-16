@@ -64,8 +64,8 @@ import org.koin.androidx.compose.koinViewModel
 
 /**
  * Calls (experimental, docs/VOICE_CALLS.md §3.14, ADR 2026-10.mr88): "Relay all calls", and the person's own STUN and
- * TURN servers, each replacing what the relays supply; where the walkie is wired, its transcripts' switch and their
- * speech model (C-3.11-9). Reached only where calls are wired (`CALLS_WIRED`): the route is not registered otherwise.
+ * TURN servers, each replacing what the relays supply; the transcripts and captions switch and their speech model
+ * (C-3.11-9, C-3.7-5). Reached only where calls are wired (`CALLS_WIRED`): the route is not registered otherwise.
  */
 @Composable
 fun CallSettingsScreen(
@@ -120,7 +120,7 @@ internal fun CallSettingsScreenContent(
     onEdit: ((CallServerDraft) -> CallServerDraft) -> Unit = {},
     onSave: () -> Unit = {},
     onTest: () -> Unit = {},
-    // The walkie transcripts section; null, and no section, in a build without the walkie.
+    // The transcripts and captions section; null, and no section, where the speech model is not wired.
     transcripts: TranscriptsUi? = null,
     onToggleTranscripts: (Boolean) -> Unit = {},
     onDownloadSpeechModel: () -> Unit = {},
@@ -304,9 +304,9 @@ private fun verdictText(
     }
 
 /**
- * The walkie transcript's speech model (docs/VOICE_CALLS.md C-3.11-9): what it costs and Download, the progress and
- * Cancel while it comes (the download runs on the app's scope and a foreground service, so leaving the screen does not
- * stop it), or that it is here and Remove.
+ * The speech model behind the walkie's transcript and a live call's captions (docs/VOICE_CALLS.md C-3.11-9, C-3.7-5):
+ * what it costs and Download, the progress and Cancel while it comes (the download runs on the app's scope and a
+ * foreground service, so leaving the screen does not stop it), or that it is here and Remove.
  */
 @Composable
 private fun SpeechModelRow(

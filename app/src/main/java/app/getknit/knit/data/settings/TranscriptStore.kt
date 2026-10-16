@@ -8,16 +8,17 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
 /**
- * The walkie transcript's two choices (experimental, docs/VOICE_CALLS.md C-3.11-9, ADR 2026-10.nz3g), over the settings
- * DataStore rather than grown into [SettingsStore]. Bound only where the walkie is wired; both ride a Knit backup like
- * every other choice the person made.
+ * The speech model's choices — the walkie's transcript and a live call's captions (experimental, docs/VOICE_CALLS.md
+ * C-3.11-9 and C-3.7-5, ADR 2026-10.nz3g) — over the settings DataStore rather than grown into [SettingsStore]. Bound
+ * only where calls are wired; all ride a Knit backup like every other choice the person made.
  */
 class TranscriptStore(
     private val dataStore: DataStore<Preferences>,
 ) {
     /**
-     * The Calls screen's "Walkie transcripts" switch, on by default (the model is still a download the person asks for).
-     * Off, `WalkieTranscriber` takes no burst and the call screen draws no transcript card.
+     * The Calls screen's "Transcripts and captions" switch, on by default (the model is still a download the person asks
+     * for). Off, `WalkieTranscriber` takes no burst, `CallCaptioner` no audio, and the call screen draws neither the
+     * walkie's transcript card nor a live call's CC button.
      */
     val enabled: Flow<Boolean> = dataStore.data.map { it[KEY_ENABLED] ?: true }
 
@@ -27,12 +28,21 @@ class TranscriptStore(
      */
     val offerDismissed: Flow<Boolean> = dataStore.data.map { it[KEY_OFFER_DISMISSED] ?: false }
 
+    /**
+     * The live call screen's CC button, off by default and remembered from call to call: on, a live call is captioned
+     * from the moment its media is up. Without [enabled] it does nothing and is not drawn.
+     */
+    val liveCaptions: Flow<Boolean> = dataStore.data.map { it[KEY_LIVE_CAPTIONS] ?: false }
+
     suspend fun setEnabled(value: Boolean) = dataStore.edit { it[KEY_ENABLED] = value }
+
+    suspend fun setLiveCaptions(value: Boolean) = dataStore.edit { it[KEY_LIVE_CAPTIONS] = value }
 
     suspend fun dismissOffer() = dataStore.edit { it[KEY_OFFER_DISMISSED] = true }
 
     internal companion object {
         val KEY_ENABLED = booleanPreferencesKey("calls_transcripts")
         val KEY_OFFER_DISMISSED = booleanPreferencesKey("calls_transcript_offer_dismissed")
+        val KEY_LIVE_CAPTIONS = booleanPreferencesKey("calls_live_captions")
     }
 }

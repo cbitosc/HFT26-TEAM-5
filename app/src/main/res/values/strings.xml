@@ -744,8 +744,8 @@
     <string name="call_settings_saved">Saved</string>
     <string name="call_settings_test_busy">Can\'t test during a call</string>
     <!-- The Calls screen's walkie transcripts (docs/VOICE_CALLS.md C-3.11-9): the switch, and the speech model, fetched here or from a walkie call's card. -->
-    <string name="call_settings_transcripts_title">Walkie transcripts</string>
-    <string name="call_settings_transcripts_subtitle">Turn the walkie-talkie bursts you hear and speak into text, on this phone. The text never leaves it.</string>
+    <string name="call_settings_transcripts_title">Transcripts and captions</string>
+    <string name="call_settings_transcripts_subtitle">Turn what you hear on a call into text, on this phone: walkie-talkie bursts as they play, and live calls when you turn on CC. The text never leaves the phone.</string>
     <string name="call_settings_speech_model_title">Speech model</string>
     <string name="call_settings_speech_model_absent">A one-time %1$s download from getknit.app. Transcripts start once it\'s on this phone.</string>
     <string name="call_settings_speech_model_metered">You\'re on mobile data or Data Saver now.</string>

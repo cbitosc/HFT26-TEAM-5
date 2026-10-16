@@ -1,4 +1,4 @@
-@file:Suppress("MatchingDeclarationName") // the walkie transcript card and the state it draws
+@file:Suppress("MatchingDeclarationName") // the walkie transcript card, a live call's captions and the state they draw
 
 package app.getknit.knit.ui.call
 
@@ -37,8 +37,14 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import app.getknit.knit.call.CaptionStatus
+import app.getknit.knit.call.Captions
 import app.getknit.knit.call.SttModelState
 import app.getknit.knit.call.TranscriptLine
 import app.getknit.knit.ui.theme.LocalReduceMotion
@@ -181,12 +187,8 @@ private fun Said(line: TranscriptLine) {
 
         // The words so far, while the burst is still coming or being finished: dimmed, since they may yet change, and
         // never read out — the settled text is, once.
-        streaming && line.live.isNotBlank() -> {
-            Text(
-                line.live + "…",
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+        streaming && line.words.isNotBlank() -> {
+            Streaming(line, MaterialTheme.typography.bodyLarge)
         }
 
         else -> {
@@ -197,6 +199,29 @@ private fun Said(line: TranscriptLine) {
             )
         }
     }
+}
+
+/**
+ * A line's words while they still come: what the model has closed at a pause ([TranscriptLine.settled]) as it will
+ * stay, then its guess at the rest, dimmed, since that may yet change. Never read out: the line is, once settled.
+ */
+@Composable
+private fun Streaming(
+    line: TranscriptLine,
+    style: TextStyle,
+) {
+    val dim = MaterialTheme.colorScheme.onSurfaceVariant
+    Text(
+        buildAnnotatedString {
+            append(line.settled)
+            if (line.live.isNotBlank()) {
+                if (line.settled.isNotBlank()) append(" ")
+                withStyle(SpanStyle(color = dim)) { append(line.live) }
+            }
+            withStyle(SpanStyle(color = dim)) { append("…") }
+        },
+        style = style,
+    )
 }
 
 // What a line without text says.
@@ -223,6 +248,9 @@ private fun ModelPanel(
     onDownload: () -> Unit,
     onCancel: () -> Unit,
     onDismiss: () -> Unit,
+    // What the model would do here, before its cost, and what the button beside Download says.
+    offer: String = "Turn the bursts you hear and speak into text, on this phone.",
+    dismiss: String = "Dismiss",
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         when (val model = ui.model) {
@@ -231,12 +259,12 @@ private fun ModelPanel(
 
             SttModelState.Absent -> {
                 Text(
-                    "Turn the bursts you hear and speak into text, on this phone. The speech model is a one-time ${mb(ui.modelBytes)} " +
-                        "download from getknit.app, here or any time in Settings › Calls.",
+                    "$offer The speech model is a one-time ${mb(ui.modelBytes)} download from getknit.app, here or any " +
+                        "time in Settings › Calls.",
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 if (ui.metered) MeteredNote()
-                OfferButtons("Download", onDownload, onDismiss)
+                OfferButtons("Download", onDownload, onDismiss, dismiss)
             }
 
             is SttModelState.Downloading -> {
@@ -262,7 +290,7 @@ private fun ModelPanel(
                     color = MaterialTheme.colorScheme.error,
                 )
                 if (ui.metered) MeteredNote()
-                OfferButtons("Try again", onDownload, onDismiss)
+                OfferButtons("Try again", onDownload, onDismiss, dismiss)
             }
         }
     }
@@ -282,14 +310,132 @@ private fun OfferButtons(
     label: String,
     onDownload: () -> Unit,
     onDismiss: () -> Unit,
+    dismiss: String,
 ) {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         FilledTonalButton(onClick = onDownload, contentPadding = ButtonDefaults.ButtonWithIconContentPadding) {
             Icon(Icons.Outlined.Download, contentDescription = null, modifier = Modifier.size(ButtonDefaults.IconSize))
             Text(label, Modifier.padding(start = ButtonDefaults.IconSpacing))
         }
-        TextButton(onClick = onDismiss, modifier = Modifier.testTag("walkie_transcript_dismiss")) { Text("Dismiss") }
+        TextButton(onClick = onDismiss, modifier = Modifier.testTag("walkie_transcript_dismiss")) { Text(dismiss) }
     }
+}
+
+/** What a live call's captions draw: the call's lines and where they stand, and where the speech model stands. */
+internal data class CaptionsUi(
+    val captions: Captions,
+    val model: SttModelState,
+    val modelBytes: Long,
+    val metered: Boolean,
+    // The call is on the earpiece: the screen is dark at the ear, so captions are read on the loudspeaker or a headset.
+    val earpiece: Boolean = false,
+)
+
+/**
+ * A live call's captions (docs/VOICE_CALLS.md C-3.7-5), in the call screen's card slot while the CC button is on: what
+ * [name] says, large, as it plays — the words the model has settled as they will stay and its guess at the rest dimmed
+ * — newest at the bottom, a call's last few dozen lines behind it. Unlike the walkie's transcript it carries no speaker
+ * and no times: a live call is one other person, and this phone's own voice is not captioned. While the model is not
+ * on the phone it offers the download, and Not now ([onOff]) turns the captions off; a note says when they stopped
+ * because the phone could not keep up or the model would not run, and on the earpiece, that they read better on the
+ * loudspeaker. Nothing here leaves the phone.
+ */
+@Composable
+internal fun LiveCaptions(
+    ui: CaptionsUi,
+    name: String,
+    onDownload: () -> Unit,
+    onCancel: () -> Unit,
+    onOff: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val ready = ui.model == SttModelState.Ready
+    val lines = ui.captions.lines
+    val list = rememberLazyListState()
+    val reduceMotion = LocalReduceMotion.current
+    LaunchedEffect(lines.size, lines.lastOrNull()?.state, lines.lastOrNull()?.words, ready) {
+        if (!ready || lines.isEmpty()) return@LaunchedEffect
+        if (reduceMotion) list.scrollToItem(lines.lastIndex) else list.animateScrollToItem(lines.lastIndex)
+    }
+    val transcript = TranscriptUi(lines, ui.model, ui.modelBytes, ui.metered)
+    Surface(
+        modifier = modifier.fillMaxWidth().testTag("live_captions"),
+        shape = MaterialTheme.shapes.large,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+    ) {
+        Column(Modifier.padding(top = 16.dp)) {
+            Box(Modifier.padding(horizontal = 16.dp)) { Title("Captions", "ON DEVICE", Icons.Outlined.ClosedCaption) }
+            LazyColumn(
+                modifier = Modifier.weight(1f, fill = false),
+                state = list,
+                contentPadding = PaddingValues(start = 16.dp, top = 12.dp, end = 16.dp, bottom = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                captionNote(ui, ready)?.let { note ->
+                    item(key = "note") { Note(note, error = ui.captions.status != CaptionStatus.ON) }
+                }
+                if (!ready) {
+                    item(key = "model") {
+                        ModelPanel(
+                            transcript,
+                            onDownload,
+                            onCancel,
+                            onOff,
+                            offer = "See what ${name.ifBlank { "the other phone" }} says as text, written on this phone as you hear it.",
+                            dismiss = "Not now",
+                        )
+                    }
+                } else if (lines.isEmpty() && ui.captions.status == CaptionStatus.ON) {
+                    item(key = "empty") {
+                        Text(
+                            "What ${name.ifBlank { "the other phone" }} says shows here as text.",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                items(lines, key = { "c${it.burst}" }) { line -> Caption(line) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun Caption(line: TranscriptLine) {
+    val style = MaterialTheme.typography.titleLarge
+    when (val state = line.state) {
+        // Read out as it lands, for a user who cannot hear it; the words still coming never are.
+        is TranscriptLine.State.Text -> {
+            Text(state.text, style = style, modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+        }
+
+        else -> {
+            Streaming(line, style)
+        }
+    }
+}
+
+// What the captions say above their lines: why they stopped, else that the earpiece hides them.
+private fun captionNote(
+    ui: CaptionsUi,
+    ready: Boolean,
+): String? =
+    when (ui.captions.status) {
+        CaptionStatus.BEHIND -> "Captions stopped: this phone couldn't keep up with the call. Turn CC off and on to try again."
+        CaptionStatus.FAILED -> "Captions stopped: the speech model wouldn't run on this phone."
+        CaptionStatus.ON -> if (ready && ui.earpiece) "Captions are easier to read with the call on speaker or a headset." else null
+    }
+
+@Composable
+private fun Note(
+    text: String,
+    error: Boolean,
+) {
+    Text(
+        text,
+        style = MaterialTheme.typography.bodyMedium,
+        color = if (error) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }
 
 /** "44 MB": whole megabytes (10^6 bytes, as a download size is read). */

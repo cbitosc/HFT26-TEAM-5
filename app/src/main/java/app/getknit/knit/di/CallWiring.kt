@@ -4,6 +4,7 @@ import android.os.Build
 import android.util.Log
 import androidx.compose.runtime.Composable
 import app.getknit.knit.BuildConfig
+import app.getknit.knit.call.CallCaptioner
 import app.getknit.knit.call.CallControl
 import app.getknit.knit.call.CallLog
 import app.getknit.knit.call.CallManager
@@ -165,6 +166,7 @@ private fun callGraph(): Module =
                 link = get<DirectCallPath>().link,
                 capture = get(),
                 log = { Log.i(TAG, it) },
+                captions = get(),
             )
         }
         // The call screen reads the media's stats itself (its diagnostics card); the manager sees only the seam.
@@ -219,32 +221,49 @@ private fun callGraph(): Module =
                 reach = callReach(),
             )
         }
+        // The speech model (C-3.11-9, C-3.7-5): one the user downloads, writing out the walkie's bursts and a live call's
+        // peer as they play.
+        single { TranscriptStore(get()) }
+        single {
+            SttModelStore(
+                androidContext(),
+                get<AndroidInternetGate>(),
+                get<CoroutineScope>(),
+                keepAlive = { SttDownloadService.start(androidContext()) },
+                log = { Log.i(TAG, it) },
+            )
+        }
+        single { MoonshineSpeech(get(), get<ModelLoadGuard>(), get<CoroutineScope>(), log = { Log.i(TAG, it) }) }
+        // The names a call is likely to carry, for the model to listen for: read as a call begins, never logged.
+        single {
+            SttKeytermFeed(
+                calls = get<CallManager>().state,
+                speech = get(),
+                peers = get(),
+                groups = get(),
+                messages = get(),
+                settings = get(),
+                scope = get<CoroutineScope>(),
+                log = { Log.i(TAG, it) },
+            )
+        }
+        single {
+            // A live call's captions (C-3.7-5): the Calls screen's switch and the call screen's CC button, both on.
+            val store = get<TranscriptStore>()
+            val on =
+                combine(store.enabled, store.liveCaptions) { enabled, live -> enabled && live }
+                    .stateIn(get<CoroutineScope>(), SharingStarted.Eagerly, false)
+            CallCaptioner(
+                speech = get<MoonshineSpeech>(),
+                ready = { get<SttModelStore>().paths() != null },
+                scope = get<CoroutineScope>(),
+                enabled = { on.value },
+                // One model call at a time, in the order the audio came, off the media's audio thread.
+                dispatcher = Dispatchers.Default.limitedParallelism(1),
+                log = { Log.i(TAG, it) },
+            )
+        }
         if (WALKIE_WIRED) {
-            // The transcript (C-3.11-9): a model the user downloads, fed here the bursts this phone hears as they play.
-            single { TranscriptStore(get()) }
-            single {
-                SttModelStore(
-                    androidContext(),
-                    get<AndroidInternetGate>(),
-                    get<CoroutineScope>(),
-                    keepAlive = { SttDownloadService.start(androidContext()) },
-                    log = { Log.i(TAG, it) },
-                )
-            }
-            single { MoonshineSpeech(get(), get<ModelLoadGuard>(), get<CoroutineScope>(), log = { Log.i(TAG, it) }) }
-            // The names a call is likely to carry, for the model to listen for: read as a call begins, never logged.
-            single {
-                SttKeytermFeed(
-                    calls = get<CallManager>().state,
-                    speech = get(),
-                    peers = get(),
-                    groups = get(),
-                    messages = get(),
-                    settings = get(),
-                    scope = get<CoroutineScope>(),
-                    log = { Log.i(TAG, it) },
-                )
-            }
             // A debug build's lab switch, off by default (`SettingsStore.debugWalkieClips`): each burst's audio and line.
             single {
                 WalkieClipFiles(
@@ -427,16 +446,8 @@ fun startCallsIfWired(koin: Koin) {
         runCatching { koin.get<CallController>().start() }.onFailure { Log.w(TAG, "calls not started", it) }
         runCatching { koin.get<CallLog>().start() }.onFailure { Log.w(TAG, "call records not started", it) }
         if (WALKIE_WIRED) runCatching { koin.get<WalkieTalk>().start() }.onFailure { Log.w(TAG, "walkie not started", it) }
-        if (WALKIE_WIRED) runCatching { koin.get<SttModelStore>().start() }.onFailure { Log.w(TAG, "walkie stt not started", it) }
-        if (WALKIE_WIRED) {
-            runCatching { koin.get<SttKeytermFeed>().start() }.onFailure {
-                Log.w(
-                    TAG,
-                    "walkie stt key terms not started",
-                    it,
-                )
-            }
-        }
+        runCatching { koin.get<SttModelStore>().start() }.onFailure { Log.w(TAG, "speech model not started", it) }
+        runCatching { koin.get<SttKeytermFeed>().start() }.onFailure { Log.w(TAG, "speech key terms not started", it) }
     }
 }
 
