@@ -27,6 +27,7 @@ import app.getknit.knit.data.message.MessageEntity
 import app.getknit.knit.data.message.MessageFtsEntity
 import app.getknit.knit.data.peer.MetPeerDao
 import app.getknit.knit.data.peer.MetPeerEntity
+import app.getknit.knit.data.peer.PeerBadgeEntity
 import app.getknit.knit.data.peer.PeerDao
 import app.getknit.knit.data.peer.PeerEntity
 import app.getknit.knit.data.peer.PeerProfileEntity
@@ -53,7 +54,7 @@ import net.zetetic.database.sqlcipher.driver.SQLCipherDriver
  * The `@Database` version, as a top-level constant so the annotation and [KnitDatabase.SCHEMA_VERSION] read
  * one number (an annotation argument cannot name the class's own companion).
  */
-internal const val KNIT_DB_SCHEMA_VERSION = 25
+internal const val KNIT_DB_SCHEMA_VERSION = 26
 
 @Database(
     entities = [
@@ -66,7 +67,7 @@ internal const val KNIT_DB_SCHEMA_VERSION = 25
         GroupRootEntity::class, MessageReceiptEntity::class, DraftEntity::class,
         MessageFtsEntity::class, CommonsEntity::class, CommonsOutboxEntity::class,
         CommonsMemberEntity::class, MetPeerEntity::class, SavedFileEntity::class,
-        PeerProfileEntity::class, GroupMemberClockEntity::class,
+        PeerProfileEntity::class, GroupMemberClockEntity::class, PeerBadgeEntity::class,
     ],
     // v1: frozen launch baseline. The pre-1.0 alpha schema churn (the old destructive v2…v22 bumps that
     //     rode the wire/crypto breaks) is collapsed; docs/WIRE_COMPAT.md keeps the historical break record.
@@ -211,6 +212,10 @@ internal const val KNIT_DB_SCHEMA_VERSION = 25
     // v25: `messages.videoDurationMs` / `videoWidth` / `videoHeight` / `videoPoster` / `videoPosterFlagged`: a short
     //     video's duration, upright size and inline JPEG poster, the sender's labels until the bytes land, and this
     //     phone's verdict on the poster (ADR 2026-10.hmfe). Migrated by KnitMigrations.MIGRATION_24_25.
+    // v26: one `peer_badges` table — the supporter badges each peer's sealed profile last carried, verbatim, verified
+    //     when shown (docs/SUPPORTER_BADGE.md, ADR 2026-10.r99s). A table rather than columns on `peers`, and written
+    //     only by the sealed profile path, so a cleartext profile never reverts them. Rows go with their pin and ride a
+    //     backup like `peers`. Empty on arrival; migrated by KnitMigrations.MIGRATION_25_26.
     version = KNIT_DB_SCHEMA_VERSION,
     // Export the schema JSON to app/schemas/ (location set by the androidx.room Gradle plugin's
     // room { schemaDirectory(...) } in app/build.gradle.kts). Keeps the schema diffable in review and feeds

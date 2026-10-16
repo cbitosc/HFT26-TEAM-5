@@ -2,6 +2,10 @@ package app.getknit.knit.mesh
 
 import android.util.Log
 import app.getknit.knit.TextLimits
+import app.getknit.knit.badge.BadgeIssuer
+import app.getknit.knit.badge.BadgeJournal
+import app.getknit.knit.badge.BadgeRefresher
+import app.getknit.knit.badge.PinnedBadgeKey
 import app.getknit.knit.call.CallSignals
 import app.getknit.knit.call.TurnServer
 import app.getknit.knit.call.TurnSource
@@ -54,6 +58,7 @@ import app.getknit.knit.mesh.crypto.sealedContent
 import app.getknit.knit.mesh.lora.LoraCtl
 import app.getknit.knit.mesh.lora.LoraFramePolicy
 import app.getknit.knit.mesh.lora.LoraSizeHint
+import app.getknit.knit.mesh.protocol.BadgeEntry
 import app.getknit.knit.mesh.protocol.CallPayload
 import app.getknit.knit.mesh.protocol.ChatContent
 import app.getknit.knit.mesh.protocol.CommonsPost
@@ -102,6 +107,8 @@ import app.getknit.knit.notifications.Notifier
 import app.getknit.knit.presence.OpenToChatPolicy
 import app.getknit.knit.presence.OpenToChatWatch
 import app.getknit.knit.transfer.TransferSignals
+import app.getknit.knit.ui.contacts.contactIds
+import app.getknit.knit.ui.contacts.observeContactSignals
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -121,6 +128,7 @@ import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -272,6 +280,12 @@ class MeshManager(
     private val ticketKeys: TicketKeyJournal? = null,
     private val ticketIssuer: TicketIssuer? = null,
     private val allowCleartext: Boolean = false,
+    // The supporter badge (docs/SUPPORTER_BADGE.md, ADR 2026-10.r99s): the holder's toggle and held badges, read into the
+    // sealed profile, and the issuer that signs them. The journal is wired in every build (a release build simply never
+    // holds a badge); the refresher runs only where tickets are wired, since earning one takes a customer key.
+    private val badgeJournal: BadgeJournal? = null,
+    private val badgeIssuer: BadgeIssuer? = null,
+    private val badgePins: List<PinnedBadgeKey> = emptyList(),
 ) : MeshController,
     TransferSignals,
     CallSignals,
@@ -626,6 +640,29 @@ class MeshManager(
         }
 
     /**
+     * Asks the issuer of a live customer key for this phone's supporter badge while "Show my supporter badge" is on
+     * (docs/SUPPORTER_BADGE.md §5, ADR 2026-10.r99s), on the ticket refresher's session. Built only with a key store, an
+     * issuer and the journal: a build without tickets never asks.
+     */
+    private val badgeRefresher: BadgeRefresher? =
+        if (ticketKeys != null && badgeJournal != null && badgeIssuer != null) {
+            BadgeRefresher(
+                journal = badgeJournal,
+                keys = ticketKeys,
+                issuer = badgeIssuer,
+                selfId = { identity.nodeId() },
+                pins = badgePins,
+                online = online,
+                routeChanges = routeChanges,
+                allowCleartext = allowCleartext,
+                clock = clock,
+                log = { Log.i(SPOOL_TAG, it) },
+            )
+        } else {
+            null
+        }
+
+    /**
      * The Internet plane (`docs/SPOOL_PROTOCOL.md`) — a custody-plane sibling of [forwardSync], not a
      * third transport. Null when no dialer is injected (unit tests, and any build that ships without
      * it); off at runtime unless the user opts in and configures a spool, so the default install opens
@@ -827,6 +864,7 @@ class MeshManager(
         }
         scopeSync?.start(session)
         ticketRefresher?.start(session)
+        badgeRefresher?.start(session)
         watchRoute(session)
         watchScopeInputs(session)
     }
@@ -883,6 +921,7 @@ class MeshManager(
         started = false
         scopeSync?.stop()
         ticketRefresher?.stop()
+        badgeRefresher?.stop()
         transport.stop()
         // Clear this session's pending relays on the app scope (the session is about to die); capture
         // the instance so a fast restart reassigning `router` can't retarget the wrong one. Then tear
@@ -2934,7 +2973,7 @@ class MeshManager(
                 settings.loraBoard,
             ) { name, status, avatarAt, openToChat, board ->
                 OwnPresentation(name, status, avatarAt, openToChat, board)
-            }
+            }.combine(shownBadges()) { presentation, badges -> presentation.copy(badges = badges) }
                 // Distinct BEFORE the first value is set aside, never after: every one of the five flows is a
                 // projection of the one DataStore, which re-emits on a write to ANY key — so the seed's own
                 // stamp write, the ledger flush, a read-state stamp, each re-emits the unchanged presentation.
@@ -3122,9 +3161,14 @@ class MeshManager(
         if (owed.isEmpty()) return
         val me = identity.nodeId()
         val avatarHash = settings.ownAvatarHash.first()
-        val payload = currentProfilePayload(version, avatarHash)
+        val payload = currentProfilePayload(version, avatarHash, withBadges = false)
+        // The badges go to contacts only (docs/SUPPORTER_BADGE.md C-6-4): a session forms with any room stranger whose
+        // tick we sealed, so the session set is wider than the people the holder chose to show a payment status to.
+        val withBadges = currentProfilePayload(version, avatarHash, withBadges = true).takeIf { it.pr?.badges != null }
+        val contacts = if (withBadges != null) badgeAudience(me) else emptySet()
         owed.forEach { session ->
-            if (sendCtlDm(session.peerId, payload, avatarHash, me)) sentProfileVersions[session.peerId] = version
+            val content = if (withBadges != null && session.peerId in contacts) withBadges else payload
+            if (sendCtlDm(session.peerId, content, avatarHash, me)) sentProfileVersions[session.peerId] = version
         }
     }
 
@@ -3132,6 +3176,7 @@ class MeshManager(
     private suspend fun currentProfilePayload(
         version: Long,
         avatarHash: String?,
+        withBadges: Boolean,
     ): MessageContent {
         val board = settings.loraBoard.first()
         return MessageContent(
@@ -3146,8 +3191,41 @@ class MeshManager(
                     openToChat = settings.openToChat.first(),
                     loraNode = board?.node,
                     loraKey = board?.key,
+                    badges = if (withBadges) shownBadges().first().ifEmpty { null } else null,
                 ),
         )
+    }
+
+    /**
+     * Who our badges go to: the contacts the Contacts screen lists, by its one rule (`ui/contacts/ContactUniverse.kt`'s
+     * [contactIds]), read at send time. A peer that becomes a contact later sees the badge with our next profile version.
+     */
+    private suspend fun badgeAudience(me: String): Set<String> {
+        val signals = observeContactSignals(messages, groups, settings, flowOf(me)).first()
+        val verified = peers.verifiedNodeIds().toSet()
+        val blocked = settings.blockedNodeIds.first()
+        return contactIds(
+            signals.conversations,
+            signals.authored,
+            signals.groups,
+            signals.groupSenders,
+            signals.accepted,
+            verified,
+            blocked,
+            me,
+        )
+    }
+
+    /**
+     * The badges our sealed profile carries (docs/SUPPORTER_BADGE.md C-5-10): none while "Show my supporter badge" is
+     * off, else the held ones, at most [BadgeEntry.MAX_PER_PROFILE], in their held order. Whether each still verifies is
+     * each receiver's question at its own clock; nothing is filtered here but the toggle.
+     */
+    private fun shownBadges(): Flow<List<BadgeEntry>> {
+        val journal = badgeJournal ?: return flowOf(emptyList())
+        return combine(journal.show, journal.held) { on, held ->
+            if (on) held.take(BadgeEntry.MAX_PER_PROFILE).map { it.entry() } else emptyList()
+        }.distinctUntilChanged()
     }
 
     /**
@@ -3160,8 +3238,9 @@ class MeshManager(
      */
     private suspend fun sendIntroTo(peerId: String): Boolean {
         val avatarHash = settings.ownAvatarHash.first()
-        val payload = currentProfilePayload(settings.profileVersion.first(), avatarHash)
-        return sendCtlDm(peerId, payload, avatarHash, identity.nodeId())
+        val me = identity.nodeId()
+        val payload = currentProfilePayload(settings.profileVersion.first(), avatarHash, withBadges = peerId in badgeAudience(me))
+        return sendCtlDm(peerId, payload, avatarHash, me)
     }
 
     /**
@@ -4000,6 +4079,10 @@ private data class OwnPresentation(
     val avatarUpdatedAt: Long,
     val openToChat: Boolean,
     val board: LoraBoard?,
+    // Sealed-only (ADR 2026-10.r99s): a change republishes, but custodyPresentsOtherThan never compares it, since the
+    // cleartext frame custody holds never carries it. An edit made while the mesh was stopped reaches contacts on the
+    // first heal's sealed re-send instead.
+    val badges: List<BadgeEntry> = emptyList(),
 )
 
 /** `"<peerId>|<millis>"` entries ↔ a peer→stamp map, the intro driver's two settings sets. */

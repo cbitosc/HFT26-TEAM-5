@@ -47,6 +47,13 @@ object SettingsKeys {
     const val DIRECT_HOST_PREFIX = "direct_host_"
     const val CALL_CAPTURE_PREFIX = "call_capture_"
 
+    // The supporter badge (docs/SUPPORTER_BADGE.md, ADR 2026-10.r99s): the "Show my supporter badge" choice rides a
+    // backup; the held badges and their ask state are this phone's ("badge_held" is in [TRANSIENT_PREFIXES]), so a
+    // restored phone draws a fresh `r` before it shows anything.
+    const val BADGE_SHOW = "badge_show"
+    const val BADGE_HELD = "badge_held"
+    const val BADGE_HELD_STATE = "badge_held_state"
+
     /**
      * Keys a backup never carries: state about *this phone's* radios and ROM (the Aware give-up and
      * initiator-hold journals, the model poison-pill latch), and the paired LoRa board's address, names and
@@ -61,7 +68,8 @@ object SettingsKeys {
      * is this phone's schedule, so a restored phone asks at once. The customer key beside it rides, like a `?k=` token.
      * The calls this phone saw end (`call_tombs`) are this phone's too: a restored phone holds new sessions. So are the
      * Wi-Fi Direct host guard (`direct_host_`) and the call microphone's verdict (`call_capture_`): another phone's ROM
-     * is not this one's.
+     * is not this one's. The supporter badges this phone holds (`badge_held…`) carry the `r` it drew for them, which
+     * stays on the phone that drew it.
      */
     val TRANSIENT_PREFIXES: List<String> =
         listOf(
@@ -81,5 +89,6 @@ object SettingsKeys {
             CALL_TOMBS,
             DIRECT_HOST_PREFIX,
             CALL_CAPTURE_PREFIX,
+            BADGE_HELD,
         )
 }

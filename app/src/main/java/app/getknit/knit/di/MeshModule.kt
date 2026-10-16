@@ -5,6 +5,8 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.room3.withWriteTransaction
 import app.getknit.knit.BuildConfig
+import app.getknit.knit.badge.BadgeIssuer
+import app.getknit.knit.badge.BadgeKeys
 import app.getknit.knit.call.CallManager
 import app.getknit.knit.crash.ProcessExitReasons
 import app.getknit.knit.data.KnitDatabase
@@ -12,6 +14,7 @@ import app.getknit.knit.data.MeshBlobStore
 import app.getknit.knit.data.crypto.IdentityKeyStore
 import app.getknit.knit.data.forward.ForwardRepository
 import app.getknit.knit.data.relay.RelayStatusRepository
+import app.getknit.knit.data.settings.BadgeStore
 import app.getknit.knit.data.settings.DirectHostStore
 import app.getknit.knit.data.settings.LoraPlaneStateStore
 import app.getknit.knit.data.settings.SettingsStore
@@ -385,6 +388,10 @@ val meshModule =
                 ticketKeys = if (CALLS_WIRED) get<TicketKeyStore>() else null,
                 ticketIssuer = if (CALLS_WIRED) get<TicketIssuer>() else null,
                 allowCleartext = BuildConfig.DEBUG,
+                // The supporter badge (ADR 2026-10.r99s): the journal in every build, the issuer beside the ticket swap's.
+                badgeJournal = get<BadgeStore>(),
+                badgeIssuer = if (CALLS_WIRED) get<TicketIssuer>() as? BadgeIssuer else null,
+                badgePins = BadgeKeys.forBuild(BuildConfig.DEBUG),
                 identities = get(),
                 quotes = get(),
                 notificationLabels = { notificationLabels(androidContext()) },

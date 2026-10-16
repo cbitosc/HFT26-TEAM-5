@@ -604,6 +604,22 @@ object KnitMigrations {
             }
         }
 
+    /**
+     * v25 → v26: one `peer_badges` table — the supporter badges each peer's sealed profile last carried, verified when
+     * shown (docs/SUPPORTER_BADGE.md, ADR 2026-10.r99s). Empty on arrival: each fills as that peer's next sealed profile
+     * lands. Additive only; the SQL must stay byte-equivalent to what Room generates for `app/schemas/**/26.json`.
+     */
+    val MIGRATION_25_26 =
+        object : Migration(25, 26) {
+            override suspend fun migrate(connection: SQLiteConnection) {
+                connection.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `peer_badges` " +
+                        "(`nodeId` TEXT NOT NULL, `position` INTEGER NOT NULL, `wrapper` BLOB NOT NULL, `r` BLOB NOT NULL, " +
+                        "PRIMARY KEY(`nodeId`, `position`))",
+                )
+            }
+        }
+
     /** All migrations, applied by Room in order. */
     val ALL: Array<Migration> =
         arrayOf(
@@ -631,5 +647,6 @@ object KnitMigrations {
             MIGRATION_22_23,
             MIGRATION_23_24,
             MIGRATION_24_25,
+            MIGRATION_25_26,
         )
 }

@@ -1,6 +1,7 @@
 package app.getknit.knit.data.peer
 
 import androidx.room3.Dao
+import androidx.room3.Insert
 import androidx.room3.Query
 import kotlinx.coroutines.flow.Flow
 
@@ -97,6 +98,23 @@ interface PeerDao {
     /** Drops every proof of key whose pin is gone — run after each deletion from `peers`. */
     @Query("DELETE FROM peer_profiles WHERE nodeId NOT IN (SELECT nodeId FROM peers)")
     suspend fun deleteOrphanProfiles()
+
+    /** Drops every badge whose pin is gone — run beside [deleteOrphanProfiles]. */
+    @Query("DELETE FROM peer_badges WHERE nodeId NOT IN (SELECT nodeId FROM peers)")
+    suspend fun deleteOrphanBadges()
+
+    @Query("DELETE FROM peer_badges WHERE nodeId = :nodeId")
+    suspend fun deleteBadges(nodeId: String)
+
+    @Insert
+    suspend fun insertBadges(badges: List<PeerBadgeEntity>)
+
+    /** Every badge held, in each sender's order: the input the display-time verifier reads. */
+    @Query("SELECT * FROM peer_badges ORDER BY nodeId, position")
+    fun observeBadges(): Flow<List<PeerBadgeEntity>>
+
+    @Query("SELECT * FROM peer_badges ORDER BY nodeId, position")
+    suspend fun badges(): List<PeerBadgeEntity>
 
     /**
      * Writes [peer], replacing every column in place when the row is already there. Every caller keeps passing

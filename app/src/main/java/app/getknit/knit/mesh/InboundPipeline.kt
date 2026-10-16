@@ -58,6 +58,7 @@ import app.getknit.knit.mesh.crypto.ratchet.RatchetSessions
 import app.getknit.knit.mesh.crypto.readsCryptoV3
 import app.getknit.knit.mesh.crypto.sealBytes
 import app.getknit.knit.mesh.lora.MeshtasticProto
+import app.getknit.knit.mesh.protocol.BadgeEntry
 import app.getknit.knit.mesh.protocol.BlobCancelContent
 import app.getknit.knit.mesh.protocol.BlobHasContent
 import app.getknit.knit.mesh.protocol.BlobHaveContent
@@ -1487,6 +1488,11 @@ class InboundPipeline(
                 loraKey = payload.loraKey,
             ),
         )
+        // The supporter badges are this path's alone (docs/SUPPORTER_BADGE.md C-6-2, ADR 2026-10.r99s): stored apart,
+        // replaced whole by a sealed profile that passed the gate above (absent clears), never touched by the
+        // cleartext writer, and verified only when drawn. Stored unverified on purpose: a badge whose key this build
+        // does not pin yet, or whose window has not opened, shows once it can.
+        peers.replaceBadges(env.senderId, payload.badges.orEmpty().take(BadgeEntry.MAX_PER_PROFILE))
         // Status notices for what actually moved. Compared against the pre-write row, and written here
         // rather than in a writer of their own because this is the point where both the old and the new
         // presentation exist at once — a moment nothing else in the profile paths preserves. Free of the

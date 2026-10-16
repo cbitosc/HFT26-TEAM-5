@@ -321,6 +321,18 @@ class GoldenVectorTest {
                         loraKey = "oR62IJmFUE0Tgcw0GcypU5ZqUFCQllVBy2snB/BKQA4=",
                     ),
                 ),
+            // The supporter badges (docs/SUPPORTER_BADGE.md, ADR 2026-10.r99s): sealed-only, so there is no
+            // `profileContent` twin. The wrapper is opaque here; its own bytes are pinned by SupporterBadgeTest.
+            "profilePayloadBadges" to
+                WireCodec.encodePayload(
+                    ProfilePayload(
+                        name = "Ann",
+                        status = "hiking",
+                        avatarHash = "av1",
+                        version = 1700L,
+                        badges = listOf(BadgeEntry(w = bytes(24, 21), r = bytes(16, 0))),
+                    ),
+                ),
             "groupRootPayload" to WireCodec.encodePayload(GroupRootPayload(root = bytes(32, 13), version = 2, minter = "aa")),
             "groupKeyPayloadRoot" to
                 WireCodec.encodePayload(
@@ -465,6 +477,21 @@ class GoldenVectorTest {
                                 version = 1700L,
                                 loraNode = 0xdeadbeefL,
                                 loraKey = "oR62IJmFUE0Tgcw0GcypU5ZqUFCQllVBy2snB/BKQA4=",
+                            ),
+                    ),
+                ),
+            "messageContentV2ProfileBadges" to
+                compact(
+                    MessageContent(
+                        body = "",
+                        ctl = MessageContent.CTL_PROFILE,
+                        pr =
+                            ProfilePayload(
+                                name = "Ann",
+                                status = "hiking",
+                                avatarHash = hex(bytes(32, 7)),
+                                version = 1700L,
+                                badges = listOf(BadgeEntry(w = bytes(24, 21), r = bytes(16, 0))),
                             ),
                     ),
                 ),

@@ -1,5 +1,6 @@
 package app.getknit.knit.data
 
+import app.getknit.knit.data.peer.PeerBadgeEntity
 import app.getknit.knit.data.peer.PeerDao
 import app.getknit.knit.data.peer.PeerEntity
 import app.getknit.knit.data.peer.PeerFace
@@ -7,6 +8,7 @@ import app.getknit.knit.data.settings.InboundSettings
 import app.getknit.knit.identity.IdentitySource
 import app.getknit.knit.identity.PeerLabelIndex
 import app.getknit.knit.identity.PeerLabels
+import app.getknit.knit.mesh.protocol.BadgeEntry
 import app.getknit.knit.mesh.protocol.WireEnvelope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
@@ -153,6 +155,23 @@ class PeerRepository(
         sentAt: Long,
     ) = dao.recordProfile(nodeId, wire.signed, wire.sig, sentAt)
 
+    /**
+     * Replaces every supporter badge [nodeId] shows with [badges] (docs/SUPPORTER_BADGE.md C-6-2): what a sealed profile
+     * that passed the version gate does, an empty list clearing them. Called inside the ctl commit's write transaction,
+     * so the delete and the insert land together. The cleartext profile writer never calls this (C-6-3).
+     */
+    suspend fun replaceBadges(
+        nodeId: String,
+        badges: List<BadgeEntry>,
+    ) {
+        dao.deleteBadges(nodeId)
+        if (badges.isEmpty()) return
+        dao.insertBadges(badges.mapIndexed { i, b -> PeerBadgeEntity(nodeId, i, b.w, b.r) })
+    }
+
+    /** Every badge held, unverified: [app.getknit.knit.badge.PeerBadges] verifies them for display. */
+    fun observeBadges(): Flow<List<PeerBadgeEntity>> = dao.observeBadges()
+
     /** [nodeId]'s kept proof of key, wrapped point to point as a key is served; null when none is held. */
     suspend fun profileFrame(nodeId: String): WireEnvelope? =
         dao.profile(nodeId)?.let { WireEnvelope(relay = false, sig = it.sig, signed = it.signed) }
@@ -167,6 +186,7 @@ class PeerRepository(
         if (dao.findByNodeId(nodeId) == null) return false
         dao.delete(nodeId)
         dao.deleteOrphanProfiles()
+        dao.deleteOrphanBadges()
         return true
     }
 
@@ -194,6 +214,7 @@ class PeerRepository(
         if (over <= 0) return
         dao.evictOldestCappable(protected, over)
         dao.deleteOrphanProfiles() // the proof of key goes with the pin it proves
+        dao.deleteOrphanBadges()
     }
 
     /** One judgement of [observeDirectory]'s inputs; equal judgements build one index. */

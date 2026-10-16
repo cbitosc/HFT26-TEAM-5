@@ -8,6 +8,8 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.preferencesDataStoreFile
 import androidx.room3.withWriteTransaction
 import app.getknit.knit.BuildConfig
+import app.getknit.knit.badge.BadgeKeys
+import app.getknit.knit.badge.PeerBadges
 import app.getknit.knit.contacts.ContactCards
 import app.getknit.knit.contacts.ContactImporter
 import app.getknit.knit.contacts.ContactRemover
@@ -45,6 +47,7 @@ import app.getknit.knit.data.ratchet.GroupRatchetRepository
 import app.getknit.knit.data.ratchet.GroupRootRepository
 import app.getknit.knit.data.ratchet.RatchetRepository
 import app.getknit.knit.data.relay.RelayInviteApplier
+import app.getknit.knit.data.settings.BadgeStore
 import app.getknit.knit.data.settings.SettingsKeys
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.data.settings.TicketKeyStore
@@ -208,6 +211,10 @@ val appModule =
         single { RelayInviteInbox() }
         // The customer keys an invite hands this phone (ADR 2026-10.3sk7), beside the relay list in the settings DataStore.
         single { TicketKeyStore(get()) }
+        // The supporter badge (docs/SUPPORTER_BADGE.md, ADR 2026-10.r99s): the holder's toggle and held badges beside the
+        // customer keys, and every peer's received badges verified at display time against this build's pinned keys.
+        single { BadgeStore(get()) }
+        single { PeerBadges(get<PeerRepository>().observeBadges(), BadgeKeys.forBuild(BuildConfig.DEBUG), get<CoroutineScope>()) }
         // A build without tickets (release: CALLS_WIRED off) hands the applier no key store, so an invite's issuer and
         // key are ignored without a word, as the room half is with the commons dark.
         single {

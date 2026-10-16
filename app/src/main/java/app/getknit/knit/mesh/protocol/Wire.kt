@@ -765,6 +765,12 @@ data class ReactionPayload(
  * mirrors [ProfileContent.loraNode] for the same reason (nullable, elided while unbound, absent clears),
  * and [loraKey] mirrors [ProfileContent.loraKey] (the board's signing key, base64; elided unless the board
  * signs).
+ *
+ * [badges] is the one field here that is **not** on [ProfileContent], on purpose (docs/SUPPORTER_BADGE.md,
+ * ADR 2026-10.r99s): the supporter credentials the sender chose to show, at most [BadgeEntry.MAX_PER_PROFILE],
+ * in their display order. Sealed-only, so payment status reaches contacts and never a carrier or the LoRa
+ * bootstrap; a receiver keeps them in a store of their own that only a sealed profile replaces, which is what
+ * keeps a cleartext profile from reverting them. Nullable, elided while none is shown, and absent clears.
  */
 @Serializable
 data class ProfilePayload(
@@ -775,7 +781,33 @@ data class ProfilePayload(
     val openToChat: Boolean = false,
     val loraNode: Long? = null,
     val loraKey: String? = null,
+    val badges: List<BadgeEntry>? = null,
 )
+
+/**
+ * One supporter badge a sealed profile carries ([ProfilePayload.badges], docs/SUPPORTER_BADGE.md): [w] is the
+ * credential's wrapper exactly as the issuer signed it (the CBOR `{bc, sig}`, never its `knit-badge:v1:` text) and
+ * [r] the 16 random bytes the holder committed to in its `sub`, which a contact needs to bind the badge to the
+ * sender's node id. Both required, per docs/WIRE_COMPAT.md rule 6. A plain class equal by its bytes, whose
+ * [toString] names neither: `r` is the one secret that keeps the issuer from naming the holder, so it never
+ * reaches a log line.
+ */
+@Serializable
+class BadgeEntry(
+    @ByteString val w: ByteArray,
+    @ByteString val r: ByteArray,
+) {
+    override fun equals(other: Any?): Boolean = other is BadgeEntry && w.contentEquals(other.w) && r.contentEquals(other.r)
+
+    override fun hashCode(): Int = 31 * w.contentHashCode() + r.contentHashCode()
+
+    override fun toString(): String = "BadgeEntry(${w.size} B)"
+
+    companion object {
+        /** The most a profile carries, and the most a receiver keeps from one. */
+        const val MAX_PER_PROFILE = 4
+    }
+}
 
 /**
  * The sealed `CTL_TRANSFER` payload — the signaling for a direct Wi-Fi file transfer between two contacts

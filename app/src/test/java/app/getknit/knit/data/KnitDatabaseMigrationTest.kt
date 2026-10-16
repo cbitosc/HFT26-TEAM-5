@@ -47,7 +47,7 @@ class KnitDatabaseMigrationTest {
         )
 
     @Test
-    fun `the current schema (v24) creates and opens from the exported JSON`() =
+    fun `the current schema (v26) creates and opens from the exported JSON`() =
         runTest {
             helper.createDatabase(CURRENT_VERSION).close()
         }
@@ -906,12 +906,32 @@ class KnitDatabaseMigrationTest {
             }
         }
 
+    @Test
+    fun `migrate 25 to 26 adds an empty peer_badges table and keeps every peer`() =
+        runTest {
+            helper.createDatabase(25).use { c ->
+                c.execSQL(
+                    "INSERT INTO peers (nodeId, name, status, verified, updatedAt, openToChat, lastSeenAt) VALUES ('p1','Pat','',0,1,0,0)",
+                )
+            }
+            helper.runMigrationsAndValidate(26, listOf(KnitMigrations.MIGRATION_25_26)).use { c ->
+                c.prepare("SELECT COUNT(*) FROM peers").use { s ->
+                    assertTrue(s.step())
+                    assertEquals(1L, s.getLong(0))
+                }
+                c.prepare("SELECT COUNT(*) FROM peer_badges").use { s ->
+                    assertTrue(s.step())
+                    assertEquals("a badge is kept from the next sealed profile", 0L, s.getLong(0))
+                }
+            }
+        }
+
     private companion object {
         /**
          * KnitDatabase `@Database(version = …)` — bump alongside the DB (its retention is CLASS, so the version
          * can't be read reflectively). A missing schemas/<db>/<version>.json fails the smoke test.
          */
-        const val CURRENT_VERSION = 25
+        const val CURRENT_VERSION = 26
 
         /** The v16 column list with an attachment — MIGRATION_16_17's test seeds rows through it. */
         const val INSERT_V16 =

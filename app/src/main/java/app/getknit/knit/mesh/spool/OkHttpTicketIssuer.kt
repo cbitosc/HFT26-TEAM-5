@@ -1,20 +1,27 @@
 package app.getknit.knit.mesh.spool
 
+import app.getknit.knit.badge.BadgeAnswer
+import app.getknit.knit.badge.BadgeIssuer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okio.Buffer
 import java.io.IOException
 import java.io.InterruptedIOException
 import java.net.UnknownHostException
+import java.util.Base64
 import java.util.concurrent.TimeUnit
 
 /**
  * The one place the key swap speaks OkHttp (`rules/mesh.md`, ADR 2026-10.3sk7): a single `POST <origin>/api/v1/ticket`
- * with `Authorization: Bearer <key>` and an empty body, read into [IssuerAnswer.read].
+ * with `Authorization: Bearer <key>` and an empty body, read into [IssuerAnswer.read]. The badge issue
+ * ([issueBadge], ADR 2026-10.r99s) is the same `POST` to `/api/v1/badge` with a `{"sub": …}` body, under every rule
+ * below.
  *
  * - **Bound to the validated network**, as the link-preview fetch is: [clientFor] hands back a client whose sockets and
  *   lookups belong to the default network `net/AndroidInternetGate` vouched for, or null when there is none
@@ -34,33 +41,67 @@ import java.util.concurrent.TimeUnit
 class OkHttpTicketIssuer(
     private val clientFor: () -> OkHttpClient?,
     private val allowCleartext: Boolean,
-) : TicketIssuer {
+) : TicketIssuer,
+    BadgeIssuer {
     override suspend fun swap(
         origin: String,
         key: String,
-    ): IssuerAnswer {
-        if (!IssuerOrigin.isAcceptable(origin, allowCleartext)) return IssuerAnswer.NoVerdict("refused origin")
-        val client = clientFor() ?: return IssuerAnswer.NoVerdict("offline")
+    ): IssuerAnswer =
+        post(origin, IssuerOrigin.ticketUrl(origin), key, ByteArray(0).toRequestBody(null), IssuerAnswer::NoVerdict) { code, body ->
+            IssuerAnswer.read(code, body)
+        }
+
+    /**
+     * The badge issue (docs/SUPPORTER_BADGE.md §5, ADR 2026-10.r99s): the same origin, header and rules as [swap], with
+     * `{"sub": <base64url>}` as the body. The `sub` is a commitment, not the node id, and still never reaches a log line.
+     */
+    override suspend fun issueBadge(
+        origin: String,
+        key: String,
+        sub: ByteArray,
+    ): BadgeAnswer {
+        val body = """{"sub":"${Base64.getUrlEncoder().withoutPadding().encodeToString(sub)}"}"""
+        return post(
+            origin,
+            IssuerOrigin.badgeUrl(origin),
+            key,
+            body.toRequestBody(JSON.toMediaType()),
+            BadgeAnswer::NoVerdict,
+        ) { code, bytes ->
+            BadgeAnswer.read(code, bytes)
+        }
+    }
+
+    private suspend fun <A> post(
+        origin: String,
+        url: String,
+        key: String,
+        body: RequestBody,
+        noVerdict: (String) -> A,
+        read: (Int, ByteArray) -> A,
+    ): A {
+        if (!IssuerOrigin.isAcceptable(origin, allowCleartext)) return noVerdict("refused origin")
+        val client = clientFor() ?: return noVerdict("offline")
         val request =
             Request
                 .Builder()
-                .url(IssuerOrigin.ticketUrl(origin))
+                .url(url)
                 .header(AUTHORIZATION, "Bearer $key")
                 .header(ACCEPT, JSON)
-                .post(ByteArray(0).toRequestBody(null))
+                .post(body)
                 .build()
         return withContext(Dispatchers.IO) {
             try {
                 client.newCall(request).execute().use { response ->
-                    val body = readCapped(response) ?: return@use IssuerAnswer.NoVerdict("too large")
-                    IssuerAnswer.read(response.code, body)
+                    val bytes = readCapped(response) ?: return@use noVerdict("too large")
+                    read(response.code, bytes)
                 }
             } catch (_: UnknownHostException) {
-                IssuerAnswer.NoVerdict("dns")
+                noVerdict("dns")
             } catch (_: InterruptedIOException) {
-                IssuerAnswer.NoVerdict("timeout")
+                noVerdict("timeout")
             } catch (e: IOException) {
-                IssuerAnswer.NoVerdict(e.javaClass.simpleName)
+                noVerdict(e.javaClass.simpleName)
             }
         }
     }

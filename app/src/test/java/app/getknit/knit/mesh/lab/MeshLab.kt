@@ -11,6 +11,8 @@ import androidx.room3.useReaderConnection
 import androidx.room3.withWriteTransaction
 import androidx.test.core.app.ApplicationProvider
 import app.getknit.knit.TextLimits
+import app.getknit.knit.badge.BadgeKeys
+import app.getknit.knit.badge.PeerBadges
 import app.getknit.knit.call.CallManager
 import app.getknit.knit.call.CallSignals
 import app.getknit.knit.call.TurnServer
@@ -51,6 +53,7 @@ import app.getknit.knit.data.ratchet.GroupRatchetRepository
 import app.getknit.knit.data.ratchet.GroupRootRepository
 import app.getknit.knit.data.ratchet.RatchetRepository
 import app.getknit.knit.data.relay.RelayInviteApplier
+import app.getknit.knit.data.settings.BadgeStore
 import app.getknit.knit.data.settings.CallTombStore
 import app.getknit.knit.data.settings.ContributionTotals
 import app.getknit.knit.data.settings.SettingsKeys
@@ -1011,6 +1014,9 @@ class LabNode internal constructor(
     private val dataStore = PreferenceDataStoreFactory.create(scope = settingsScope) { File(dir, "settings.preferences_pb") }
     val settings = SettingsStore(dataStore)
 
+    /** The holder's side of the supporter badge (ADR 2026-10.r99s), in the same settings file, kept across restarts. */
+    val badges = BadgeStore(dataStore)
+
     /**
      * Whether this node's image classifier calls every picture it decodes explicit — what the bundled model
      * says of a picture it minds. Read at each classification, so a scenario can flip it mid-run; kept across
@@ -1282,6 +1288,8 @@ class LabNode internal constructor(
                 ingressBudget = IngressBudget(burst = limits.ingressBurst, perMinute = limits.ingressPerMinute, clock = now),
                 spoolDialer = spool,
                 commons = commons,
+                badgeJournal = badges,
+                badgePins = listOf(BadgeKeys.RFC8032_TEST1),
                 onCallSignal = { sender, payload, sentAt -> calls.onSignal(sender, payload, sentAt) },
                 onCallTalk = { _, chunk, _, _ -> talks += chunk },
             )
@@ -2274,6 +2282,16 @@ class LabNode internal constructor(
 
     /** [peer]'s row on this node: name, status, flag, avatar and the profile version they were last seen at. */
     suspend fun peer(peer: LabNode): PeerEntity? = peers.find(peer.nodeId)
+
+    /** How many badge rows this node stores for [peer], verified or not. */
+    suspend fun badgeRowsFor(peer: LabNode): Int = peers.observeBadges().first().count { it.nodeId == peer.nodeId }
+
+    /** The badge ids this node would draw on [peer]'s avatar now: its stored rows, verified at its own clock. */
+    suspend fun badgesShownFor(peer: LabNode): List<String> =
+        PeerBadges
+            .verifyAll(peers.observeBadges().first(), now() / 1_000, listOf(BadgeKeys.RFC8032_TEST1))[peer.nodeId]
+            ?.map { it.b }
+            .orEmpty()
 
     /** How this node presents [peer], in the fields a profile carries; null without a row. */
     suspend fun presentationOf(peer: LabNode): Presentation? =

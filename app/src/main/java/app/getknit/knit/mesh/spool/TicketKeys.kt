@@ -32,6 +32,9 @@ object IssuerOrigin {
     /** Where the key swap lives under an origin (coordinator ADR 2026-10.ukvm). */
     const val TICKET_PATH = "/api/v1/ticket"
 
+    /** Where the badge issue lives under the same origin (docs/SUPPORTER_BADGE.md §5). */
+    const val BADGE_PATH = "/api/v1/badge"
+
     private val PATTERN =
         Regex(
             "^(https?)://" +
@@ -55,6 +58,9 @@ object IssuerOrigin {
 
     /** The key swap's URL under [origin]. */
     fun ticketUrl(origin: String): String = origin + TICKET_PATH
+
+    /** The badge issue's URL under [origin]. */
+    fun badgeUrl(origin: String): String = origin + BADGE_PATH
 
     private const val MAX_PORT = 65_535
 }

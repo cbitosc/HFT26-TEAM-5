@@ -3,6 +3,7 @@
 package app.getknit.knit.mesh.crypto
 
 import app.getknit.knit.identity.NodeId
+import app.getknit.knit.mesh.protocol.BadgeEntry
 import app.getknit.knit.mesh.protocol.CanonicalText
 import app.getknit.knit.mesh.protocol.EncEnvelope
 import app.getknit.knit.mesh.protocol.FrameId
@@ -91,6 +92,7 @@ internal object MessageContentV2 {
                         openToChat = it.openToChat,
                         loraNode = it.loraNode,
                         loraKey = it.loraKey?.let(::keyBytes),
+                        badges = it.badges?.map { badge -> BadgeV2(w = badge.w, r = badge.r) },
                     )
                 },
         )
@@ -150,6 +152,7 @@ internal object MessageContentV2 {
                             openToChat = it.openToChat,
                             loraNode = it.loraNode,
                             loraKey = it.loraKey?.let(::b64),
+                            badges = it.badges?.map { badge -> BadgeEntry(w = badge.w, r = badge.r) },
                         )
                     },
             )
@@ -171,7 +174,8 @@ internal object MessageContentV2 {
      * The nested layouts are append-only too: `ProfileV2`'s label 5 is the open-to-chat flag (defaulted, so
      * elided while off — a profile without it decodes as before), label 6 the bound LoRa board's node
      * number (nullable, elided while unbound) and label 7 that board's signing key (32 raw bytes here, base64
-     * on the public layouts; nullable, elided unless the board signs).
+     * on the public layouts; nullable, elided unless the board signs). Label 8 is the supporter badges
+     * (docs/SUPPORTER_BADGE.md): sealed-only, so it has no public twin, and each entry is `{1: wrapper, 2: r}`.
      */
     @Serializable
     @Suppress("MagicNumber") // the CBOR labels are the layout itself, pinned by GoldenVectorTest
@@ -272,6 +276,17 @@ internal object MessageContentV2 {
         val loraNode: Long? = null,
         @CborLabel(7)
         val loraKey: ByteArray? = null,
+        @CborLabel(8)
+        val badges: List<BadgeV2>? = null,
+    )
+
+    @Serializable
+    @Suppress("MagicNumber") // the CBOR labels are the layout itself, pinned by GoldenVectorTest
+    private class BadgeV2(
+        @CborLabel(1)
+        val w: ByteArray,
+        @CborLabel(2)
+        val r: ByteArray,
     )
 }
 
