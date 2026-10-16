@@ -18,6 +18,12 @@ interface InboundSettings {
     val ownAvatarHash: Flow<String?>
     val displayName: Flow<String>
 
+    /**
+     * The declared size above which a received attachment waits for a tap before its fetch may ride Bluetooth,
+     * null for never (ADR 2026-10.js2p, [SettingsStore.bluetoothDownloadLimit]).
+     */
+    val bluetoothDownloadLimitBytes: Flow<Long?>
+
     /** Conversation ids explicitly accepted out of the message-request queue (see [SettingsStore.acceptedConversations]). */
     val acceptedConversations: Flow<Set<String>>
 

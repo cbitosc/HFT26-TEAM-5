@@ -26,6 +26,7 @@ import app.getknit.knit.ui.chat.MessageBubbleMineViaInternetPreview
 import app.getknit.knit.ui.chat.MessageBubblePhotoArrivingPreview
 import app.getknit.knit.ui.chat.MessageBubbleTheirsPreview
 import app.getknit.knit.ui.chat.MessageBubbleTheirsViaInternetPreview
+import app.getknit.knit.ui.chat.MessageBubbleVoiceTapToDownloadPreview
 import app.getknit.knit.ui.chat.MessageBubbleWithMentionPreview
 import app.getknit.knit.ui.chat.MessageDetailsScreenEmptyPreview
 import app.getknit.knit.ui.chat.MessageDetailsScreenPreview
@@ -35,6 +36,8 @@ import app.getknit.knit.ui.chat.StagedLinkTilePreview
 import app.getknit.knit.ui.chat.StagedLocationTileFailedPreview
 import app.getknit.knit.ui.chat.StagedLocationTileReadyPreview
 import app.getknit.knit.ui.chat.SystemNoticePreview
+import app.getknit.knit.ui.chat.TapToDownloadFilePreview
+import app.getknit.knit.ui.chat.TapToDownloadPhotoPreview
 import com.android.tools.screenshot.PreviewTest
 
 // Screenshot tests over the previews in `ui.chat`.
@@ -68,6 +71,11 @@ fun MessageBubbleWithMention() = MessageBubbleWithMentionPreview()
 @ComponentShots
 @Composable
 fun MessageBubblePhotoArriving() = MessageBubblePhotoArrivingPreview()
+
+@PreviewTest
+@ComponentShots
+@Composable
+fun MessageBubbleVoiceTapToDownload() = MessageBubbleVoiceTapToDownloadPreview()
 
 @PreviewTest
 @ComponentShots
@@ -199,3 +207,13 @@ fun MessageDetailsScreen() = MessageDetailsScreenPreview()
 @ScreenShots
 @Composable
 fun MessageDetailsScreenEmpty() = MessageDetailsScreenEmptyPreview()
+
+@PreviewTest
+@ComponentShots
+@Composable
+fun TapToDownloadFile() = TapToDownloadFilePreview()
+
+@PreviewTest
+@ComponentShots
+@Composable
+fun TapToDownloadPhoto() = TapToDownloadPhotoPreview()

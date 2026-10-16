@@ -144,6 +144,7 @@ class ChatViewModelTest {
     private val sizesFlow = MutableStateFlow(emptyMap<String, Int>())
     private val flaggedFlow = MutableStateFlow(emptyList<String>())
     private val filteringFlow = MutableStateFlow(true)
+    private val downloadLimitFlow = MutableStateFlow<Long?>(1_000_000L)
     private val groupFlow = MutableStateFlow<GroupEntity?>(null)
     private val peersFlow = MutableStateFlow(emptyList<PeerEntity>())
     private val nameFlow = MutableStateFlow("Alice")
@@ -173,6 +174,8 @@ class ChatViewModelTest {
         every { blobs.observeSizes(any()) } returns sizesFlow
         every { imageScreening.observeFlaggedHashes() } returns flaggedFlow
         every { settings.contentFilteringEnabled } returns filteringFlow
+        // Combined with the filter into the blob state: a relaxed mock's silent flow would stall every row.
+        every { settings.bluetoothDownloadLimitBytes } returns downloadLimitFlow
         every { groups.observeGroup(Conversations.NEARBY) } returns groupFlow
         stubThread(GROUP)
         every { groups.observeGroup(GROUP) } returns groupFlow
@@ -1459,6 +1462,58 @@ class ChatViewModelTest {
             advanceUntilIdle()
             assertEquals("landed: nothing left to show", emptyMap<String, ArrivingFile>(), vm.arrivals.value)
             assertEquals("and the poll stops", 0, mesh.arrivals.subscriptionCount.value)
+        }
+
+    @Test
+    fun aLargeReceivedAttachmentAwaitsTheTapUntilApprovedHeldOrUngated() =
+        runTest {
+            // ADR 2026-10.js2p: the card shows exactly where BluetoothFetchGate holds the fetch.
+            val vm = vm()
+            backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.state.collect {} }
+            val big = msg(senderId = "bob", id = "m1", conversationId = Conversations.NEARBY, attachmentHash = "h1")
+
+            fun awaits() =
+                vm.state.value.rows
+                    .single()
+                    .attachmentAwaitsTap
+
+            messagesFlow.value = listOf(big.copy(attachmentSize = 2_000_000L))
+            advanceUntilIdle()
+            assertTrue("over the limit, not held", awaits())
+
+            messagesFlow.value = listOf(big.copy(attachmentSize = 900_000L))
+            advanceUntilIdle()
+            assertFalse("under the limit", awaits())
+
+            messagesFlow.value = listOf(big)
+            advanceUntilIdle()
+            assertFalse("no declared size", awaits())
+
+            messagesFlow.value = listOf(big.copy(attachmentSize = 2_000_000L, attachmentFetchApproved = true))
+            advanceUntilIdle()
+            assertFalse("tapped", awaits())
+
+            messagesFlow.value = listOf(big.copy(attachmentSize = 2_000_000L, senderId = "me"))
+            advanceUntilIdle()
+            assertFalse("our own", awaits())
+
+            messagesFlow.value = listOf(big.copy(attachmentSize = 2_000_000L))
+            downloadLimitFlow.value = null
+            advanceUntilIdle()
+            assertFalse("limit set to Never", awaits())
+
+            downloadLimitFlow.value = 1_000_000L
+            sizesFlow.value = mapOf("h1" to 2_000_000)
+            advanceUntilIdle()
+            assertFalse("held", awaits())
+        }
+
+    @Test
+    fun aTapToDownloadReachesTheMesh() =
+        runTest {
+            vm().downloadAttachment("h1")
+            advanceUntilIdle()
+            assertEquals(listOf("h1"), mesh.downloadedAttachments)
         }
 
     @Test

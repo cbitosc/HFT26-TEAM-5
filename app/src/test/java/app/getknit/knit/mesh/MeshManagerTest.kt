@@ -17,10 +17,12 @@ import app.getknit.knit.data.crypto.SignedPrekey
 import app.getknit.knit.data.group.GroupEntity
 import app.getknit.knit.data.group.GroupMembersStore
 import app.getknit.knit.data.group.toFoundingInfo
+import app.getknit.knit.data.message.AttachmentFetchRow
 import app.getknit.knit.data.message.Conversations
 import app.getknit.knit.data.message.DeliveryPlane
 import app.getknit.knit.data.message.MentionStore
 import app.getknit.knit.data.message.MessageEntity
+import app.getknit.knit.data.message.MissingAttachment
 import app.getknit.knit.data.peer.MetPeerRepository
 import app.getknit.knit.data.peer.PeerEntity
 import app.getknit.knit.data.ratchet.GroupRatchetRepository
@@ -41,6 +43,7 @@ import app.getknit.knit.mesh.crypto.ratchet.RatchetCrypto
 import app.getknit.knit.mesh.crypto.ratchet.RatchetEngine
 import app.getknit.knit.mesh.crypto.ratchet.RatchetSessions
 import app.getknit.knit.mesh.crypto.scope.ScopeCrypto
+import app.getknit.knit.mesh.protocol.BlobReqContent
 import app.getknit.knit.mesh.protocol.ChatContent
 import app.getknit.knit.mesh.protocol.CommonsPost
 import app.getknit.knit.mesh.protocol.EncEnvelope
@@ -89,6 +92,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -253,7 +257,13 @@ class MeshManagerTest {
 
         override suspend fun liveIds(now: Long): List<String> = synchronized(frames) { frames.keys.toList() }
 
-        override suspend fun attachmentsNeedingFetch(): Map<String, String> = emptyMap()
+        /** Carried frames naming an attachment we lack, as a test sets them (ADR 2026-10.js2p's custody re-arm). */
+        @Volatile
+        var carried: List<CarriedAttachment> = emptyList()
+
+        override suspend fun attachmentsNeedingFetch(): Map<String, String> = carried.associate { it.hash to (it.senderId ?: "") }
+
+        override suspend fun carriedAttachments(): List<CarriedAttachment> = carried
 
         override suspend fun recipientOf(id: String): String? = synchronized(frames) { frames[id]?.envelope?.recipientId }
 
@@ -409,6 +419,12 @@ class MeshManagerTest {
          */
         val displayName = MutableStateFlow("")
 
+        /**
+         * The user's Bluetooth download limit (ADR 2026-10.js2p), null for never asking — stubbed for every rig, since
+         * the database re-arm reads it on every link-up and tick and a relaxed mock's flow would hang that read.
+         */
+        val bluetoothDownloadLimit = MutableStateFlow<Long?>(null)
+
         /** What the board was handed by [MeshManager.sendPublicPost], and what it answers. */
         val publicPosts = mutableListOf<String>()
         var publicChannelRefusal: PublicPostRefusal? = null
@@ -418,6 +434,7 @@ class MeshManagerTest {
             coEvery { identity.nodeId() } returns me.nodeId
             coEvery { settings.displayName } returns displayName
             coEvery { settings.loraBoard } returns loraBoard
+            coEvery { settings.bluetoothDownloadLimitBytes } returns bluetoothDownloadLimit
             // The local delivery of anything we originate runs the inbound path, whose first act is a
             // blocklist read with `.first()`. A relaxed mock's empty flow throws there rather than hanging.
             coEvery { settings.blockedNodeIds } returns MutableStateFlow(emptySet())
@@ -2584,6 +2601,110 @@ class MeshManagerTest {
             assertTrue(rig.sentReactionFrames().isEmpty())
             assertEquals(1, rig.sentChatFrames().size)
             assertEquals(1L, rig.metrics.seals().reactionsSealed)
+        }
+
+    // --- Ask before large Bluetooth-only downloads (ADR 2026-10.js2p) ---
+
+    private fun missing(
+        hash: String,
+        sender: String,
+        size: Long?,
+        approved: Boolean = false,
+    ) = MissingAttachment(hash, sender, listOf(AttachmentFetchRow(hash, sender, size, approved, own = false)))
+
+    /** Every blob request the manager sent, as (to, content). */
+    private fun Rig.blobAsks(): List<Pair<String?, BlobReqContent>> =
+        transport.sent.mapNotNull { (wire, to) ->
+            WireCodec
+                .decodeEnvelope(wire.signed)
+                ?.takeIf { it.type == FrameType.BLOB_REQ }
+                ?.let { env -> WireCodec.decodePayload<BlobReqContent>(env.payload)?.let { to?.nodeId to it } }
+        }
+
+    @Test
+    fun theDatabaseReArmHoldsAnAttachmentOverTheLimitToWifiAwareAndChoosingNeverFetchesItAtOnce() =
+        runTest(UnconfinedTestDispatcher()) {
+            val rig = Rig(backgroundScope)
+            val author = "author-node"
+            rig.bluetoothDownloadLimit.value = 1_000_000L
+            coEvery { rig.messages.attachmentsNeedingFetch(any()) } returns
+                listOf(
+                    missing("big", author, 2_000_000L),
+                    missing("tapped", author, 2_000_000L, approved = true),
+                    missing("small", author, 400_000L),
+                    // A stranger's row naming it with an inflated size: the contact's row, declaring nothing, fetches it.
+                    MissingAttachment(
+                        "shared",
+                        author,
+                        listOf(
+                            AttachmentFetchRow("shared", author, null, false, false),
+                            AttachmentFetchRow("shared", "x", 9_000_000L, false, false),
+                        ),
+                    ),
+                )
+            rig.transport.nearby.value = setOf(Peer(author)) // a Bluetooth link only: no Wi-Fi Aware route
+            rig.stubProfileState(MutableStateFlow(0L)) // start() reads the profile settings too
+            coEvery { rig.groups.observeGroups() } returns flowOf(emptyList()) // the startup storage sweep's read
+
+            rig.manager.start()
+            rig.await(3) { rig.blobAsks().size }
+            assertEquals(
+                "the tapped, the small and the shared one asked plain; the large one not at all",
+                setOf("tapped", "small", "shared"),
+                rig.blobAsks().mapTo(HashSet()) { it.second.hash },
+            )
+            assertTrue(rig.blobAsks().none { it.second.fastOnly != null })
+
+            rig.bluetoothDownloadLimit.value = null // the user chose "Never ask"
+            rig.await(4) { rig.blobAsks().size }
+            assertEquals(author to BlobReqContent("big"), rig.blobAsks().last())
+            rig.manager.stop()
+        }
+
+    @Test
+    fun anUnopenedCarriedAttachmentIsFastOnlyOnlyWhenEveryFrameNamingItIsOurs() =
+        runTest(UnconfinedTestDispatcher()) {
+            // Round 3 of ADR 2026-10.js2p's review: a stranger's DM to us naming a hash we carry for somebody else must
+            // not make our carrier pull Wi-Fi Aware only. Folded as the rows are: it can lift the gate, never impose it.
+            val rig = Rig(backgroundScope)
+            val author = "author-node"
+            val me = rig.me.nodeId
+            rig.bluetoothDownloadLimit.value = 1_000_000L
+            rig.forwardStore.carried =
+                listOf(
+                    CarriedAttachment("ours", recipientId = me, carriedAt = 0L, senderId = author),
+                    CarriedAttachment("carried", recipientId = "carol", carriedAt = 0L, senderId = author),
+                    CarriedAttachment("carried", recipientId = me, carriedAt = 0L, senderId = "stranger"),
+                )
+            rig.transport.nearby.value = setOf(Peer(author))
+            rig.stubProfileState(MutableStateFlow(0L))
+            coEvery { rig.groups.observeGroups() } returns flowOf(emptyList())
+
+            rig.manager.start()
+            rig.await(1) { rig.blobAsks().size }
+            assertEquals(
+                "the carrier pull stays plain; the unopened DM to us is held",
+                setOf("carried"),
+                rig.blobAsks().mapTo(HashSet()) {
+                    it.second.hash
+                },
+            )
+            rig.manager.stop()
+        }
+
+    @Test
+    fun tapToDownloadApprovesTheRowsAndAsksTheAuthorPlainAtOnce() =
+        runTest(UnconfinedTestDispatcher()) {
+            val rig = Rig(backgroundScope)
+            val author = "author-node"
+            coEvery { rig.messages.attachmentFetchRows("big", any()) } returns
+                listOf(AttachmentFetchRow("big", author, 2_000_000L, true, false))
+            rig.transport.nearby.value = setOf(Peer(author))
+
+            rig.manager.downloadAttachment("big")
+
+            coVerify { rig.messages.approveAttachmentFetch("big") }
+            assertEquals(listOf(author to BlobReqContent("big")), rig.blobAsks())
         }
 
     private companion object {

@@ -317,11 +317,17 @@ data class ReactionContent(
  * stream only the rest (work item #116, ADR 2026-10.wtyc). Null for a whole file, and omitted from the CBOR then,
  * so a plain ask is byte-identical to every older build's. A holder that predates the field skips it and serves
  * the whole file, which the asker takes as before; one that knows it echoes it in the link's `FILE_HEADER`.
+ *
+ * [fastOnly] true asks for the bytes over Wi-Fi Aware only (ADR 2026-10.js2p): the asker's user has not approved a
+ * fetch of an attachment declared over their limit, so a holder serves it over a live Wi-Fi Aware link, or one it
+ * raises for it, and otherwise not at all — never over Bluetooth. Null for every other ask, and omitted from the CBOR
+ * then, so a plain ask stays byte-identical. A holder that predates the field skips it and serves as it always has.
  */
 @Serializable
 data class BlobReqContent(
     val hash: String,
     val offset: Long? = null,
+    val fastOnly: Boolean? = null,
 )
 
 /**

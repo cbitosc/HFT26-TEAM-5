@@ -4,6 +4,7 @@ import app.getknit.knit.data.VoiceAudio
 import app.getknit.knit.data.adts
 import app.getknit.knit.data.message.Conversations
 import app.getknit.knit.data.message.DeliveryPlane
+import app.getknit.knit.data.settings.BluetoothDownloadLimit
 import app.getknit.knit.mesh.BlobExchange
 import app.getknit.knit.mesh.lora.FakeMeshtasticAir
 import app.getknit.knit.mesh.protocol.FrameType
@@ -428,12 +429,16 @@ class AttachmentLabTest {
      * Alice's sealed DMs to Bob (the seed, Bob's key-request answer, ticks) are the air's to lose while the blob
      * comes in. The group frame and the blob exchange pass, and the files are never held. The re-link's digest
      * exchange then repairs the seed from Alice's custody.
+     *
+     * Bob never asks before a large Bluetooth download: a frame addressed to him that he cannot open yet has its size
+     * sealed inside, so with the default limit its blob would wait for Wi-Fi Aware until it opened (ADR 2026-10.js2p).
      */
     @Test
     fun aGroupVoiceNoteWhoseBytesOutrunItsSeedIsDescribedWhenItOpens() =
         runBlocking {
             val alice = lab.node("alice").apply { setDisplayName("Alice") }
             val bob = lab.node("bob").apply { setDisplayName("Bob") }
+            bob.settings.setBluetoothDownloadLimit(BluetoothDownloadLimit.NEVER)
             lab.link(alice, bob)
             lab.awaitAcquainted(alice, bob)
 
@@ -459,6 +464,52 @@ class AttachmentLabTest {
                 "Bob's row for the voice note never learned its duration: ${bob.rowsIn(groupId)}",
                 lab.tryAwait(1) { if (bob.voiceDurationOf(groupId, noteId) == VoiceAudio.durationMs(note)) 1 else 0 },
             )
+            lab.assertConverged(listOf(alice, bob), atLeast = 1) { groupId }
+        }
+
+    /**
+     * The same shape under the default Bluetooth download limit (ADR 2026-10.js2p), with a file over it: a group frame
+     * addressed to Bob that he cannot open yet has its size sealed inside. Custody leaves its bytes to the delivery that
+     * follows the seed, and the tick's re-arm holds it to Wi-Fi Aware — by the roster the frame itself carries, since Bob
+     * has no group row before the seed (the mesh-lab review's finding: by group rows alone the tick fetched it over
+     * Bluetooth). Nothing is asked until Bob's row exists; once it opens, over the limit, it waits for the tap, and the
+     * tap fetches it.
+     */
+    @Test
+    fun aLargeGroupFileHeardBeforeItsSeedIsNotAskedForUntilItOpens() =
+        runBlocking {
+            val alice = lab.node("alice").apply { setDisplayName("Alice") }
+            val bob = lab.node("bob").apply { setDisplayName("Bob") }
+            lab.link(alice, bob)
+            lab.awaitAcquainted(alice, bob)
+
+            alice.transport.hold(bob.transport)
+            val groupId = alice.createGroup(bob)
+            assertTrue(alice.sendFile(Random(2007).nextBytes(2_000_000), "plans.zip", "application/zip", text = "plans", groupId = groupId))
+            val id = alice.ownMessageId(groupId, "plans")
+            val hash = checkNotNull(alice.attachmentHash(groupId, id))
+            lab.await(1) { alice.transport.held(bob.transport).count { it.isGroupFrame() } }
+            alice.transport.lossy(bob.transport) { it.isSealedDmTo(bob) }
+            val released = alice.transport.release(bob.transport) { batch -> batch.filter { it.isGroupFrame() } }
+            assertEquals(1, released.size)
+
+            // Bob carries the frame he cannot open; the tick's re-arm sees it and asks nobody over Bluetooth.
+            lab.await(1) { if (id in bob.custodyIds()) 1 else 0 }
+            assertNull("the frame opened before the tick: the fixture lost its order", bob.row(id))
+            val heldBefore = bob.metrics.files().blobFastOnlyHeld
+            bob.reoffer()
+            // Wanted, and held to Wi-Fi Aware: a plain want would have asked Alice over the link instead.
+            lab.await(1) { if (bob.metrics.files().blobFastOnlyHeld > heldBefore) 1 else 0 }
+            assertTrue(
+                "asked over Bluetooth before the frame opened: ${bob.transport.blobAsks}",
+                bob.transport.blobAsks.none { it.hash == hash },
+            )
+
+            alice.transport.lossy(bob.transport) // a clean link again, and the re-link's digest exchange serves the seed
+            lab.unlink(alice, bob)
+            lab.link(alice, bob)
+            lab.await(1) { if (bob.row(id) != null) 1 else 0 }
+            bob.manager.downloadAttachment(hash) // over the limit: the tap
             lab.assertConverged(listOf(alice, bob), atLeast = 1) { groupId }
         }
 

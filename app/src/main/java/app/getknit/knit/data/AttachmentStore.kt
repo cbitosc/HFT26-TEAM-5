@@ -72,9 +72,11 @@ class AttachmentStore(
      * on send and the row records its *ciphertext* hash. So the description rides along and is written
      * where the row is actually created (`MeshManager.sendChat`), against the hash that row will hold.
      *
-     * [name] and [sizeBytes] travel the same way and for the same reason, and are set only by [ingestFile].
-     * [sizeBytes] is the **plaintext** length deliberately: it is what the recipient will save, whereas the
-     * blob stored under [hash] in a DM or group is that plaintext plus its seal.
+     * [name] and [sizeBytes] travel the same way and for the same reason. [name] is set only by [ingestFile];
+     * [sizeBytes] by every ingest but a link card's, since a recipient's "Ask before large Bluetooth downloads"
+     * judges a large photo's or voice note's declared length too (ADR 2026-10.js2p). It is the **plaintext**
+     * length deliberately: it is what the recipient will save, whereas the blob stored under [hash] in a DM or
+     * group is that plaintext plus its seal.
      *
      * [link] is the same idea for a link-preview card ([ingestLinkPreview]): what the composer draws for the
      * staged card and the link its dismissal is remembered by, carried on the one staged object rather than
@@ -213,7 +215,7 @@ class AttachmentStore(
                 hash = held.plainHash,
                 mime = held.mime,
                 name = name.takeUnless { image },
-                sizeBytes = if (image) 0 else plain.size,
+                sizeBytes = plain.size,
                 animated = held.animated,
                 sourceHash = bytesHash.takeIf { it != held.plainHash },
                 reuse = held,
@@ -261,7 +263,7 @@ class AttachmentStore(
             val hash = sha256(bytes)
             blobs.insert(hash, VoiceAudio.MIME, bytes)
             IngestResult.Success(
-                Ingested(hash, VoiceAudio.MIME, voice = VoiceAudio.describe(bytes)),
+                Ingested(hash, VoiceAudio.MIME, voice = VoiceAudio.describe(bytes), sizeBytes = bytes.size),
                 flagged = false,
             )
         }
@@ -425,7 +427,10 @@ class AttachmentStore(
         val flagged = screen && imageScreening.isImageExplicit(bytes)
         val hash = sha256(bytes)
         blobs.insert(hash, mime, bytes)
-        return IngestResult.Success(Ingested(hash, mime, animated = AnimatedImage.isAnimated(bytes)), flagged)
+        return IngestResult.Success(
+            Ingested(hash, mime, sizeBytes = bytes.size, animated = AnimatedImage.isAnimated(bytes)),
+            flagged,
+        )
     }
 
     /** [bitmap] bounded to [MAX_DIMENSION] and encoded afresh — the long way, and one generation of loss. */

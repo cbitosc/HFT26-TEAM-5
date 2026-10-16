@@ -63,6 +63,7 @@ class IosPayloadShapesTest {
         val whole = roundTrip<BlobReqContent>("a164686173687840" + "6162".repeat(32))
         assertEquals(hash, whole.hash)
         assertNull(whole.offset)
+        assertNull("an iPhone's ask never says fast-only (ADR 2026-10.js2p)", whole.fastOnly)
         val resumed = roundTrip<BlobReqContent>("a264686173687840" + "6162".repeat(32) + "666f6666736574191000")
         assertEquals(4096L, resumed.offset)
     }

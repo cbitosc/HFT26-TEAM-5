@@ -559,6 +559,104 @@ class CompositeMeshTransportTest {
         }
 
     @Test
+    fun fastLinkedIsTheHighThroughputPlanesLinksAloneSoABluetoothNeighbourGainingWifiAwareShows() =
+        runTest(UnconfinedTestDispatcher()) {
+            // ADR 2026-10.js2p's review: the merged neighbours do not move when a Bluetooth neighbour gains Wi-Fi Aware.
+            val bt = FakeChild()
+            val nan = FakeChild(highThroughput = true)
+            val composite = CompositeMeshTransport(listOf(bt, nan), backgroundScope)
+            bt.setNeighbors(Peer("p"))
+            advanceUntilIdle()
+            assertEquals(emptySet<String>(), composite.fastLinked.value)
+            val merged = composite.neighbors.value
+
+            nan.setNeighbors(Peer("p"))
+            advanceUntilIdle()
+            assertEquals(setOf("p"), composite.fastLinked.value)
+            assertEquals("the merged set did not move", merged.map { it.nodeId }, composite.neighbors.value.map { it.nodeId })
+        }
+
+    // --- Fast-only serves: Wi-Fi Aware or nothing (ADR 2026-10.js2p) ---
+
+    private fun fastOnlyAttachment(onDropped: () -> Unit = {}) =
+        FileMeta(FileKind.ATTACHMENT, "k", "image/jpeg", fastOnly = true, onDropped = onDropped)
+
+    @Test
+    fun aFastOnlyFileRidesALiveFastLinkAndIsNeverHandedToBluetoothWhenItRefuses() =
+        runTest(UnconfinedTestDispatcher()) {
+            val bt = FakeChild()
+            val nan = FakeChild(highThroughput = true)
+            val metrics = MeshMetrics()
+            val composite = CompositeMeshTransport(listOf(bt, nan), backgroundScope, metrics)
+            bt.setNeighbors(Peer("p"))
+            nan.setNeighbors(Peer("p"))
+            advanceUntilIdle()
+            // Small as it is, a live fast link carries it.
+            assertTrue(composite.sendFile(fileOfSize(1_000), Peer("p"), fastOnlyAttachment()))
+            assertEquals(1, nan.sentFiles.size)
+            assertTrue(bt.sentFiles.isEmpty())
+
+            nan.acceptFiles = false // the link died in the check→enqueue window
+            assertTrue("refused, not fallen back", !composite.sendFile(fileOfSize(1_000), Peer("p"), fastOnlyAttachment()))
+            assertTrue("Bluetooth carries no fast-only copy", bt.sentFiles.isEmpty())
+            assertEquals(1L, metrics.files().fastOnlyDropped)
+        }
+
+    @Test
+    fun aFastOnlyFileArmsWhateverItsSizeAndIsDroppedWhenTheGraceExpires() =
+        runTest(UnconfinedTestDispatcher()) {
+            val bt = FakeChild()
+            val nan = FakeChild(highThroughput = true).apply { armBulk = true }
+            val metrics = MeshMetrics()
+            val composite = CompositeMeshTransport(listOf(bt, nan), backgroundScope, metrics)
+            bt.setNeighbors(Peer("p"))
+            advanceUntilIdle()
+            var dropped = 0
+
+            assertTrue("scheduled", composite.sendFile(fileOfSize(1_000), Peer("p"), fastOnlyAttachment { dropped++ }))
+            assertEquals("armed below the size gate too", listOf("p"), nan.expectBulkCalls)
+            advanceTimeBy(CompositeMeshTransport.BULK_GRACE_MS + 1)
+            advanceUntilIdle()
+            assertTrue("no Bluetooth copy at the grace's end", bt.sentFiles.isEmpty())
+            assertTrue(nan.sentFiles.isEmpty())
+            assertEquals("the holder is told the copy went nowhere", 1, dropped)
+            assertEquals(1L, metrics.files().fastOnlyDropped)
+        }
+
+    @Test
+    fun aFastOnlyFileRidesTheArmedLinkWhenItComesUp() =
+        runTest(UnconfinedTestDispatcher()) {
+            val bt = FakeChild()
+            val nan = FakeChild(highThroughput = true).apply { armBulk = true }
+            val composite = CompositeMeshTransport(listOf(bt, nan), backgroundScope)
+            bt.setNeighbors(Peer("p"))
+            advanceUntilIdle()
+            var dropped = 0
+
+            composite.sendFile(fileOfSize(CompositeMeshTransport.BULK_MIN_BYTES), Peer("p"), fastOnlyAttachment { dropped++ })
+            advanceTimeBy(1_000)
+            nan.setNeighbors(Peer("p"))
+            advanceUntilIdle()
+            assertEquals(1, nan.sentFiles.size)
+            assertTrue(bt.sentFiles.isEmpty())
+            assertEquals(0, dropped)
+        }
+
+    @Test
+    fun aFastOnlyFileTheFastPlaneWontArmForIsRefusedAtOnce() =
+        runTest(UnconfinedTestDispatcher()) {
+            val bt = FakeChild()
+            val nan = FakeChild(highThroughput = true) // armBulk = false
+            val composite = CompositeMeshTransport(listOf(bt, nan), backgroundScope)
+            bt.setNeighbors(Peer("p"))
+            advanceUntilIdle()
+
+            assertTrue(!composite.sendFile(fileOfSize(CompositeMeshTransport.BULK_MIN_BYTES), Peer("p"), fastOnlyAttachment()))
+            assertTrue(bt.sentFiles.isEmpty())
+            assertTrue(nan.sentFiles.isEmpty())
+        }
+
+    @Test
     fun bigAttachmentSkipsTheWaitWhenTheFastPlaneWontArm() =
         runTest(UnconfinedTestDispatcher()) {
             val bt = FakeChild()

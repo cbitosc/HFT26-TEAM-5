@@ -16,6 +16,7 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import app.getknit.knit.R
+import app.getknit.knit.data.settings.BluetoothDownloadLimit
 import app.getknit.knit.mesh.lora.BoardBattery
 import app.getknit.knit.mesh.lora.LoraPlane
 import app.getknit.knit.ui.BackgroundBattery
@@ -55,6 +56,8 @@ class SettingsScreenContentTest {
         themeMode: ThemeMode = ThemeMode.System,
         onSelectThemeMode: (ThemeMode) -> Unit = {},
         showThemeMode: Boolean = true,
+        bluetoothDownloadLimit: BluetoothDownloadLimit = BluetoothDownloadLimit.DEFAULT,
+        onSelectBluetoothDownloadLimit: (BluetoothDownloadLimit) -> Unit = {},
         linkPreviewsEnabled: Boolean = false,
         onToggleLinkPreviews: (Boolean) -> Unit = {},
         dynamicColor: Boolean = false,
@@ -81,6 +84,7 @@ class SettingsScreenContentTest {
                             header = header,
                             contentFilteringEnabled = contentFilteringEnabled,
                             themeMode = themeMode,
+                            bluetoothDownloadLimit = bluetoothDownloadLimit,
                             linkPreviewsEnabled = linkPreviewsEnabled,
                             dynamicColor = dynamicColor,
                             relay = relay,
@@ -94,6 +98,7 @@ class SettingsScreenContentTest {
                     onToggleContentFiltering = onToggleContentFiltering,
                     onSelectThemeMode = onSelectThemeMode,
                     showThemeMode = showThemeMode,
+                    onSelectBluetoothDownloadLimit = onSelectBluetoothDownloadLimit,
                     onToggleLinkPreviews = onToggleLinkPreviews,
                     onToggleDynamicColor = onToggleDynamicColor,
                     showDynamicColor = showDynamicColor,
@@ -200,6 +205,17 @@ class SettingsScreenContentTest {
         render(themeMode = ThemeMode.Light)
         compose.onNodeWithTag("settings_theme_mode").performScrollTo()
         compose.onNodeWithText("Light").assertIsSelected()
+    }
+
+    @Test
+    fun theLargeDownloadRowStartsAtOneMegabyteAndReportsAPick() {
+        // ADR 2026-10.js2p: the default asks above 1 MB; Never turns the card off.
+        var picked: BluetoothDownloadLimit? = null
+        render(onSelectBluetoothDownloadLimit = { picked = it })
+        compose.onNodeWithTag("settings_bt_download").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Over 1 MB").assertIsSelected()
+        compose.onNodeWithText("Never").performClick()
+        assertEquals(BluetoothDownloadLimit.NEVER, picked)
     }
 
     /** Below API 31 there is no per-app night mode, so the control is absent rather than dead. */

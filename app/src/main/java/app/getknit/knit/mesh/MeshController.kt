@@ -214,6 +214,12 @@ interface MeshController {
 
     /** Broadcasts a best-effort "now typing" cue for [conversationId] to nearby peers. */
     suspend fun sendTyping(conversationId: String)
+
+    /**
+     * The user's "Tap to download" on attachment [hash] (ADR 2026-10.js2p): approves a fetch the Bluetooth download
+     * limit held to Wi-Fi Aware, and fetches it now over any plane. Kept on the message rows, so it outlives a restart.
+     */
+    suspend fun downloadAttachment(hash: String)
 }
 
 /**

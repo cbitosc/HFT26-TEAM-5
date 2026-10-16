@@ -18,6 +18,7 @@ import app.getknit.knit.data.adts
 import app.getknit.knit.data.group.GroupEntity
 import app.getknit.knit.data.group.GroupMembersStore
 import app.getknit.knit.data.group.toGroupInfo
+import app.getknit.knit.data.message.AttachmentFetchRow
 import app.getknit.knit.data.message.ConversationKind
 import app.getknit.knit.data.message.Conversations
 import app.getknit.knit.data.message.DeliveryPlane
@@ -180,6 +181,7 @@ class InboundPipelineTest {
         override val blockedNodeIds get() = blocked
         override val blockedDeviceTags = MutableStateFlow(emptySet<String>())
         override val contentFilteringEnabled = MutableStateFlow(true)
+        override val bluetoothDownloadLimitBytes = MutableStateFlow<Long?>(null)
         override val ownAvatarHash = MutableStateFlow<String?>(null)
         override val displayName = MutableStateFlow("Me")
         val accepted = MutableStateFlow(emptySet<String>())
@@ -383,6 +385,22 @@ class InboundPipelineTest {
             coEvery { messages.recipientOf(any()) } answers { msgMap[firstArg<String>()]?.recipientId }
             // The quote check's reads and its guarded write (ADR 2026-10.gpa3), over the same fake map.
             coEvery { messages.find(any()) } answers { msgMap[firstArg<String>()] }
+            // What BluetoothFetchGate folds a want's verdict over (ADR 2026-10.js2p), over the same fake map.
+            coEvery { messages.attachmentFetchRows(any(), any()) } answers {
+                val me = secondArg<String>()
+                msgMap.values
+                    .filter { it.attachmentHash == firstArg<String>() }
+                    .sortedWith(compareBy({ it.sentAt }, { it.id }))
+                    .map {
+                        AttachmentFetchRow(
+                            it.attachmentHash!!,
+                            it.senderId,
+                            it.attachmentSize,
+                            it.attachmentFetchApproved,
+                            it.senderId == me,
+                        )
+                    }
+            }
             coEvery { messages.repliesAwaiting(any(), any(), any()) } answers {
                 msgMap.values
                     .filter {
@@ -641,6 +659,7 @@ class InboundPipelineTest {
             attachmentHash: String,
             fileName: String,
             body: String = "",
+            attachmentSize: Long? = null,
         ): RelayEnvelope {
             val header = MessageCrypto.header(id, author.nodeId, 5L, self.nodeId)
             val sealed =
@@ -650,6 +669,7 @@ class InboundPipelineTest {
                     attachmentMime = "application/octet-stream",
                     attachmentKey = "a2V5",
                     attachmentName = fileName,
+                    attachmentSize = attachmentSize,
                 )
             val enc = author.crypto.seal(sealed.encode(), header, mapOf(self.nodeId to self.bundle))!!
             return RelayEnvelope(
@@ -2560,6 +2580,169 @@ class InboundPipelineTest {
 
             coVerify { rig.blobExchange.want("room-pic", alice.nodeId, "carrier", null) }
             coVerify { rig.blobExchange.want("dm-doc", alice.nodeId, "carrier", null) }
+        }
+
+    /**
+     * ADR 2026-10.js2p: an attachment declared over the user's Bluetooth download limit is wanted fast-only; one under it,
+     * or one declaring no size, plain. A room post declares none, so it is never held.
+     */
+    @Test
+    fun aDeliveredAttachmentOverTheBluetoothLimitIsWantedFastOnlyAndEveryOtherPlain() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.peerMap[alice.nodeId] =
+                PeerEntity(nodeId = alice.nodeId, pubKey = alice.bundle.encoded, verified = true, updatedAt = 1L)
+            rig.settings.bluetoothDownloadLimitBytes.value = 1_000_000L
+
+            rig.deliver(
+                alice,
+                rig.sealedFileDm(alice, id = "d1", attachmentHash = "big", fileName = "a.zip", attachmentSize = 2_000_000L),
+                from = "c",
+            )
+            rig.deliver(
+                alice,
+                rig.sealedFileDm(alice, id = "d2", attachmentHash = "small", fileName = "b.pdf", attachmentSize = 400_000L),
+                from = "c",
+            )
+            rig.deliver(alice, rig.sealedFileDm(alice, id = "d3", attachmentHash = "unsized", fileName = "c.pdf"), from = "c")
+            rig.deliver(alice, rig.attachmentChat(alice, id = "r1", attachmentHash = "room-pic", mime = "image/jpeg"), from = "c")
+
+            coVerify(exactly = 0) { rig.blobExchange.want("big", any(), any(), any(), false) }
+            coVerify { rig.blobExchange.want("big", alice.nodeId, "c", null, true) }
+            // Judged small, so plain — which lifts the fast-only want custody made before the frame was opened.
+            coVerify { rig.blobExchange.want("small", alice.nodeId, "c", null, false) }
+            coVerify { rig.blobExchange.want("unsized", alice.nodeId, "c", null, false) }
+            coVerify(exactly = 0) { rig.blobExchange.want("room-pic", any(), any(), any(), true) }
+        }
+
+    /**
+     * A stranger's row naming a contact's attachment with an inflated size must not hold the contact's fetch: the rows
+     * are folded, and one that would fetch it — here the contact's, declaring nothing — fetches it for all.
+     */
+    @Test
+    fun oneRowThatWouldFetchAnAttachmentFetchesItForEveryRowNamingIt() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.peerMap[alice.nodeId] =
+                PeerEntity(nodeId = alice.nodeId, pubKey = alice.bundle.encoded, verified = true, updatedAt = 1L)
+            rig.settings.bluetoothDownloadLimitBytes.value = 1_000_000L
+            rig.msgMap["contact"] =
+                MessageEntity(
+                    id = "contact",
+                    senderId = "contact-node",
+                    conversationId = "contact-node",
+                    body = "",
+                    sentAt = 1L,
+                    attachmentHash = "shared",
+                )
+
+            val inflated = rig.sealedFileDm(alice, id = "d1", attachmentHash = "shared", fileName = "x.zip", attachmentSize = 9_000_000L)
+            rig.deliver(alice, inflated, from = "c")
+
+            coVerify(exactly = 0) { rig.blobExchange.want("shared", any(), any(), any(), true, any()) }
+            coVerify { rig.blobExchange.want("shared", alice.nodeId, "c", null, false) }
+        }
+
+    /** A row arriving after the user tapped its attachment comes in tapped, and its want is plain (ADR 2026-10.js2p). */
+    @Test
+    fun aRowArrivingAfterTheTapInheritsIt() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.peerMap[alice.nodeId] =
+                PeerEntity(nodeId = alice.nodeId, pubKey = alice.bundle.encoded, verified = true, updatedAt = 1L)
+            rig.settings.bluetoothDownloadLimitBytes.value = 1_000_000L
+            rig.msgMap["first"] =
+                MessageEntity(
+                    id = "first",
+                    senderId = alice.nodeId,
+                    conversationId = alice.nodeId,
+                    body = "",
+                    sentAt = 1L,
+                    attachmentHash = "big",
+                    attachmentSize = 2_000_000L,
+                    attachmentFetchApproved = true,
+                )
+
+            rig.deliver(
+                alice,
+                rig.sealedFileDm(alice, id = "d2", attachmentHash = "big", fileName = "a.zip", attachmentSize = 2_000_000L),
+                from = "c",
+            )
+
+            assertTrue("the new row comes in tapped", rig.msgMap.getValue("d2").attachmentFetchApproved)
+            coVerify(exactly = 0) { rig.blobExchange.want("big", any(), any(), any(), true, any()) }
+        }
+
+    @Test
+    fun withNoBluetoothLimitEveryAttachmentIsWantedPlain() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.peerMap[alice.nodeId] =
+                PeerEntity(nodeId = alice.nodeId, pubKey = alice.bundle.encoded, verified = true, updatedAt = 1L)
+
+            rig.deliver(
+                alice,
+                rig.sealedFileDm(alice, id = "d1", attachmentHash = "big", fileName = "a.zip", attachmentSize = 2_000_000L),
+                from = "c",
+            )
+
+            coVerify(exactly = 0) { rig.blobExchange.want("big", any(), any(), any(), true) }
+            coVerify { rig.blobExchange.want("big", alice.nodeId, "c", null, false) }
+        }
+
+    @Test
+    fun onCarriedFrameLeavesAnUnopenedFrameToUsToDeliveryAndJudgesAStoredOneByItsRows() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.settings.bluetoothDownloadLimitBytes.value = 1_000_000L
+
+            fun dm(
+                id: String,
+                hash: String,
+                to: String,
+            ) = rig.attachmentChat(alice, id = id, attachmentHash = hash).let {
+                RelayEnvelope(
+                    type = it.type,
+                    id = it.id,
+                    senderId = it.senderId,
+                    sentAt = it.sentAt,
+                    recipientId = to,
+                    payload = it.payload,
+                )
+            }
+
+            rig.pipeline.onCarriedFrame(dm("d1", "ours-unopened", rig.self.nodeId))
+            rig.pipeline.onCarriedFrame(dm("d2", "carols", "carol"))
+            rig.pipeline.onCarriedFrame(rig.attachmentChat(alice, id = "r1", attachmentHash = "room-pic"))
+            // Not opened yet, its size sealed: left to the delivery right behind, not wanted here at all.
+            coVerify(exactly = 0) { rig.blobExchange.want("ours-unopened", any(), any(), any(), any(), any()) }
+            coVerify { rig.blobExchange.want("carols", alice.nodeId, null, null, false) }
+            coVerify { rig.blobExchange.want("room-pic", alice.nodeId, null, null, false) }
+
+            // A re-served DM we already stored: no delivery follows, so its row judges it — here, tapped.
+            rig.msgMap["d3"] =
+                MessageEntity(
+                    id = "d3",
+                    senderId = alice.nodeId,
+                    recipientId = rig.self.nodeId,
+                    conversationId = alice.nodeId,
+                    body = "",
+                    sentAt = 5L,
+                    attachmentHash = "ours-tapped",
+                    attachmentSize = 2_000_000L,
+                    attachmentFetchApproved = true,
+                )
+            rig.pipeline.onCarriedFrame(dm("d3", "ours-tapped", rig.self.nodeId))
+            coVerify { rig.blobExchange.want("ours-tapped", alice.nodeId, null, null, false) }
+
+            rig.settings.bluetoothDownloadLimitBytes.value = null
+            rig.pipeline.onCarriedFrame(dm("d4", "ours-no-limit", rig.self.nodeId))
+            coVerify { rig.blobExchange.want("ours-no-limit", alice.nodeId, null, null, false) }
         }
 
     /** ADR 2026-10.g24x: a DM's linked recipient is fetching its picture now, so a carrier holds its own pull back. */

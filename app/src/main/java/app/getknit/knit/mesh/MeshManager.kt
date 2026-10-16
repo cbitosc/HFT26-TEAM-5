@@ -251,6 +251,16 @@ class MeshManager(
     // accumulate across start/stop cycles (e.g. a Diagnostics-triggered restart()).
     private var sessionScope: CoroutineScope? = null
 
+    // Serialises the database re-arm and the user's tap (ADR 2026-10.js2p): see [rewantMissingBlobsLocked].
+    private val rewantLock = Mutex()
+
+    /**
+     * Test seam: runs inside a re-arm between its reads and its wants, under [rewantLock] — where `mesh/lab` parks one
+     * to race the user's tap against it (`LargeAttachmentLabTest`). Null in production.
+     */
+    @Volatile
+    internal var beforeRewantApplies: (suspend () -> Unit)? = null
+
     // Content-addressed image fetch over the mesh, backed by the encrypted blob store.
     private val blobExchange =
         BlobExchange(
@@ -731,6 +741,7 @@ class MeshManager(
         session.launch { transport.fileFeedsChanged.collect { blobExchange.feedsChanged() } }
         // A file streaming in is reported back to its sender, which times its parked asks by it (ADR 2026-10.nsr7).
         session.launch { transport.fileProgress.collect { blobExchange.onFileProgress(it) } }
+        watchFastLinks(session)
         watchReachable(session)
         watchMetPeers(session)
         openToChatWatch.start(session)
@@ -753,6 +764,24 @@ class MeshManager(
         scopeSync?.start(session)
         watchRoute(session)
         watchScopeInputs(session)
+    }
+
+    /**
+     * A Wi-Fi Aware link coming up steps the fast-only blob wants at once (ADR 2026-10.js2p): to a neighbour already
+     * linked over Bluetooth it changes no neighbour set, so neither the link-up hooks nor `BlobExchange.linked` see it,
+     * and an ephemeral data path may be gone by the next tick. Only the gained ids; a lost link is the next step's
+     * business. Armed only on the composite, the one transport that can tell its planes apart.
+     */
+    private fun watchFastLinks(session: CoroutineScope) {
+        val fast = (transport as? CompositeMeshTransport)?.fastLinked ?: return
+        session.launch {
+            var before = emptySet<String>()
+            fast.collect { now ->
+                val gained = now - before
+                before = now
+                blobExchange.fastLinkUp(gained)
+            }
+        }
     }
 
     /**
@@ -1171,11 +1200,17 @@ class MeshManager(
                 voicePeaks = attachment?.voice?.peaks,
                 // A file's name and its plaintext length — the two facts a file bubble needs and cannot
                 // read off the bytes. Null for an image or a voice note, whose bubbles describe themselves,
-                // so an ordinary photo frame is byte-for-byte what it was before ADR 2026-09.qq2r. They come
-                // off the sealed content on the receiving side and off the staged ingest here, and are written
-                // against the same ciphertext hash for the same reason.
+                // so an ordinary photo frame is byte-for-byte what it was before ADR 2026-09.qq2r — unless it is
+                // large enough for a recipient's "Ask before large Bluetooth downloads" to gate it, which judges
+                // the declared size alone (ADR 2026-10.js2p). They come off the sealed content on the receiving
+                // side and off the staged ingest here, and are written against the same ciphertext hash for the
+                // same reason.
                 attachmentName = attachment?.name,
-                attachmentSize = attachment?.takeIf { it.name != null }?.sizeBytes?.toLong(),
+                attachmentSize =
+                    attachment
+                        ?.takeIf { BluetoothFetchGate.declaresSize(it.sizeBytes.toLong(), named = it.name != null) }
+                        ?.sizeBytes
+                        ?.toLong(),
                 // Read off the frames at ingest, and by the recipient off the same bytes when they land.
                 attachmentAnimated = attachment?.animated == true,
                 // The plaintext's own name beside the ciphertext's, and the picker's bytes when ingest changed them:
@@ -2280,6 +2315,31 @@ class MeshManager(
     }
 
     /**
+     * The user tapped "Tap to download" on attachment [hash] (ADR 2026-10.js2p): the approval goes on every row naming
+     * it first — the database is what every later re-arm reads — then the fetch is wanted plain, which lifts the
+     * fast-only hold at once and asks over whatever plane reaches a holder. Asked of the earliest row's sender first, as
+     * the database re-arm would, and the fast plane armed toward it as delivery does. Nothing to do once held. With the
+     * mesh stopped the want is only recorded — there is no neighbour to ask and no session to time it — and the approval
+     * on the rows is what the next start's re-arm reads, plain.
+     *
+     * Runs on the manager's own scope and returns at once: the chat calls it from its view model, and leaving the screen
+     * while a re-arm holds [rewantLock] must not cancel the tap. The approval is written before the lock is taken, so it
+     * never waits on a re-arm; the want runs under the lock, so a re-arm that read the rows before the approval cannot
+     * apply its stale fast-only verdict after it. The want is also marked approved, so no later want of a stale verdict —
+     * a delivery that read its row before the tap — can turn it fast-only again (the review of ADR 2026-10.js2p).
+     */
+    override suspend fun downloadAttachment(hash: String) {
+        scope.launch {
+            messages.approveAttachmentFetch(hash)
+            rewantLock.withLock {
+                val author = messages.attachmentFetchRows(hash, me = identity.nodeId()).firstOrNull()?.senderId ?: return@withLock
+                blobExchange.want(hash, author = author, fastOnly = false, approved = true)
+                transport.expectBulkTransfer(author)
+            }
+        }
+    }
+
+    /**
      * Broadcasts a best-effort "now typing" cue for [conversationId] to nearby peers — the presence ping behind
      * the chat typing indicator. Deliberately NOT [originateSigned]: it must never flood, be custodied, or be
      * parked, so it is signed with `relay = false` (single-hop, like a blob request) and sent only over the
@@ -2322,7 +2382,10 @@ class MeshManager(
             receipts.deleteOrphans() // ...and per-recipient delivery rows left by a deleted thread or a retention trim
             sweepExpired() // carried DMs whose TTL elapsed while we were down (the in-memory sets are usually empty)
             sweepLocalStorage() // bound the local messages/peers tables against a Sybil flood (Message Requests hardening)
-            rewantMissingBlobs()
+            // The first value is the startup re-arm; every change of the user's Bluetooth download limit re-arms with
+            // the new verdict at once, so choosing "Never" fetches what was waiting without the next tick (ADR
+            // 2026-10.js2p). Distinct: every settings flow re-emits on a write to any key.
+            settings.bluetoothDownloadLimitBytes.distinctUntilChanged().collect { rewantMissingBlobs() }
         }
     }
 
@@ -2352,12 +2415,27 @@ class MeshManager(
      * appeared: startup, a neighbor joining, and the 60 s re-offer tick. [BlobExchange.wantAll] is idempotent for
      * a hash already in flight and returns at once for one the store has, so the repeat costs one bounded query.
      */
-    private suspend fun rewantMissingBlobs() {
+    private suspend fun rewantMissingBlobs() = rewantLock.withLock { rewantMissingBlobsLocked() }
+
+    /**
+     * [rewantMissingBlobs]'s body. Its callers — the tick, a link-up, the limit collector — and the user's tap
+     * ([downloadAttachment]) run one at a time: each reads the rows and the limit, then wants by what it read, and one
+     * that read before another's write and applied after it would undo it (a tick that read 1 MB re-holding what the
+     * switch to Never had just fetched, ADR 2026-10.js2p's review).
+     */
+    private suspend fun rewantMissingBlobsLocked() {
         // Own/received message attachments: always re-pull (uncapped, kept alive by their message row). Each is
         // wanted with its row's sender, so a want re-armed after a restart or the sweep asks the author first.
         // All of it goes to the exchange in one batch, so a link-up's holder queries share one frame per neighbour.
-        val ownHashes = messages.attachmentsNeedingFetch()
-        val wanted = ownHashes.entries.mapTo(mutableListOf<Pair<String, String?>>()) { (hash, author) -> hash to author }
+        val me = identity.nodeId()
+        val limit = settings.bluetoothDownloadLimitBytes.first()
+        val needed = messages.attachmentsNeedingFetch(me = me)
+        val ownHashes = needed.mapTo(HashSet()) { it.hash }
+        val wanted = needed.mapTo(mutableListOf<Pair<String, String?>>()) { it.hash to it.senderId }
+        // Each want's fast-only flag is derived here from the rows, every time, never kept from the last (ADR
+        // 2026-10.js2p): an attachment every row of which declares over the user's limit, untapped, is fetched over
+        // Wi-Fi Aware only. One row that would fetch it fetches it for all (a stranger's row cannot hold a contact's).
+        val fastOnly = needed.filter { BluetoothFetchGate.fastOnly(it.rows, limit) }.mapTo(HashSet()) { it.hash }
         // Carrier-only custody blobs backfill only while under the byte budget (the same pull-time soft cap
         // onCarriedFrame applies), so a restart re-attempts pulls that a live-session over-budget skip left
         // missing; skip ones already re-requested above as our own/received attachments, and ones a DM's linked
@@ -2365,30 +2443,67 @@ class MeshManager(
         // ends by itself when the recipient's link goes or the window passes.
         if (blobs.carrierOnlyBlobBytes() < CARRIER_BLOB_BUDGET_BYTES) {
             val carried = forwardStore.attachmentsNeedingFetch()
-            val held = heldForLinkedRecipients(carried.keys)
+            val linked = transport.neighbors.value.mapTo(HashSet()) { it.nodeId }
+            // One read of custody's per-frame rows for both judgements below, and only when one of them can act.
+            val frames = if (carried.isNotEmpty() && (linked.isNotEmpty() || limit != null)) carriedFrames(me) else emptyList()
+            val held = heldForLinkedRecipients(carried.keys, frames, linked)
             carried.forEach { (hash, author) ->
                 if (hash !in ownHashes && hash !in held) wanted += hash to author
             }
+            if (limit != null) fastOnly += unopenedForUs(carried.keys - ownHashes, frames, me)
         }
         // A group's decided photo not shown yet (ADR 2026-09.nxcq): the row is the durable want, so a pull lost
         // to a restart or the fetch TTL comes back here and not only on the group's next frame. A photo
         // screening refused keeps its verdict and is never asked for again while filtering is on.
         groups.photoHashesNeedingFetch().forEach { if (!refusedImage(it)) wanted += it to null }
-        blobExchange.wantAll(wanted)
+        beforeRewantApplies?.invoke()
+        blobExchange.wantAll(wanted, fastOnly)
     }
 
-    /** The carried attachments among [hashes] whose pull [CarrierPullPolicy] holds back right now. */
-    private suspend fun heldForLinkedRecipients(hashes: Set<String>): Set<String> {
-        if (hashes.isEmpty()) return emptySet()
-        val linked = transport.neighbors.value.mapTo(HashSet()) { it.nodeId }
-        if (linked.isEmpty()) return emptySet()
-        val now = clock()
+    /**
+     * Custody's carried frames naming an attachment we lack, each marked [CarriedAttachment.member] when it is a group's
+     * we are in — by the roster the frame itself carries first (a member whose seed is late holds the frame and no group
+     * row yet), then by our group rows. The one read [rewantMissingBlobsLocked] makes of them per re-arm.
+     */
+    private suspend fun carriedFrames(me: String): List<CarriedAttachment> {
         val ours = groups.active().mapTo(HashSet()) { it.groupId }
-        return forwardStore
-            .carriedAttachments()
-            .map { if (it.groupId in ours) it.copy(member = true) else it }
+        return forwardStore.carriedAttachments().map {
+            if (it.groupId in ours || me in it.roster.orEmpty()) it.copy(member = true) else it
+        }
+    }
+
+    /**
+     * The carried attachments among [hashes] that no stored row names and that *every* carried frame naming them
+     * addresses to us — our DM, a group we are in ([carriedFrames]): frames not opened yet (waiting on a key, or never
+     * delivered), their declared size still sealed. While a limit is set they are fetched fast-only, as
+     * `InboundPipeline.onCarriedFrame` leaves them, so the tick's carrier re-arm does not lift what custody held (ADR
+     * 2026-10.js2p). Folded as the rows are: one frame we carry for somebody else keeps the pull plain, so a stranger's DM
+     * naming a hash we carry for others can lift the gate on our side and never impose it.
+     */
+    private fun unopenedForUs(
+        hashes: Set<String>,
+        frames: List<CarriedAttachment>,
+        me: String,
+    ): Set<String> {
+        if (hashes.isEmpty()) return emptySet()
+        return frames
             .groupBy { it.hash }
-            .filter { (hash, frames) -> hash in hashes && CarrierPullPolicy.defers(frames, linked, now) }
+            .filter { (hash, named) -> hash in hashes && named.all { it.recipientId == me || it.member } }
+            .keys
+    }
+
+    /** The carried attachments among [hashes] whose pull [CarrierPullPolicy] holds back now, [linked] being who is. */
+    private fun heldForLinkedRecipients(
+        hashes: Set<String>,
+        frames: List<CarriedAttachment>,
+        linked: Set<String>,
+    ): Set<String> {
+        if (hashes.isEmpty() || linked.isEmpty()) return emptySet()
+        val now = clock()
+        // A member is never held back (g24x) — by the frame's own roster too ([carriedFrames]).
+        return frames
+            .groupBy { it.hash }
+            .filter { (hash, named) -> hash in hashes && CarrierPullPolicy.defers(named, linked, now) }
             .keys
     }
 

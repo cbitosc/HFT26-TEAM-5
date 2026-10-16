@@ -70,6 +70,14 @@ import kotlin.coroutines.cancellation.CancellationException
  * Any wait on a holder counts its grace from the first look that finds it no longer streaming to us: our copy may sit
  * behind that stream in the stack's buffer (#121), so a grace that ran during the stream would ask past it.
  *
+ * **Fast-only (ADR 2026-10.js2p).** An attachment declared over the user's "Ask before large Bluetooth downloads" limit,
+ * and not tapped, is wanted *fast-only*: only a neighbour whose copy would ride Wi-Fi Aware — linked over it, or
+ * reachable on it so the holder raises the link ([BulkRoute]) — is queried, asked or asked to pull it through, its
+ * `blobreq` says so ([BlobReqContent.fastOnly]) and the holder never hands it to Bluetooth (`CompositeMeshTransport`).
+ * With no such neighbour nothing is asked and nothing stamped: the want waits for one, a link-up or the tick stepping it
+ * again. The flag is the latest local want's ([want], [wantAll]) — the database re-arm re-derives it every tick, and the
+ * user's tap re-wants it plain, which steps at once — never a memo of its own.
+ *
  * A transfer a link drop cut off resumes rather than restarts (work item #116, ADR 2026-10.wtyc): the link keeps
  * the prefix in [PartialBlobs], every ask names its length as the `blobreq` offset, a holder streams only the
  * rest ([onRequest]), and a spliced file that fails its hash check drops the prefix and asks from byte 0
@@ -197,29 +205,42 @@ class BlobExchange(
      * gave them, and [via] is the first asked to pull it through when nobody in reach holds it. [asker] is a neighbour
      * we are pulling it for ([onRequest]): it lacks the bytes, so this cycle neither queries nor asks it, but a later
      * one does — it may be the one path the bytes have to us by then.
+     *
+     * [fastOnly] keeps the fetch to neighbours whose copy would ride Wi-Fi Aware (ADR 2026-10.js2p, see the class KDoc).
+     * A want of our own sets it, whichever way: the latest one wins, so the user's tap (false) lifts a hold at once. An
+     * [asker]'s sets it only on a want it creates — a neighbour's ask never widens or narrows a fetch of our own.
+     * [approved] is the user's tap: the want is plain from then on, whatever a later want read before the tap says.
      */
     suspend fun want(
         hash: String,
         author: String? = null,
         via: String? = null,
         asker: String? = null,
+        fastOnly: Boolean = false,
+        approved: Boolean = false,
     ) {
+        // The tap sticks to a want whose bytes are on the way too: if that copy is cut, the next step asks plain.
+        if (approved) synchronized(lock) { fetching[hash]?.let { setFastOnly(it.also { w -> w.approved = true }, false, now()) } }
         if (onTheWayOrHeld(hash)) return
-        recordWant(hash, now(), author, via, asker)
+        recordWant(hash, now(), author, via, asker, fastOnly, approved)
         step(hash, linkedNow())
         flushQueries()
     }
 
     /**
-     * [want] for each of [wanted] (hash → author), stepped together so their queries share one frame per neighbour.
-     * The database re-arm (`MeshManager.rewantMissingBlobs`) runs at every link-up, ahead of [reask].
+     * [want] for each of [wanted] (hash → author), stepped together so their queries share one frame per neighbour;
+     * those in [fastOnly] are wanted fast-only, every other plain (ADR 2026-10.js2p). The database re-arm
+     * (`MeshManager.rewantMissingBlobs`) runs at every link-up, ahead of [reask], and is what re-derives the flag.
      */
-    suspend fun wantAll(wanted: List<Pair<String, String?>>) {
+    suspend fun wantAll(
+        wanted: List<Pair<String, String?>>,
+        fastOnly: Set<String> = emptySet(),
+    ) {
         if (wanted.isEmpty()) return
         val linked = linkedNow()
         for ((hash, author) in wanted) {
             if (onTheWayOrHeld(hash)) continue
-            recordWant(hash, now(), author, via = null, asker = null)
+            recordWant(hash, now(), author, via = null, asker = null, fastOnly = hash in fastOnly)
             step(hash, linked)
         }
         flushQueries()
@@ -296,6 +317,30 @@ class BlobExchange(
     }
 
     /**
+     * The Wi-Fi Aware plane linked [nodeIds] — neighbours already linked over Bluetooth among them, whose gaining the
+     * fast link changes no neighbour set and so never reaches [linked] (`MeshManager.watchFastLinks`). Every fast-only
+     * want takes its next step now, which asks the newly linked holders at once ([fastLinkSeen]) rather than at the
+     * tick: an ephemeral data path may be gone by then (ADR 2026-10.js2p's review). Nothing else moves.
+     */
+    suspend fun fastLinkUp(nodeIds: Collection<String>) {
+        if (nodeIds.isEmpty()) return
+        // Handed to each want as edges of their own: a link that went down and up again between two steps leaves no
+        // difference between their snapshots, and would be missed (round 4 of the review).
+        val held =
+            synchronized(lock) {
+                fetching
+                    .filterValues { it.fastOnly }
+                    .onEach { (_, w) -> w.fastEdges += nodeIds }
+                    .keys
+                    .toList()
+            }
+        if (held.isEmpty()) return
+        val linked = linkedNow()
+        held.forEach { step(it, linked) }
+        flushQueries()
+    }
+
+    /**
      * One step of [hash]'s fetch against the [linked] neighbours: the queries [decide] owes go into the outbox (the
      * caller flushes them), its asks go out, and its next wake is timed so a grace, a wait for answers or a stream's
      * end is acted on without waiting for the tick.
@@ -311,9 +356,9 @@ class BlobExchange(
             return
         }
         val kept = partials.length(hash)
-        val plan = synchronized(lock) { fetching[hash]?.let { decide(it, linked, kept, now()) }?.also { queue(hash, it) } } ?: return
+        val plan = synchronized(lock) { fetching[hash]?.let { decideMarking(it, linked, kept) }?.also { queue(hash, it) } } ?: return
         if (plan.asks.isNotEmpty()) {
-            val req = blobRequest(selfId(), hash)
+            val req = blobRequest(selfId(), hash, plan.fastOnly)
             for (ask in plan.asks) {
                 // A holder serving a large attachment arms the Wi-Fi Aware link itself; only the larger node id of a
                 // pair initiates, so our half of the mark is what brings it up when that is us.
@@ -326,6 +371,16 @@ class BlobExchange(
         plan.events.forEach(onEvent)
         plan.wake?.let { armTimer(hash, it) }
     }
+
+    /**
+     * [decide] at the clock's now, noting a fast-only ask in [w]'s cycle: a cycle that asked for a fast-only copy and
+     * still wants the blob at its end is dead ([Want.dead]), and backs off. Under [lock].
+     */
+    private fun decideMarking(
+        w: Want,
+        linked: List<Candidate>,
+        kept: Long,
+    ): Plan = decide(w, linked, kept, now()).also { if (w.fastOnly && it.asks.isNotEmpty()) w.fastAsked = true }
 
     /** Moves the queries [plan] owes into the outbox. Under [lock]. */
     private fun queue(
@@ -344,22 +399,81 @@ class BlobExchange(
         kept: Long,
         t: Long,
     ): Plan {
-        val p = Plan()
+        val p = Plan(fastOnly = w.fastOnly)
+        // A fast-only want sees only the neighbours whose copy would ride Wi-Fi Aware (ADR 2026-10.js2p).
+        val eligible = if (w.fastOnly) linked.filter { it.route != BulkRoute.None } else linked
+        // Ahead of the fetch's wait, so an ask outstanding on another holder never consumes the edge.
+        if (w.fastOnly) fastLinkSeen(w, eligible)
         w.fetch?.let { f ->
-            // Queries go out mid-fetch too (a newcomer, a fetching neighbour's recheck): fresh answers for the fallback.
-            owedQueries(w, capableOf(linked.filter { it.id !in w.pullers }), t, p, stuckOn = stuckOn(f, linked))
-            fetchWait(w, f, linked, kept, t, p)?.let { return p.waitFor(it) }
+            // An ask made before the want turned fast-only, on a neighbour that would send over Bluetooth: let it go.
+            if (eligible.none { it.id == f.peer } && linked.any { it.id == f.peer }) {
+                w.over(f, "fast-only", p)
+            } else {
+                // Queries go out mid-fetch too (a newcomer, a fetching neighbour's recheck): fresh answers for the fallback.
+                owedQueries(w, capableOf(eligible.filter { it.id !in w.pullers }), t, p, stuckOn = stuckOn(f, eligible))
+                fetchWait(w, f, eligible, kept, t, p)?.let { return p.waitFor(it) }
+            }
         }
         // A cycle closes only with no ask outstanding, so an ask's grace always runs out inside the cycle it began in.
         if (w.cycleDue(t)) openCycle(w, t)
-        val live = linked.filter { it.id !in w.pullers }
+        val live = eligible.filter { it.id !in w.pullers }
+        if (w.fastOnly && live.isEmpty()) {
+            // Nobody to ask over Wi-Fi Aware: ask nobody and stamp nothing. A link-up, a route coming up (the tick
+            // steps it) or the user's tap moves it on; Bluetooth holders are never asked blind in its place.
+            p.events += BlobEvent.FastOnlyHeld
+            if (!w.fastHeld) log("blob fast-only ${w.hash8}… held: no Wi-Fi Aware holder among ${linked.size} linked")
+            w.fastHeld = true
+            return p
+        }
+        w.fastHeld = false
         val capable = capableOf(live)
         owedQueries(w, capable, t, p)
-        if (askHolder(w, capable, kept, t, p)) return p
-        if (askBlind(w, live, capable, t, p)) return p
-        pullThrough(w, capable, t, p)
+        if (!askHolder(w, capable, kept, t, p) && !askBlind(w, live, capable, t, p)) pullThrough(w, capable, t, p)
         return p
     }
+
+    /**
+     * A Wi-Fi Aware link coming up to an [eligible] neighbour, per neighbour: the change a fast-only want's backoff waits
+     * for ([Want.dead]). Each newly linked one is forgotten as this cycle knew it — its failure, its answer, its query,
+     * its blind ask — so it is queried or asked again at once over the link, whatever else is outstanding. Nothing else
+     * moves: no fresh cycle and no cleared dead count, because Wi-Fi Aware links flap on every custody sync, and a reset
+     * per sync re-queried and re-armed every never-linking reachable holder at the sync rate (round 3 of ADR
+     * 2026-10.js2p's review). The holder our own ask is on is not an edge either: its data path coming up is that ask
+     * being served, and forgetting it would query or widen past it once. A neighbour already linked over Bluetooth that
+     * gains the fast link changes no neighbour set, so [linked] never sees it: this is how it is seen, on the next step —
+     * the tick, or [fastLinkUp] at the edge itself.
+     */
+    private fun fastLinkSeen(
+        w: Want,
+        eligible: List<Candidate>,
+    ) {
+        val linkedNow = eligible.filter { it.route == BulkRoute.Linked }.mapTo(HashSet()) { it.id }
+        // The first look is a baseline, not an edge: what a fresh want finds linked it never knew otherwise. The edges
+        // [fastLinkUp] handed over count too, for the neighbours linked now: a flap between two steps is still an edge.
+        val seen = w.fastLinked?.let { linkedNow - it }.orEmpty()
+        val gained = (seen + (w.fastEdges intersect linkedNow)) - setOfNotNull(w.fetch?.peer)
+        w.fastEdges.clear()
+        w.fastLinked = linkedNow
+        if (gained.isEmpty()) return
+        w.failed.removeAll(gained)
+        w.blindAsked.removeAll(gained)
+        w.reasked.removeAll(gained)
+        w.pulled.removeAll(gained)
+        gained.forEach {
+            w.answers.remove(it)
+            w.queried.remove(it)
+        }
+    }
+
+    /**
+     * Whether an ask of [c] for [w]'s blob arms the Wi-Fi Aware link on our side too: a fast-only ask of a reachable
+     * neighbour, which has no Bluetooth copy to fall back on (ADR 2026-10.js2p). The first ask and a holder's fetch arm
+     * by their own rule.
+     */
+    private fun armsFastOnly(
+        w: Want,
+        c: Candidate,
+    ): Boolean = w.fastOnly && c.route == BulkRoute.Reachable
 
     /** The neighbours among [live] this build queries: those whose link says they answer, while querying is on. */
     private fun capableOf(live: List<Candidate>): List<Candidate> = if (holderQuery.enabled) live.filter { it.capable } else emptyList()
@@ -717,7 +831,7 @@ class BlobExchange(
         blind.forEach {
             w.blindAsked += it.id
             w.askedAt[it.id] = t
-            p.ask(it.peer, arm = false, line = "widened")
+            p.ask(it.peer, arm = armsFastOnly(w, it), line = "widened")
         }
         p.events += BlobEvent.BlindAsk
         return true
@@ -744,7 +858,7 @@ class BlobExchange(
             to.forEach {
                 w.pulled += it.id
                 w.askedAt[it.id] = t
-                p.ask(it.peer, arm = false, line = "pull")
+                p.ask(it.peer, arm = armsFastOnly(w, it), line = "pull")
             }
             p.why = if (to.size == 1 && to[0] === hop) "via hop" else "wide"
             p.events += BlobEvent.PullThrough
@@ -803,9 +917,11 @@ class BlobExchange(
         kept: Long,
     ): Tier {
         val left = w.answers[c.id]?.size?.let { it - kept }
+        // A fast-only copy is one the holder raises the link for whatever its size (ADR 2026-10.js2p).
+        val large = w.fastOnly || (left != null && left >= CompositeMeshTransport.BULK_MIN_BYTES)
         return when {
             c.route == BulkRoute.Linked -> Tier.FastLink
-            c.route == BulkRoute.Reachable && left != null && left >= CompositeMeshTransport.BULK_MIN_BYTES -> Tier.FastArm
+            c.route == BulkRoute.Reachable && large -> Tier.FastArm
             !c.slow && !c.streaming -> Tier.Link
             else -> Tier.SlowLink
         }
@@ -827,7 +943,7 @@ class BlobExchange(
         kept: Long,
     ): Long {
         val left = w.answers[c.id]?.size?.let { it - kept }
-        val linkWait = c.route == BulkRoute.Reachable && (left == null || left >= CompositeMeshTransport.BULK_MIN_BYTES)
+        val linkWait = c.route == BulkRoute.Reachable && (w.fastOnly || left == null || left >= CompositeMeshTransport.BULK_MIN_BYTES)
         return firstAskGraceMs + rttOf(c.id) + if (linkWait) CompositeMeshTransport.BULK_GRACE_MS else 0L
     }
 
@@ -868,12 +984,15 @@ class BlobExchange(
     ): String {
         val h = "${hash.take(LOG_HASH_CHARS)}…"
         val to = plan.asks.joinToString { it.to.nodeId }
-        return when (plan.asks.first().line) {
-            "first" -> "blob ask $h → $to first (${plan.why}), widen in ${plan.wake} ms"
-            "widened" -> "blob ask $h → $to widened"
-            "pull" -> "blob pull $h → $to (${plan.why})"
-            else -> "blob fetch $h → $to (${plan.why}), grace ${plan.wake} ms${if (plan.asks.first().arm) ", armed" else ""}"
-        }
+        val line =
+            when (plan.asks.first().line) {
+                "first" -> "blob ask $h → $to first (${plan.why}), widen in ${plan.wake} ms"
+                "widened" -> "blob ask $h → $to widened"
+                "pull" -> "blob pull $h → $to (${plan.why})"
+                else -> "blob fetch $h → $to (${plan.why}), grace ${plan.wake} ms${if (plan.asks.first().arm) ", armed" else ""}"
+            }
+        // Appended, never woven in: the trials grep the lines above as they stand (`first (…)`, `widened`).
+        return if (plan.fastOnly) "$line [fast-only]" else line
     }
 
     /**
@@ -1131,11 +1250,14 @@ class BlobExchange(
     private fun blobRequest(
         me: String,
         hash: String,
+        fastOnly: Boolean,
     ): WireEnvelope {
         // A cut transfer's kept prefix makes the ask a resume: a holder that knows the field streams only the rest,
         // and one that doesn't sends the whole file, which lands as it always has (#116).
         val offset = partials.length(hash).takeIf { it > 0 }
-        return unsignedPointToPoint(FrameType.BLOB_REQ, newRequestId(), me, WireCodec.encodePayload(BlobReqContent(hash, offset)))
+        // Absent unless set, so a plain ask is the bytes it always was (ADR 2026-10.js2p).
+        val content = BlobReqContent(hash, offset, fastOnly = true.takeIf { fastOnly })
+        return unsignedPointToPoint(FrameType.BLOB_REQ, newRequestId(), me, WireCodec.encodePayload(content))
     }
 
     /** A holder query for [hashes], under the envelope id [id] the answer will name. Unsigned and point-to-point. */
@@ -1172,12 +1294,17 @@ class BlobExchange(
      * ends. A Bluetooth phone splits one pace budget over every link it feeds (ADR 2026-10.8jwn), so four copies at
      * once all landed at the end; one at a time, the first lands in a quarter of that, and its receiver holds it — a
      * second source for the rest.
+     *
+     * A [fastOnly] ask (ADR 2026-10.js2p) is served only over Wi-Fi Aware: refused at once when the asker is neither
+     * linked nor reachable on it, never parked behind a Bluetooth feed, and handed to the transport marked so it is
+     * never sent over Bluetooth. Not holding it, we pull it through fast-only too.
      */
     suspend fun onRequest(
         hash: String,
         fromNodeId: String,
         offset: Long? = null,
-    ) = serveOrWant(hash, fromNodeId, offset, mayPark = true)
+        fastOnly: Boolean = false,
+    ) = serveOrWant(hash, fromNodeId, offset, mayPark = true, fastOnly = fastOnly)
 
     /** [onRequest], where [mayPark] false serves at once whatever else is being fed (a park that waited its longest). */
     private suspend fun serveOrWant(
@@ -1185,8 +1312,16 @@ class BlobExchange(
         fromNodeId: String,
         offset: Long?,
         mayPark: Boolean,
+        fastOnly: Boolean = false,
     ) {
         val peer = Peer(fromNodeId)
+        // Nothing reaches it over Wi-Fi Aware: refuse before the store is read, and stamp no memo, so a SENDING answer
+        // never covers a copy that went nowhere and its next ask, once a route is up, is served at once.
+        if (fastOnly && transport.bulkRouteTo(fromNodeId) == BulkRoute.None) {
+            onEvent(BlobEvent.FastOnlyRefused)
+            log("blob refuse ${hash.take(LOG_HASH_CHARS)}… → $fromNodeId: fast-only, no Wi-Fi Aware route")
+            return
+        }
         val file = store.fileFor(hash)
         if (file != null) {
             // Holding the bytes is what decides a serve; a missing mime row only costs us the type.
@@ -1199,14 +1334,19 @@ class BlobExchange(
             // whose serve waits behind a multi-minute blob to the same peer — or was enqueued inside the
             // memo: don't ship a second. Parked behind another copy's feed: served when that one ends.
             if (transport.fileInFlightTo(fromNodeId, hash)) return
-            if (mayPark && parkBehindFeed(hash, fromNodeId, offset, file.length() - from, addressees(hash))) return
+            // A fast-only copy never rides a Bluetooth budget, so it never waits behind a Bluetooth feed either.
+            if (mayPark && !fastOnly && parkBehindFeed(hash, fromNodeId, offset, file.length() - from, addressees(hash))) return
             if (servedRecently(hash, fromNodeId)) return
-            if (!transport.sendFile(file, peer, FileMeta(FileKind.ATTACHMENT, hash, mime, offset = from))) {
+            // A fast-only copy the transport gives up on after accepting it (no Wi-Fi Aware link inside its grace) goes
+            // nowhere: forget it as a refused send is forgotten.
+            val dropped: (() -> Unit)? = if (fastOnly) ({ forgetServed(hash, fromNodeId) }) else null
+            val meta = FileMeta(FileKind.ATTACHMENT, hash, mime, offset = from, fastOnly = fastOnly, onDropped = dropped)
+            if (!transport.sendFile(file, peer, meta)) {
                 forgetServed(hash, fromNodeId) // nothing went out — let the next ask retry at once
             }
             return
         }
-        want(hash, asker = fromNodeId)
+        want(hash, asker = fromNodeId, fastOnly = fastOnly)
     }
 
     /**
@@ -1500,15 +1640,19 @@ class BlobExchange(
         from: String? = null,
     ) {
         val stored = store.saveIncoming(hash, mime, srcPath)
-        from?.let { transport.fileTaken(it, hash) }
         if (stored == null) {
+            from?.let { transport.fileTaken(it, hash) }
             // A whole file that fails its hash is the holder's bytes alone: a kept prefix stays, and the tick asks
             // again as it always has. A spliced one may have failed on the prefix.
             if (resumedFrom > 0) reaskFromZero(hash, from)
             return
         }
         partials.drop(hash) // nothing left to resume
-        clearFetching(hash)?.let { withdrawAsks(hash, it, from) }
+        // The want goes before the file leaves the link's landing ones: a step in between would find the blob held and
+        // no longer arriving, take the want itself, and withdraw from everyone — the holder that just served it too.
+        val want = clearFetching(hash)
+        from?.let { transport.fileTaken(it, hash) }
+        want?.let { withdrawAsks(hash, it, from) }
         onObtained(hash, stored.absolutePath)
     }
 
@@ -1528,7 +1672,10 @@ class BlobExchange(
         if (onTheWayOrHeld(hash)) return
         val t = now()
         synchronized(lock) {
-            val w = fetching.getOrPut(hash) { Want(hash, t, null, null, null) }
+            // An existing want keeps its fast-only flag. A fresh one (the want was swept or evicted while its prefix was
+            // kept) cannot know it, so it is fast-only until the tick's database re-arm re-derives it, within one round:
+            // a gated file never starts over Bluetooth on a guess, and a plain one waits a tick at most (ADR 2026-10.js2p).
+            val w = fetching.getOrPut(hash) { Want(hash, t, null, null, null).also { it.fastOnly = true } }
             w.wantedAt = t
             w.openCycle(t, natural = false)
             from?.let { w.failed += it }
@@ -1563,12 +1710,22 @@ class BlobExchange(
         author: String?,
         via: String?,
         asker: String?,
+        fastOnly: Boolean,
+        approved: Boolean = false,
     ) = synchronized(lock) {
         val want = fetching[hash]
         if (want == null) {
-            fetching[hash] = Want(hash, nowMs, author, via, asker)
+            fetching[hash] =
+                Want(hash, nowMs, author, via, asker).also {
+                    it.approved = approved
+                    it.fastOnly = fastOnly && !approved
+                }
         } else {
             want.wantedAt = nowMs // mutated in place, so insertion order (the eviction order) is kept
+            // Our own want says what we will take now (ADR 2026-10.js2p); a neighbour's ask leaves our fetch as it is.
+            // The tap is sticky: a want that read its rows before the tap and lands after it never re-holds the fetch.
+            if (approved) want.approved = true
+            if (asker == null) setFastOnly(want, fastOnly && !want.approved, nowMs)
             if (want.author == null) want.author = author
             if (want.via == null) want.via = via
             asker?.let {
@@ -1578,6 +1735,24 @@ class BlobExchange(
                 want.pullers += it
             }
         }
+    }
+
+    /**
+     * Sets [w]'s fast-only flag. Lifted (the tap, a limit set to Never, a row that turned out small), the fetch starts
+     * over as a plain one at once: the cycle that held it is not counted dead, its backoff is forgotten, and holders it
+     * gave up on for Wi-Fi Aware's sake — a reachable one that never raised the link — are asked again, now over
+     * whatever plane carries them. An ask still outstanding is left to run. Under [lock].
+     */
+    private fun setFastOnly(
+        w: Want,
+        fastOnly: Boolean,
+        t: Long,
+    ) {
+        val lifted = w.fastOnly && !fastOnly
+        w.fastOnly = fastOnly
+        if (!lifted) return
+        w.deadCycles = 0
+        if (w.fetch == null) w.openCycle(t, natural = false)
     }
 
     /** Oldest-wanted-first snapshot of the fetching hashes, copied under the lock so callers iterate safely. */
@@ -1721,6 +1896,20 @@ class BlobExchange(
         val hash8 = hash.take(LOG_HASH_CHARS)
         var cycleAt = wantedAt
 
+        // Asked for over Wi-Fi Aware only (ADR 2026-10.js2p): set by the latest want of our own ([recordWant]). And
+        // whether the last step found nobody to ask over it — the log names the hold once, not every tick.
+        var fastOnly = false
+        var fastHeld = false
+
+        // The user's tap reached this want: plain for good ([recordWant]). Whether this cycle asked anyone for a
+        // fast-only copy ([dead]), and the neighbours the last step saw linked over Wi-Fi Aware ([fastLinkSeen]).
+        var approved = false
+        var fastAsked = false
+        var fastLinked: Set<String>? = null
+
+        // Fast links [fastLinkUp] saw come up since the last step, whatever the snapshots say ([fastLinkSeen]).
+        val fastEdges = HashSet<String>()
+
         // Whether this cycle heard of a holder or a fetcher; cycles in a row that did not widen the pull-through.
         var cycleSawLead = false
         var emptyCycles = 0
@@ -1776,9 +1965,13 @@ class BlobExchange(
         /**
          * Whether this cycle is dead: every neighbour asked said it lacks the blob — at least one answered, none said it
          * holds or is fetching it, and nobody was asked blind (that one may hold it: ADR 2026-10.f7gg's round, and every
-         * cycle with querying off, keeps its pace).
+         * cycle with querying off, keeps its pace). A fast-only cycle that asked anyone is dead too, its blob still
+         * wanted at its end: its holders answer HAVE every cycle but are only reachable, and a link that will not come up
+         * would otherwise cost a query, an armed ask and a data-path attempt on each side every 45 s until the tap (ADR
+         * 2026-10.js2p's review). It backs off like any dead cycle, and a Wi-Fi Aware link coming up re-asks that holder alone
+         * ([fastLinkSeen]), resetting nothing.
          */
-        fun dead(): Boolean = !cycleSawLead && answers.isNotEmpty() && blindAsked.isEmpty()
+        fun dead(): Boolean = (fastOnly && fastAsked) || (!cycleSawLead && answers.isNotEmpty() && blindAsked.isEmpty())
 
         /**
          * How long this cycle stands before the next opens: [CYCLE_MS], doubled for each dead cycle in a row before
@@ -1800,7 +1993,8 @@ class BlobExchange(
          * the backoff is over, and the next cycle is due one cycle after the lead — not at once, which would forget it.
          */
         fun sawLead(t: Long) {
-            if (!cycleSawLead && deadCycles > 0) {
+            // Not for a fast-only want: its holders answer HAVE every cycle while the link they need never comes up.
+            if (!cycleSawLead && deadCycles > 0 && !fastOnly) {
                 deadCycles = 0
                 cycleAt = t
             }
@@ -1818,6 +2012,7 @@ class BlobExchange(
             cycleAt = t
             fetch = null // a natural close has none; a forced one (a refused splice) starts its ask over
             cycleSawLead = false
+            fastAsked = false
             pullers.clear()
             queried.clear()
             answers.clear()
@@ -1902,8 +2097,13 @@ class BlobExchange(
         val id: String get() = peer.nodeId
     }
 
-    /** What a step decided: the queries it owes, the asks it makes, and when it wants to be stepped again. */
-    private class Plan {
+    /**
+     * What a step decided: the queries it owes, the asks it makes, and when it wants to be stepped again. [fastOnly] is
+     * the want's flag as the step read it under the lock, so the asks it sends say the same (ADR 2026-10.js2p).
+     */
+    private class Plan(
+        val fastOnly: Boolean = false,
+    ) {
         val query = mutableListOf<String>()
         val asks = mutableListOf<Ask>()
         var wake: Long? = null
@@ -1978,6 +2178,11 @@ class BlobExchange(
         ProgressTaken,
         CancelSent,
         CancelTaken,
+
+        // A fast-only want's step with no neighbour reachable over Wi-Fi Aware, and a fast-only ask refused for want of
+        // a Wi-Fi Aware route to its asker (ADR 2026-10.js2p).
+        FastOnlyHeld,
+        FastOnlyRefused,
     }
 
     companion object {

@@ -138,12 +138,20 @@ enum class FileKind(
  *
  * [offset] is the first byte to send: the asker already holds the ones before it from a transfer a link drop cut
  * off (work item #116, ADR 2026-10.wtyc). 0 sends the whole file, as every send did before.
+ *
+ * [fastOnly] is the asker's `blobreq` saying it takes these bytes over Wi-Fi Aware only (ADR 2026-10.js2p): the
+ * composite sends them over a live Wi-Fi Aware link or one it raises for them, and otherwise drops them, never handing
+ * them to the Bluetooth link. A send that `sendFile` accepted and then dropped that way calls [onDropped], so the
+ * holder forgets the serve and answers the asker's next query truthfully rather than SENDING for a copy that went
+ * nowhere. Local to this node: nothing here rides the link.
  */
 data class FileMeta(
     val kind: FileKind,
     val key: String,
     val mime: String,
     val offset: Long = 0,
+    val fastOnly: Boolean = false,
+    val onDropped: (() -> Unit)? = null,
 )
 
 /**

@@ -71,6 +71,7 @@ class ChatScreenContentTest {
     private var locationClicks = 0
     private var accepts = 0
     private var consentsAccepted = 0
+    private val downloads = mutableListOf<String>()
 
     private fun content(
         input: String,
@@ -126,6 +127,7 @@ class ChatScreenContentTest {
                     onUnblock = {},
                     onCopy = {},
                     onSaveAttachment = { _, _, _ -> },
+                    onDownloadAttachment = { downloads += it },
                     onLoadOlder = onLoadOlder,
                     jumpToMessageId = jumpToMessageId,
                     onRevealMessage = onRevealMessage,
@@ -539,6 +541,24 @@ class ChatScreenContentTest {
         attachmentFlagged = flagged,
         linkCard = linkCard,
     )
+
+    /** ADR 2026-10.js2p: a large attachment only Bluetooth could bring waits for the tap, which reaches the mesh. */
+    @Test
+    fun aLargeAttachmentAwaitingTheTapShowsItsSizeAndDownloadsOnTap() {
+        val row =
+            cardRow(linkCard = null).copy(
+                attachmentHash = "h-big",
+                attachmentMime = "application/pdf",
+                attachmentName = "Survey map.pdf",
+                attachmentSize = 4_200_000L,
+                attachmentReady = false,
+                attachmentAwaitsTap = true,
+            )
+        compose.setContent(content(input = "", state = ChatUiState(isRoom = true, myNodeId = "me", rows = listOf(row))))
+
+        compose.onNodeWithTag("chat_attachment_tap_to_download").assertIsDisplayed().performClick()
+        assertEquals(listOf("h-big"), downloads)
+    }
 
     /** A group is the one thread that has to say it per bubble: the header names the group, not the person. */
     @Test

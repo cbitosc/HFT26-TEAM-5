@@ -61,6 +61,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.getknit.knit.BuildConfig
 import app.getknit.knit.R
+import app.getknit.knit.data.settings.BluetoothDownloadLimit
 import app.getknit.knit.mesh.lora.BoardBattery
 import app.getknit.knit.mesh.lora.LoraPlane
 import app.getknit.knit.ui.BackgroundBattery
@@ -87,6 +88,7 @@ internal data class SettingsFormState(
     val header: ProfileHeader = ProfileHeader(),
     val contentFilteringEnabled: Boolean = true,
     val themeMode: ThemeMode = ThemeMode.System,
+    val bluetoothDownloadLimit: BluetoothDownloadLimit = BluetoothDownloadLimit.DEFAULT,
     val linkPreviewsEnabled: Boolean = false,
     val dynamicColor: Boolean = false,
     val relay: RelaySummary = RelaySummary(),
@@ -115,6 +117,7 @@ fun SettingsScreen(
     val header by viewModel.header.collectAsStateWithLifecycle()
     val contentFilteringEnabled by viewModel.contentFilteringEnabled.collectAsStateWithLifecycle()
     val themeMode by viewModel.themeMode.collectAsStateWithLifecycle()
+    val bluetoothDownloadLimit by viewModel.bluetoothDownloadLimit.collectAsStateWithLifecycle()
     val linkPreviewsEnabled by viewModel.linkPreviewsEnabled.collectAsStateWithLifecycle()
     val dynamicColor by viewModel.dynamicColor.collectAsStateWithLifecycle()
     val relay by viewModel.relaySummary.collectAsStateWithLifecycle()
@@ -139,6 +142,7 @@ fun SettingsScreen(
                 header = header,
                 contentFilteringEnabled = contentFilteringEnabled,
                 themeMode = themeMode,
+                bluetoothDownloadLimit = bluetoothDownloadLimit,
                 linkPreviewsEnabled = linkPreviewsEnabled,
                 dynamicColor = dynamicColor,
                 relay = relay,
@@ -152,6 +156,7 @@ fun SettingsScreen(
         onOpenProfile = onOpenProfile,
         onToggleContentFiltering = viewModel::setContentFilteringEnabled,
         onSelectThemeMode = viewModel::setThemeMode,
+        onSelectBluetoothDownloadLimit = viewModel::setBluetoothDownloadLimit,
         onToggleLinkPreviews = viewModel::setLinkPreviewsEnabled,
         onToggleDynamicColor = viewModel::setDynamicColor,
         onOpenRelays = onOpenRelays,
@@ -177,6 +182,7 @@ internal fun SettingsScreenContent(
     onOpenProfile: () -> Unit = {},
     onToggleContentFiltering: (Boolean) -> Unit,
     onSelectThemeMode: (ThemeMode) -> Unit = {},
+    onSelectBluetoothDownloadLimit: (BluetoothDownloadLimit) -> Unit = {},
     onToggleLinkPreviews: (Boolean) -> Unit = {},
     onToggleDynamicColor: (Boolean) -> Unit = {},
     onOpenRelays: () -> Unit,
@@ -298,6 +304,17 @@ internal fun SettingsScreenContent(
                 modifier = Modifier.testTag("settings_content_filtering"),
             )
 
+            // How a large attachment only Bluetooth could bring arrives (ADR 2026-10.js2p). Beside content filtering:
+            // both decide what reaches this phone from others.
+            ChoiceRow(
+                title = stringResource(R.string.settings_bt_download_title),
+                subtitle = stringResource(R.string.settings_bt_download_subtitle),
+                choices = BT_DOWNLOAD_LIMITS,
+                selected = form.bluetoothDownloadLimit,
+                onSelect = onSelectBluetoothDownloadLimit,
+                modifier = Modifier.testTag("settings_bt_download"),
+            )
+
             // Both appearance controls are hidden rather than disabled below API 31, matching the two plane
             // rows: a control that can never move needs a reason next to it, and there is nowhere here to
             // put one. They sit together because they answer the same question about how the app looks.
@@ -398,43 +415,61 @@ private fun ProfileHeaderRow(
     }
 }
 
-/**
- * The light/dark choice: a title, a line of explanation, and one segmented control carrying all three
- * answers at once.
- *
- * Segmented buttons rather than the dialog the neighbouring `NavigatingRow`s would suggest, because picking
- * one applies a configuration change and recreates the Activity — a dialog would be torn down as you chose
- * from it. The explicit 48dp height is the accessibility touch target; Material's segmented container is
- * 40dp, which the ATF suite flags. The labels are centred and hold still as the check appears; see the two
- * comments in the button below for how.
- */
+/** The light/dark choice: the theme's [ChoiceRow]. */
 @Composable
 private fun ThemeModeRow(
     selected: ThemeMode,
     onSelect: (ThemeMode) -> Unit,
     modifier: Modifier = Modifier,
+) = ChoiceRow(
+    title = stringResource(R.string.settings_theme_title),
+    subtitle = stringResource(R.string.settings_theme_subtitle),
+    choices = THEME_MODES,
+    selected = selected,
+    onSelect = onSelect,
+    modifier = modifier,
+)
+
+/**
+ * A title, a line of explanation, and one segmented control carrying every answer at once — the theme and the
+ * large-download limit share it.
+ *
+ * Segmented buttons rather than the dialog the neighbouring `NavigatingRow`s would suggest, because picking a
+ * theme applies a configuration change and recreates the Activity — a dialog would be torn down as you chose
+ * from it. The explicit 48dp height is the accessibility touch target; Material's segmented container is
+ * 40dp, which the ATF suite flags. The labels are centred and hold still as the check appears; see the two
+ * comments in the button below for how.
+ */
+@Composable
+private fun <T> ChoiceRow(
+    title: String,
+    subtitle: String,
+    choices: List<Pair<T, Int>>,
+    selected: T,
+    onSelect: (T) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier.fillMaxWidth().padding(top = 8.dp)) {
         Text(
-            text = stringResource(R.string.settings_theme_title),
+            text = title,
             style = MaterialTheme.typography.titleMedium,
         )
         Text(
-            text = stringResource(R.string.settings_theme_subtitle),
+            text = subtitle,
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.height(8.dp))
         SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-            THEME_MODES.forEachIndexed { index, (mode, label) ->
+            choices.forEachIndexed { index, (choice, label) ->
                 SegmentedButton(
-                    selected = mode == selected,
-                    onClick = { onSelect(mode) },
-                    shape = SegmentedButtonDefaults.itemShape(index = index, count = THEME_MODES.size),
+                    selected = choice == selected,
+                    onClick = { onSelect(choice) },
+                    shape = SegmentedButtonDefaults.itemShape(index = index, count = choices.size),
                     modifier = Modifier.height(48.dp),
                     icon = {
                         SegmentedButtonDefaults.Icon(
-                            active = mode == selected,
+                            active = choice == selected,
                             // An empty box of the same size when inactive, rather than the default null.
                             // Null makes the unselected icon measure zero wide, and the row's measure policy
                             // then slides the label half an icon-width left to re-centre it — so the word
@@ -460,6 +495,14 @@ private fun ThemeModeRow(
  * 8dp `IconSpacing` its `SegmentedButton.kt` holds privately, with no public constant to read it from.
  */
 private val CHECK_SLOT = SegmentedButtonDefaults.IconSize + 8.dp
+
+/** The three limits in the order they read, each with the string that names it. */
+private val BT_DOWNLOAD_LIMITS =
+    listOf(
+        BluetoothDownloadLimit.NEVER to R.string.settings_bt_download_never,
+        BluetoothDownloadLimit.MB_1 to R.string.settings_bt_download_1mb,
+        BluetoothDownloadLimit.MB_5 to R.string.settings_bt_download_5mb,
+    )
 
 /** The three choices in the order they read, each with the string that names it. */
 private val THEME_MODES =

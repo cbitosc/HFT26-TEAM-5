@@ -10,6 +10,7 @@ import app.getknit.knit.mesh.ForwardStore
 import app.getknit.knit.mesh.StoreDigest
 import app.getknit.knit.mesh.protocol.ChatContent
 import app.getknit.knit.mesh.protocol.FrameType
+import app.getknit.knit.mesh.protocol.GroupInfo
 import app.getknit.knit.mesh.protocol.Protocol
 import app.getknit.knit.mesh.protocol.RelayEnvelope
 import app.getknit.knit.mesh.protocol.WireCodec
@@ -125,6 +126,29 @@ class ForwardRepositoryTest : RoomDbTest() {
             )
         return CarriedFrame(env, sig = ByteArray(0), signed = WireCodec.encodeEnvelope(env))
     }
+
+    @Test
+    fun `a carried group frame's attachment carries the roster the frame itself names`() =
+        runTest {
+            // ADR 2026-10.js2p: a member whose seed is late holds the frame and no group row; the frame's own roster
+            // is what tells the database re-arm the attachment is ours.
+            val repo = repo(db, StoreDigest())
+            val env =
+                RelayEnvelope(
+                    type = FrameType.CHAT,
+                    id = "g1",
+                    senderId = "alice",
+                    sentAt = 1L,
+                    group = GroupInfo(id = "g-1", members = listOf("alice", "bob"), createdBy = "alice"),
+                    payload = WireCodec.encodePayload(ChatContent(attachmentHash = "CT")),
+                )
+            repo.store(CarriedFrame(env, sig = ByteArray(0), signed = WireCodec.encodeEnvelope(env)), ForwardStore.ORIGIN_RELAY, now = 0L)
+            repo.store(chat("d1", "peer", 2L, "bob", ChatContent(attachmentHash = "DM")), ForwardStore.ORIGIN_RELAY, now = 0L)
+
+            val byHash = repo.carriedAttachments().associateBy { it.hash }
+            assertEquals(setOf("alice", "bob"), byHash.getValue("CT").roster)
+            assertNull("a DM names no roster", byHash.getValue("DM").roster)
+        }
 
     @Test
     fun `store denormalizes the attachment hash but never gates the insert on it`() =

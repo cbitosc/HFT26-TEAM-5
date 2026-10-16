@@ -136,7 +136,18 @@ class MessageRepositoryTest : RoomDbTest() {
             repo.save(msg("m1", attachmentHash = "H1"))
             repo.save(msg("m2", attachmentHash = "H2"))
             db.blobDao().insert(BlobEntity(hash = "H2", mime = "image/jpeg", bytes = ByteArray(0)))
-            assertEquals(mapOf("H1" to "s"), repo.attachmentsNeedingFetch())
+            assertEquals(mapOf("H1" to "s"), repo.attachmentsNeedingFetch(me = "me").associate { it.hash to it.senderId })
+        }
+
+    @Test
+    fun `attachmentsNeedingFetch folds the rows per hash, the earliest row's sender first`() =
+        runTest {
+            val repo = repo()
+            repo.save(msg("late", attachmentHash = "H1").copy(senderId = "stranger", sentAt = 9L, attachmentSize = 9_000_000L))
+            repo.save(msg("early", attachmentHash = "H1").copy(senderId = "contact", sentAt = 1L))
+            val missing = repo.attachmentsNeedingFetch(me = "me").single()
+            assertEquals("contact", missing.senderId)
+            assertEquals(listOf("contact", "stranger"), missing.rows.map { it.senderId })
         }
 
     @Test

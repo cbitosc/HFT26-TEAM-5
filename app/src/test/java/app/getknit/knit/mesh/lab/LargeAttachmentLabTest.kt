@@ -1,0 +1,200 @@
+package app.getknit.knit.mesh.lab
+
+import app.getknit.knit.data.message.Conversations
+import app.getknit.knit.data.settings.BluetoothDownloadLimit
+import app.getknit.knit.mesh.BulkRoute
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Before
+import org.junit.Rule
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import kotlin.random.Random
+
+/**
+ * Ask before large Bluetooth-only downloads (ADR 2026-10.js2p). An attachment its sender declared over the recipient's
+ * limit (1 MB by default, as shipped — the lab keeps the default) is fetched on its own only over Wi-Fi Aware; with
+ * Bluetooth alone in reach nothing is asked until the user taps "Tap to download" (`MeshController.downloadAttachment`).
+ * The lab has no Wi-Fi Aware: `LabTransport.bulkRoutes` declares which plane a file between two nodes would ride, on
+ * each end, as the composite's `bulkRouteTo` reports it. The `blobAsks` recorder is the oracle for who was asked, and
+ * whether the ask said fast-only.
+ */
+@RunWith(RobolectricTestRunner::class)
+class LargeAttachmentLabTest {
+    private lateinit var lab: MeshLab
+
+    @get:Rule
+    val chaos = LabChaos.rule()
+
+    @Before
+    fun setUp() {
+        lab = MeshLab()
+    }
+
+    @After
+    fun tearDown() {
+        lab.close()
+    }
+
+    /** The asks for [hash] this node sent that reached a peer. */
+    private fun LabNode.asksFor(hash: String) = transport.blobAsks.filter { it.hash == hash }
+
+    private fun LabNode.filesTo(
+        to: LabNode,
+        hash: String,
+    ) = transport.files.count { it == "${to.nodeId} ATTACHMENT $hash" }
+
+    /** Two acquainted nodes on one Bluetooth link, with Alice's 2 MB file DM on its way to Bob, and its id and hash. */
+    private suspend fun largeFileToBob(
+        alice: LabNode,
+        bob: LabNode,
+        seed: Int,
+    ): Pair<String, String> {
+        val file = Random(seed).nextBytes(LARGE_BYTES)
+        assertTrue(alice.sendFile(file, "survey.zip", "application/zip", text = "the survey", to = bob))
+        val id = alice.ownMessageId(alice.dmWith(bob), "the survey")
+        return id to checkNotNull(alice.attachmentHash(alice.dmWith(bob), id))
+    }
+
+    private fun dm(
+        alice: LabNode,
+        bob: LabNode,
+    ): (LabNode) -> String = { it.dmWith(if (it === alice) bob else alice) }
+
+    /**
+     * Bluetooth alone: Bob holds the message and asks for nothing — not on delivery, not on the tick — until he taps,
+     * and then the file crosses the Bluetooth link once.
+     */
+    @Test
+    fun aLargeFileOverBluetoothAloneWaitsForTheTapThenCrossesOnce() =
+        runBlocking {
+            val alice = lab.node("alice").apply { setDisplayName("Alice") }
+            val bob = lab.node("bob").apply { setDisplayName("Bob") }
+            lab.link(alice, bob)
+            lab.awaitAcquainted(alice, bob)
+
+            val (_, hash) = largeFileToBob(alice, bob, seed = 2001)
+            lab.await(1) { bob.decrypted(bob.dmWith(alice)).size }
+            // Delivery stepped the want and held it; the tick re-arms it from the database and holds it again.
+            lab.await(1) { if (bob.metrics.files().blobFastOnlyHeld > 0) 1 else 0 }
+            val heldBefore = bob.metrics.files().blobFastOnlyHeld
+            bob.reoffer()
+            lab.await(1) { if (bob.metrics.files().blobFastOnlyHeld > heldBefore) 1 else 0 }
+            assertTrue("nothing asked over Bluetooth before the tap: ${bob.asksFor(hash)}", bob.asksFor(hash).isEmpty())
+            assertEquals(0, alice.filesTo(bob, hash))
+
+            bob.manager.downloadAttachment(hash)
+            lab.assertConverged(listOf(alice, bob), atLeast = 1, conversation = dm(alice, bob))
+            assertTrue("the tap's ask is plain: ${bob.asksFor(hash)}", bob.asksFor(hash).run { isNotEmpty() && none { it.fastOnly } })
+            assertEquals("one copy", 1, alice.filesTo(bob, hash))
+        }
+
+    /**
+     * The tap racing the database re-arm (ADR 2026-10.js2p's review). A re-arm reads the rows before the user taps and
+     * is parked there, holding the re-arm lock, until the approval is written; it then wants by its stale read. The tap's
+     * want waits on the lock and lands after it, so the stale fast-only verdict never outlives the tap, nothing withdraws
+     * the tap's ask, and one copy lands. (Which of the lock and the exchange's sticky tap saves it is not told apart here:
+     * `BlobExchangeTest.aTapIsStickyAgainstAStaleWantWithItsAskOutstanding` pins the bit alone.)
+     */
+    @Test
+    fun aReArmParkedAcrossTheTapNeverUndoesIt() =
+        runBlocking {
+            val alice = lab.node("alice").apply { setDisplayName("Alice") }
+            val bob = lab.node("bob").apply { setDisplayName("Bob") }
+            lab.link(alice, bob)
+            lab.awaitAcquainted(alice, bob)
+
+            val (id, hash) = largeFileToBob(alice, bob, seed = 2006)
+            lab.await(1) { bob.decrypted(bob.dmWith(alice)).size }
+            lab.await(1) { if (bob.metrics.files().blobFastOnlyHeld > 0) 1 else 0 }
+
+            val parked = CompletableDeferred<Unit>()
+            val release = CompletableDeferred<Unit>()
+            bob.manager.beforeRewantApplies = {
+                bob.manager.beforeRewantApplies = null
+                parked.complete(Unit)
+                release.await()
+            }
+            // The copy is held on the link, so the withdrawals are read while the tap's ask stands, before any bytes land:
+            // a step around the landing is the store's business, not the race's.
+            alice.transport.holdFiles(bob.transport)
+            coroutineScope {
+                val tick = launch { bob.reoffer() } // reads the rows untapped, then parks under the lock
+                parked.await()
+                bob.manager.downloadAttachment(hash)
+                lab.await(1) { if (bob.row(id)?.attachmentFetchApproved == true) 1 else 0 } // the tap is written
+                release.complete(Unit) // the stale re-arm applies its fast-only verdict; then the tap's want
+                tick.join()
+            }
+            lab.await(1) { bob.asksFor(hash).count { !it.fastOnly } } // the tap's plain ask reached Alice
+            assertTrue("nothing withdrew the tap's ask: ${bob.transport.blobCancels}", bob.transport.blobCancels.none { it.second == hash })
+            alice.transport.releaseFiles(bob.transport)
+            lab.assertConverged(listOf(alice, bob), atLeast = 1, conversation = dm(alice, bob))
+            assertEquals("one copy", 1, alice.filesTo(bob, hash))
+        }
+
+    /** Wi-Fi Aware in reach — linked, or reachable for the holder to raise — fetches it without a tap, asking fast-only. */
+    @Test
+    fun aLargeFileWithWifiAwareInReachIsFetchedWithoutATap() =
+        runBlocking {
+            for ((route, seed) in listOf(BulkRoute.Linked to 2002, BulkRoute.Reachable to 2003)) {
+                val alice = lab.node("alice-$route").apply { setDisplayName("Alice") }
+                val bob = lab.node("bob-$route").apply { setDisplayName("Bob") }
+                alice.transport.bulkRoutes[bob.nodeId] = route
+                bob.transport.bulkRoutes[alice.nodeId] = route
+                lab.link(alice, bob)
+                lab.awaitAcquainted(alice, bob)
+
+                val (_, hash) = largeFileToBob(alice, bob, seed)
+                lab.assertConverged(listOf(alice, bob), atLeast = 1, conversation = dm(alice, bob))
+                assertTrue("$route: asked fast-only: ${bob.asksFor(hash)}", bob.asksFor(hash).run { isNotEmpty() && all { it.fastOnly } })
+                assertEquals("$route: one copy", 1, alice.filesTo(bob, hash))
+            }
+        }
+
+    /**
+     * A large picture posted to the room declares no size — the cleartext frame has no field for one — so it is fetched
+     * over Bluetooth as it always was.
+     */
+    @Test
+    fun aLargeAttachmentThatDeclaresNoSizeIsFetchedAsBefore() =
+        runBlocking {
+            val alice = lab.node("alice").apply { setDisplayName("Alice") }
+            val bob = lab.node("bob").apply { setDisplayName("Bob") }
+            lab.link(alice, bob)
+            lab.awaitAcquainted(alice, bob)
+
+            assertTrue(alice.sendImage(Random(2004).nextBytes(LARGE_BYTES), "big room picture"))
+            val id = alice.ownMessageId(Conversations.NEARBY, "big room picture")
+            val hash = checkNotNull(alice.attachmentHash(Conversations.NEARBY, id))
+            lab.assertConverged(listOf(alice, bob), atLeast = 1) { Conversations.NEARBY }
+            assertTrue(bob.asksFor(hash).none { it.fastOnly })
+        }
+
+    /** "Never ask": a large file over Bluetooth alone is fetched as it always was. */
+    @Test
+    fun withTheLimitSetToNeverALargeFileOverBluetoothIsFetched() =
+        runBlocking {
+            val alice = lab.node("alice").apply { setDisplayName("Alice") }
+            val bob = lab.node("bob").apply { setDisplayName("Bob") }
+            bob.settings.setBluetoothDownloadLimit(BluetoothDownloadLimit.NEVER)
+            lab.link(alice, bob)
+            lab.awaitAcquainted(alice, bob)
+
+            val (_, hash) = largeFileToBob(alice, bob, seed = 2005)
+            lab.assertConverged(listOf(alice, bob), atLeast = 1, conversation = dm(alice, bob))
+            assertTrue(bob.asksFor(hash).none { it.fastOnly })
+            assertEquals(1, alice.filesTo(bob, hash))
+        }
+
+    private companion object {
+        // Past the 1 MB default limit: its sender declares it, and its recipient holds it to Wi-Fi Aware.
+        const val LARGE_BYTES = 2_000_000
+    }
+}

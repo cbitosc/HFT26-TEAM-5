@@ -47,7 +47,7 @@ class KnitDatabaseMigrationTest {
         )
 
     @Test
-    fun `the current schema (v23) creates and opens from the exported JSON`() =
+    fun `the current schema (v24) creates and opens from the exported JSON`() =
         runTest {
             helper.createDatabase(CURRENT_VERSION).close()
         }
@@ -857,12 +857,36 @@ class KnitDatabaseMigrationTest {
             }
         }
 
+    @Test
+    fun `migrate 23 to 24 leaves every attachment unapproved and indexes the attachment hash`() =
+        runTest {
+            // ADR 2026-10.js2p: the tap is the user's, never inferred at upgrade.
+            helper.createDatabase(23).use { c ->
+                c.execSQL(
+                    "INSERT INTO messages (id, senderId, conversationId, body, sentAt, received, receivedVia, mentions, " +
+                        "replyToHasAttachment, moderation, pendingKey, kind, originViaMqtt, originSigned, attachmentAnimated, " +
+                        "replyCheck, replyToFlagged, attachmentHash, attachmentSize) " +
+                        "VALUES ('f1','n1','peer-1','',2,0,0,'[]',0,0,0,0,0,0,0,0,0,'H1',2000000)",
+                )
+            }
+            helper.runMigrationsAndValidate(24, listOf(KnitMigrations.MIGRATION_23_24)).use { c ->
+                c.prepare("SELECT attachmentFetchApproved, attachmentSize FROM messages WHERE id = 'f1'").use { s ->
+                    assertTrue(s.step())
+                    assertEquals(0L, s.getLong(0))
+                    assertEquals(2_000_000L, s.getLong(1))
+                }
+                c
+                    .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'index_messages_attachmentHash'")
+                    .use { s -> assertTrue("a delivery reads the rows naming its attachment by index", s.step()) }
+            }
+        }
+
     private companion object {
         /**
          * KnitDatabase `@Database(version = …)` — bump alongside the DB (its retention is CLASS, so the version
          * can't be read reflectively). A missing schemas/<db>/<version>.json fails the smoke test.
          */
-        const val CURRENT_VERSION = 23
+        const val CURRENT_VERSION = 24
 
         /** The v16 column list with an attachment — MIGRATION_16_17's test seeds rows through it. */
         const val INSERT_V16 =

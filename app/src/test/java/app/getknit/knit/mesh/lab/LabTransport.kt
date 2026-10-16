@@ -18,6 +18,7 @@ import app.getknit.knit.mesh.link.FileIntake
 import app.getknit.knit.mesh.link.FrameKey
 import app.getknit.knit.mesh.link.LinkCrossings
 import app.getknit.knit.mesh.link.LinkFraming
+import app.getknit.knit.mesh.protocol.BlobCancelContent
 import app.getknit.knit.mesh.protocol.BlobHasContent
 import app.getknit.knit.mesh.protocol.BlobHaveContent
 import app.getknit.knit.mesh.protocol.BlobReqContent
@@ -356,15 +357,25 @@ class LabTransport(
     /** Every frame a lossy pipe dropped, for a scenario that asserts on what the air ate. */
     val lost = CopyOnWriteArrayList<WireEnvelope>()
 
-    /** A `blobreq` that crossed one of this node's pipes: to whom, for which hash, from which byte (#116). */
+    /**
+     * A `blobreq` that crossed one of this node's pipes: to whom, for which hash, from which byte (#116), and whether
+     * it asked for the bytes over Wi-Fi Aware only (ADR 2026-10.js2p).
+     */
     data class BlobAsk(
         val to: String,
         val hash: String,
         val offset: Long?,
+        val fastOnly: Boolean = false,
     )
 
     /** Every `blobreq` this node sent that reached its peer, in arrival order — what an ask said, offset included. */
     val blobAsks = CopyOnWriteArrayList<BlobAsk>()
+
+    /**
+     * Every `blobcancel` this node sent that reached its peer, as (to, hash), recorded on arrival — so a scenario that
+     * asserts none was sent reads it once the peer could have heard one, not when the sender's counter moved.
+     */
+    val blobCancels = CopyOnWriteArrayList<Pair<String, String>>()
 
     /** A `blobhave` that crossed one of this node's pipes: to whom, and the hashes it named (ADR 2026-10.6e5t). */
     data class BlobQuery(
@@ -981,7 +992,13 @@ class LabTransport(
         when (envelope.type) {
             FrameType.BLOB_REQ -> {
                 WireCodec.decodePayload<BlobReqContent>(envelope.payload)?.let { ask ->
-                    pipes[fromNodeId]?.target?.blobAsks?.add(BlobAsk(nodeId, ask.hash, ask.offset))
+                    pipes[fromNodeId]?.target?.blobAsks?.add(BlobAsk(nodeId, ask.hash, ask.offset, ask.fastOnly == true))
+                }
+            }
+
+            FrameType.BLOB_CANCEL -> {
+                WireCodec.decodePayload<BlobCancelContent>(envelope.payload)?.let { c ->
+                    pipes[fromNodeId]?.target?.blobCancels?.add(nodeId to c.hash)
                 }
             }
 

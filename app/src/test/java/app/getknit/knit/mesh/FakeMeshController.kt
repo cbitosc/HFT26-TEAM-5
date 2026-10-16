@@ -64,6 +64,13 @@ class FakeMeshController : MeshController {
     val sentReactions = mutableListOf<Pair<String, String>>()
     val sentTyping = mutableListOf<String>()
 
+    /** Hashes passed to [downloadAttachment], in order — the bubble's "Tap to download" (ADR 2026-10.js2p). */
+    val downloadedAttachments = mutableListOf<String>()
+
+    override suspend fun downloadAttachment(hash: String) {
+        downloadedAttachments += hash
+    }
+
     /** Peers passed to [cancelIntro], in order — a contact removal's one mesh call. */
     val cancelledIntros = mutableListOf<String>()
 

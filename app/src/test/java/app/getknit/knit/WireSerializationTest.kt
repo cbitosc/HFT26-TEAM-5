@@ -476,6 +476,23 @@ class WireSerializationTest {
     }
 
     @Test
+    fun aFastOnlyBlobAskRoundTripsAndAPlainOneIsTheBytesItAlwaysWas() {
+        // ADR 2026-10.js2p: the flag is additive — absent unless set, so a plain ask is byte-identical to an older build's.
+        val fast = BlobReqContent("h", fastOnly = true)
+        assertEquals(fast, WireCodec.decodePayload<BlobReqContent>(WireCodec.encodePayload(fast)))
+        assertArrayEquals(WireCodec.encodePayload(OlderBlobReq("h")), WireCodec.encodePayload(BlobReqContent("h")))
+        assertNull(WireCodec.decodePayload<BlobReqContent>(WireCodec.encodePayload(OlderBlobReq("h")))?.fastOnly)
+        // An older reader skips the key it does not know, and serves as it always has.
+        assertEquals(OlderBlobReq("h"), WireCodec.decodePayload<OlderBlobReq>(WireCodec.encodePayload(fast)))
+    }
+
+    /** `BlobReqContent` as builds before ADR 2026-10.wtyc encoded it: the hash alone. */
+    @Serializable
+    private data class OlderBlobReq(
+        val hash: String,
+    )
+
+    @Test
     fun reactionRetractContentSurvivesWithNullEmoji() {
         val content = ReactionContent("m1", emoji = null)
         assertNull(WireCodec.decodePayload<ReactionContent>(WireCodec.encodePayload(content))?.emoji)

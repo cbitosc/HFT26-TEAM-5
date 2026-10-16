@@ -21,15 +21,43 @@ class MessageDaoTest : RoomDbTest() {
     private val dao get() = db.messageDao()
 
     @Test
-    fun `attachmentsNeedingFetch returns referenced hashes not yet in blobs, deduped, with the earliest sender`() =
+    fun `attachmentFetchRows lists every row naming a missing attachment, earliest first`() =
         runTest {
             dao.upsert(msg("m1", attachmentHash = "H1", sender = "forwarder", sentAt = 5L))
             dao.upsert(msg("m2", attachmentHash = "H2")) // H2 is held below → excluded
-            dao.upsert(msg("m3", attachmentHash = "H1", sender = "author", sentAt = 2L)) // duplicate → H1 once, earliest
+            dao.upsert(msg("m3", attachmentHash = "H1", sender = "author", sentAt = 2L))
             dao.upsert(msg("m4", attachmentHash = null)) // no attachment → excluded
             db.blobDao().insert(BlobEntity(hash = "H2", mime = "image/jpeg", bytes = ByteArray(0)))
 
-            assertEquals(listOf(NeededAttachment("H1", "author")), dao.attachmentsNeedingFetch())
+            assertEquals(
+                "one entry per row, the earliest first: its sender is whom a re-armed want asks",
+                listOf("H1" to "author", "H1" to "forwarder"),
+                dao.attachmentFetchRows(me = "me").map { it.hash to it.senderId },
+            )
+        }
+
+    @Test
+    fun `attachmentFetchRows carries each row's declared size, its tap and whether it is ours`() =
+        runTest {
+            // ADR 2026-10.js2p: what BluetoothFetchGate folds a re-armed want's verdict over, row by row.
+            dao.upsert(msg("a1", attachmentHash = "H1", sender = "peer", sentAt = 1L).copy(attachmentSize = 2_000_000L))
+            dao.upsert(msg("a2", attachmentHash = "H1", sender = "me", sentAt = 2L).copy(attachmentSize = 1_500_000L))
+            dao.upsert(msg("c1", attachmentHash = "H3", sender = "peer", sentAt = 3L))
+
+            assertEquals(
+                listOf(
+                    AttachmentFetchRow("H1", "peer", 2_000_000L, approved = false, own = false),
+                    AttachmentFetchRow("H1", "me", 1_500_000L, approved = false, own = true),
+                    AttachmentFetchRow("H3", "peer", null, approved = false, own = false),
+                ),
+                dao.attachmentFetchRows(me = "me"),
+            )
+
+            dao.approveAttachmentFetch("H1")
+            assertTrue("every row naming the hash", dao.attachmentFetchRows(me = "me").filter { it.hash == "H1" }.all { it.approved })
+            assertEquals(2, dao.attachmentFetchRowsFor("H1", me = "me").size)
+            db.blobDao().insert(BlobEntity(hash = "H1", mime = "image/jpeg", bytes = ByteArray(0)))
+            assertEquals("by hash, held or not", 2, dao.attachmentFetchRowsFor("H1", me = "me").size)
         }
 
     @Test

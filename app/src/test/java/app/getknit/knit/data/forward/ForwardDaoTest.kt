@@ -147,11 +147,16 @@ class ForwardDaoTest : RoomDbTest() {
 
             assertEquals(
                 setOf(
-                    CarriedAttachmentRow("H1", "bob", 7L, "peer", null),
-                    CarriedAttachmentRow("H1", null, 9L, "peer", null),
-                    CarriedAttachmentRow("H1", null, 11L, "peer", "g-1"),
+                    listOf("H1", "bob", 7L, "peer", null),
+                    listOf("H1", null, 9L, "peer", null),
+                    listOf("H1", null, 11L, "peer", "g-1"),
                 ),
-                dao.carriedAttachments().toSet(),
+                dao.carriedAttachments().mapTo(HashSet()) { listOf(it.hash, it.recipientId, it.receivedAt, it.senderId, it.groupId) },
+            )
+            // Only a group frame's bytes are loaded, for the roster it carries (ADR 2026-10.js2p).
+            assertEquals(
+                mapOf(null to true, "g-1" to false),
+                dao.carriedAttachments().groupBy { it.groupId }.mapValues { (_, rows) -> rows.all { it.signed == null } },
             )
         }
 

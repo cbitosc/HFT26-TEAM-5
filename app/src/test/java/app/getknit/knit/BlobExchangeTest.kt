@@ -9,8 +9,11 @@ import app.getknit.knit.mesh.FileKind
 import app.getknit.knit.mesh.FileMeta
 import app.getknit.knit.mesh.MeshRouter
 import app.getknit.knit.mesh.PartialBlobs
+import app.getknit.knit.mesh.protocol.BlobHasContent
+import app.getknit.knit.mesh.protocol.BlobHasItem
 import app.getknit.knit.mesh.protocol.BlobReqContent
 import app.getknit.knit.mesh.protocol.FrameType
+import app.getknit.knit.mesh.protocol.Protocol
 import app.getknit.knit.mesh.protocol.WireCodec
 import app.getknit.knit.mesh.sha256Hex
 import kotlinx.coroutines.CoroutineScope
@@ -1151,6 +1154,367 @@ class BlobExchangeTest {
             store.seed(otherHash, "image/jpeg", other)
             exchange.reask()
             assertEquals(0L, partials.length(otherHash))
+        }
+
+    // --- Fast-only wants: Wi-Fi Aware or nothing until the user's tap (ADR 2026-10.js2p) ---
+
+    /** Collects every blob request [peer] receives, whole. */
+    private fun CoroutineScope.requestsArrivingAt(peer: FakeLoopTransport): MutableList<BlobReqContent> {
+        val asked = CopyOnWriteArrayList<BlobReqContent>()
+        launch {
+            peer.inbound.collect { f ->
+                if (f.envelope.type == FrameType.BLOB_REQ) WireCodec.decodePayload<BlobReqContent>(f.envelope.payload)?.let { asked += it }
+            }
+        }
+        return asked
+    }
+
+    private fun exchangeOn(
+        t: FakeLoopTransport,
+        store: FakeBlobStore = FakeBlobStore(Files.createTempDirectory("blob-fast").toFile()),
+        now: () -> Long = { 0L },
+    ) = BlobExchange(transport = t, store = store, selfId = { t.nodeId }, onObtained = { _, _ -> }, now = now, partials = partials())
+
+    @Test
+    fun aFastOnlyWantAsksNoNeighbourThatWouldSendOverBluetoothUntilAPlainWantLiftsIt() =
+        runTest(UnconfinedTestDispatcher()) {
+            val r = FakeLoopTransport("r")
+            val author = FakeLoopTransport("author").also(r::connect)
+            val other = FakeLoopTransport("other").also(r::connect)
+            var now = 0L
+            val exchange = exchangeOn(r, now = { now })
+            val toAuthor = backgroundScope.requestsArrivingAt(author)
+            val toOther = backgroundScope.requestsArrivingAt(other)
+
+            exchange.want("H", author = "author", fastOnly = true)
+            now += BlobExchange.FIRST_ASK_GRACE_MS + CompositeMeshTransport.BULK_GRACE_MS
+            exchange.reask()
+            now += BlobExchange.ROUND_MS
+            exchange.reask()
+            assertTrue("no blind ask, no widening, no pull over Bluetooth", toAuthor.isEmpty() && toOther.isEmpty())
+            assertTrue("nothing armed", r.bulkArmed.isEmpty())
+
+            exchange.want("H", author = "author") // the user's tap
+            assertEquals("asked at once, of the author, plain", listOf(BlobReqContent("H")), toAuthor)
+            assertTrue(toOther.isEmpty())
+        }
+
+    @Test
+    fun aFastOnlyWantAsksOnlyTheNeighboursWhoseCopyWouldRideWifiAwareAndSaysSo() =
+        runTest(UnconfinedTestDispatcher()) {
+            val r = FakeLoopTransport("r")
+            val author = FakeLoopTransport("author").also(r::connect)
+            val fast = FakeLoopTransport("fast").also(r::connect)
+            val reach = FakeLoopTransport("reach").also(r::connect)
+            r.bulkRoutes["fast"] = BulkRoute.Linked
+            r.bulkRoutes["reach"] = BulkRoute.Reachable
+            var now = 0L
+            val exchange = exchangeOn(r, now = { now })
+            val toAuthor = backgroundScope.requestsArrivingAt(author)
+            val toFast = backgroundScope.requestsArrivingAt(fast)
+            val toReach = backgroundScope.requestsArrivingAt(reach)
+
+            exchange.want("H", author = "author", fastOnly = true)
+            assertEquals("the fast-linked neighbour first, the author passed over", listOf(BlobReqContent("H", fastOnly = true)), toFast)
+            assertTrue(toReach.isEmpty())
+
+            now += BlobExchange.FIRST_ASK_GRACE_MS
+            exchange.reask()
+            assertEquals("widened to the reachable one, fast-only", listOf(BlobReqContent("H", fastOnly = true)), toReach)
+            assertEquals("and armed toward it: no Bluetooth copy to fall back on", listOf("reach"), r.bulkArmed)
+            now += BlobExchange.ROUND_MS
+            exchange.reask()
+            assertTrue("the Bluetooth-only author is never asked", toAuthor.isEmpty())
+        }
+
+    @Test
+    fun aNeighboursPlainAskNeverLiftsOurFastOnlyWant() =
+        runTest(UnconfinedTestDispatcher()) {
+            val r = FakeLoopTransport("r")
+            val author = FakeLoopTransport("author").also(r::connect)
+            val asker = FakeLoopTransport("asker").also(r::connect)
+            val exchange = exchangeOn(r)
+            val toAuthor = backgroundScope.requestsArrivingAt(author)
+
+            exchange.want("H", author = "author", fastOnly = true)
+            exchange.onRequest("H", "asker") // a neighbour asks us for it, plain; we lack it
+            exchange.reask()
+            assertTrue(toAuthor.isEmpty())
+        }
+
+    @Test
+    fun aPullThroughForAFastOnlyAskIsFastOnlyItself() =
+        runTest(UnconfinedTestDispatcher()) {
+            val h = FakeLoopTransport("h")
+            val source = FakeLoopTransport("source").also(h::connect)
+            val asker = FakeLoopTransport("asker").also(h::connect)
+            h.bulkRoutes["asker"] = BulkRoute.Linked
+            val exchange = exchangeOn(h)
+            val toSource = backgroundScope.requestsArrivingAt(source)
+
+            exchange.onRequest("H", "asker", fastOnly = true) // we lack it: pull it through
+            exchange.reask()
+            assertTrue("the Bluetooth-only source is not asked on its behalf", toSource.isEmpty())
+
+            h.bulkRoutes["source"] = BulkRoute.Linked
+            exchange.reask()
+            assertEquals(listOf(BlobReqContent("H", fastOnly = true)), toSource)
+        }
+
+    @Test
+    fun aHolderServesAFastOnlyAskOnlyOverAWifiAwareRouteAndForgetsACopyTheTransportDropped() =
+        runTest(UnconfinedTestDispatcher()) {
+            val h = FakeLoopTransport("h")
+            val n = FakeLoopTransport("n").also(h::connect)
+            val store =
+                FakeBlobStore(
+                    Files.createTempDirectory("blob-fast-serve").toFile(),
+                ).apply { seed(PICTURE_HASH, "image/jpeg", PICTURE) }
+            val exchange = exchangeOn(h, store)
+
+            exchange.onRequest(PICTURE_HASH, "n", fastOnly = true)
+            assertTrue("no Wi-Fi Aware route to the asker: refused, nothing handed to the link", h.filesSent.isEmpty())
+
+            h.bulkRoutes["n"] = BulkRoute.Reachable
+            exchange.onRequest(PICTURE_HASH, "n", fastOnly = true)
+            val meta = h.filesSent.single()
+            assertTrue("marked for the transport, which never hands it to Bluetooth", meta.fastOnly)
+            exchange.onRequest(PICTURE_HASH, "n", fastOnly = true)
+            assertEquals("a re-ask inside the memo ships nothing", 1, h.filesSent.size)
+
+            checkNotNull(meta.onDropped).invoke() // the fast link never came up: the composite dropped it
+            exchange.onRequest(PICTURE_HASH, "n", fastOnly = true)
+            assertEquals("forgotten, so the next ask is served at once", 2, h.filesSent.size)
+
+            exchange.onRequest(PICTURE_HASH, "n", offset = null, fastOnly = false)
+            assertEquals("a plain ask meets the same memo", 2, h.filesSent.size)
+        }
+
+    @Test
+    fun aTapIsNotUndoneByAWantThatReadItsRowsBeforeIt() =
+        runTest(UnconfinedTestDispatcher()) {
+            // ADR 2026-10.js2p's review: a re-arm or a delivery that read the rows before the tap, and wants after it,
+            // must not hold the fetch again — that ended the tap's ask and withdrew it.
+            val r = FakeLoopTransport("r")
+            val author = FakeLoopTransport("author").also(r::connect)
+            var now = 0L
+            val exchange = exchangeOn(r, now = { now })
+            val toAuthor = backgroundScope.requestsArrivingAt(author)
+
+            exchange.want("H", author = "author", fastOnly = true)
+            exchange.want("H", author = "author", approved = true) // the tap
+            assertEquals(listOf(BlobReqContent("H")), toAuthor)
+
+            exchange.wantAll(listOf("H" to "author"), fastOnly = setOf("H")) // stale: read before the tap
+            exchange.want("H", author = "author", fastOnly = true) // a delivery that read its row before the tap
+            now += BlobExchange.FIRST_ASK_GRACE_MS + BlobExchange.ROUND_MS
+            exchange.reask()
+            assertEquals("still fetched plain, over Bluetooth", listOf(BlobReqContent("H"), BlobReqContent("H")), toAuthor)
+        }
+
+    @Test
+    fun aTapIsStickyAgainstAStaleWantWithItsAskOutstanding() =
+        runTest(UnconfinedTestDispatcher()) {
+            // The mesh-lab review: with the tap's ask standing on a holder that said it holds the blob, a stale fast-only
+            // want — a re-arm or a delivery that read its rows before the tap — once ended that ask and withdrew it.
+            val r = FakeLoopTransport("r")
+            val author = FakeLoopTransport("author").apply { advertises = Protocol.CAP_BLOB_HAVE }.also(r::connect)
+            val events = CopyOnWriteArrayList<BlobExchange.BlobEvent>()
+            val exchange =
+                BlobExchange(
+                    transport = r,
+                    store = FakeBlobStore(Files.createTempDirectory("blob-sticky").toFile()),
+                    selfId = { "r" },
+                    onObtained = { _, _ -> },
+                    now = { 0L },
+                    partials = partials(),
+                    holderQuery = BlobExchange.HolderQuery(enabled = true),
+                    onEvent = { events += it },
+                )
+            val queries = CopyOnWriteArrayList<String>()
+            backgroundScope.launch { author.inbound.collect { if (it.envelope.type == FrameType.BLOB_HAVE) queries += it.envelope.id } }
+            val toAuthor = backgroundScope.requestsArrivingAt(author)
+
+            exchange.want("H", author = "author", fastOnly = true) // over the limit, Bluetooth only: held
+            exchange.want("H", author = "author", approved = true) // the tap: the author is queried
+            exchange.onHaveAnswer(
+                BlobHasContent(listOf(BlobHasItem("H", BlobHasItem.HAVE, 2_000_000L)), load = 0, re = queries.single()),
+                "author",
+            )
+            assertEquals("the tap's ask, standing on the holder", listOf(BlobReqContent("H")), toAuthor)
+
+            exchange.wantAll(listOf("H" to "author"), fastOnly = setOf("H"))
+            exchange.want("H", author = "author", fastOnly = true)
+            assertTrue("nothing withdrew it: $events", BlobExchange.BlobEvent.CancelSent !in events)
+            assertTrue("and nothing ended it", BlobExchange.BlobEvent.Fallback !in events)
+        }
+
+    @Test
+    fun aNonHoldersFlappingFastLinkNeverResetsTheBackoffOnAReachableHolder() =
+        runTest(UnconfinedTestDispatcher()) {
+            // Round 3 of the review: Wi-Fi Aware links flap on every custody sync. A neighbour's data path coming up is an
+            // edge for that neighbour alone — it must not open a fresh cycle that re-asks, and re-arms toward, a reachable
+            // holder whose link never comes up.
+            val r = FakeLoopTransport("r")
+            val reach = FakeLoopTransport("reach").also(r::connect)
+            val sync = FakeLoopTransport("sync").also(r::connect)
+            r.bulkRoutes["reach"] = BulkRoute.Reachable
+            var now = 0L
+            val exchange = exchangeOn(r, now = { now })
+            val toReach = backgroundScope.requestsArrivingAt(reach)
+
+            exchange.want("H", author = "reach", fastOnly = true)
+            repeat(10) {
+                now += 30_000L
+                r.bulkRoutes["sync"] = BulkRoute.Linked // a custody sync's data path up…
+                exchange.fastLinkUp(listOf("sync"))
+                now += 30_000L
+                r.bulkRoutes.remove("sync") // …and down again, then the tick
+                exchange.reask()
+            }
+            assertTrue("asked within the backoff over 10 min of flapping: ${toReach.size}", toReach.size <= 4)
+
+            val before = toReach.size
+            r.bulkRoutes["reach"] = BulkRoute.Linked // the holder itself links
+            exchange.fastLinkUp(listOf("reach"))
+            assertEquals("asked at once over it", before + 1, toReach.size)
+        }
+
+    @Test
+    fun aFastLinkThatDropsAndReturnsBetweenTwoStepsIsStillAnEdge() =
+        runTest(UnconfinedTestDispatcher()) {
+            // Round 4 of the review: links flap per custody sync, so a down→up between two steps leaves both snapshots
+            // linked. The watcher's own edge must still ask the holder again.
+            val r = FakeLoopTransport("r")
+            val h = FakeLoopTransport("h").also(r::connect)
+            r.bulkRoutes["h"] = BulkRoute.Linked
+            var now = 0L
+            val exchange = exchangeOn(r, now = { now })
+            val toH = backgroundScope.requestsArrivingAt(h)
+
+            exchange.want("H", author = "h", fastOnly = true)
+            now += BlobExchange.FIRST_ASK_GRACE_MS + 1
+            exchange.reask() // h brought nothing over its link: spent for this cycle
+            exchange.reask()
+            assertEquals(1, toH.size)
+
+            r.bulkRoutes.remove("h") // the link drops…
+            r.bulkRoutes["h"] = BulkRoute.Linked // …and comes back, with no step between
+            exchange.fastLinkUp(setOf("h"))
+            assertEquals("asked again within that step", 2, toH.size)
+        }
+
+    @Test
+    fun aLandedFileTakesItsWantBeforeLeavingTheLinkSoARacingStepWithdrawsNothing() =
+        runTest(UnconfinedTestDispatcher()) {
+            // Round 3 of the review (R4): a step between the file leaving the link's landing ones and the want's removal
+            // found the blob held and no longer arriving, took the want itself and withdrew every ask — the serving
+            // holder's included, a stray `blobcancel` after the blob was held.
+            val r = FakeLoopTransport("r")
+            val h = FakeLoopTransport("h").apply { advertises = Protocol.CAP_BLOB_HAVE }.also(r::connect)
+            val events = CopyOnWriteArrayList<BlobExchange.BlobEvent>()
+            val exchange =
+                BlobExchange(
+                    transport = r,
+                    store = FakeBlobStore(Files.createTempDirectory("blob-landed-order").toFile()).apply { checkHashes = true },
+                    selfId = { "r" },
+                    onObtained = { _, _ -> },
+                    now = { 0L },
+                    partials = partials(),
+                    holderQuery = BlobExchange.HolderQuery(enabled = true),
+                    onEvent = { events += it },
+                )
+            val queries = CopyOnWriteArrayList<String>()
+            backgroundScope.launch { h.inbound.collect { if (it.envelope.type == FrameType.BLOB_HAVE) queries += it.envelope.id } }
+            val toH = backgroundScope.requestsArrivingAt(h)
+
+            exchange.want(PICTURE_HASH, author = "h")
+            exchange.onHaveAnswer(
+                BlobHasContent(listOf(BlobHasItem(PICTURE_HASH, BlobHasItem.HAVE, PICTURE.size.toLong())), re = queries.single()),
+                "h",
+            )
+            assertEquals(1, toH.size)
+
+            r.arriving += PICTURE_HASH // the copy streams in, then lands
+            r.afterTaken = { backgroundScope.launch { exchange.reask() } } // a tick right after it leaves the link
+            exchange.onReceived(PICTURE_HASH, "image/jpeg", cutFile(PICTURE).absolutePath, from = "h")
+
+            assertTrue("nothing withdrawn from the holder that served it: $events", BlobExchange.BlobEvent.CancelSent !in events)
+            assertEquals("and nothing asked again", 1, toH.size)
+        }
+
+    @Test
+    fun aHolderThatGainsTheFastLinkIsAskedAgainAtOnceWithinTheCycle() =
+        runTest(UnconfinedTestDispatcher()) {
+            // The blobs review: a holder already linked over Bluetooth that gains the Wi-Fi Aware link changes no
+            // neighbour set, so only the edge itself ([BlobExchange.fastLinkUp]) can ask it again before the cycle ends.
+            val r = FakeLoopTransport("r")
+            val a = FakeLoopTransport("a").also(r::connect)
+            val b = FakeLoopTransport("b").also(r::connect)
+            r.bulkRoutes["a"] = BulkRoute.Reachable
+            r.bulkRoutes["b"] = BulkRoute.Reachable
+            var now = 0L
+            val exchange = exchangeOn(r, now = { now })
+            val toB = backgroundScope.requestsArrivingAt(b)
+
+            exchange.want("H", author = "a", fastOnly = true) // a first, alone
+            now += BlobExchange.FIRST_ASK_GRACE_MS + CompositeMeshTransport.BULK_GRACE_MS + 1
+            exchange.reask() // a brought nothing: the round widens to b
+            assertEquals(1, toB.size)
+            exchange.reask()
+            assertEquals("asked once this cycle", 1, toB.size)
+
+            r.bulkRoutes["b"] = BulkRoute.Linked // b's data path came up, between ticks
+            exchange.fastLinkUp(listOf("b"))
+            assertEquals("asked again over it, at once", 2, toB.size)
+            assertTrue(toB.all { it.fastOnly == true })
+        }
+
+    @Test
+    fun aFastOnlyWantWhoseReachableHolderNeverLinksBacksOffUntilTheLinkComesUp() =
+        runTest(UnconfinedTestDispatcher()) {
+            // ADR 2026-10.js2p's review: a reachable holder whose Wi-Fi Aware link never comes up was asked, armed and
+            // raised every cycle until the tap. A fast-only cycle that asked and still wants the blob is dead: 45 s,
+            // then 90 s, 3 min, 6 min. A link coming up opens a fresh cycle at once.
+            val r = FakeLoopTransport("r")
+            val reach = FakeLoopTransport("reach").also(r::connect)
+            r.bulkRoutes["reach"] = BulkRoute.Reachable
+            var now = 0L
+            val exchange = exchangeOn(r, now = { now })
+            val toReach = backgroundScope.requestsArrivingAt(reach)
+
+            exchange.want("H", author = "reach", fastOnly = true)
+            repeat(11) {
+                now += 60_000L // the re-offer tick
+                exchange.reask()
+            }
+            assertEquals("asked at 0 s, 60 s, 180 s and 360 s — not every tick", 4, toReach.size)
+            assertTrue(toReach.all { it.fastOnly == true })
+
+            r.bulkRoutes["reach"] = BulkRoute.Linked // the link came up
+            exchange.reask()
+            assertEquals("asked at once over it", 5, toReach.size)
+        }
+
+    @Test
+    fun liftingAFastOnlyWantAsksAgainAtOnceTheHolderItGaveUpOn() =
+        runTest(UnconfinedTestDispatcher()) {
+            val r = FakeLoopTransport("r")
+            val reach = FakeLoopTransport("reach").also(r::connect)
+            r.bulkRoutes["reach"] = BulkRoute.Reachable
+            var now = 0L
+            val exchange = exchangeOn(r, now = { now })
+            val toReach = backgroundScope.requestsArrivingAt(reach)
+
+            exchange.want("H", author = "reach", fastOnly = true)
+            repeat(4) {
+                now += 60_000L
+                exchange.reask()
+            }
+            val before = toReach.size
+            exchange.want("H", author = "reach", approved = true) // the tap, deep in a backoff
+            assertEquals("a fresh plain cycle, at once", before + 1, toReach.size)
+            assertEquals(BlobReqContent("H"), toReach.last())
         }
 
     private companion object {

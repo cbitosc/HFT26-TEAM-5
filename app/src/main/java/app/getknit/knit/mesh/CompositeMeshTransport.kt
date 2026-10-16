@@ -180,6 +180,22 @@ class CompositeMeshTransport(
             }.stateIn(scope, SharingStarted.Eagerly, emptyMap())
         }
 
+    /**
+     * The node ids the [highThroughput] children (Wi-Fi Aware) hold a live link to now. A neighbour already linked over
+     * Bluetooth that gains a Wi-Fi Aware link changes the merged [neighbors] not at all, so this is the one place that
+     * edge shows: `MeshManager.watchFastLinks` steps the fast-only blob wants on it (ADR 2026-10.js2p). Not on the
+     * [MeshTransport] seam; nothing routes on it.
+     */
+    val fastLinked: StateFlow<Set<String>> =
+        children.filter { it.highThroughput }.let { fast ->
+            if (fast.isEmpty()) {
+                MutableStateFlow(emptySet())
+            } else {
+                combine(fast.map { it.neighbors }) { sets -> sets.flatMapTo(HashSet()) { set -> set.map { it.nodeId } } }
+                    .stateIn(scope, SharingStarted.Eagerly, emptySet())
+            }
+        }
+
     // Stamp each frame with the child it came off (InboundFrame.kind) before the merge erases that — the
     // delivery path records it as the message's DeliveryPlane. Presentation only: the router never reads it.
     override val inbound: Flow<InboundFrame> =
@@ -374,6 +390,7 @@ class CompositeMeshTransport(
         // (the link's own `file …` line names the offset).
         val bytes = file.length() - meta.offset.coerceIn(0L, file.length())
         val tag = "${meta.kind}/${meta.key} ${bytes}B → ${to.nodeId}"
+        if (meta.fastOnly) return sendFastOnly(fast, file, to, meta, tag)
         if (fast.neighbors.value.any { it.nodeId == to.nodeId }) {
             // Fast link already up (e.g. a custody sync in flight) — ride it whatever the size; fall back
             // on a teardown race.
@@ -395,6 +412,39 @@ class CompositeMeshTransport(
         return true // scheduled: the waiter commits to exactly one plane (or drops if the peer left)
     }
 
+    /**
+     * [sendFile] for an asker that takes the bytes over Wi-Fi Aware only ([FileMeta.fastOnly], ADR 2026-10.js2p): a live
+     * fast link carries them whatever their size, else the fast plane is armed for them whatever their size and waited
+     * on as any large blob is. Never the link holder — not on a refused enqueue, not when the grace runs out, not when
+     * the plane will not arm: the asker's user has not agreed to wait on Bluetooth for these bytes. A copy given up
+     * after it was accepted calls [FileMeta.onDropped].
+     */
+    private suspend fun sendFastOnly(
+        fast: MeshTransport,
+        file: File,
+        to: Peer,
+        meta: FileMeta,
+        tag: String,
+    ): Boolean {
+        if (fast.neighbors.value.any { it.nodeId == to.nodeId }) {
+            if (fast.sendFile(file, to, meta)) {
+                log("file route: $tag over fast link (fast-only)")
+                return true
+            }
+            log("file route: $tag fast-only — dropped (fast enqueue refused)")
+            metrics?.onFastOnlyDropped()
+            return false
+        }
+        if (!fast.expectBulkTransfer(to.nodeId)) {
+            log("file route: $tag fast-only — dropped (fast plane won't arm)")
+            metrics?.onFastOnlyDropped()
+            return false
+        }
+        log("file route: $tag armed (fast-only) — waiting ≤${BULK_GRACE_MS}ms for the fast link")
+        awaitFastLinkThenSend(fast, file, to, meta, tag)
+        return true
+    }
+
     /** The armed-grace tail of [sendFile], detached so the serial inbound dispatch never suspends on it. */
     private fun awaitFastLinkThenSend(
         fast: MeshTransport,
@@ -412,6 +462,10 @@ class CompositeMeshTransport(
             val overFast = linked && fast.sendFile(file, to, meta)
             if (overFast) {
                 log("file route: $tag over fast link after grace")
+            } else if (meta.fastOnly) {
+                log("file route: $tag fast-only — dropped (${if (linked) "fast enqueue refused" else "grace expired"})")
+                metrics?.onFastOnlyDropped()
+                meta.onDropped?.invoke()
             } else {
                 log("file route: $tag ${if (linked) "fast enqueue refused" else "grace expired"} — link holder")
                 childHoldingLinkTo(to.nodeId)?.sendFile(file, to, meta)

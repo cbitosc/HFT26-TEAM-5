@@ -532,7 +532,7 @@ opaque SHA-256-addressed bytes with a MIME string beside them, which is why voic
     never flooded — each hop mints a fresh request id), and never bouncing a blob back to its giver.
 
 On startup, `MeshManager.resumePendingFetches()` re-requests any attachment referenced by a stored
-message whose bytes aren't present yet (`MessageDao.attachmentsNeedingFetch()`) — and any
+message whose bytes aren't present yet (`MessageDao.attachmentFetchRows()`) — and any
 attachment referenced by a **carried store-and-forward frame** whose bytes are missing
 (`ForwardStore.attachmentsNeedingFetch()`, gated by the carrier budget below), so a carrier keeps
 retrying the image it is custodying for a late joiner.

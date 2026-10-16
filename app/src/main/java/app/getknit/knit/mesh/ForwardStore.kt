@@ -138,7 +138,9 @@ interface ForwardStore {
 
 /** One carried frame naming attachment [hash]: its cleartext recipient (null for a group or room frame), when we took
  *  it into custody, its author, its group if it is a group's, and whether we are in that group (the store does not
- *  know: its reader fills it in) ([ForwardStore.carriedAttachments]). */
+ *  know: its reader fills it in) ([ForwardStore.carriedAttachments]). [roster] is the member list the frame itself
+ *  carries (`RelayEnvelope.group`), null for a frame with none: it says a group frame is ours before any group row
+ *  does — a member whose seed is late holds the frame and no row (ADR 2026-10.js2p). */
 data class CarriedAttachment(
     val hash: String,
     val recipientId: String?,
@@ -146,4 +148,5 @@ data class CarriedAttachment(
     val senderId: String? = null,
     val groupId: String? = null,
     val member: Boolean = false,
+    val roster: Set<String>? = null,
 )

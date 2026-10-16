@@ -1756,6 +1756,11 @@ class BlobHolderQueryTest {
             val hash = b.store.seed(bytes)
             c.store.seed(bytes)
             c.transport.feeding = 1 // b would be the first choice
+            // No want holds the blob any more (swept): the from-0 want made here is fast-only until the database re-arm
+            // says otherwise (ADR 2026-10.js2p), so both holders ride Wi-Fi Aware here, and c serves over it.
+            a.transport.bulkRoutes["b"] = BulkRoute.Linked
+            a.transport.bulkRoutes["c"] = BulkRoute.Linked
+            c.transport.bulkRoutes["a"] = BulkRoute.Linked
             val keptPrefix = Files.createTempFile("cut", ".bin").toFile().apply { writeBytes(ByteArray(100)) }
             assertTrue(a.partials.keep(hash, keptPrefix, basedOn = null))
             val bad = Files.createTempFile("bad", ".bin").toFile().apply { writeBytes(ByteArray(bytes.size)) }

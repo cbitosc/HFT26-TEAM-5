@@ -565,6 +565,7 @@ fun ChatScreen(
             // the copy saved last time, or through the picker first (ADR 2026-09.7ad3).
             if (FileTypes.isRisky(mime, name)) riskyFile = pending else viewModel.openAttachment(pending)
         },
+        onDownloadAttachment = viewModel::downloadAttachment,
         onSendFileDirectly = viewModel::sendFileDirectly,
         showTransferConsent = showTransferConsent,
         onAcceptTransferConsent = viewModel::acceptTransferConsent,
@@ -691,6 +692,8 @@ internal fun ChatScreenContent(
     onCameraClick: () -> Unit = {},
     onFileClick: () -> Unit = {},
     onSaveFile: (hash: String, key: String?, name: String?, mime: String?) -> Unit = { _, _, _, _ -> },
+    // "Tap to download" on a large attachment only Bluetooth could bring (ADR 2026-10.js2p).
+    onDownloadAttachment: (hash: String) -> Unit = {},
     // A large file over a direct Wi-Fi link (DM only): the menu item, and the card's answers.
     onSendFileDirectly: () -> Unit = {},
     showTransferConsent: TransferConsent? = null,
@@ -1359,6 +1362,7 @@ internal fun ChatScreenContent(
                                         highlighted = row.id == highlightedMessageId,
                                         onImageClick = { fullscreenImage = it },
                                         onSaveFile = onSaveFile,
+                                        onDownloadAttachment = onDownloadAttachment,
                                         onOpenProfile = onOpenProfile,
                                         onReact = onReact,
                                         quickReactions = quickReactions,
@@ -2050,6 +2054,8 @@ private fun MessageBubble(
     // Saving a file attachment through the storage picker; defaulted so the @Preview call sites and the
     // content tests need no extra wiring.
     onSaveFile: (hash: String, key: String?, name: String?, mime: String?) -> Unit = { _, _, _, _ -> },
+    // "Tap to download" on a large attachment only Bluetooth could bring (ADR 2026-10.js2p); defaulted likewise.
+    onDownloadAttachment: (hash: String) -> Unit = {},
     onOpenProfile: (nodeId: String) -> Unit,
     onReact: (messageId: String, emoji: String) -> Unit,
     // The long-press menu's quick-reaction row and its "+" (opens the full picker); defaulted for previews.
@@ -2259,7 +2265,25 @@ private fun MessageBubble(
                             Spacer(Modifier.height(4.dp))
                         }
                         if (row.attachmentHash != null) {
-                            if (VoiceAudio.isVoice(row.attachmentMime)) {
+                            if (row.attachmentAwaitsTap && arrival == null && row.attachmentSize != null) {
+                                // Over the user's limit and only Bluetooth could bring it: nothing is fetched until
+                                // the tap (ADR 2026-10.js2p). Bytes arriving — Wi-Fi Aware needs no tap — put the
+                                // kind's own placeholder and its progress ring back.
+                                TapToDownloadCard(
+                                    label =
+                                        row.attachmentName
+                                            ?: stringResource(
+                                                if (VoiceAudio.isVoice(row.attachmentMime)) {
+                                                    R.string.chat_attachment_voice
+                                                } else {
+                                                    R.string.chat_attachment_photo
+                                                },
+                                            ),
+                                    declaredSize = row.attachmentSize,
+                                    onDownload = { onDownloadAttachment(row.attachmentHash) },
+                                    onLongClick = { showPicker = true },
+                                )
+                            } else if (VoiceAudio.isVoice(row.attachmentMime)) {
                                 // Decoded here, under remember, rather than in ChatRow: the row is a data
                                 // class, so holding the bars as an array would give it identity equality and
                                 // recompose every voice bubble on every emission of the message list.
@@ -4878,6 +4902,38 @@ fun MessageBubblePhotoArrivingPreview() =
             onBlock = {},
             onCopy = {},
             arrival = ArrivingFile("preview", bytes = 84_000, total = 204_028),
+        )
+    }
+
+/** A large voice note only Bluetooth could bring, waiting for the user's tap (ADR 2026-10.js2p). */
+@Preview(showBackground = true)
+@Composable
+fun MessageBubbleVoiceTapToDownloadPreview() =
+    KnitPreview {
+        MessageBubble(
+            row =
+                ChatRow(
+                    id = "m6",
+                    body = "",
+                    mine = false,
+                    senderName = "Ada Lovelace",
+                    senderNodeId = "node-ada",
+                    avatarHash = null,
+                    sentAt = PREVIEW_NOW - 2 * 60_000L,
+                    received = false,
+                    attachmentHash = "preview",
+                    attachmentMime = VoiceAudio.MIME,
+                    attachmentSize = 2_400_000,
+                    attachmentAwaitsTap = true,
+                ),
+            now = PREVIEW_NOW,
+            showSenderName = true,
+            onImageClick = {},
+            onOpenProfile = {},
+            onReact = { _, _ -> },
+            onDelete = {},
+            onBlock = {},
+            onCopy = {},
         )
     }
 

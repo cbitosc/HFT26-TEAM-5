@@ -575,6 +575,20 @@ object KnitMigrations {
             }
         }
 
+    /**
+     * v23 → v24: `messages.attachmentFetchApproved` — the user's "Tap to download" on a large attachment only Bluetooth
+     * could fetch (ADR 2026-10.js2p), and an index on `messages.attachmentHash` for the delivery's per-hash read of
+     * every row naming an attachment. Local only; unapproved on every existing row. Additive only; the SQL must stay
+     * byte-equivalent to what Room generates for `app/schemas/**/24.json`.
+     */
+    val MIGRATION_23_24 =
+        object : Migration(23, 24) {
+            override suspend fun migrate(connection: SQLiteConnection) {
+                connection.execSQL("ALTER TABLE `messages` ADD COLUMN `attachmentFetchApproved` INTEGER NOT NULL DEFAULT 0")
+                connection.execSQL("CREATE INDEX IF NOT EXISTS `index_messages_attachmentHash` ON `messages` (`attachmentHash`)")
+            }
+        }
+
     /** All migrations, applied by Room in order. */
     val ALL: Array<Migration> =
         arrayOf(
@@ -600,5 +614,6 @@ object KnitMigrations {
             MIGRATION_20_21,
             MIGRATION_21_22,
             MIGRATION_22_23,
+            MIGRATION_23_24,
         )
 }

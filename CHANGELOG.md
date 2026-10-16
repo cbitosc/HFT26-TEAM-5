@@ -27,6 +27,9 @@ document:
 
 ### Changed
 
+- Photos, voice messages and files over 1 MB that only Bluetooth can bring now wait for you to tap them, since
+  that download can take minutes. Over Wi-Fi Aware they still download by themselves, and Settings can raise
+  the limit to 5 MB or turn it off.
 - Private messages over LoRa to someone your board hasn't heard from lately now wait, apart from one every 15
   minutes. Once that one is answered the rest follow, so texting a friend whose board is switched off no
   longer uses up your airtime.

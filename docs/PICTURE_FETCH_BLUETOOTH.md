@@ -244,6 +244,14 @@ stateDiagram-v2
 The plane tiers, best first: fast link (Wi-Fi Aware linked), fast reach (Wi-Fi Aware reachable), Bluetooth link, slow
 link (Coded), sending, blind, held.
 
+**A large attachment is not fetched over Bluetooth until the user taps it** (ADR 2026-10.js2p). One its sender
+declared over the user's "Ask before large Bluetooth downloads" limit (1 MB by default) is wanted *fast-only*: the
+diagram above runs over the neighbours on the two Wi-Fi Aware tiers alone, every ask says `fastOnly`, and with neither
+in reach nobody is queried or asked — no blind round, no pull-through over Bluetooth. A cycle that asked a reachable holder
+and still wants the bytes backs off as a dead one does, until a Wi-Fi Aware link comes up. A holder serves such an ask over a
+live Wi-Fi Aware link or one it raises, and otherwise drops it rather than feed it to Bluetooth. "Tap to download" wants
+it plain, and from there it is fetched as this page describes. A room picture declares no size and is never held.
+
 ## How fast a link is fed
 
 The pace of a Bluetooth file is per link, read before every chunk (`BluetoothMeshTransport.paceFor`):

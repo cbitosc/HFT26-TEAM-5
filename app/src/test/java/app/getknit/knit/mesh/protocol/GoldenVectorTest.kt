@@ -112,6 +112,8 @@ class GoldenVectorTest {
             "blobReqContent" to WireCodec.encodePayload(BlobReqContent(hash = "h1")),
             // An ask that resumes a transfer a link drop cut off, 400 000 bytes in (#116, ADR 2026-10.wtyc).
             "blobReqContentResumed" to WireCodec.encodePayload(BlobReqContent(hash = "h1", offset = 400_000)),
+            // An ask for the bytes over Wi-Fi Aware only: the user has not approved a large Bluetooth download (ADR 2026-10.js2p).
+            "blobReqContentFastOnly" to WireCodec.encodePayload(BlobReqContent(hash = "h1", fastOnly = true)),
             // The holder query and its answer (ADR 2026-10.6e5t): every state a build emits, the load and the query echo.
             "blobHaveContent" to WireCodec.encodePayload(BlobHaveContent(hashes = listOf("h1", "h2"))),
             "blobHasContent" to

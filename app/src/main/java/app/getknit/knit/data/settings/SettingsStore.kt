@@ -181,6 +181,12 @@ class SettingsStore(
      */
     val themeMode: Flow<ThemeMode> = dataStore.data.map { ThemeMode.of(it[KEY_THEME_MODE]) }
 
+    /** "Ask before large Bluetooth downloads" (ADR 2026-10.js2p); [BluetoothDownloadLimit.DEFAULT] until the user picks. */
+    val bluetoothDownloadLimit: Flow<BluetoothDownloadLimit> =
+        dataStore.data.map { BluetoothDownloadLimit.of(it[KEY_BT_DOWNLOAD_LIMIT]) }
+
+    override val bluetoothDownloadLimitBytes: Flow<Long?> = bluetoothDownloadLimit.map { it.bytes }
+
     /**
      * The open-to-chat cue's durable state (`presence/OpenToChatWatch`): the peers a cue has named, as
      * `"<peerId>|<millis>"` entries — several per peer, one per cue, pruned to the last day — and when the
@@ -652,6 +658,8 @@ class SettingsStore(
 
     suspend fun setThemeMode(value: ThemeMode) = dataStore.edit { it[KEY_THEME_MODE] = value.name }
 
+    suspend fun setBluetoothDownloadLimit(value: BluetoothDownloadLimit) = dataStore.edit { it[KEY_BT_DOWNLOAD_LIMIT] = value.name }
+
     /** Replaces the cue's named set and last-post stamp in one write (see [openToChatNamed]). */
     suspend fun setOpenToChatCueState(
         named: Set<String>,
@@ -997,6 +1005,7 @@ class SettingsStore(
         val KEY_OPEN_TO_CHAT = booleanPreferencesKey("open_to_chat")
         val KEY_DYNAMIC_COLOR = booleanPreferencesKey("dynamic_color")
         val KEY_THEME_MODE = stringPreferencesKey("theme_mode")
+        val KEY_BT_DOWNLOAD_LIMIT = stringPreferencesKey("bluetooth_download_limit")
         val KEY_OPEN_TO_CHAT_NAMED = stringSetPreferencesKey("open_to_chat_named")
         val KEY_OPEN_TO_CHAT_LAST_POST_AT = longPreferencesKey("open_to_chat_last_post_at")
         val KEY_MESH_ENABLED = booleanPreferencesKey("mesh_enabled")

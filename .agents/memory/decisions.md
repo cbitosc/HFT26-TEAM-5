@@ -230,6 +230,7 @@ carries; never renumber an old one.
 | [2026-10.gpa3](decisions/2026-10-gpa3-a-quote-is-checked-against-the-original-it-names.md) | A quote is checked against the original it names | chat, moderation, security |
 | [2026-10.gtmm](decisions/2026-10-gtmm-compose-previews-are-screenshot-tested-on-the-alpha-preview-plugin.md) | Compose previews are screenshot-tested on the alpha preview plugin | testing, toolchain, ui |
 | [2026-10.jbsa](decisions/2026-10-jbsa-conversation-shortcuts-follow-the-chat-list.md) | Conversation shortcuts follow the chat list | notifications, contacts, ui |
+| [2026-10.js2p](decisions/2026-10-js2p-ask-before-large-bluetooth-only-downloads.md) | Ask before large Bluetooth-only downloads | blobs, ui, wire |
 | [2026-10.k8ge](decisions/2026-10-k8ge-a-name-clash-fades-a-week-after-the-look-alike-was-last-heard.md) | A name clash fades a week after the look-alike was last heard | identity, ui, contacts |
 | [2026-10.mptm](decisions/2026-10-mptm-an-attachment-keeps-the-identity-it-arrived-under.md) | An attachment keeps the identity it arrived under | attachments, crypto, privacy, custody |
 | [2026-10.nsr7](decisions/2026-10-nsr7-a-file-s-receiver-reports-its-progress.md) | A file's receiver reports its progress, and the holder times parked asks by it | ble, mesh, blobs |

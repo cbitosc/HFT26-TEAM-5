@@ -1314,6 +1314,10 @@ class DebugBridgeReceiver :
             .put("blobProgressTaken", snap.files.blobProgressTaken)
             .put("blobCancelsSent", snap.files.blobCancelsSent)
             .put("blobCancelsTaken", snap.files.blobCancelsTaken)
+            // Ask before large Bluetooth downloads (ADR 2026-10.js2p): fast-only holds, refusals and dropped copies.
+            .put("blobFastOnlyHeld", snap.files.blobFastOnlyHeld)
+            .put("blobFastOnlyRefused", snap.files.blobFastOnlyRefused)
+            .put("fastOnlyDropped", snap.files.fastOnlyDropped)
             .put("carrierPullsDeferred", snap.files.carrierPullsDeferred)
             .put("dmSealedV2", snap.seals.dmSealedV2)
             .put("dmSealedV3", snap.seals.dmSealedV3)

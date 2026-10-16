@@ -3,6 +3,7 @@ package app.getknit.knit.ui.settings
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.getknit.knit.data.relay.RelayFacts
+import app.getknit.knit.data.settings.BluetoothDownloadLimit
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.identity.Alias
 import app.getknit.knit.identity.Identity
@@ -108,6 +109,11 @@ class SettingsViewModel(
         settings.themeMode
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ThemeMode.System)
 
+    /** "Ask before large Bluetooth downloads" (ADR 2026-10.js2p). */
+    val bluetoothDownloadLimit: StateFlow<BluetoothDownloadLimit> =
+        settings.bluetoothDownloadLimit
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), BluetoothDownloadLimit.DEFAULT)
+
     /**
      * Summary of the Internet (spool) plane for the row that navigates to its own screen — the switch
      * itself lives there, with the relay-list editor it needs to be actionable.
@@ -146,6 +152,10 @@ class SettingsViewModel(
 
     fun setLinkPreviewsEnabled(value: Boolean) {
         viewModelScope.launch { settings.setLinkPreviewsEnabled(value) }
+    }
+
+    fun setBluetoothDownloadLimit(value: BluetoothDownloadLimit) {
+        viewModelScope.launch { settings.setBluetoothDownloadLimit(value) }
     }
 
     fun setDynamicColor(value: Boolean) {

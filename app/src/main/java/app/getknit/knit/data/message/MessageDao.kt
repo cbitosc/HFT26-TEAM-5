@@ -321,18 +321,36 @@ interface MessageDao {
     )
 
     /**
-     * Attachment hashes referenced by stored messages whose bytes aren't in the `blobs` table yet, each with the sender
-     * of the earliest row naming it — the one holder a re-armed want can name, so its first ask goes there (ADR
-     * 2026-10.f7gg).
+     * Every stored row naming an attachment whose bytes aren't in the `blobs` table yet, earliest first (`sentAt`, then
+     * id), with what `BluetoothFetchGate` judges each on (ADR 2026-10.js2p): its declared size, the user's tap, and
+     * whether [me] sent it. One entry per *row*, not per hash: a stranger's row naming a contact's attachment hash must
+     * not decide the contact's fetch, so the rule folds over the rows in Kotlin (`MessageRepository.attachmentsNeedingFetch`),
+     * and the earliest row's sender is the one holder a re-armed want can name (ADR 2026-10.f7gg).
      */
     @Query(
-        "SELECT DISTINCT m.attachmentHash AS hash, " +
-            "(SELECT s.senderId FROM messages AS s WHERE s.attachmentHash = m.attachmentHash " +
-            "ORDER BY s.sentAt, s.id LIMIT 1) AS senderId " +
-            "FROM messages AS m " +
-            "WHERE m.attachmentHash IS NOT NULL AND m.attachmentHash NOT IN (SELECT hash FROM blobs)",
+        "SELECT attachmentHash AS hash, senderId, attachmentSize, attachmentFetchApproved AS approved, " +
+            "(senderId = :me) AS own FROM messages " +
+            "WHERE attachmentHash IS NOT NULL AND attachmentHash NOT IN (SELECT hash FROM blobs) " +
+            "ORDER BY sentAt, id",
     )
-    suspend fun attachmentsNeedingFetch(): List<NeededAttachment>
+    suspend fun attachmentFetchRows(me: String): List<AttachmentFetchRow>
+
+    /** [attachmentFetchRows] for the one attachment [hash], held or not: what a delivery judges its want on. */
+    @Query(
+        "SELECT attachmentHash AS hash, senderId, attachmentSize, attachmentFetchApproved AS approved, " +
+            "(senderId = :me) AS own FROM messages WHERE attachmentHash = :hash ORDER BY sentAt, id",
+    )
+    suspend fun attachmentFetchRowsFor(
+        hash: String,
+        me: String,
+    ): List<AttachmentFetchRow>
+
+    /**
+     * The user's "Tap to download" on attachment [hash] (ADR 2026-10.js2p): every row naming it may now be fetched over
+     * Bluetooth. Keyed by hash for [setVoiceMeta]'s reason; a repeat writes nothing.
+     */
+    @Query("UPDATE messages SET attachmentFetchApproved = 1 WHERE attachmentHash = :hash AND attachmentFetchApproved = 0")
+    suspend fun approveAttachmentFetch(hash: String)
 
     /**
      * Whether the message naming ciphertext [hash] crossed a **short-range radio** between [me] and
@@ -712,10 +730,32 @@ data class ConversationSender(
     val senderId: String,
 )
 
-/** A blob a stored row names but the store lacks, and who sent the row ([MessageDao.attachmentsNeedingFetch]). */
+/** A blob a carried frame names but the store lacks, and the frame's sender (`ForwardDao.attachmentsNeedingFetch`). */
 data class NeededAttachment(
     val hash: String,
     val senderId: String,
+)
+
+/** One stored row naming an attachment, as `BluetoothFetchGate` judges it ([MessageDao.attachmentFetchRows]). */
+data class AttachmentFetchRow(
+    val hash: String,
+    val senderId: String,
+    /** What the row's sender declared the attachment's length to be, null when it declared none. */
+    val attachmentSize: Long?,
+    /** Whether the user tapped "Tap to download" on it (ADR 2026-10.js2p). */
+    val approved: Boolean,
+    /** Whether this node sent the row. */
+    val own: Boolean,
+)
+
+/**
+ * An attachment stored rows name but the store lacks ([MessageRepository][app.getknit.knit.data.MessageRepository]'s
+ * fold of [MessageDao.attachmentFetchRows]): the sender of the earliest row naming it, and every row, earliest first.
+ */
+data class MissingAttachment(
+    val hash: String,
+    val senderId: String,
+    val rows: List<AttachmentFetchRow>,
 )
 
 /**

@@ -128,7 +128,7 @@ interface ForwardDao {
     /**
      * Content hashes referenced by a carried frame whose bytes aren't in the `blobs` table yet, each with the author of
      * the earliest frame naming it — the carrier's side of the "still-missing blobs" set (mirrors
-     * [app.getknit.knit.data.message.MessageDao.attachmentsNeedingFetch]).
+     * [app.getknit.knit.data.message.MessageDao.attachmentFetchRows]).
      * Re-requested on startup / neighbour-join so a carrier keeps trying to pull the image it's custodying.
      */
     @Query(
@@ -145,7 +145,8 @@ interface ForwardDao {
      * its author and its group — [attachmentsNeedingFetch] per frame, for the carrier's pull deferral (ADR 2026-10.g24x).
      */
     @Query(
-        "SELECT attachmentHash AS hash, recipientId, receivedAt, senderId, groupId FROM forward_store " +
+        "SELECT attachmentHash AS hash, recipientId, receivedAt, senderId, groupId, " +
+            "CASE WHEN groupId IS NOT NULL THEN signed END AS signed FROM forward_store " +
             "WHERE attachmentHash IS NOT NULL AND attachmentHash NOT IN (SELECT hash FROM blobs)",
     )
     suspend fun carriedAttachments(): List<CarriedAttachmentRow>
@@ -244,11 +245,17 @@ interface ForwardDao {
     )
 }
 
-/** Room projection for [ForwardDao.carriedAttachments]: one carried frame naming a blob we lack. */
-data class CarriedAttachmentRow(
+/**
+ * Room projection for [ForwardDao.carriedAttachments]: one carried frame naming a blob we lack, and a group frame's
+ * signed bytes, which the reader decodes for the roster it carries (ADR 2026-10.js2p). Not a data class: a byte array has
+ * no value equality.
+ */
+class CarriedAttachmentRow(
     val hash: String,
     val recipientId: String?,
     val receivedAt: Long,
     val senderId: String,
     val groupId: String?,
+    /** A group frame's signed bytes, for its roster; null for every other frame, whose bytes are never loaded. */
+    val signed: ByteArray?,
 )

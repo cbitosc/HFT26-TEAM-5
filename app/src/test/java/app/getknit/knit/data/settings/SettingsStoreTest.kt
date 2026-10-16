@@ -199,6 +199,22 @@ class SettingsStoreTest {
             assertEquals(ThemeMode.System, store.themeMode.first())
         }
 
+    @Test
+    fun `the large Bluetooth download limit defaults to one megabyte and round-trips Never`() =
+        runTest {
+            // ADR 2026-10.js2p; the raw key's name is pinned too, since a backup carries it.
+            val file = File(tmp.root, "settings-bt-limit.preferences_pb")
+            val dataStore = PreferenceDataStoreFactory.create(scope = backgroundScope) { file }
+            val store = SettingsStore(dataStore)
+            assertEquals(BluetoothDownloadLimit.MB_1, store.bluetoothDownloadLimit.first())
+            assertEquals(1_000_000L, store.bluetoothDownloadLimitBytes.first())
+            store.setBluetoothDownloadLimit(BluetoothDownloadLimit.NEVER)
+            assertNull(store.bluetoothDownloadLimitBytes.first())
+            assertEquals("NEVER", dataStore.data.first()[stringPreferencesKey("bluetooth_download_limit")])
+            dataStore.edit { it[stringPreferencesKey("bluetooth_download_limit")] = "MB_50" }
+            assertEquals("an unknown limit reads as the default", BluetoothDownloadLimit.MB_1, store.bluetoothDownloadLimit.first())
+        }
+
     /**
      * A mode written by a newer build, or a constant since renamed, must read as the system default rather
      * than throw. Written through the raw key so this also pins the key's name.

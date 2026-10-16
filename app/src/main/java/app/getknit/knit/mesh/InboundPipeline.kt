@@ -18,6 +18,7 @@ import app.getknit.knit.data.ReactionRepository
 import app.getknit.knit.data.VoiceAudio
 import app.getknit.knit.data.group.GroupEntity
 import app.getknit.knit.data.group.GroupMembersStore
+import app.getknit.knit.data.message.AttachmentFetchRow
 import app.getknit.knit.data.message.ConversationKind
 import app.getknit.knit.data.message.Conversations
 import app.getknit.knit.data.message.DeliveryPlane
@@ -319,7 +320,9 @@ class InboundPipeline(
     ) {
         when {
             env.type == FrameType.BLOB_REQ -> {
-                decodeCounted<BlobReqContent>(env.payload)?.let { blobExchange.onRequest(it.hash, fromNodeId, it.offset) }
+                decodeCounted<BlobReqContent>(env.payload)?.let { req ->
+                    blobExchange.onRequest(req.hash, fromNodeId, req.offset, fastOnly = req.fastOnly == true)
+                }
                 metrics.onBlobAskHandled()
             }
 
@@ -2049,6 +2052,11 @@ class InboundPipeline(
      * is delivered here. A DM whose recipient is linked to us waits ([CarrierPullPolicy], ADR 2026-10.g24x), and so
      * does a group's picture whose author is: the recipient or the members are fetching it from the author now, and
      * our copy would only split the author's feed; the database re-arm pulls it later.
+     *
+     * A frame addressed to us — our DM, a group we are in — is custodied before it is opened, so its attachment's
+     * declared size is still sealed: while the user has a Bluetooth download limit it is left to [deliverChat], right
+     * behind, which wants it by the real verdict ([carriedFastOnly], ADR 2026-10.js2p). A carrier's pull of somebody
+     * else's frame is not the user's download, and is never held to the limit.
      */
     suspend fun onCarriedFrame(
         env: RelayEnvelope,
@@ -2067,7 +2075,63 @@ class InboundPipeline(
             metrics.onCarrierPullDeferred()
             return
         }
-        blobExchange.want(hash, author = env.senderId, via = via)
+        val fastOnly = carriedFastOnly(env, hash, member) ?: return
+        blobExchange.want(hash, author = env.senderId, via = via, fastOnly = fastOnly)
+    }
+
+    /**
+     * How [deliverChat] fetches its attachment [hash] (ADR 2026-10.js2p): whether the new row comes in tapped, and whether
+     * the want is fast-only. A row that is not gated itself — no declared size, under the limit, no limit, our own —
+     * fetches the attachment for every row naming it, so it is plain with no read at all: the room post and the ordinary
+     * photo pay nothing. Only a gated row reads the rows naming the hash, once (by index): it comes in tapped when the user
+     * already tapped the hash — it would show the card again otherwise — and it is fast-only when every row, this one
+     * included, is gated ([BluetoothFetchGate.fastOnly]); one free row fetches it for all.
+     */
+    private suspend fun deliveredFetch(
+        hash: String?,
+        declaredSize: Long?,
+        isNew: Boolean,
+        senderId: String,
+        me: String,
+    ): DeliveredFetch {
+        if (hash == null) return DeliveredFetch.PLAIN
+        val limit = settings.bluetoothDownloadLimitBytes.first()
+        val own = senderId == me
+        if (!BluetoothFetchGate.fastOnly(declaredSize, limit, approved = false, own = own)) return DeliveredFetch.PLAIN
+        val stored = messages.attachmentFetchRows(hash, me)
+        val tapped = stored.any { it.approved }
+        val rows = if (isNew) stored + AttachmentFetchRow(hash, senderId, declaredSize, tapped, own) else stored
+        return DeliveredFetch(inheritsTap = isNew && tapped, fastOnly = BluetoothFetchGate.fastOnly(rows, limit))
+    }
+
+    /** [deliveredFetch]'s verdict: whether the new row comes in tapped, and whether its want is fast-only. */
+    private class DeliveredFetch(
+        val inheritsTap: Boolean,
+        val fastOnly: Boolean,
+    ) {
+        companion object {
+            val PLAIN = DeliveredFetch(inheritsTap = false, fastOnly = false)
+        }
+    }
+
+    /**
+     * How [onCarriedFrame] wants [env]'s attachment [hash] (ADR 2026-10.js2p): plain unless the frame is addressed to us
+     * ([member] of its group, or its DM's recipient) and a limit is set. Then the rows naming it judge it, as the database
+     * re-arm does — a re-served DM we already stored, which no delivery follows — and with none it is not wanted here at
+     * all (null): its size is sealed inside, and [deliverChat], right behind, wants it by its verdict. One that never
+     * opens is the tick's (`MeshManager.rewantMissingBlobs`, fast-only); a want here would only query the Wi-Fi Aware
+     * neighbours once more per incoming picture.
+     */
+    private suspend fun carriedFastOnly(
+        env: RelayEnvelope,
+        hash: String,
+        member: Boolean,
+    ): Boolean? {
+        val me = identity.nodeId()
+        if (env.recipientId != me && !member) return false
+        val limit = settings.bluetoothDownloadLimitBytes.first() ?: return false
+        val rows = messages.attachmentFetchRows(hash, me).takeIf { it.isNotEmpty() } ?: return null
+        return BluetoothFetchGate.fastOnly(rows, limit)
     }
 
     /**
@@ -2735,6 +2799,7 @@ class InboundPipeline(
         val isNew = !messages.exists(env.id)
         val hash = content.attachmentHash
         val moderation = inboundModeration(isNew, content.body, conversationId)
+        val fetch = deliveredFetch(hash, sealed?.attachmentSize, isNew, env.senderId, me)
         val built =
             MessageEntity(
                 id = env.id,
@@ -2765,6 +2830,7 @@ class InboundPipeline(
                 attachmentKey = sealed?.attachmentKey,
                 attachmentName = sealed?.attachmentName,
                 attachmentSize = sealed?.attachmentSize,
+                attachmentFetchApproved = fetch.inheritsTap,
                 moderation = moderation,
                 originNode = origin?.node,
                 originName = origin?.name,
@@ -2786,7 +2852,7 @@ class InboundPipeline(
             if (blobStore.has(hash)) {
                 describeHeldAttachment(hash, sealed?.attachmentKey, content.attachmentMime)
             } else if (sealed?.attachmentKey != null || !copyFromOwnStore(hash, env.senderId)) {
-                blobExchange.want(hash, author = env.senderId, via = via)
+                blobExchange.want(hash, author = env.senderId, via = via, fastOnly = fetch.fastOnly)
                 // Arm the fast plane toward the author — the guaranteed holder — so the pull can ride a NAN
                 // NDP instead of crawling over BLE (the serve side arms its own half in the composite; only
                 // the larger nodeId of a pair ever initiates, so an inert mark here is harmless). Freshness/

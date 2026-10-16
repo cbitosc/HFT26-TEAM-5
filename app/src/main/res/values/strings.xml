@@ -242,6 +242,15 @@
     <string name="chat_share_needs_chat">Open a direct message or group chat to send a file</string>
     <string name="chat_file_peer_too_old">Their version of Knit can\'t receive files</string>
 
+    <!-- A received attachment over the user's "Ask before large Bluetooth downloads" limit that only Bluetooth could
+         bring (ADR 2026-10.js2p): the bubble waits for a tap. Over Wi-Fi Aware it downloads with no tap, so the card
+         turns into the progress ring by itself. -->
+    <string name="chat_attachment_tap_to_download">%1$s · Tap to download</string>
+    <string name="chat_attachment_tap_hint">Slow over Bluetooth. Wi-Fi Aware gets it on its own.</string>
+    <string name="chat_attachment_download_action">Download</string>
+    <string name="chat_attachment_photo">Photo</string>
+    <string name="chat_attachment_voice">Voice message</string>
+
     <!-- Direct file transfer (transfer/): a large file over a one-shot Wi-Fi Direct link, never through the mesh -->
     <string name="chat_send_large_file">Direct file send</string>
     <string name="chat_transfer_needs_dm">Direct transfers work in a one-to-one chat</string>
@@ -638,6 +647,11 @@
     <string name="settings_theme_system">System</string>
     <string name="settings_theme_light">Light</string>
     <string name="settings_theme_dark">Dark</string>
+    <string name="settings_bt_download_title">Ask before large Bluetooth downloads</string>
+    <string name="settings_bt_download_subtitle">Large files download on their own over Wi-Fi Aware. Above this size, one only Bluetooth can bring waits for your tap, since that can take minutes.</string>
+    <string name="settings_bt_download_never">Never</string>
+    <string name="settings_bt_download_1mb">Over 1 MB</string>
+    <string name="settings_bt_download_5mb">Over 5 MB</string>
     <string name="settings_dynamic_color_title">Dynamic colors</string>
     <string name="settings_dynamic_color_subtitle">Color Knit from your wallpaper using Material You. Off keeps Knit\'s default.</string>
     <string name="settings_link_previews_title">Link previews</string>

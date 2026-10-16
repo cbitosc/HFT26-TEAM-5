@@ -210,8 +210,20 @@ class ForwardRepository(
 
     override suspend fun attachmentsNeedingFetch(): Map<String, String> = dao.attachmentsNeedingFetch().associate { it.hash to it.senderId }
 
+    /** A group frame's roster is read off its own signed bytes: what says it is ours before any group row does. */
     override suspend fun carriedAttachments(): List<CarriedAttachment> =
-        dao.carriedAttachments().map { CarriedAttachment(it.hash, it.recipientId, it.receivedAt, it.senderId, it.groupId) }
+        dao.carriedAttachments().map {
+            // Only a group frame's bytes are loaded (the query's CASE): a DM or a room post names no roster.
+            val roster =
+                it.signed?.let { signed ->
+                    WireCodec
+                        .decodeEnvelope(signed)
+                        ?.group
+                        ?.members
+                        ?.toSet()
+                }
+            CarriedAttachment(it.hash, it.recipientId, it.receivedAt, it.senderId, it.groupId, roster = roster)
+        }
 
     override suspend fun recipientOf(id: String): String? = dao.recipientOf(id)
 

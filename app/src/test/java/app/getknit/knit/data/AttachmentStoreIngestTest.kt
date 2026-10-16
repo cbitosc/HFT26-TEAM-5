@@ -306,7 +306,8 @@ class AttachmentStoreIngestTest {
             val result = success(store.ingestFile(fileUri("IMG_0001.jpg", photo)))
 
             assertNull(result.ingested.name)
-            assertEquals(0, result.ingested.sizeBytes)
+            // Its length still rides along, for the recipient's large-download gate (ADR 2026-10.js2p).
+            assertEquals(photo.size, result.ingested.sizeBytes)
         }
 
     @Test

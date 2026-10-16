@@ -99,6 +99,24 @@ Adjacent routing that stays where its owner is, because another subsystem owns i
   stranger's post reaches: that would be a confirmation oracle. The plaintext name is recorded at send, on arrival and
   on save, never by a bulk decrypt, and `identityFor` must skip a sealed row without one. Carriers see equality on
   purpose; convergent encryption was rejected. Lab: `AttachmentReuseLabTest`.
+- **Before touching the fast-only want — `BlobExchange.want` / `wantAll`'s `fastOnly` and `approved`, `Want.dead`'s
+  fast-only half, `BlobReqContent.fastOnly`, `FileMeta.fastOnly` / `onDropped`, `CompositeMeshTransport.sendFile`'s
+  fast-only route, `CompositeMeshTransport.fastLinked` / `BlobExchange.fastLinkUp`, `CarriedAttachment.roster`,
+  `BluetoothFetchGate`, `MessageDao.attachmentFetchRows`, `MeshController.downloadAttachment`,
+  `messages.attachmentFetchApproved`, or what `rewantMissingBlobs`, `InboundPipeline.onCarriedFrame` and `deliverChat`
+  pass as the flag:** READ ADR 2026-10.js2p. An attachment every row of which declares over the user's Bluetooth
+  download limit, untapped, is fetched only over Wi-Fi Aware — the rule folds per row in Kotlin, so a stranger's row
+  cannot hold a contact's. A fast-only want queries, asks and pulls through only a neighbour linked or reachable on that
+  plane; with none it asks nobody and stamps nothing (never a blind ask of a Bluetooth holder); a cycle that asked and
+  still wants it is dead and backs off; a Wi-Fi Aware link coming up — seen per holder, at the edge, even to a neighbour
+  already linked over Bluetooth — asks that holder again at once, and resets nothing else (links flap per sync). The holder serves over a live link or one it
+  raises, else drops it (`file route: … fast-only — dropped`) and forgets the serve. The flag is re-derived from the
+  rows on every re-arm and limit change, the re-arms and the tap's want run under one mutex (the tap's approval before
+  it, on the manager's scope), and the tap is sticky in the exchange; a neighbour's ask sets the flag only on a want it creates. An unopened frame addressed to us — by its own roster
+  for a group, never by group rows alone — is not wanted by custody (delivery follows; the tick holds one that never
+  opens to Wi-Fi Aware, only when every carried frame naming the hash is ours). A room post declares no size and is never held.
+  Lab: `LargeAttachmentLabTest`, `AttachmentLabTest`'s two #132 cases; unit: `BlobExchangeTest`'s fast-only cases,
+  `CompositeMeshTransportTest`, `BluetoothFetchGateTest`.
 - **When touching `KeyExchange`'s cache / `profileFor` / `serveKey`, `peer_profiles` (`PeerProfileEntity`,
   `PeerRepository.recordProfileFrame`), or the key-ahead in `ForwardSync.onDigest` (`keylessSenders`):** READ ADR
   2026-09.g64k (it closes the case ADR 2026-09.9xuu set aside). A carrier keeps the signed profile each pin came from,

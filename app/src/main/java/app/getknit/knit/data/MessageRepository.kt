@@ -1,5 +1,6 @@
 package app.getknit.knit.data
 
+import app.getknit.knit.data.message.AttachmentFetchRow
 import app.getknit.knit.data.message.AttachmentIdentityRow
 import app.getknit.knit.data.message.ConversationActivity
 import app.getknit.knit.data.message.ConversationSender
@@ -7,6 +8,7 @@ import app.getknit.knit.data.message.Conversations
 import app.getknit.knit.data.message.DeliveryPlane
 import app.getknit.knit.data.message.MessageDao
 import app.getknit.knit.data.message.MessageEntity
+import app.getknit.knit.data.message.MissingAttachment
 import app.getknit.knit.data.message.QuoteSettlement
 import app.getknit.knit.data.search.SearchQuery
 import kotlinx.coroutines.flow.Flow
@@ -162,8 +164,21 @@ class MessageRepository(
     /** Marks attachment [hash] animated on every row naming it — the "GIF" label's locally-derived flag. */
     suspend fun markAttachmentAnimated(hash: String) = dao.markAttachmentAnimated(hash)
 
-    /** Attachment hashes stored rows name but the store lacks, each to the sender of the earliest such row. */
-    suspend fun attachmentsNeedingFetch(): Map<String, String> = dao.attachmentsNeedingFetch().associate { it.hash to it.senderId }
+    /**
+     * Attachments stored rows name but the store lacks, each with the sender of the earliest such row and every row
+     * naming it, for `BluetoothFetchGate` to fold ([me] is this node, ADR 2026-10.js2p).
+     */
+    suspend fun attachmentsNeedingFetch(me: String): List<MissingAttachment> =
+        dao.attachmentFetchRows(me).groupBy { it.hash }.map { (hash, rows) -> MissingAttachment(hash, rows.first().senderId, rows) }
+
+    /** Every row naming attachment [hash], earliest first, as `BluetoothFetchGate` judges it ([me] is this node). */
+    suspend fun attachmentFetchRows(
+        hash: String,
+        me: String,
+    ): List<AttachmentFetchRow> = dao.attachmentFetchRowsFor(hash, me)
+
+    /** The user's "Tap to download" on attachment [hash], kept on every row naming it (ADR 2026-10.js2p). */
+    suspend fun approveAttachmentFetch(hash: String) = dao.approveAttachmentFetch(hash)
 
     /** The held identity a file whose bytes hash to [bytesHash] already goes by, if any (ADR 2026-10.mptm). */
     suspend fun attachmentIdentityFor(bytesHash: String): AttachmentIdentityRow? = dao.identityFor(bytesHash)

@@ -250,7 +250,9 @@ free). Two invariants that are easy to break:
   hashes under budget) on every neighbor join and 60 s re-offer tick, not only at startup. Any new "what do
   we still need" path reads the database the same way; never make the memo the source. The re-ask itself is
   the tick's `onNeighborAdded` per linked neighbour (`want` is a no-op for a hash already in the set), and it
-  is what moves a hop-by-hop pull since ADR 2026-09.4tx5 — gate it on `arrivingFiles()`, never remove it.
+  is what moves a hop-by-hop pull since ADR 2026-09.4tx5 — gate it on `arrivingFiles()`, never remove it. The same re-read
+  re-derives each want's fast-only flag (ADR 2026-10.js2p: declared over the user's Bluetooth download limit, not
+  tapped — Wi-Fi Aware only), so a swept or restarted want never asks over Bluetooth on a stale flag or stays held on one.
 - **Group-root minting is damped; group-root adoption is not** (`GroupRootPolicy`, spec §3.2). Several
   members minting version 1 at once is normal and self-healing — `(version, minter)` collapses the
   lineages. Refusing to *adopt* a strictly-greater root is the failure mode: the device keeps gossiping

@@ -68,6 +68,7 @@ import app.getknit.knit.location.LocationFixPolicy
 import app.getknit.knit.location.LocationPrecision
 import app.getknit.knit.location.LocationSource
 import app.getknit.knit.mesh.ArrivingFile
+import app.getknit.knit.mesh.BluetoothFetchGate
 import app.getknit.knit.mesh.MeshController
 import app.getknit.knit.mesh.PublicPostOutcome
 import app.getknit.knit.mesh.PublicPostRefusal
@@ -237,6 +238,10 @@ data class ChatRow(
     val attachmentSize: Long? = null,
     // The stored blob's own length once it is here, which supersedes the sender's declared size.
     val attachmentBytes: Int? = null,
+    // A received attachment over the user's "Ask before large Bluetooth downloads" limit, not yet tapped and not
+    // held: its fetch rides Wi-Fi Aware only, and the bubble offers "Tap to download" while no bytes are arriving
+    // (ADR 2026-10.js2p). [attachmentSize] is then the size the card shows.
+    val attachmentAwaitsTap: Boolean = false,
     // Whether this attachment can cross the Internet-relay plane. Anything but [AttachmentRelay.Silent]
     // or [AttachmentRelay.Relayable] marks the bubble "nearby only" — a statement about *reach*, never
     // about delivery, which the ✓/✓✓ tick keeps to itself. Set only for our own sends; see the mapping
@@ -751,11 +756,12 @@ class ChatViewModel(
         combine(
             heldSizes.filterNotNull(),
             imageScreening.observeFlaggedHashes(),
-            settings.contentFilteringEnabled,
+            // The download limit rides with the filter: both are settings that change how a received attachment shows.
+            combine(settings.contentFilteringEnabled, settings.bluetoothDownloadLimitBytes) { hide, limit -> hide to limit },
             linkCards.cards,
             combine(transfers.states, retrySources) { live, readable -> live to readable },
-        ) { sizes, flagged, hideSensitive, cards, (live, readable) ->
-            BlobState(sizes, flagged.toSet(), hideSensitive, cards, live, readable)
+        ) { sizes, flagged, (hideSensitive, limit), cards, (live, readable) ->
+            BlobState(sizes, flagged.toSet(), hideSensitive, limit, cards, live, readable)
         }
 
     init {
@@ -808,6 +814,8 @@ class ChatViewModel(
         val blobSizes: Map<String, Int>,
         val flaggedHashes: Set<String>,
         val hideSensitiveContent: Boolean,
+        // "Ask before large Bluetooth downloads" in bytes, null for never (ADR 2026-10.js2p).
+        val downloadLimit: Long?,
         // blob hash -> the decoded link-preview card, for every card this process has opened so far.
         val linkCards: Map<String, LinkCard>,
         // transfer id -> its live state, for the direct-transfer cards in this thread.
@@ -825,6 +833,7 @@ class ChatViewModel(
         val sizes: Map<String, Int>,
         val flagged: Set<String>,
         val hideSensitive: Boolean,
+        val downloadLimit: Long?,
         val linkCards: Map<String, LinkCard>,
         val transfers: Map<String, TransferState>,
         val retrySources: Map<String, Boolean>,
@@ -872,6 +881,7 @@ class ChatViewModel(
                 blob.sizes,
                 blob.flagged,
                 blob.hideSensitive,
+                blob.downloadLimit,
                 blob.linkCards,
                 blob.transfers,
                 blob.retrySources,
@@ -1006,6 +1016,7 @@ class ChatViewModel(
             val blobSizes = bundle.blobSizes
             val flaggedHashes = bundle.flaggedHashes
             val hideSensitive = bundle.hideSensitiveContent
+            val downloadLimit = bundle.downloadLimit
             val cards = bundle.linkCards
             val liveTransfers = bundle.transfers
             val retrySources = bundle.retrySources
@@ -1097,6 +1108,13 @@ class ChatViewModel(
                         attachmentName = m.attachmentName,
                         attachmentSize = m.attachmentSize,
                         attachmentBytes = heldBytes,
+                        // The rule the fetch asks too, so the card shows exactly while the fetch waits on it (ADR
+                        // 2026-10.js2p). A link card is never gated: it never draws a placeholder.
+                        attachmentAwaitsTap =
+                            heldBytes == null &&
+                                m.attachmentHash != null &&
+                                m.attachmentMime != LinkPreviewBlob.MIME &&
+                                BluetoothFetchGate.fastOnly(m.attachmentSize, downloadLimit, m.attachmentFetchApproved, own = mine),
                         attachmentFlagged = hideSensitive && m.attachmentHash != null && m.attachmentHash in flaggedHashes,
                         // Outbound reach only: a received attachment has already arrived, so telling its
                         // reader it is "nearby only" would describe a journey that is over. Unknown size
@@ -2383,6 +2401,15 @@ class ChatViewModel(
             val ok = bytes != null && type != null && gallerySaver.saveToPictures(bytes, hash, type)
             _events.tryEmit(if (ok) R.string.chat_image_saved else R.string.chat_image_save_failed)
         }
+    }
+
+    /**
+     * The user's "Tap to download" on a large attachment only Bluetooth could bring (ADR 2026-10.js2p): recorded on
+     * the message rows by the mesh, which then fetches it over any plane. The card gives way to the progress ring
+     * once bytes arrive, and to the bubble once they land.
+     */
+    fun downloadAttachment(hash: String) {
+        viewModelScope.launch { meshManager.downloadAttachment(hash) }
     }
 
     /**

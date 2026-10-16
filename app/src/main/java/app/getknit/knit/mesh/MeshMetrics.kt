@@ -273,6 +273,7 @@ class MeshMetrics {
     private val filesSentNan = AtomicLong()
     private val filesSentBt = AtomicLong()
     private val nanBulkGraceTimeouts = AtomicLong()
+    private val fastOnlyDropped = AtomicLong()
     private val fastCompactSent = AtomicLong()
     private val fastLegacySent = AtomicLong()
     private val fastFragSent = AtomicLong()
@@ -496,6 +497,14 @@ class MeshMetrics {
      */
     fun onBlobEvent(event: BlobExchange.BlobEvent) {
         blobEvents.getValue(event).incrementAndGet()
+    }
+
+    /**
+     * A copy served to an asker that takes it over Wi-Fi Aware only (ADR 2026-10.js2p) went nowhere: the fast plane
+     * would not arm, refused the enqueue, or did not link inside the grace — never handed to Bluetooth instead.
+     */
+    fun onFastOnlyDropped() {
+        fastOnlyDropped.incrementAndGet()
     }
 
     /** A broadcast/group delivery receipt we re-sent to its author because the first best-effort tick may not
@@ -1295,6 +1304,9 @@ class MeshMetrics {
             blobProgressTaken = blob(BlobExchange.BlobEvent.ProgressTaken),
             blobCancelsSent = blob(BlobExchange.BlobEvent.CancelSent),
             blobCancelsTaken = blob(BlobExchange.BlobEvent.CancelTaken),
+            blobFastOnlyHeld = blob(BlobExchange.BlobEvent.FastOnlyHeld),
+            blobFastOnlyRefused = blob(BlobExchange.BlobEvent.FastOnlyRefused),
+            fastOnlyDropped = fastOnlyDropped.get(),
         )
 
     private fun blob(event: BlobExchange.BlobEvent): Long = blobEvents.getValue(event).get()
@@ -1536,6 +1548,12 @@ class MeshMetrics {
             // Asks withdrawn by a `blobcancel`, and withdrawals that dropped a parked ask or a queued copy (ADR 2026-10.nsr7).
             val blobCancelsSent: Long = 0,
             val blobCancelsTaken: Long = 0,
+            // ADR 2026-10.js2p: a fast-only want's step that found no neighbour reachable over Wi-Fi Aware and asked
+            // nobody, a fast-only ask this holder refused for want of a Wi-Fi Aware route to its asker, and a fast-only
+            // copy the composite gave up on rather than hand to Bluetooth.
+            val blobFastOnlyHeld: Long = 0,
+            val blobFastOnlyRefused: Long = 0,
+            val fastOnlyDropped: Long = 0,
         )
 
         /**

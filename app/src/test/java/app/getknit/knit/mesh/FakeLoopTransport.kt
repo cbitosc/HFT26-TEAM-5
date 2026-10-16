@@ -127,6 +127,9 @@ class FakeLoopTransport(
 
     override fun arrivingFiles(): Map<String, ArrivingFile> = arriving.associateWith { ArrivingFile(it, bytes = 0, total = null) }
 
+    /** Runs once a file has been taken off [arriving]: where a test puts a step that races the consumer. */
+    var afterTaken: (() -> Unit)? = null
+
     /** A taken file leaves [arriving], as a link's landing one does (#138). */
     override fun fileTaken(
         fromNodeId: String,
@@ -134,6 +137,7 @@ class FakeLoopTransport(
     ) {
         taken += fromNodeId to key
         arriving -= key
+        afterTaken?.invoke()
     }
 
     override fun fileArrivingFrom(nodeId: String): Boolean = nodeId in arrivingFrom

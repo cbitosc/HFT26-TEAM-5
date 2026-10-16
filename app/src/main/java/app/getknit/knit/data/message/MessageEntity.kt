@@ -115,6 +115,9 @@ import kotlinx.serialization.json.Json
  *    and `senderId` is the scanned suffix, so `observeSendersIn` and `hasMessagesIn` are answered out of the
  *    index with no row fetches. Without it, the live @-mention query would walk every row of a thread on
  *    every write to the table — worse than the whole-thread read the window removes.
+ *
+ * `attachmentHash` is indexed for the reads keyed by it on the inbound path (ADR 2026-10.js2p): a delivery judges
+ * its attachment's fetch over every row naming the hash (`MessageDao.attachmentFetchRowsFor`).
  */
 @Entity(
     tableName = "messages",
@@ -123,6 +126,7 @@ import kotlinx.serialization.json.Json
         Index(value = ["conversationId", "kind", "senderId"]),
         Index(value = ["attachmentPlainHash"]),
         Index(value = ["replyToId", "replyCheck"]),
+        Index(value = ["attachmentHash"]),
     ],
 )
 data class MessageEntity(
@@ -227,6 +231,12 @@ data class MessageEntity(
      * filtering toggle, like a flagged body ([hiddenByFilter]). **Local only.**
      */
     val replyToFlagged: Boolean = false,
+    /**
+     * The user tapped "Tap to download" on this row's attachment: its fetch may ride Bluetooth whatever its declared
+     * [attachmentSize] (ADR 2026-10.js2p, `mesh/BluetoothFetchGate`). Written on every row naming the hash at once
+     * ([MessageDao.approveAttachmentFetch]), so the database re-arm never gates a tapped attachment again. **Local only.**
+     */
+    val attachmentFetchApproved: Boolean = false,
 ) {
     companion object {
         // [originSigned] values. Append-only like every other registry here: the value is stored on the row.

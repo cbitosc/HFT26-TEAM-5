@@ -711,6 +711,20 @@ cutting one short would need a link record, which tears down an older peer's lin
 as an unsigned frame, and the copy comes as before. `vectors/wire-v1.json` gained `blobCancelContent`.
 *Metadata cost:* none beyond the ask it withdraws.
 
+**Precedent — an ask for the bytes over Wi-Fi Aware only (`BlobReqContent.fastOnly`, ADR 2026-10.js2p).** A
+recipient that has not approved a download its sender declared over the user's limit asks with `fastOnly = true`, and
+a holder that reads it serves over a live Wi-Fi Aware link or one it raises, else not at all — never over Bluetooth.
+The ask is CBOR, so rule 1 holds as for `offset`: the null is omitted, a plain ask is the bytes it always was
+(`blobReqContent` did not move), and every older reader — Android builds and the iOS port's `CBORFields` — skips the
+key and serves as before. No capability bit: the flag only narrows what a holder may do, and the asker sends a
+fast-only ask only to a neighbour its own Wi-Fi Aware plane links or reaches, which an iPhone never is. The gap an
+older Android holder leaves is its composite's fallback: one the asker reaches over Wi-Fi Aware, that cannot raise the
+link inside the grace, sends over Bluetooth as it always has. The field is the asker's alone: nothing in `FileHeaderWire`
+moved, and the holder's `FileMeta.fastOnly` never leaves the phone. Nothing in the fast codecs (`FrameTranscoder`
+passes the unknown key through and verifies its own rebuild). No version bump, no discovery marker, no DB change on the
+wire's account; `vectors/wire-v1.json` gained `blobReqContentFastOnly`, and nothing moved. *Metadata cost:* a
+neighbour asked learns that this phone holds back a large download over Bluetooth — a setting, never which message.
+
 **Precedent — the nested-type rule (rule 6) came from the interop audit, not a split.** The 2026-10 audit
 decoded `{"inner": {}}` both ways: kotlinx-cbor gave a null `inner`, iOS an `inner` of defaults. No nested
 wire type was all-defaults then, so no frame read differently on the two platforms. The rule keeps it that
