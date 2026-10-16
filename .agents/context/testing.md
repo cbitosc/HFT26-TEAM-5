@@ -748,6 +748,10 @@ and compares it, pixel for pixel, with a PNG committed under `app/src/screenshot
   directory; `pre-push` is the one that uploads the objects.
 - **Scale and cost:** 166 subjects, 332 images (about 15 MB in LFS). A warm `validate` takes about 45 s, an
   `update` about 40 s.
+- **The render fork runs on a 1 GiB heap** (`app/build.gradle.kts`): the renderer keeps ~1.2 MiB of every
+  preview reachable, so Gradle's 512 MiB default dies with an OutOfMemoryError near the end of the run. Raise
+  the heap if the preview count outgrows it; don't reach for `forkEvery`, which leaves only the last fork's
+  results in the report.
 - **CI runs it on both mirrors, advisory for now:** GitHub's `screenshot-tests` job and GitLab's
   `test:screenshots` (on skuld). Each is the only job that fetches the LFS objects — GitHub through an
   `actions/cache` keyed on their ids, then `git lfs pull`; GitLab by setting `GIT_LFS_SKIP_SMUDGE` back to
