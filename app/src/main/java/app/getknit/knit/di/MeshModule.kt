@@ -68,6 +68,7 @@ import app.getknit.knit.transfer.DirectWifi
 import app.getknit.knit.transfer.TransferFiles
 import app.getknit.knit.transfer.TransferManager
 import app.getknit.knit.transfer.TransferSignals
+import app.getknit.knit.ui.chat.notificationLabels
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -346,6 +347,7 @@ val meshModule =
                 onTransferSignal = { sender, payload, sentAt -> get<TransferManager>().onSignal(sender, payload, sentAt) },
                 identities = get(),
                 quotes = get(),
+                notificationLabels = { notificationLabels(androidContext()) },
                 // Ask the best holder of a blob rather than the likeliest (ADR 2026-10.6e5t).
                 blobHolderQuery = BlobExchange.HolderQuery(enabled = BuildConfig.BLOB_QUERY),
                 fieldLog = get(),

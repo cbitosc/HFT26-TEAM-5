@@ -79,6 +79,7 @@ import app.getknit.knit.ui.components.noAutofillMenu
 import app.getknit.knit.ui.preview.KnitPreview
 import app.getknit.knit.ui.preview.PREVIEW_NOW
 import app.getknit.knit.ui.util.compactTimeAgo
+import app.getknit.knit.ui.util.relativeTimeLabels
 import app.getknit.knit.ui.util.rememberCurrentTimeMillis
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeoutOrNull
@@ -346,7 +347,7 @@ private fun MessageHitRow(
         }
         Spacer(Modifier.width(12.dp))
         Text(
-            text = compactTimeAgo(hit.sentAt, now),
+            text = compactTimeAgo(hit.sentAt, now, labels = relativeTimeLabels()),
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

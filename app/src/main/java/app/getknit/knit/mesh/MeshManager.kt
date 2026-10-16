@@ -235,6 +235,9 @@ class MeshManager(
     // pipeline, and run over the held backlog once per start. The default labels rebuilt quotes in English, which is
     // what every test wants; production hands in the Koin single, which reads the reader's own strings.
     private val quotes: QuoteVerifier = QuoteVerifier(messages),
+    // What a notification says in place of a body it cannot show — handed to the inbound pipeline. English by
+    // default, which every test wants; production reads the reader's own strings (`notificationLabels(context)`).
+    private val notificationLabels: () -> NotificationLabels = { NotificationLabels.ENGLISH },
     // The field log (ADR 2026-10.a239): each session's start, stop, power and radio status, and the counters'
     // quarter-hourly movement. Null — every test — keeps none.
     private val fieldLog: FieldLog? = null,
@@ -484,6 +487,7 @@ class MeshManager(
             blobStore = blobStore,
             identities = identities,
             quotes = quotes,
+            notificationLabels = notificationLabels,
             db = db,
             identity = identity,
             settings = settings,

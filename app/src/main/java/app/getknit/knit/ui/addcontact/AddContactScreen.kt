@@ -106,6 +106,7 @@ fun AddContactScreen(
     val shareMessage = stringResource(R.string.contact_link_share_text)
     val shareTitle = stringResource(R.string.contact_link_chooser_title)
     val copiedMessage = stringResource(R.string.contact_link_copied)
+    val clipLabel = stringResource(R.string.add_contact_clip_label)
     val relayAddedMessage = stringResource(R.string.relays_invite_applied)
     val relayRefusedMessage = stringResource(R.string.relays_invite_refused_url)
     LaunchedEffect(Unit) {
@@ -143,7 +144,7 @@ fun AddContactScreen(
                 }
 
                 is AddContactEvent.CopyLink -> {
-                    clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("Knit contact link", event.url)))
+                    clipboard.setClipEntry(ClipEntry(ClipData.newPlainText(clipLabel, event.url)))
                     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) snackbarHostState.showSnackbar(copiedMessage)
                 }
 

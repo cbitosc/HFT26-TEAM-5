@@ -8,6 +8,7 @@ import app.getknit.knit.data.AttachmentStore
 import app.getknit.knit.data.message.MessageEntity
 import app.getknit.knit.data.message.hiddenByFilter
 import app.getknit.knit.location.GeoUri
+import app.getknit.knit.mesh.NotificationLabels
 
 /**
  * The one-line stand-in a message with no body gets: the chat list's preview, the message-request list's,
@@ -18,8 +19,9 @@ import app.getknit.knit.location.GeoUri
  * ([MessageEntity.attachmentAnimated]) reads "GIF" rather than "Photo".
  *
  * The mirror of this logic without a `Context` lives in `InboundPipeline.attachmentPreview` (that layer is
- * deliberately Android-light, `rules/mesh.md`) and the two are changed together — as are the two callers of
- * [GeoUri.describe], this file's [messagePreview] and the pipeline's notification body.
+ * deliberately Android-light, `rules/mesh.md`, and reads these strings through [notificationLabels]) and the two
+ * are changed together — as are the two callers of [GeoUri.describe], this file's [messagePreview] and the
+ * pipeline's notification body.
  */
 fun attachmentPreview(
     context: Context,
@@ -94,6 +96,18 @@ fun attachmentLabel(
         }
     return if (size == null) label else context.getString(R.string.chat_attachment_with_size, label, formatShortFileSize(context, size))
 }
+
+/** The words a notification says in place of a body it cannot show, in the reader's language (see [NotificationLabels]). */
+fun notificationLabels(context: Context): NotificationLabels =
+    NotificationLabels(
+        photo = context.getString(R.string.chat_list_preview_photo),
+        gif = context.getString(R.string.chat_list_preview_gif),
+        voice = context.getString(R.string.chat_list_preview_voice),
+        link = context.getString(R.string.chat_list_preview_link),
+        location = context.getString(R.string.chat_list_preview_location),
+        file = context.getString(R.string.chat_list_preview_file),
+        hidden = context.getString(R.string.moderation_preview_hidden),
+    )
 
 /** What to say about an ingest that produced nothing. */
 @StringRes

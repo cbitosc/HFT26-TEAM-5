@@ -55,6 +55,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -88,6 +89,7 @@ import app.getknit.knit.ui.preview.PREVIEW_NOW
 import app.getknit.knit.ui.rememberOnResume
 import app.getknit.knit.ui.theme.knitColors
 import app.getknit.knit.ui.util.compactTimeAgo
+import app.getknit.knit.ui.util.relativeTimeLabels
 import app.getknit.knit.ui.util.rememberCurrentTimeMillis
 import org.koin.androidx.compose.koinViewModel
 import java.io.File
@@ -463,7 +465,7 @@ private fun MetricsSection(metrics: MeshMetrics.Snapshot) {
         if (metrics.frames.framesDropped > 0) {
             MetricRow(stringResource(R.string.diagnostics_metric_dropped), metrics.frames.framesDropped.toString())
             metrics.frames.dropsByReason.forEach { (reason, count) ->
-                MetricRow("   ${reason.name}", count.toString())
+                MetricRow(SUB_ROW_INDENT + reason.name, count.toString())
             }
         }
         // Key recovery (inbound key-request): surfaced only once it's been exercised, so a mesh that never
@@ -600,7 +602,7 @@ private fun MetricsSection(metrics: MeshMetrics.Snapshot) {
         if (metrics.bluetooth.btConnectFails > 0) {
             MetricRow(stringResource(R.string.diagnostics_metric_bt_connect_fails), metrics.bluetooth.btConnectFails.toString())
             metrics.bluetooth.btConnectFailsByReason.forEach { (reason, count) ->
-                MetricRow("   ${reason.name}", count.toString())
+                MetricRow(SUB_ROW_INDENT + reason.name, count.toString())
             }
         }
     }
@@ -872,7 +874,7 @@ private fun NodeRow(
             )
         }
         val tag = transportTag(node.transports, node.viaSpool, node.via)
-        val age = node.profileUpdatedAt?.let { compactTimeAgo(it, now) }
+        val age = node.profileUpdatedAt?.let { compactTimeAgo(it, now, labels = relativeTimeLabels()) }
         tag?.let { TransportTag(it) }
         phy?.let {
             if (tag != null) Spacer(Modifier.width(4.dp))
@@ -892,6 +894,9 @@ private fun NodeRow(
 /** How much of a scope label (a node id or group id) fits a Diagnostics row without wrapping. */
 private const val SCOPE_LABEL_CHARS = 12
 
+/** The lead-in that sets a detail row under the row it belongs to. */
+private const val SUB_ROW_INDENT = "   "
+
 /**
  * One spool's live state: whether we are connected, its most recent refusal, and per-scope convergence.
  *
@@ -902,29 +907,41 @@ private const val SCOPE_LABEL_CHARS = 12
  */
 @Composable
 private fun SpoolSection(spool: SpoolStatus) {
-    MetricRow(SpoolUrl.host(spool.url), spool.connected.let { if (it) "connected" else "offline" })
-    spool.lastError?.let { MetricRow("   last error", it) }
+    MetricRow(
+        SpoolUrl.host(spool.url),
+        stringResource(if (spool.connected) R.string.diagnostics_spool_connected else R.string.diagnostics_spool_offline),
+    )
+    spool.lastError?.let { MetricRow(SUB_ROW_INDENT + stringResource(R.string.diagnostics_spool_last_error), it) }
     if (spool.connected) {
         // The relay's own build, when it publishes one. Absent for a spool implementation that serves no
         // `/source`, so the row appears rather than reading "unknown" for a perfectly healthy relay.
-        spool.software?.label?.let { MetricRow("   software", it) }
-        MetricRow("   photos", if (spool.maxAttachBytes != null) "yes" else "frames only")
-        if (spool.powBits > 0) MetricRow("   proof-of-work", "${spool.powBits} bits")
+        spool.software?.label?.let { MetricRow(SUB_ROW_INDENT + stringResource(R.string.diagnostics_spool_software), it) }
+        MetricRow(
+            SUB_ROW_INDENT + stringResource(R.string.diagnostics_spool_photos),
+            stringResource(
+                if (spool.maxAttachBytes != null) R.string.diagnostics_spool_photos_yes else R.string.diagnostics_spool_photos_frames_only,
+            ),
+        )
+        if (spool.powBits > 0) {
+            MetricRow(
+                SUB_ROW_INDENT + stringResource(R.string.diagnostics_spool_pow),
+                pluralStringResource(R.plurals.diagnostics_spool_pow_bits, spool.powBits, spool.powBits),
+            )
+        }
     }
     spool.scopes.forEach { scope ->
         // A pair scope shares its label with the DM scope it precedes, so two rows for one peer are not a bug.
-        val suffix =
+        val name = scope.label.take(SCOPE_LABEL_CHARS)
+        val label =
             when {
-                scope.retiring -> " (retiring)"
-                scope.pair -> " (pair)"
-                else -> ""
+                scope.retiring -> stringResource(R.string.diagnostics_spool_scope_retiring, name)
+                scope.pair -> stringResource(R.string.diagnostics_spool_scope_pair, name)
+                else -> name
             }
-        MetricRow(
-            "   ${scope.label.take(SCOPE_LABEL_CHARS)}$suffix",
-            "${scope.localCount} local / ${scope.spoolCount} spool" +
-                (if (scope.accountedCount > 0) " · ${scope.accountedCount} aged" else "") +
-                if (scope.invalidCount > 0) " · ${scope.invalidCount} bad" else "",
-        )
+        var counts = stringResource(R.string.diagnostics_spool_scope_counts, scope.localCount, scope.spoolCount)
+        if (scope.accountedCount > 0) counts = stringResource(R.string.diagnostics_spool_scope_aged, counts, scope.accountedCount)
+        if (scope.invalidCount > 0) counts = stringResource(R.string.diagnostics_spool_scope_bad, counts, scope.invalidCount)
+        MetricRow(SUB_ROW_INDENT + label, counts)
     }
 }
 
@@ -1161,7 +1178,7 @@ private fun CrashRow(
         Column(modifier = Modifier.weight(1f)) {
             Text(text = stringResource(R.string.crash_last_label), style = MaterialTheme.typography.bodyMedium)
             Text(
-                text = stringResource(R.string.crash_when, compactTimeAgo(crash.at, now)),
+                text = stringResource(R.string.crash_when, compactTimeAgo(crash.at, now, labels = relativeTimeLabels())),
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,

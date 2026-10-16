@@ -60,6 +60,7 @@ import app.getknit.knit.ui.openUrl
 import app.getknit.knit.ui.preview.KnitPreview
 import app.getknit.knit.ui.preview.PREVIEW_NOW
 import app.getknit.knit.ui.util.compactTimeAgo
+import app.getknit.knit.ui.util.relativeTimeLabels
 import app.getknit.knit.ui.util.rememberCurrentTimeMillis
 import kotlinx.coroutines.launch
 import org.koin.androidx.compose.koinViewModel
@@ -254,7 +255,7 @@ private fun CrashHeaderSection(
     Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
         Text(text = report.summary, style = MaterialTheme.typography.titleMedium)
         Text(
-            text = stringResource(R.string.crash_when, compactTimeAgo(report.at, now)),
+            text = stringResource(R.string.crash_when, compactTimeAgo(report.at, now, labels = relativeTimeLabels())),
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

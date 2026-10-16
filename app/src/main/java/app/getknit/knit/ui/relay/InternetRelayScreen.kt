@@ -98,6 +98,7 @@ fun InternetRelayScreen(
     val shareMessage = stringResource(R.string.relays_invite_share_text)
     val shareTitle = stringResource(R.string.relays_invite_chooser_title)
     val copiedMessage = stringResource(R.string.relays_invite_copied)
+    val clipLabel = stringResource(R.string.relays_invite_clip_label)
     val refusedMessage = stringResource(R.string.relays_invite_refused)
     val refusedUrlMessage = stringResource(R.string.relays_invite_refused_url)
     val appliedMessage = stringResource(R.string.relays_invite_applied)
@@ -109,7 +110,7 @@ fun InternetRelayScreen(
                 }
 
                 is InternetRelayEvent.CopyInvite -> {
-                    clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("Knit relay invite", event.url)))
+                    clipboard.setClipEntry(ClipEntry(ClipData.newPlainText(clipLabel, event.url)))
                     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) snackbarHostState.showSnackbar(copiedMessage)
                 }
 

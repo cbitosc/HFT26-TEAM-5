@@ -54,7 +54,6 @@ import app.getknit.knit.location.LocationFix
 import app.getknit.knit.location.LocationPrecision
 import app.getknit.knit.ui.preview.KnitPreview
 import java.util.Date
-import java.util.Locale
 
 /**
  * A shared position inside a bubble, drawn in place of the `geo:` line the body carried: the coordinates,
@@ -311,11 +310,12 @@ private fun accuracyLine(
     }
 
 /** Metres under a kilometre, kilometres to one decimal above it. */
-fun distanceLabel(metres: Int): String =
+@Composable
+private fun distanceLabel(metres: Int): String =
     if (metres < METRES_PER_KM) {
-        "$metres m"
+        stringResource(R.string.distance_metres, metres)
     } else {
-        String.format(Locale.getDefault(), "%.1f km", metres / METRES_PER_KM.toDouble())
+        stringResource(R.string.distance_kilometres, metres / METRES_PER_KM.toDouble())
     }
 
 private const val METRES_PER_KM = 1000

@@ -113,6 +113,7 @@ import app.getknit.knit.ui.signout.SignOut
 import app.getknit.knit.ui.signout.SignOutDialog
 import app.getknit.knit.ui.theme.KnitMotion
 import app.getknit.knit.ui.util.compactTimeAgo
+import app.getknit.knit.ui.util.relativeTimeLabels
 import app.getknit.knit.ui.util.rememberCurrentTimeMillis
 import app.getknit.knit.ui.whatsnew.WhatsNew
 import app.getknit.knit.ui.whatsnew.WhatsNewCard
@@ -718,7 +719,7 @@ internal fun ConversationListItem(
                     }
                     row.lastMessageAt?.let { sentAt ->
                         Text(
-                            text = compactTimeAgo(sentAt, now),
+                            text = compactTimeAgo(sentAt, now, labels = relativeTimeLabels()),
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )

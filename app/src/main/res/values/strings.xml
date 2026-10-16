@@ -539,6 +539,14 @@
     <string name="chat_list_preview_file">📎 %1$s</string>
     <string name="chat_list_preview_link">🔗 Link</string>
     <string name="chat_list_preview_location">📍 Location</string>
+    <!-- Compact relative times on the chat list, search and Diagnostics: "now", "5m", "2h", "Yesterday". -->
+    <string name="time_ago_now">now</string>
+    <string name="time_ago_minutes">%1$dm</string>
+    <string name="time_ago_hours">%1$dh</string>
+    <string name="time_ago_yesterday">Yesterday</string>
+    <!-- A distance under a kilometre, then kilometres to one decimal (a location's accuracy). -->
+    <string name="distance_metres">%1$d m</string>
+    <string name="distance_kilometres">%1$.1f km</string>
 
     <!-- Chat-list previews for a direct-transfer row: phrased from the reader's side, so the list never
          prefixes them with "You:". One per state the card can draw, plus the two that read differently
@@ -691,6 +699,8 @@
     <string name="contact_link_copied">Link copied</string>
     <string name="add_contact_title">Add contact</string>
     <string name="add_contact_link_title">Add by link</string>
+    <!-- The clipboard's label for a copied contact link; some keyboards and launchers show it. -->
+    <string name="add_contact_clip_label">Knit contact link</string>
     <string name="add_contact_caption">Paste a contact link someone sent you, or open it from the message it arrived in. Send them yours too — it only connects once you\'ve both added the other\'s link.</string>
     <string name="add_contact_input_label">Contact link</string>
     <string name="add_contact_input_hint">https://getknit.app/c#…</string>
@@ -769,6 +779,24 @@
     <string name="diagnostics_metric_reactions_sealed_fallback">Reactions sent cleartext (fallback)</string>
     <string name="diagnostics_metric_bt_connect_fails">BT connect failures</string>
     <string name="diagnostics_spools">Internet relays</string>
+    <string name="diagnostics_spool_connected">connected</string>
+    <string name="diagnostics_spool_offline">offline</string>
+    <string name="diagnostics_spool_last_error">last error</string>
+    <string name="diagnostics_spool_software">software</string>
+    <string name="diagnostics_spool_photos">photos</string>
+    <string name="diagnostics_spool_photos_yes">yes</string>
+    <string name="diagnostics_spool_photos_frames_only">frames only</string>
+    <string name="diagnostics_spool_pow">proof-of-work</string>
+    <plurals name="diagnostics_spool_pow_bits">
+        <item quantity="one">%1$d bit</item>
+        <item quantity="other">%1$d bits</item>
+    </plurals>
+    <string name="diagnostics_spool_scope_retiring">%1$s (retiring)</string>
+    <string name="diagnostics_spool_scope_pair">%1$s (pair)</string>
+    <!-- One scope's convergence: messages held locally / on the relay. -->
+    <string name="diagnostics_spool_scope_counts">%1$d local / %2$d spool</string>
+    <string name="diagnostics_spool_scope_aged">%1$s · %2$d aged</string>
+    <string name="diagnostics_spool_scope_bad">%1$s · %2$d bad</string>
     <string name="diagnostics_metric_spool_pushed">Messages sent to Internet relays</string>
     <string name="diagnostics_metric_lora_sent">LoRa frames sent</string>
     <string name="diagnostics_metric_lora_received">LoRa frames received</string>
@@ -1252,6 +1280,8 @@
     <string name="relays_invite_share_desc">Invite others to %1$s</string>
     <string name="relays_invite_share">Share invite link</string>
     <string name="relays_invite_copy">Copy invite link</string>
+    <!-- The clipboard's label for a copied relay invite; some keyboards and launchers show it. -->
+    <string name="relays_invite_clip_label">Knit relay invite</string>
     <string name="relays_invite_share_text">Join this relay on Knit: %1$s</string>
     <string name="relays_invite_chooser_title">Share relay invite</string>
     <string name="relays_invite_copied">Invite link copied</string>

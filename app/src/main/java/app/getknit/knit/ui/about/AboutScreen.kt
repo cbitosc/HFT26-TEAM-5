@@ -174,7 +174,7 @@ private fun Header(environment: CrashEnvironment) {
             tint = MaterialTheme.colorScheme.primary,
             modifier = Modifier.size(BRAND_MARK_SIZE),
         )
-        Text(text = "Knit", style = MaterialTheme.typography.headlineMedium)
+        Text(text = stringResource(R.string.app_name), style = MaterialTheme.typography.headlineMedium)
         Text(
             text = stringResource(R.string.about_version, environment.versionName, environment.versionCode),
             style = MaterialTheme.typography.bodyMedium,

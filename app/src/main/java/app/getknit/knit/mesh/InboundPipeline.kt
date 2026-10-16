@@ -131,6 +131,9 @@ class InboundPipeline(
     // Judges an inbound reply's quote against the original it names (ADR 2026-10.gpa3). The default labels a
     // rebuilt quote in English; the app hands MeshManager one that reads the reader's own strings.
     private val quotes: QuoteVerifier = QuoteVerifier(messages),
+    // What a notification says in place of a body it cannot show, read per notification so a language change
+    // lands at once. The default is English, which every test wants; the app reads the reader's own strings.
+    private val notificationLabels: () -> NotificationLabels = { NotificationLabels.ENGLISH },
     private val db: KnitDatabase,
     private val identity: IdentitySource,
     private val settings: InboundSettings,
@@ -3006,8 +3009,9 @@ class InboundPipeline(
         fileName: String?,
         hidden: Boolean,
     ): String {
-        if (hidden) return HIDDEN_NOTIFICATION_BODY
-        return GeoUri.describe(content.body, GeoUri.LABEL).ifBlank { attachmentPreview(content, fileName) }
+        val labels = notificationLabels()
+        if (hidden) return labels.hidden
+        return GeoUri.describe(content.body, labels.location).ifBlank { attachmentPreview(content, fileName, labels) }
     }
 
     /** Posts [body] as a message from [env]'s sender in [conversationId] — the shared tail of every inbound notification. */
@@ -3073,10 +3077,9 @@ class InboundPipeline(
 
     /**
      * Notification stand-in for a message whose only content is an attachment, so it still says something
-     * useful on the lock screen. Literal strings rather than resources because this layer holds no
-     * `Context` (it is deliberately Android-light, `rules/mesh.md`); they mirror `chat_list_preview_photo`,
-     * `chat_list_preview_gif`, `chat_list_preview_voice` and `chat_list_preview_file` and should be changed
-     * together with them.
+     * useful on the lock screen. This layer holds no `Context` (it is deliberately Android-light,
+     * `rules/mesh.md`), so the words come in as [NotificationLabels], read from the same strings the chat list's
+     * preview uses.
      *
      * A shared position in the body is named the same way, by [GeoUri.describe] at both call sites — a
      * lock-screen line should say "📍 Location", not print coordinates — mirroring `messagePreview` in
@@ -3093,14 +3096,15 @@ class InboundPipeline(
     private fun attachmentPreview(
         content: ChatContent,
         fileName: String?,
+        labels: NotificationLabels,
     ): String =
         when {
             content.attachmentHash == null -> content.body
-            fileName != null -> "📎 $fileName"
-            VoiceAudio.isVoice(content.attachmentMime) -> "🎤 Voice message"
-            content.attachmentMime == LinkPreviewBlob.MIME -> "🔗 Link"
-            content.attachmentMime == "image/gif" -> "🎞️ GIF"
-            else -> "📷 Photo"
+            fileName != null -> labels.file.format(fileName)
+            VoiceAudio.isVoice(content.attachmentMime) -> labels.voice
+            content.attachmentMime == LinkPreviewBlob.MIME -> labels.link
+            content.attachmentMime == "image/gif" -> labels.gif
+            else -> labels.photo
         }
 
     /** Fires a "you were mentioned" notification on the Mentions channel for an inbound chat in [conversationId]. */
@@ -3669,9 +3673,6 @@ class InboundPipeline(
         // Same tag as MeshManager on purpose: these inbound verify/drop log lines are grepped in field
         // diagnostics, so the extraction must not change them.
         const val TAG = "MeshManager"
-
-        /** A flagged message's notification text while content filtering hides it; the thread says the same. */
-        const val HIDDEN_NOTIFICATION_BODY = "Message hidden"
 
         /** Longest message or node id a quote may name; every id this protocol mints is far shorter. */
         const val MAX_QUOTED_ID = 64
