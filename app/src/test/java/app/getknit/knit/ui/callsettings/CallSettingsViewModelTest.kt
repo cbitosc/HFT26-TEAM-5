@@ -45,7 +45,7 @@ class CallSettingsViewModelTest {
     private val stt =
         mockk<SttModelStore>(relaxed = true) {
             every { state } returns modelState
-            every { model } returns SttModel.MOONSHINE_MEDIUM_STREAMING_EN
+            every { model } returns SttModel.MOONSHINE_SMALL_STREAMING_EN
             every { metered() } returns true
         }
     private val transcriptStore = mockk<TranscriptStore>(relaxed = true) { every { enabled } returns transcriptsOn }
@@ -89,7 +89,7 @@ class CallSettingsViewModelTest {
         runTest {
             val vm = vm(stt)
             advanceUntilIdle()
-            val bytes = SttModel.MOONSHINE_MEDIUM_STREAMING_EN.bytes
+            val bytes = SttModel.MOONSHINE_SMALL_STREAMING_EN.bytes
             assertEquals(TranscriptsUi(on = true, model = SttModelState.Absent, bytes = bytes, metered = true), vm.transcripts.value)
             transcriptsOn.value = false
             modelState.value = SttModelState.Ready

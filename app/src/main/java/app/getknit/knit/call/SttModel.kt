@@ -21,7 +21,7 @@ enum class SttArch { TINY_STREAMING, SMALL_STREAMING, MEDIUM_STREAMING }
 /**
  * A speech model the walkie's transcript can download (C-3.11-9): its files, fetched by name under [baseUrl] and
  * pinned by size and hash here, so the host is trusted with nothing — a byte it changes is a download that fails.
- * [baseUrl] is https or nothing. The app ships one, [MOONSHINE_MEDIUM_STREAMING_EN].
+ * [baseUrl] is https or nothing. The app ships one, [MOONSHINE_SMALL_STREAMING_EN].
  */
 class SttModel(
     val id: String,
@@ -43,30 +43,30 @@ class SttModel(
         private val SAFE_NAME = Regex("[A-Za-z0-9._-]+")
 
         /**
-         * Moonshine v2 Medium Streaming, English (245M parameters, int8 `.ort`, MIT): 6.65 % on the Open ASR average,
-         * against Small's 7.84 and Whisper Small's 8.59. The walkie's one model: Tiny (12.0 %) read too poorly, and Small was
-         * set aside for Medium's accuracy at about twice the fetch and the model time (ADR 2026-10.nz3g).
-         * Moonshine's own files (`medium-streaming-en/quantized_26_08_21`, the per-channel quantization), rehosted under
-         * getknit.app with the library's licence. `scripts/stt-model.py --check` re-derives these pins from upstream; never
-         * edit them by hand.
+         * Moonshine v2 Small Streaming, English (123M parameters, int8 `.ort`, MIT): 7.84 % on the Open ASR average,
+         * ahead of Whisper Small's 8.59 at half its size and a fraction of its time. The one model, for the walkie and a live
+         * call's captions alike: Tiny (12.0 %) read too poorly, and Medium (6.65 %), shipped for a day, could not keep up
+         * with a live call's continuous speech on the lab's oldest phones, where Small could (ADR 2026-10.nz3g). Moonshine's own files
+         * (`small-streaming-en/quantized_26_08_21`, the per-channel quantization), rehosted under getknit.app with the
+         * library's licence. `scripts/stt-model.py --check` re-derives these pins from upstream; never edit them by hand.
          */
-        val MOONSHINE_MEDIUM_STREAMING_EN =
+        val MOONSHINE_SMALL_STREAMING_EN =
             SttModel(
-                id = "moonshine-medium-streaming-en-2026-08-21",
-                baseUrl = "https://getknit.app/models/stt/moonshine-medium-streaming-en-2026-08-21/",
+                id = "moonshine-small-streaming-en-2026-08-21",
+                baseUrl = "https://getknit.app/models/stt/moonshine-small-streaming-en-2026-08-21/",
                 files =
                     listOf(
-                        SttFile("adapter.ort", 3_651_296, "3f2a287def57cc094367a0eec3c4f5fc36a32ec420e86764b696920991b20281"),
-                        SttFile("cross_kv.ort", 11_643_776, "642f6e21cd305be79342207c6f9e6b681d469d55bc48c72b27b84846fb71fd1e"),
-                        SttFile("decoder_kv.ort", 146_972_408, "193bb366492b74fc4ad338c6778e8d8eb916aaa11b5aa264f9057f4db7759486"),
-                        SttFile("encoder.ort", 94_705_376, "12915e76ebac7dd287c5ea63965d06103a53ba1ce242a4a34f318f3958c60c37"),
-                        SttFile("frontend.model.ort", 28_720, "95768855c70c8251eeecc05fedf69999da1b8ab16f605c9f457fd3354b0ad6b5"),
-                        SttFile("frontend.weights.ort", 11_889_560, "5ac941f490cbe035b335b99a414cc393d62d4c6f9f2423495b286870d271d709"),
-                        SttFile("streaming_config.json", 513, "28e83b7a28e91472692a035e0dae3116422ae43aeb2bef5ed822c44ce89b88af"),
+                        SttFile("adapter.ort", 2_870_368, "c665f742364febad597cc9ac1e0b341ffbee0e24a1466e2f3bde95e6e4771762"),
+                        SttFile("cross_kv.ort", 5_356_536, "e2d3417144e9514055ebfefe8dcc4c0a55a55adcb8530435844c75c53e352bf6"),
+                        SttFile("decoder_kv.ort", 81_878_600, "1a05465b1dd955858dfcbee039c0020fb5dd982b0f5094c34e61735d518d771b"),
+                        SttFile("encoder.ort", 44_148_576, "2d4d973e91e8aca08c51e7e7efa28a46ab265b63d809d5294d18b86bcd85b993"),
+                        SttFile("frontend.model.ort", 26_944, "09b1210ae30dc5f0f3e45f0ebab914c254741323114f53fbbe5ae62cca35058f"),
+                        SttFile("frontend.weights.ort", 7_769_464, "7ef97521bd4bad3928f5bb6808586f4fcc6e92bd5990394112eed7d4052ec338"),
+                        SttFile("streaming_config.json", 512, "26f02b6afb22d60871a5efd85c3d38e569cc0ddb6c5eb6e93d3260152ae8a47a"),
                         SttFile("tokenizer.bin", 249_974, "6884b35fd6377d4c4d32336a0bc152f36b64d1e45b6503683cdc238250a8472d"),
                         SttFile("LICENSE", 14_180, "fa7d1174dd8af6a7cd280be20b80d10095ed4c19b5b20b61a7715c3ad790dc5f"),
                     ),
-                arch = SttArch.MEDIUM_STREAMING,
+                arch = SttArch.SMALL_STREAMING,
             )
     }
 }

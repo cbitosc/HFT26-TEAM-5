@@ -812,7 +812,7 @@ an experiment behind `BuildConfig.WALKIE` (`-Pwalkie=`, on in debug and off in r
     at 8 kbps cost the model from what the model gets wrong on clean audio. A cancelled burst drops its line.
   - **The model.** Moonshine v2 Streaming, English (int8 `.ort`, MIT), through Moonshine's own runtime
     (`moonshine-voice`, `MoonshineSpeech`; its slim ONNX Runtime inside), packaged only where calls are, like
-    libwebrtc: Medium Streaming (269 MB; 6.65 % on the Open ASR average), the one model there is.
+    libwebrtc: Small Streaming (142 MB; 7.84 % on the Open ASR average), the one model there is.
     Each burst is one stream of the model's: its streaming encoder caches what it has seen, so a look costs the new
     audio and a decode. How a burst becomes lines is `MoonshineSpeech.lines` (`LineMode`): one line of up to 30 s with
     the model's voice detector off (the default, since a split at a pause decodes each half without the other), or a

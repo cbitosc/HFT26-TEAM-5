@@ -1416,7 +1416,7 @@ fun CallScreenConnectedPreview() = PreviewCall(CallPhase.Connected, route = "rel
 @Preview(name = "Connected, on a headset", widthDp = 411, heightDp = 891)
 @Composable
 fun CallScreenHeadsetPreview() =
-    PreviewCall(CallPhase.Connected, route = "srflx/srflx", routing = PREVIEW_ON_BUDS, caller = PREVIEW_CALLER)
+    PreviewCall(CallPhase.Connected, route = "host/host/wifi-direct", routing = PREVIEW_ON_BUDS, caller = PREVIEW_CALLER)
 
 @Preview(name = "Connected, breaking up", widthDp = 411, heightDp = 891)
 @Preview(name = "Connected, breaking up, dark", widthDp = 411, heightDp = 891, uiMode = Configuration.UI_MODE_NIGHT_YES)
@@ -1479,7 +1479,7 @@ fun CallScreenRelayDiagnosticsPreview() =
 fun CallScreenDiagnosticsPreview() =
     PreviewCall(
         CallPhase.Connected,
-        route = "srflx/srflx",
+        route = "host/host/wifi-direct",
         stats =
             CallStats(
                 localType = "host",
@@ -1704,4 +1704,4 @@ fun CallScreenCaptionsBehindPreview() =
             ),
     )
 
-private const val PREVIEW_MODEL_BYTES = 269_155_803L
+private const val PREVIEW_MODEL_BYTES = 142_315_154L

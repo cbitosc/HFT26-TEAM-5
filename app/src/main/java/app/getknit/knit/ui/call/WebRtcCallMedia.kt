@@ -177,6 +177,7 @@ internal class WebRtcCallMedia(
                 .createAudioDeviceModule()
         tap.module = module
         tap.faultSilence = pendingFault
+        tap.feed = pendingFeed
         val factory = PeerConnectionFactory.builder().setAudioDeviceModule(module).createPeerConnectionFactory()
         log(
             "webrtc: audio module on ${profile.name.lowercase()} (${capture.choice.value.reason
@@ -293,6 +294,16 @@ internal class WebRtcCallMedia(
     // Carried to a module built later, so a fault armed before the first call applies to it.
     @Volatile private var pendingFault = false
 
+    /** A trial's microphone from a file (`…debug.CALL --es op capture --es pcm <file>`), null for the microphone. */
+    var micFeed: MicFeed?
+        get() = audio?.tap?.feed ?: pendingFeed
+        set(value) {
+            pendingFeed = value
+            audio?.tap?.feed = value
+        }
+
+    @Volatile private var pendingFeed: MicFeed? = null
+
     companion object {
         /** How long a probe waits for its kind's candidate: a `turns:` allocation over a slow network takes seconds. */
         private const val PROBE_MS = 8_000L
@@ -375,7 +386,14 @@ private class WebRtcSession(
     private val captions: CallCaptioner?,
     private val onClosed: (WebRtcSession) -> Unit,
 ) : CallSession {
+    // Two locks, because libwebrtc's observer runs on its signaling thread and a getStats or setConfiguration call
+    // blocks the caller until that thread has run it. [lock] keeps the description's bookkeeping (the late and group
+    // candidates) and is taken on the signaling thread, so it is never held across a call into [pc]. [pcLock] is held
+    // across those calls and over close()'s flag, so close() never disposes [pc] under one; it guards [config] and
+    // [preferred], is never taken on the signaling thread, and nothing under it takes [lock]. Holding [lock] across
+    // getStats froze the call screen whenever a candidate came during a stats read.
     private val lock = Any()
+    private val pcLock = Any()
     private val statsReader = CallStatsReader()
     private val relays = RelayTally()
     private val gathered = CompletableDeferred<Unit>()
@@ -385,7 +403,9 @@ private class WebRtcSession(
     private var described = false
     private val late = mutableListOf<String>()
     private var lateReported = false
-    private var closed = false
+
+    // Set under [pcLock]; read anywhere.
+    @Volatile private var closed = false
 
     // Group candidates gathered after the description, waiting out a short debounce for the call's lane.
     private val directLate = mutableListOf<String>()
@@ -397,9 +417,13 @@ private class WebRtcSession(
     private val source: AudioSource = factory.createAudioSource(MediaConstraints())
     private val track: AudioTrack = factory.createAudioTrack("knit-audio", source)
 
-    // The peer's track and the sink on it that hands its decoded audio to the captions (C-3.7-5), under [lock]: taken
-    // off before the connection is disposed, so no audio thread calls into a closed session.
+    // The peer's track and the sink on it that hands its decoded audio to the captions (C-3.7-5), and whether the
+    // session has closed, under [sinkLock] — never [pcLock]: the sink is added on the signaling thread, which a stats
+    // read holds [pcLock] waiting for. Taken off before the connection is disposed, so no audio thread calls into a
+    // closed session.
+    private val sinkLock = Any()
     private var heard: Pair<AudioTrack, AudioTrackSink>? = null
+    private var sinkClosed = false
 
     private val observer =
         object : PeerConnection.Observer {
@@ -522,10 +546,11 @@ private class WebRtcSession(
                 // 16-bit PCM is all the tap reads; anything else is skipped rather than misread.
                 if (bits == PCM_BITS) tap.pcm(data, rate, channels)
             }
-        // Added under the lock, so a close either finds it to take off or has already closed and it is never added.
+        // Added under the sink's lock, so a close either finds it to take off or has already closed and it is never
+        // added.
         val replaced =
-            synchronized(lock) {
-                if (closed) return
+            synchronized(sinkLock) {
+                if (sinkClosed) return
                 remote.addSink(sink)
                 heard.also { heard = remote to sink }
             }
@@ -572,7 +597,7 @@ private class WebRtcSession(
      * [config] goes back, so the restart's new ports are pruned under the policy the call opened with.
      */
     private fun useServers(servers: List<TurnServer>): Boolean =
-        synchronized(lock) {
+        synchronized(pcLock) {
             if (closed) return false
             config.iceServers = iceServersOf(servers)
             if (!pc.setConfiguration(config)) log("webrtc: restart's ICE servers refused; keeping the old ones")
@@ -585,7 +610,7 @@ private class WebRtcSession(
      */
     private suspend fun restartedDescription(kind: String): String? {
         delay(GATHER_MS)
-        if (synchronized(lock) { closed }) return null
+        if (closed) return null
         val sdp = pc.localDescription?.description
         log("webrtc: $kind carries ${summary(sdp.orEmpty().lines().filter { it.startsWith("a=candidate:") })}")
         return sdp
@@ -595,13 +620,13 @@ private class WebRtcSession(
         apply { pc.setRemoteDescription(it, SessionDescription(SessionDescription.Type.ANSWER, remoteAnswer)) }
 
     override fun addCandidates(lines: List<String>) {
-        if (synchronized(lock) { closed }) return
+        if (closed) return
         // One audio m-line, bundled: its mid is "0" under Unified Plan.
         lines.forEach { pc.addIceCandidate(IceCandidate("0", 0, it)) }
     }
 
     override fun setMuted(muted: Boolean) {
-        if (synchronized(lock) { !closed }) track.setEnabled(!muted)
+        if (!closed) track.setEnabled(!muted)
         tap.muted = muted
     }
 
@@ -611,7 +636,7 @@ private class WebRtcSession(
     suspend fun stats(): CallStats? {
         val report = report() ?: return null
         val prefer =
-            synchronized(lock) { config.networkPreference }
+            synchronized(pcLock) { config.networkPreference }
                 .takeIf { it != PeerConnection.AdapterType.UNKNOWN }
                 ?.name
                 ?.lowercase()
@@ -628,8 +653,8 @@ private class WebRtcSession(
                             report.statsMap.values.map { StatEntry(it.id, it.type, it.timestampUs, it.members) }
                         if (cont.isActive) cont.resume(entries)
                     }
-                // Under the lock, so close() cannot dispose the connection between the check and the call.
-                synchronized(lock) {
+                // Under [pcLock], so close() cannot dispose the connection between the check and the call.
+                synchronized(pcLock) {
                     if (closed) cont.resume(null) else pc.getStats(callback)
                 }
             }
@@ -639,7 +664,7 @@ private class WebRtcSession(
     private fun onDefaultNetwork(network: android.net.Network) {
         val type = path.preferenceFor(network) ?: return
         val applied =
-            synchronized(lock) {
+            synchronized(pcLock) {
                 if (closed || type == preferred) return
                 preferred = type
                 config.networkPreference = type
@@ -649,7 +674,7 @@ private class WebRtcSession(
     }
 
     override fun close() {
-        synchronized(lock) {
+        synchronized(pcLock) {
             if (closed) return
             closed = true
         }
@@ -658,7 +683,10 @@ private class WebRtcSession(
         gathered.complete(Unit)
         // What this phone held of the TURN server's quota when the call ended (C-7.6-26).
         log("webrtc: ${relays.summary()}")
-        synchronized(lock) { heard.also { heard = null } }?.let { (remote, sink) -> remote.removeSink(sink) }
+        synchronized(sinkLock) {
+            sinkClosed = true
+            heard.also { heard = null }
+        }?.let { (remote, sink) -> remote.removeSink(sink) }
         // dispose() closes the connection and its senders; the source is ours to free.
         pc.dispose()
         source.dispose()

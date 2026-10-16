@@ -47,8 +47,11 @@ object CaptionPolicy {
         when {
             // A pause after speech: the detector has closed every stretch, and nothing is open.
             heard.settled.isNotBlank() && heard.live.isBlank() -> RunStep.SETTLE
+
             heard.text.isBlank() && runMs >= QUIET_RUN_MS -> RunStep.DROP
+
             runMs >= MAX_RUN_MS -> RunStep.SETTLE
+
             else -> RunStep.KEEP
         }
 }

@@ -44,7 +44,7 @@ class SttModelStore(
     context: Context,
     private val gate: AndroidInternetGate,
     private val scope: CoroutineScope,
-    val model: SttModel = SttModel.MOONSHINE_MEDIUM_STREAMING_EN,
+    val model: SttModel = SttModel.MOONSHINE_SMALL_STREAMING_EN,
     // Asked as a download starts, to hold the process until it ends; a refusal (a start from the background) is logged
     // and the download runs anyway.
     private val keepAlive: () -> Unit = {},
@@ -71,7 +71,7 @@ class SttModelStore(
     /**
      * Reads the disk once: whether the model is there. Off the main thread (Koin builds this lazily). Idempotent, so a
      * caller that may come first in a fresh process (the debug bridge) calls it too. Sweeps what the walkie's earlier
-     * builds left beside it: the Tiny, Small and Medium models a picker once offered, the Small model it then shipped, and
+     * builds left beside it: the Tiny and Medium models a picker once offered, the Medium model a build then shipped, and
      * the file that kept the pick.
      */
     fun start() {

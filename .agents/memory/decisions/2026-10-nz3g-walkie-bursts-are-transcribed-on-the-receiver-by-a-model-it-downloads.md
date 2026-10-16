@@ -200,8 +200,8 @@ C-3.11-9). It is debug-only, as the walkie is, and nothing reaches the wire.
   "Transcripts and captions" — is on. On, `LiveCaptions` fills the card slot with the peer's words as they play
   (docs/VOICE_CALLS.md C-3.7-5); the walkie's card and the live captions share the line rendering (`Streaming`, a
   line's settled words as they stay and the rest dimmed, `TranscriptLine.settled`) and the model panel. The audio is
-  the received track's, through `AudioTrack.addSink` on a sink `WebRtcSession.listen` adds under its lock and takes off
-  before `pc.dispose()`; `CallCaptioner` takes the newest session's `source()` alone, begun and ended with the media's
+  the received track's, through `AudioTrack.addSink` on a sink `WebRtcSession.listen` adds under a lock of its own and
+  takes off before `pc.dispose()`; `CallCaptioner` takes the newest session's `source()` alone, begun and ended with the media's
   first and last session. A live call's streams always split at pauses (`SpeechToText.open(continuous = true)`;
   `MoonshineSpeech` keys its lease on the mode, so a walkie after a live call reloads the model): `WHOLE` re-decodes
   the open line on every look, which a walkie bounds by its talk button and a live call cannot, and the 2026-10-14
@@ -213,7 +213,19 @@ C-3.11-9). It is debug-only, as the walkie is, and nothing reaches the wire.
   recorded PCM before WebRTC's echo canceller, so on the loudspeaker (and on the `VOICE_RECOGNITION` profile, ADR
   2026-10.kw29) it carries the peer's words too, and a second stream would halve the cadence. On the earpiece the card
   says captions read better on the loudspeaker; the model runs on regardless. The STT graph moved from `WALKIE_WIRED`
-  to `CALLS_WIRED` (the runtime was already packaged wherever calls are). Medium is about twice Small's model time, so
-  continuous speech may well exceed real time even split: the trial owed is a 10-minute loudspeaker call per lab phone
-  with CC on, reading `captions:` in the log and `…debug.STT` `captions.status`, plus `pcm --ez continuous true`
-  beside the plain `pcm` on the same clip for the two modes' cost.
+  to `CALLS_WIRED` (the runtime was already packaged wherever calls are).
+- **Amendment 2026-10-16: Small for everything, after the live-call trial.** The one model is Moonshine Small Streaming
+  again (`SttModel.MOONSHINE_SMALL_STREAMING_EN`, 142 MB), for the walkie and a live call's captions alike: Medium could
+  not caption a live call on the lab's two oldest phones. The trial fed a 10-minute speech track (about 65 % talk, real
+  pauses) into one phone's call microphone (`…debug.CALL --es op capture --es pcm`, `MicFeed`) with the other muted and
+  captioning. On Medium the Moto G (GSI, API 34) stopped `BEHIND` 25–30 s into the first unbroken stretch, twice and at
+  27 °C — the model ran at about 130 % of real time split at pauses — and the Pixel 3 kept up at 82 % until it heated
+  from 33.6 to 36.2 °C and stopped at seven minutes. On Small both captioned the whole ten minutes with no stop: the Moto
+  at 75 % of real time (27.0 → 28.5 °C) and the Pixel 3 at 74 % (30.4 → 36.8 °C, 7 % of its battery over the
+  11-minute call). The text read about as well as Medium's; the one noisy clip garbled on both. Whole-line streams on
+  the `pcm` bench ran at 236 % (Moto) and 444 % (P3) on Medium against split's 132 % and 198 %, which is why a live
+  call splits. A phone that held the Medium model has it swept by `SttModelStore.start` and fetches Small. The walkie
+  gives up 1.2 points of word error on the Open ASR average (6.65 → 7.84 %) for one model that keeps up everywhere it
+  was tried. The trial also found two deadlocks in `WebRtcSession`, fixed: a stats read held the session's lock across
+  `pc.getStats`, which waits on the signaling thread, where both the captions' `listen` and the existing
+  `onIceCandidate` took that lock. Calls into the connection now hold `pcLock`, which the signaling thread never takes.

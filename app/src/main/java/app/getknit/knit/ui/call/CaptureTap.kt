@@ -59,6 +59,13 @@ internal class CaptureTap(
     /** A trial's dead microphone (`…debug.CALL --es op capture --es fault silence`): the module's own buffers zeroed. */
     @Volatile var faultSilence = false
 
+    /**
+     * A trial's microphone from a file (`…debug.CALL --es op capture --es pcm <file>`): its samples written over what
+     * the module recorded, buffer by buffer, then silence once it runs out. Two phones in one room then talk without a
+     * microphone between them, so nothing howls and every run says the same words.
+     */
+    @Volatile var feed: MicFeed? = null
+
     // The module records nothing itself and this tap fills its buffers: from a switch until the next call re-enables it.
     @Volatile private var external = false
 
@@ -113,13 +120,17 @@ internal class CaptureTap(
         bytesRead: Int,
         captureTimestampNs: Long,
     ): Long {
+        val feed = feed
         if (external) {
             readOwn(buffer, audioFormat, channelCount, sampleRate)
+        } else if (feed != null) {
+            feed.fill(buffer, channelCount, sampleRate)
         } else if (faultSilence) {
             zero(buffer)
         }
-        // A buffer between end() and the module's stop is no call's: judged, it would read as a dead microphone.
-        if (!calling) return captureTimestampNs
+        // A buffer between end() and the module's stop is no call's: judged, it would read as a dead microphone. Nor is a
+        // file's: its pauses are digital silence, and judged they would record a verdict against a microphone that works.
+        if (!calling || feed != null) return captureTimestampNs
         val frameMs = frameMs(buffer.capacity(), channelCount, sampleRate)
         watch.frame(peakOf(buffer), frameMs, muted, ::excuse)?.let(::changed)
         return captureTimestampNs
@@ -268,5 +279,54 @@ internal class CaptureTap(
         fun zero(buffer: ByteBuffer) {
             for (i in 0 until buffer.capacity()) buffer.put(i, 0)
         }
+    }
+}
+
+/**
+ * A file's audio as a call's microphone, for a trial (`CaptureTap.feed`): 16-bit mono [samples] at [rate] Hz, written
+ * over each recorded buffer at the buffer's own rate and channel count, linearly interpolated, then silence. Called on
+ * the module's record thread alone.
+ */
+internal class MicFeed(
+    private val samples: ShortArray,
+    private val rate: Int,
+) {
+    private var at = 0.0
+
+    /** Whether the file has all been played. */
+    val done: Boolean get() = at >= samples.size
+
+    fun fill(
+        buffer: ByteBuffer,
+        channels: Int,
+        sampleRate: Int,
+    ) {
+        if (channels <= 0 || sampleRate <= 0) return
+        val step = rate.toDouble() / sampleRate
+        var i = 0
+        val end = buffer.capacity() - PCM_BYTES * channels + 1
+        while (i < end) {
+            val sample = sampleAt(at)
+            repeat(channels) {
+                buffer.put(i, (sample.toInt() and BYTE_MASK).toByte())
+                buffer.put(i + 1, (sample.toInt() shr BITS_PER_BYTE).toByte())
+                i += PCM_BYTES
+            }
+            at += step
+        }
+    }
+
+    private fun sampleAt(position: Double): Short {
+        val index = position.toInt()
+        if (index >= samples.size) return 0
+        val next = if (index + 1 < samples.size) samples[index + 1] else samples[index]
+        val fraction = position - index
+        return (samples[index] + (next - samples[index]) * fraction).toInt().toShort()
+    }
+
+    private companion object {
+        const val PCM_BYTES = 2
+        const val BYTE_MASK = 0xFF
+        const val BITS_PER_BYTE = 8
     }
 }

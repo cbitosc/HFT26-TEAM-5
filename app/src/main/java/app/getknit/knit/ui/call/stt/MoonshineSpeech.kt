@@ -16,7 +16,7 @@ import kotlinx.coroutines.launch
 import java.io.File
 
 /**
- * The walkie transcript's speech model (docs/VOICE_CALLS.md C-3.11-9): Moonshine v2 Medium Streaming, through
+ * The walkie transcript's speech model (docs/VOICE_CALLS.md C-3.11-9): Moonshine v2 Small Streaming, through
  * Moonshine's own runtime (`moonshine-voice`, its ONNX Runtime inside), over the files [SttModelStore] holds (a
  * reinstall is a new generation, so a new lease). It is called through the library's `JNI`
  * class alone: its `Transcriber` wrapper would add a thread of its own and its own cadence, and the cadence here is

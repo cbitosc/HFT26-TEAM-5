@@ -306,7 +306,11 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
     `open`, the call's microphone: its `profile`, whether it `switched` mid-call, and `health` (`WATCHING`, `LIVE`,
     `SILENCED`, `SWITCHED` or `DEAD`). `--es op capture --es set standard|fallback|reset` picks the next call's path
     (`reset` forgets every verdict, so the phone's image decides), and `--es fault silence|off` zeroes what the
-    module's own path records: a dead microphone on a phone whose works, for the mid-call switch's trial. `state` also
+    module's own path records: a dead microphone on a phone whose works, for the mid-call switch's trial. `--es pcm
+    <file>` writes a raw 16 kHz mono s16le file (world-readable, e.g. under `/data/local/tmp`) over every buffer the
+    module records, from now or the next call until it runs out (`MicFeed`; silence after), and `--es pcm off` gives the
+    microphone back: two phones in one room call each other with no sound between them, the same words every run (the
+    captions' trial, C-3.7-5). `state`'s `capture.feed` reads `playing`, `done` or null. `state` also
     carries `directHost` (ADR 2026-10.w3dw: `Allowed`, `GenericImage` or `Latched(at=…)`). Logcat under `KnitCall`:
     `webrtc: audio module on <profile> (<why>)` when one is built, `call capture: <HEALTH> on <profile>`, `call
     capture: own recorder on source <n>, <rate>Hz x<channels>`. The diagnostics card's **↑ Mic** and **↓ Heard** read
@@ -318,6 +322,8 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
       `OTHER`), a `name` and a `key`. `audio` is null while the system holds no call.
     - `--es op audio --es to speaker|earpiece|wired|bluetooth`: moves the call to the first route of that kind and
       replies with the new `audio`. With no `to`, it only reports.
+    - `--es op mute --ez on true|false`: the call screen's Mute, for a trial of two phones in one room, where a call
+      both ways would howl; `state`'s `muted` shows it.
     - Logcat, under `KnitCall`:
       - `call <id>: added to the system (…)` and `call <id>: disconnected from the system (<cause>)`;
       - `telecom: …` for each refusal, or a verb Telecom left unanswered;
@@ -354,7 +360,7 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
     route; its foreground service may be refused from a broadcast, and the download then runs without it);
     `sideload --es dir <dir>` installs it from its nine files pushed there (`scripts/stt-model.py --out` stages
     them; `chmod 755` the directory and `644` the files), each checked against the same pins; `cancel`; `delete`;
-    `unload` releases the model now (otherwise 2 min idle). The model is Moonshine Medium Streaming alone; `status` names
+    `unload` releases the model now (otherwise 2 min idle). The model is Moonshine Small Streaming alone; `status` names
     it (`model`).
   - `pcm --es path <file>` streams a raw 16 kHz mono s16le file through the model in 100 ms chunks as fast as it takes
     them, looking as a burst does — in the background, since a long clip outlasts a broadcast's timeout (an ANR). It
@@ -362,7 +368,13 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
     `modelMs` and `finishMs` (the last look: a burst's end to its text): the engine alone, no call. `lines --es mode
     whole|split` sets how a burst becomes lines (`LineMode`; whole by default; in memory, reloads the model),
     and `status` names it (`lines`).
-    `pcm` also takes a saved clip's WAV (its 44-byte header skipped).
+    `pcm` also takes a saved clip's WAV (its 44-byte header skipped). `--ez continuous true` opens the stream a live
+    call's captions do (C-3.7-5), split at every pause whatever `lines` says, for the two modes' cost on one clip.
+  - **A live call's captions** (C-3.7-5). `status` also carries `captions` (the call's `status`, `ON`, `BEHIND` or
+    `FAILED`, and its `lines` in `transcript`'s shape, with `settled` beside `live`) and `liveCaptions`, the CC
+    button's choice. `captions --ez on true|false` sets it (persisted, as the button is; read as the peer's audio
+    comes, so a call already up is captioned from then on). Logcat (`KnitCall`): `captions: run <n>: <ms> ms of audio,
+    <n> look(s), <ms> ms in the model, <n> chars` per settled line, and `captions: stopped: behind|failed`.
   - `keyterms --es terms 'Ada,Grace Hopper'` replaces the names the model listens for from the next burst
     (`MoonshineSpeech.keyterms`; a call's start sets its own through `SttKeytermFeed`, and its end clears them), `--ez
     clear true` empties them; `status` lists them (`keyterms`). For an A/B of the biasing on `pcm` clips.

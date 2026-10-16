@@ -69,6 +69,7 @@ import app.getknit.knit.data.settings.LowPowerSwitch
 import app.getknit.knit.data.settings.OwnIceStore
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.data.settings.TicketKeyStore
+import app.getknit.knit.data.settings.TranscriptStore
 import app.getknit.knit.data.webp.WebpTranscode
 import app.getknit.knit.identity.Identity
 import app.getknit.knit.identity.displayNameFor
@@ -137,6 +138,7 @@ import app.getknit.knit.transfer.TransferManager
 import app.getknit.knit.ui.call.CallActivity
 import app.getknit.knit.ui.call.DefaultPath
 import app.getknit.knit.ui.call.DirectNetworkDetector
+import app.getknit.knit.ui.call.MicFeed
 import app.getknit.knit.ui.call.TalkPlayer
 import app.getknit.knit.ui.call.TalkRecorder
 import app.getknit.knit.ui.call.WalkieTalk
@@ -2407,6 +2409,14 @@ class DebugBridgeReceiver :
                 return reply("ok", "hung up")
             }
 
+            "mute" -> {
+                // `--ez on true|false`: the call screen's Mute, for a trial whose two phones would otherwise howl.
+                state ?: return reply("error", "no call")
+                val on = intent.getBooleanExtra("on", true)
+                calls.setMuted(on)
+                return reply("ok", if (on) "muted" else "unmuted")
+            }
+
             "talk" -> {
                 val walkie = getKoin().getOrNull<WalkieTalk>() ?: return reply("error", "this build wires no walkie")
                 // `--es pcm <file>`: the burst says what that raw 16 kHz mono s16le file says, held as long as it lasts.
@@ -2530,6 +2540,21 @@ class DebugBridgeReceiver :
                     "off" -> getKoin().get<WebRtcCallMedia>().faultSilence = false
                     else -> return reply("error", "fault must be silence|off")
                 }
+                // `--es pcm <file>`: the call's microphone says what that raw 16 kHz mono s16le file says, from now (or
+                // the next call) until it ends; `--es pcm off` gives the microphone back.
+                when (val pcm = intent.getStringExtra("pcm")) {
+                    // Not asked: the feed stays as it is.
+                    null -> {}
+
+                    "off" -> {
+                        getKoin().get<WebRtcCallMedia>().micFeed = null
+                    }
+
+                    else -> {
+                        val samples = withContext(Dispatchers.IO) { readShorts(File(pcm)) } ?: return reply("error", "can't read $pcm")
+                        getKoin().get<WebRtcCallMedia>().micFeed = MicFeed(samples, SttPolicy.SAMPLE_RATE)
+                    }
+                }
                 return reply("ok", "capture").put("capture", captureJson())
             }
 
@@ -2643,6 +2668,7 @@ class DebugBridgeReceiver :
             .put("next", choice.profile.name)
             .put("why", choice.reason?.name ?: JSONObject.NULL)
             .put("fault", media?.faultSilence == true)
+            .put("feed", media?.micFeed?.let { if (it.done) "done" else "playing" } ?: JSONObject.NULL)
             .put(
                 "open",
                 open?.let { JSONObject().put("profile", it.profile).put("switched", it.switched).put("health", it.health.name) }
@@ -2715,6 +2741,13 @@ class DebugBridgeReceiver :
                 val mode = intent.getStringExtra("mode")
                 speech.lines = LineMode.entries.firstOrNull { it.name.equals(mode, ignoreCase = true) }
                     ?: return reply("error", "mode is one of ${LineMode.entries.joinToString { it.name.lowercase() }}")
+            }
+
+            "captions" -> {
+                // `--ez on true|false`: a live call's CC button (C-3.7-5), remembered from call to call as the
+                // button's own choice is; read as the peer's audio comes, so a call up now is captioned from here on.
+                val transcripts = getKoin().get<TranscriptStore>()
+                transcripts.setLiveCaptions(intent.getBooleanExtra("on", true))
             }
 
             "keyterms" -> {
@@ -2790,6 +2823,7 @@ class DebugBridgeReceiver :
             .put("lines", speech.lines.name.lowercase())
             .put("keyterms", JSONArray(speech.keyterms))
             .put("pcm", lastPcm ?: JSONObject.NULL)
+            .put("liveCaptions", getKoin().get<TranscriptStore>().liveCaptions.first())
             .put(
                 "transcript",
                 getKoin()
@@ -2903,6 +2937,16 @@ class DebugBridgeReceiver :
             if (bytes.size >= WAV_HEADER && String(bytes, 0, 4, Charsets.US_ASCII) == "RIFF") buffer.position(WAV_HEADER)
             val shorts = buffer.slice().order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
             FloatArray(shorts.remaining()) { shorts.get(it) / PCM_FULL_SCALE }
+        }.getOrNull()
+
+    // A raw 16-bit little-endian mono file (or a WAV of one, its header skipped) as samples; null when it won't read.
+    private fun readShorts(file: File): ShortArray? =
+        runCatching {
+            val bytes = file.readBytes()
+            val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+            if (bytes.size >= WAV_HEADER && String(bytes, 0, 4, Charsets.US_ASCII) == "RIFF") buffer.position(WAV_HEADER)
+            val shorts = buffer.slice().order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
+            ShortArray(shorts.remaining()).also(shorts::get)
         }.getOrNull()
 
     /** The walkie's diagnostics card as numbers (§3.11): what `CallActivity` draws, null where not yet measured. */
