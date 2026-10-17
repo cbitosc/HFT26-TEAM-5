@@ -12,6 +12,7 @@ import app.getknit.knit.call.CallReach
 import app.getknit.knit.call.CallReachRule
 import app.getknit.knit.call.CallSignals
 import app.getknit.knit.call.CallTimings
+import app.getknit.knit.call.CallToneSync
 import app.getknit.knit.call.CallWalkie
 import app.getknit.knit.call.CaptureHealth
 import app.getknit.knit.call.CaptureJournal
@@ -51,6 +52,7 @@ import app.getknit.knit.ui.call.TalkPath
 import app.getknit.knit.ui.call.TalkPlayer
 import app.getknit.knit.ui.call.TalkRecorder
 import app.getknit.knit.ui.call.TelecomCalls
+import app.getknit.knit.ui.call.ToneGeneratorPlayer
 import app.getknit.knit.ui.call.WalkieTalk
 import app.getknit.knit.ui.call.WebRtcCallMedia
 import app.getknit.knit.ui.callsettings.CallSettingsViewModel
@@ -115,6 +117,11 @@ private fun callGraph(): Module =
         single<SystemCalls> { get<TelecomCalls>() }
         single<CallControl> { get<CallManager>() }
         single { SystemCallSync(calls = get(), system = get(), scope = get<CoroutineScope>(), log = { Log.i(TAG, it) }) }
+        // C-3.13-14: the caller's ringback, busy and end tones, which the system plays none of for a self-managed call.
+        single {
+            val scope = get<CoroutineScope>()
+            CallToneSync(calls = get(), player = ToneGeneratorPlayer(scope, log = { Log.w(TAG, it) }), scope = scope)
+        }
         // §3.10 (ADR 2026-10.kxnw): a call between neighbours rides a Wi-Fi Direct group, on the radio the transfer
         // shares through one lease. "Directly linked" is the transfer's own gate, a mesh neighbour now.
         single {
@@ -342,6 +349,7 @@ fun startCallsIfWired(koin: Koin) {
     CoroutineScope(SupervisorJob() + Dispatchers.Default).launch {
         // First: a call that rings before the system holds it has no route but the one the phone was left in.
         runCatching { koin.get<SystemCallSync>().start() }.onFailure { Log.w(TAG, "system calls not started", it) }
+        runCatching { koin.get<CallToneSync>().start() }.onFailure { Log.w(TAG, "call tones not started", it) }
         runCatching { koin.get<CallController>().start() }.onFailure { Log.w(TAG, "calls not started", it) }
         runCatching { koin.get<CallLog>().start() }.onFailure { Log.w(TAG, "call records not started", it) }
         if (WALKIE_WIRED) runCatching { koin.get<WalkieTalk>().start() }.onFailure { Log.w(TAG, "walkie not started", it) }

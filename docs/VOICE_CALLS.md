@@ -787,6 +787,7 @@ scope, never on the inbound path. `ui/call/TelecomCalls` is the one importer of 
 | **C-3.13-11** | A live call on the earpiece, from dialing to reconnecting, holds the proximity wake lock, so the screen goes dark and ignores touches while the phone is at the ear, wherever the user left the call screen. It never does while an incoming call rings, for a walkie, or on any other route; leaving the earpiece gives the screen back at once. A call that ends keeps a dark screen dark until the phone leaves the ear. |
 | **C-3.13-12** | A live call records from one of two profiles: `VOICE_COMMUNICATION` with the platform's echo canceller and noise suppressor, or the fallback, `VOICE_RECOGNITION` with those off so WebRTC runs its own. A generic system image over an older vendor opens every call on the fallback: its vendor lacks the VoIP record route and hands the call zeros. So does a phone where a call went silent, until the app or the OS updates. The audio module is rebuilt for a new profile between calls, never under an open one. ADR 2026-10.kw29. |
 | **C-3.13-13** | A call's microphone is watched. Three seconds of digital silence while unmuted, or a record error, is a dead microphone, unless the platform muted or silenced it. On the standard profile the call then records from a recorder of its own (`VOICE_RECOGNITION`, then `MIC`) for the rest of the call, with no renegotiation, and the next calls open on the fallback. A microphone dead with nowhere further to switch, or silenced, is the call screen's note. |
+| **C-3.13-14** | The system plays no tones for a self-managed call, so the caller's phone plays its own on the voice-call stream, under Telecom's route. Ringback sounds only once the callee's `RINGING` is back, never while the call only dials. A call that never connected plays busy when the callee declined or was busy, and congestion when no route, the media or an error ended it. A connected call that the peer or the path ended plays one short tone. A hang-up, a ring-out and a walkie play nothing. |
 
 The system shows the peer's label as the call's name, and `knit:<node id>` as its address. VoIP calls stay out of the
 system call log. A call's line in its thread is §3.12's.
@@ -866,6 +867,8 @@ servers a call would use, and never the username or password of an own server.
     and the watch (zeros, a mute, a silenced client, a record error), `CaptureTapTest` for the buffers between a call's
     end and the module's stop, `CallStatsReaderTest` for the two audio levels, and `SystemImageTest` for the image that
     opens on the fallback.
+  - The caller's tones (C-3.13-14): `CallTonesTest` for which step plays what, an end heard once, and the sync cutting
+    a tone when the call moves on.
   - A phone that may not host (C-3.10-1, ADR 2026-10.w3dw): `DirectHostGuardTest`, `DirectWifiLeaseTest` and
     `DirectCallPathTest`'s non-hosting caller.
   - Stale `OFFER` → missed call; `CANCEL` before `OFFER` → no alert.
