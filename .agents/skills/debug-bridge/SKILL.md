@@ -79,7 +79,8 @@ done
 | Do two nodes carry the same custody? | `STORE` on each | `liveFingerprint` equal across devices (never `allFingerprint`); `digestVersion == liveFingerprint` on each |
 | Which frame is stranded? | `STORE` | `allIds` sorted per device, then `comm` between devices |
 | Is the Internet plane converged? | `SPOOL` | per scope `local == spool`, `invalid` 0, `lastError` empty, `connected` |
-| Will a relay take this phone's photos? | `SPOOL` | per spool `uploads` (`open`, `locked:<why>`, `spent`) beside `entGates` |
+| Will a relay take this phone's photos? | `SPOOL` | per spool `uploads` (`open`, `locked:<why>`, `spent`) beside `entGates`; `uploadLimitChunks` for the ticket's `am` |
+| Is a free ticket coming? (experimental) | `SPOOL` | per spool `freeKey` (`none`/`asking`/`held`/`declined`/`backoff:<ms>`) and `freeIssuer` |
 | Is a DM session healthy? | `RATCHET` | `hasSession` and `confirmed`; `peerPrekeyPinned` before any reset |
 | LoRa range or airtime? | `LORA` | `loraSent`/`loraReceived`, `loraNakByReason` |
 | Why didn't a transfer start? | `XFER` | `refusal` **first**, then the live transfers |

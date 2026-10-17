@@ -124,7 +124,24 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   dump shows `held`, the `issuer` origin, the last `answer` (`ok`/`unknown-key`/`ended`, null before one), `endsAt`
   (epoch ms), `failures` (asks in a row with no verdict) and `nextAskAt` / `nextAskInMs` (null when parked by
   `unknown-key`) — never the key or the ticket. Logcat under `ScopeSync`: `<host>: ticket fetched from <issuer>
-  (exp …)` or `<host>: ticket ask: unknown-key|ended (endsAt …)|no verdict (<reason>)`.
+  (exp …)` or `<host>: ticket ask: unknown-key|ended (endsAt …)|no verdict (<reason>)|unavailable (retry after …)`.
+  **Free tickets** (`docs/VOICE_CALLS.md` C-7.6-32 to C-7.6-38): `--es url <spoolUrl> --es freeIssuer
+  <https://host[:port]|clear>` sets the **free issuer** for that relay's host (only the seeded `lax.spool.getknit.app`
+  ships with one; the lab's `lab.lax.spool.getknit.app` takes `https://anywhere.getknit.app`), `clear` going back to
+  the seeded one; `--es url <spoolUrl> --es freeConsent <allow|decline|clear>` answers the one-time notice for that
+  host without the UI (`decline` forgets a free key held there, as the relay row's switch does; `clear` makes the
+  notice ask again); `--ei mine <bits>` times one account stamp on this phone, off the network (the reply's `mine`:
+  `bits`, `n`, `ms`). With `freeIssuer` or `freeConsent` the `url` only names the relay. Each spool then also carries
+  `uploadLimitChunks` (the most chunks one of this phone's attachments may have there under the live files ticket's
+  `am`, or null for no limit beyond `maxAttachBytes`), `freeIssuer` (the origin, or null) and `freeKey`: `none`,
+  `asking` (an account request or a free key's swap is running), `held`, `declined` or `backoff:<epoch ms>` (the
+  account route's next ask). `ticketKey.free` is true for a free key, and `ticket` shows no `am` — read it off the
+  relay row's ticket line (`up to 262 kB each, 1.3 MB a day`). A free key asks only while an upload waits: logcat
+  `<host>: an upload waits for a ticket`, then `<host>: mined a <bits>-bit account stamp in <ms> ms`, `<host>: free
+  account made at <issuer>`, `<host>: ticket fetched …`; a refusal reads `<host>: free account not made: <word>; next
+  ask after <epoch ms>`, a forgotten key `<host>: free key forgotten`. An attachment over the ticket's `am` reads
+  `<host>: an attachment is over this ticket's limit (<n> chunks); not uploaded`, and a photo fitted at staging
+  `AttachmentStore: photo fitted to <bytes> B: <before> → <after> B at <px> px, q<quality>`.
   The dump's `disabled` array is the parked set, and a parked URL stays in `configured` while leaving
   `spools[]` within one 60 s `ScopeSync` reconcile tick as its worker stops (that disappearance is the
   oracle that parking actually closed the socket). `drop` clears a parked flag too, so a re-added URL

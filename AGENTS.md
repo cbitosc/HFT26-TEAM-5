@@ -573,6 +573,13 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   `aput` while fetching is untouched; a `budget` spends the ticket's pseudonym per relay host in memory, never in the
   verdict journal; and the sender's "Nearby only" reads `Locked` only when no connected relay takes this phone's
   uploads. The gate reading and the marker ship in every build; the readouts stay behind `CALLS_WIRED`.
+  Before touching a ticket's `am` (`SpoolTicket.am` / `maxChunks`, `SpoolConnection.uploadLimitChunks`,
+  `LocalPass.TOO_LARGE`, `ChunkPut`, `RelayFacts.uploadRooms` / `UploadRoom`), free tickets (`mesh/spool/FreeTickets`,
+  `TicketRefresher.uploadWanted` / `freeDueAt`, `data/relay/FreeUploads`, `FreeUploadsNotice`, the `spool_free_` keys,
+  `free_issuers` / `free_issuer_am`) or `AttachmentStore.fitted`: READ ADR 2026-10.s3ep and `docs/VOICE_CALLS.md` §2.6
+  (C-7.6-32 to C-7.6-38) — an attachment over `am` is never `aput` and `size` locks nothing; a free key asks only
+  while an upload waits (no 6 h margin, the hour floor kept) and only after the person's yes; it never rides a backup
+  or asks for a badge; a photo is fitted at staging, to the hint only with a free key or none.
 - **When creating or modifying anything under `app/src/test/java/app/getknit/knit/mesh/lab/`:** keep
   `scripts/lab-lint.py` clean (a `PostToolUse` hook runs it on every scenario edit, `lab-chaos.sh` before every sweep,
   both CIs as `lab-lint`; a deliberate finding carries `// lab-lint: allow <rule> — <why>`), then RUN

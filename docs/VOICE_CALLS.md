@@ -308,6 +308,9 @@ the address's count.
 > asks first.
 >
 > **Why a free key is not backed up.** It is anonymous and cheap to make again. A restored phone makes its own.
+>
+> **Records.** Client: knit-next ADR 2026-10.s3ep. Issuer: knit-spool-coordinator ADR 2026-10.3aqb, which holds the free
+> tier's values and the privacy policy the route keeps.
 
 ### 2.7 Casts: a walkie's chunks through a spool (experimental)
 

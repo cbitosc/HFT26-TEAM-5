@@ -252,6 +252,7 @@ carries; never renumber an old one.
 | [2026-10.r99s](decisions/2026-10-r99s-supporter-badges-ride-the-sealed-profile-only.md) | Supporter badges ride the sealed profile only, verified on display | profile, wire, anywhere, ui |
 | [2026-10.rn9j](decisions/2026-10-rn9j-mine-spool-pow-stamps-only-when-a-spool-demands-one.md) | Mine spool PoW stamps only when a spool demands one | spool, pow |
 | [2026-10.ryak](decisions/2026-10-ryak-the-ble-presence-advert-runs-at-full-power.md) | The BLE presence advert runs at full power | ble, mesh, power |
+| [2026-10.s3ep](decisions/2026-10-s3ep-a-free-ticket-lets-a-phone-send-small-photos-through-a-files-gated-relay.md) | A free ticket lets a phone send small photos through a files-gated relay | calls, spool, tickets, attachments |
 | [2026-10.swst](decisions/2026-10-swst-art-s-whitespace-is-the-law-for-both-ports.md) | ART's whitespace is the law for both ports | text, interop, testing |
 | [2026-10.unqn](decisions/2026-10-unqn-a-clean-bounded-picture-is-stripped-not-re-encoded.md) | A clean, bounded picture is stripped, not re-encoded | attachments, privacy |
 | [2026-10.w3dw](decisions/2026-10-w3dw-a-phone-that-cannot-survive-hosting-a-wi-fi-direct-group-never-hosts-one.md) | A phone that cannot survive hosting a Wi-Fi Direct group never hosts one | wifi-direct, transfer, calls, reliability |

@@ -58,6 +58,7 @@ import app.getknit.knit.data.settings.CallTombStore
 import app.getknit.knit.data.settings.ContributionTotals
 import app.getknit.knit.data.settings.SettingsKeys
 import app.getknit.knit.data.settings.SettingsStore
+import app.getknit.knit.data.settings.TicketKeyStore
 import app.getknit.knit.identity.Identity
 import app.getknit.knit.identity.NodeId
 import app.getknit.knit.mesh.BlobExchange
@@ -200,6 +201,9 @@ class MeshLab {
         // same node id, its own database and settings; the two can never link (`LabTransport.connect` refuses
         // its own node id, as the radios do), they only meet each other's frames through a third node.
         sameIdentityAs: LabNode? = null,
+        // A free issuer for the node's relay (docs/VOICE_CALLS.md §2.6): the node holds ticket keys, the person has
+        // allowed free tickets, and the refresher makes a free account when an upload waits. Null wires no tickets.
+        freeIssuer: LabFreeIssuer? = null,
     ): LabNode {
         val started = System.nanoTime()
         val node =
@@ -216,6 +220,7 @@ class MeshLab {
                 pages,
                 seedIdentity = sameIdentityAs?.identityBytes(),
                 chaos = chaos,
+                freeIssuer = freeIssuer,
             )
         nodes += node
         node.boot()
@@ -984,6 +989,8 @@ class LabNode internal constructor(
     seedIdentity: ByteArray? = null,
     // The lab's scheduling noise ([LabChaos]): this node's dispatchers and pipes run under it. Null = none.
     private val chaos: LabChaos? = null,
+    // A free issuer for this node's relay ([MeshLab.node]); null wires no tickets.
+    private val freeIssuer: LabFreeIssuer? = null,
 ) {
     /** [delegate], or its chaos-lagged form when the lab runs under [chaos]. */
     private fun dispatcher(delegate: CoroutineDispatcher): CoroutineDispatcher = chaos?.dispatcher(delegate) ?: delegate
@@ -1013,6 +1020,9 @@ class LabNode internal constructor(
     private val settingsScope = CoroutineScope(SupervisorJob() + dispatcher(Dispatchers.IO))
     private val dataStore = PreferenceDataStoreFactory.create(scope = settingsScope) { File(dir, "settings.preferences_pb") }
     val settings = SettingsStore(dataStore)
+
+    /** The ticket keys and the free half (docs/VOICE_CALLS.md §2.6), seeded with [freeIssuer] for its audience. */
+    val ticketKeys = TicketKeyStore(dataStore, freeIssuer?.let { mapOf(it.aud to it.origin) }.orEmpty())
 
     /** The holder's side of the supporter badge (ADR 2026-10.r99s), in the same settings file, kept across restarts. */
     val badges = BadgeStore(dataStore)
@@ -1288,6 +1298,10 @@ class LabNode internal constructor(
                 ingressBudget = IngressBudget(burst = limits.ingressBurst, perMinute = limits.ingressPerMinute, clock = now),
                 spoolDialer = spool,
                 commons = commons,
+                ticketKeys = freeIssuer?.let { ticketKeys },
+                ticketIssuer = freeIssuer,
+                freeKeys = freeIssuer?.let { ticketKeys },
+                accountIssuer = freeIssuer,
                 badgeJournal = badges,
                 badgePins = listOf(BadgeKeys.RFC8032_TEST1),
                 onCallSignal = { sender, payload, sentAt -> calls.onSignal(sender, payload, sentAt) },

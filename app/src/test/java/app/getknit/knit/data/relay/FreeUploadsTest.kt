@@ -119,6 +119,31 @@ class FreeUploadsTest {
     }
 
     @Test
+    fun aCustomerKeyWithNoTicketYetIsNotFittedToTheHint() {
+        // Contract revision 4: a customer key goes to the same issuer origin, so the hint would squeeze a paying
+        // customer's first photo for nothing.
+        val key = HeldKey("https://anywhere.getknit.app", "kak1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+        assertNull(chunks(status(), keys = mapOf("lax.spool.getknit.app" to key)))
+        assertNull(chunks(status(), keys = mapOf("lax.spool.getknit.app" to key), consent = mapOf("lax.spool.getknit.app" to true)))
+    }
+
+    @Test
+    fun declinedOrTurnedOffFreeTicketsAreNotFittedToTheHint() {
+        assertNull(chunks(status(), consent = mapOf("lax.spool.getknit.app" to false)))
+        assertNull(chunks(status(uploads = SpoolUploads.Locked(SpoolUploads.EXPIRED)), consent = mapOf("lax.spool.getknit.app" to false)))
+    }
+
+    @Test
+    fun aHeldTicketsAmBeatsTheHint() {
+        val free = HeldKey("https://anywhere.getknit.app", "kak1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", free = true)
+        val ticket = SpoolTicketsTest.ticket(aud = "lax.spool.getknit.app", fl = SpoolTicket.FL_FILES, am = 2L * 49_152)
+        val held = mapOf("lax.spool.getknit.app" to StoredSpoolTicket(ticket.text, null))
+        assertEquals(2, chunks(status(), held = held, keys = mapOf("lax.spool.getknit.app" to free)))
+        // And with a free key but no ticket ever held, the hint.
+        assertEquals(5, chunks(status(), keys = mapOf("lax.spool.getknit.app" to free)))
+    }
+
+    @Test
     fun aPhotosFitIsItsChunksLessTheSeal() {
         assertEquals(245_732, photoFitBytes(5))
         assertEquals(0, photoFitBytes(0))
