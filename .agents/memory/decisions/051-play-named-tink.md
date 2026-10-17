@@ -67,3 +67,12 @@ else, and the risk this ADR is really about arrives through a dependency. So `bu
 every `BitmapFactory.decode*` whose descriptor lacks a `BitmapFactory$Options`, prints the containing class
 and method, and fails above a budget of 2. Verified in both directions — 4 and FAIL before the fix, 2 and OK
 after, with the two survivors carrying the `IconCompat` signature.
+
+## Amendment 2026-10-16 — the budget is 3: Media3's TTML image cue (ADR 2026-10.hmfe)
+
+Media3, which the short-video encoder brought in, adds one unbounded decode: `TtmlSubtitle.getCues` calls
+`BitmapFactory.decodeByteArray` on a base64 image cue from a TTML subtitle track. It was confirmed from
+the dexdump, which shows the `Base64.decode` feeding the call and the `Cue` it builds; the R8 mapping
+named an unrelated CameraX builder. The only path to it is the encoder's extractor, on the sender, reading
+a file the user picked on their own phone. No peer supplies those bytes: a received video plays through
+the platform `MediaPlayer`, never Media3. The budget is now 3, and a fourth hit is a regression.

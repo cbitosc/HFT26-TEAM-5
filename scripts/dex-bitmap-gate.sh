@@ -21,17 +21,20 @@
 # contains it — feed those to `retrace` against app/build/outputs/mapping/release/mapping.txt, but treat
 # the answer as a hint, not a fact, and read the surrounding `dexdump -d` instead.
 #
-# THE BUDGET is 2, and both are androidx.core's own: `IconCompat.toIcon(Context)` decodes a URI-backed icon
+# THE BUDGET is 3. Two are androidx.core's own: `IconCompat.toIcon(Context)` decodes a URI-backed icon
 # on its TYPE_URI / TYPE_URI_ADAPTIVE_BITMAP branch, and `ShortcutManagerCompat.pushDynamicShortcut` inlines
 # the same method. Knit only ever builds icons with `IconCompat.createWithAdaptiveBitmap(bitmap)`, so that
-# branch is dead for us — but it is reachable on paper, so R8 keeps it and the scanner counts it. A third
-# hit is a real regression: ours, or a new dependency's.
+# branch is dead for us — but it is reachable on paper, so R8 keeps it and the scanner counts it.
+# The third is Media3's (ADR 051 amendment, ADR 2026-10.hmfe): `TtmlSubtitle.getCues` decodes a base64 image
+# cue out of a TTML subtitle track. Only the video encoder's extractor reaches it, on the sender, over a file
+# the user picked on their own phone; a received video plays through the platform MediaPlayer, never Media3.
+# A fourth hit is a real regression: ours, or a new dependency's.
 #
 # Usage: scripts/dex-bitmap-gate.sh <apk> [max-unbounded]
 set -euo pipefail
 
 APK="${1:?usage: dex-bitmap-gate.sh <apk> [max-unbounded]}"
-MAX_UNBOUNDED="${2:-2}"           # ADR 051 landed at 2, both in androidx.core (see header).
+MAX_UNBOUNDED="${2:-3}"           # ADR 051 landed at 2, both in androidx.core; Media3 TTML made it 3 (see header).
 
 # Resolved the same way r8-dex-gate.sh resolves apkanalyzer: PATH first, else the SDK this build installs.
 SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"

@@ -73,7 +73,9 @@ video is about 12 minutes per copy (ADR 2026-10.8jwn's 4 KiB/s), and every neigh
 7. **Playback** is the platform `MediaPlayer` over `ByteArrayMediaSource` on a `TextureView`, the voice note's
    in-memory path; Save files it under `Movies/Knit`. No ExoPlayer.
 
-**What it costs.** About 4.6 MB of Media3 classes before R8, pure Java with no `.so`, minCompileSdk 36. An encode takes
+**What it costs.** About 4.6 MB of Media3 classes before R8, pure Java with no `.so`, minCompileSdk 36. After R8
+the release dex is 8.05 MB, so ADR 050's byte ceiling goes to 9 MB. Media3's TTML image cue is a third unbounded
+decode, reached only from a sender's own pick, so ADR 051's budget goes to 3 (both amendments dated 2026-10-16). An encode takes
 real time. The seal does not pad, so a sealed video DM is about 6.5 KB longer than any other attachment DM: a carrier
 learns from the frame length that it carries a video, the distinction ADR 035 hid by sealing the MIME — the blob's own
 size hints at it anyway, and padding sealed content is a decision of its own. An encode takes real time — 18.5 s for a 61 s 720p source on the Pixel 3, 11 s for 28 s of 1080p on the emulator — behind a

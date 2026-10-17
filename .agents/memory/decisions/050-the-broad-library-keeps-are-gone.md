@@ -93,3 +93,12 @@ risk is not worth taking); the baseline profile was **not** regenerated, because
 symbols that did not change and `compileReleaseArtProfile` reported none unmatched; and the 15% gate
 threshold is a judgement call with no principle behind it beyond "far enough above 4.6% never to
 false-alarm, far enough below 44.3% to catch this class of regression".
+
+## Amendment 2026-10-16 — the byte ceiling is 9 MB (ADR 2026-10.hmfe)
+
+`r8-dex-gate.sh` also fails on total defined dex bytes, a ceiling that went from 7 MB to 8 MB at 7.02 MB
+(b41da399). Media3 Transformer, effect and muxer, which the short-video encoder needs, put the release build
+at 8,051,605 bytes. That growth is the library's own classes, renamed and shrunk, not a keep rule, and the
+named-package share stays well under its 15% alarm. So the ceiling is now 9,000,000, about 12% above
+the measured size, as the last raise was. Media3 cannot be trimmed much further:
+`Transformer.Builder.build()` refers to the default extractors and codecs directly, so R8 has to keep them.
