@@ -259,6 +259,7 @@ One line per invariant, by subsystem, with the ADR to read. Not exhaustive and n
   only your own signed frame removes or re-adds you, after the recorded leave (GFS §1, v6fu, mjaj).
 - **Sealed ctls.** A ctl never v1-wraps; a tick is sealed once and re-sent verbatim on a doubling backoff; the
   sealed profile carries presentation only, ordered by the profile version (018, 053, 020).
-- **Export.** Only `pairwiseRoot` exports, under the mutex, confirmed sessions only (019, 032).
+- **Export.** Only `pairwiseRoot` exports, under the mutex, confirmed sessions only (019, 032) — and our own
+  unanswered reset over a root it replaced, whose retiring scope takes that reset alone (2026-10.j67x).
 - **Self.** A node never pins its own key and never holds a session or a seed row with itself (45763fb6, 8333c858).
 - **Locks.** Transaction outer, mutex inner, one mutex for both facades (051284eb).

@@ -93,6 +93,38 @@ class ScopeRegistryTest {
             assertFalse(afterDrain[0].retiring)
         }
 
+    /**
+     * C-3.1-4 (ADR 2026-10.j67x, #182): our own reset, unanswered, over a root it replaced. The peer is still on
+     * the replaced root, so its scope stays — retiring, carrying the reset — beside the new root's, where the
+     * peer's answer lands. Before this both left the table and a relay-only pair had no scope at all.
+     */
+    @Test
+    fun `our unanswered reset keeps the scope it replaced, carrying the reset, beside the new one`() =
+        runTest {
+            val eph = ByteArray(32) { 9 }
+            val entry = ScopeRoots(bob, root(3), prevPairwiseRoot = root(1), prevRootExpiresAt = 5_000L, pendingResetInit = eph)
+            val scopes = registry(listOf(entry)).scopes(now = 4_999L)
+            assertEquals(2, scopes.size)
+            val (fresh, replaced) = scopes
+            assertArrayEquals(ScopeCrypto.dmScopeId(root(3), me, bob), fresh.id)
+            assertFalse(fresh.retiring)
+            assertArrayEquals("the new scope takes the pending reset too, and no other of ours", eph, fresh.resetInit)
+            assertArrayEquals(ScopeCrypto.dmScopeId(root(1), me, bob), replaced.id)
+            assertTrue(replaced.retiring)
+            assertArrayEquals("the replaced scope takes the reset", eph, replaced.resetInit)
+
+            // Past the drain the session is any other unconfirmed initiation: off the table until the answer.
+            assertTrue(registry(listOf(entry)).scopes(now = 5_000L).isEmpty())
+        }
+
+    @Test
+    fun `a confirmed replacement's retiring scope carries no reset`() =
+        runTest {
+            val entry = ScopeRoots(bob, root(3), prevPairwiseRoot = root(1), prevRootExpiresAt = 5_000L)
+            val scopes = registry(listOf(entry)).scopes(now = 0L)
+            assertEquals(listOf(null, null), scopes.map { it.resetInit })
+        }
+
     @Test
     fun `bounds default to the spec's constants so a stock spool clamps them to themselves`() =
         runTest {

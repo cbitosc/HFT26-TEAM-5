@@ -10,12 +10,18 @@ import app.getknit.knit.mesh.crypto.scope.ScopeCrypto
  * [prevPairwiseRoot] is the retiring session's export, live until [prevRootExpiresAt]: a replaced
  * session yields a new scope, and the old one stays derivable for the ratchet's drain window
  * (`docs/SPOOL_PROTOCOL.md` §3.1) so blobs already at a spool are still reachable.
+ *
+ * [pendingResetInit] is set while [pairwiseRoot] is our own reset, still unanswered, over [prevPairwiseRoot]
+ * (`RatchetSessions.pendingResetInit`, spec C-3.1-4): the init ephemeral of that reset, which both of the
+ * peer's DM scopes then carry ([Scope.resetInit]) — the retiring one's one refill (C-3.1-5), and the only
+ * flagged reset of ours either takes.
  */
 class ScopeRoots(
     val peerId: String,
     val pairwiseRoot: ByteArray,
     val prevPairwiseRoot: ByteArray? = null,
     val prevRootExpiresAt: Long = 0L,
+    val pendingResetInit: ByteArray? = null,
 )
 
 /**
@@ -61,7 +67,7 @@ class GroupScopeRoots(
 )
 
 /**
- * Derives the scope table: one scope per DM peer holding a confirmed ratchet session and one per group
+ * Derives the scope table: one scope per DM peer holding an exported ratchet session and one per group
  * holding a shared root, plus each one's retiring scope while its drain window is open. Pure — identity,
  * ratchet state and group roots are all injected suspend seams, so the derivation is unit-testable with
  * fixtures and carries no Android or Room dependency.
@@ -73,7 +79,14 @@ class GroupScopeRoots(
  * device and none on the receiver's. The two then never share a scope id, so the plane carries nothing
  * in either direction while both ends report a connected spool and no error. A **confirmed session** is
  * the bound that matters here — it costs a completed X3DH, which no stranger reaches unsolicited — and
- * `RatchetSessions.exportedRoots` already applies it.
+ * `RatchetSessions.exportedRoots` already applies it, with one named exception: **our own reset, still
+ * unanswered, over a root it replaced** (spec C-3.1-4, ADR 2026-10.j67x). The peer is still on that root and
+ * can learn the new one only from the reset, so both scopes stay: the new one active, for the answer the peer
+ * seals under it, and the replaced one retiring, for the peer's own frames and — the one refill C-3.1-5 allows
+ * it — the reset itself. Both carry the reset's init ([Scope.resetInit]): it is the only reset of ours either
+ * may take. The exception lasts while the replaced root drains: past its
+ * window the session is an ordinary unconfirmed initiation, and its peer leaves the table until it answers.
+ * Nothing a stranger sends starts it: a reset toward a peer we hold no session with replaces no root.
  *
  * **Pair scopes** (spec §3.5) are the third source: one per peer an intro is pending with, keyed by the
  * identity-derived pair secret rather than a session root. They are ordinary DM-form scopes — same
@@ -137,12 +150,13 @@ class ScopeRegistry(
     ): List<Scope> =
         roots()
             .flatMap { entry ->
+                val prev = entry.prevPairwiseRoot?.takeIf { entry.prevRootExpiresAt > now }
+                // Our unanswered reset exports only beside the root it replaced (C-3.1-4): once that drain closes
+                // it is any other unconfirmed initiation, and its peer stays off the table until the answer.
+                if (entry.pendingResetInit != null && prev == null) return@flatMap emptyList()
                 buildList {
-                    add(dmScope(me, entry.peerId, entry.pairwiseRoot, retiring = false))
-                    val prev = entry.prevPairwiseRoot
-                    if (prev != null && entry.prevRootExpiresAt > now) {
-                        add(dmScope(me, entry.peerId, prev, retiring = true))
-                    }
+                    add(dmScope(me, entry.peerId, entry.pairwiseRoot, retiring = false, resetInit = entry.pendingResetInit))
+                    if (prev != null) add(dmScope(me, entry.peerId, prev, retiring = true, resetInit = entry.pendingResetInit))
                 }
             }
 
@@ -162,12 +176,14 @@ class ScopeRegistry(
         peerId: String,
         pairwiseRoot: ByteArray,
         retiring: Boolean,
+        resetInit: ByteArray? = null,
     ) = Scope(
         id = ScopeCrypto.dmScopeId(pairwiseRoot, selfId, peerId),
         keys = ScopeCrypto.dmSealKeys(pairwiseRoot, selfId, peerId),
         bounds = bounds,
         retiring = retiring,
         peerId = peerId,
+        resetInit = resetInit,
     )
 
     private fun groupScope(

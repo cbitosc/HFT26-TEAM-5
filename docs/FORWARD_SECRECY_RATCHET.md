@@ -313,6 +313,29 @@ skipped-key path absorbs.
   a peer that has not yet seen the reset can adopt it from any of them. The peer answers each new init
   it opens with one sealed frame (`IntroSync`), because its re-seals reuse ids the resetter already
   holds and never reach the ratchet.
+- **A second reset over our own keeps the root the first replaced** (ADR 2026-10.j67x). When the sender
+  re-roots over its own reset, still unanswered and still draining the root it replaced, the new session's
+  `prevRoot` is that drained root (with its `prevRootWeAreInitiator`), not the first reset's root: the peer
+  is provably on the drained root, or drains it if it did adopt the first reset, while it may never have
+  derived the first reset's. The cost is the first reset's era — an answer the peer sealed under it is
+  lost — and the second reset is then adopted under the one-minute floor.
+- **The replaced era's own init, from before the reset, is no race** (ADR 2026-10.j67x). An unconfirmed
+  initiator that receives a peer init deriving its own `prevRoot` — the X3DH init that minted the root it
+  replaced, `prevRoot` still inside its drain — on a frame stamped before its session began (the frame's
+  `sentAt` more than `MAX_FUTURE_SKEW_MS` before its own `establishedAt`, the era gate's initiator rule, ADR
+  026) reads the frame under that root, read-only, and never resolves it as a race. A frame stamped since is
+  a peer still that root's unconfirmed initiator, which never heard our answer: it races as before (and a
+  smaller-id peer wins it and keeps its root, so we adopt it), or neither side would ever confirm. The gate
+  reads the peer's clock against ours, so it has two bounded edges: a peer clock slow by d > 5 min makes its
+  live frames sealed soon after our reset look predating — read read-only, neither side confirms until d − 5
+  min pass, within the 48 h drain, nothing lost — and a peer clock fast by d lets its stale frames from the
+  d − 5 min before our reset race, as before this rule. A confirmed winner that later takes a race loser's
+  own flagged reset as a replacement is #184. A re-root mints fresh state, so the old era's
+  anchor (`peerInitEphPub`) is gone, and the old era's init-bearing frames still re-serve from custody (24 h)
+  and from the drained root's spool scope (48 h, subscribed while our reset waits). Raced, a smaller-id peer
+  would "win" and the resetter adopt the root it left while the peer adopts its reset. A peer reset that
+  crossed ours carries a fresh ephemeral and derives a root of its own, so it still races. An init of an era
+  *older* than `prevRoot` is not covered (no anchor survives for it).
 - **A reset the peer would refuse is never sent** (ADR 2026-09.qerd). The receiver adopts a flagged init
   only a minute after the last replacement it adopted from this peer, and drops a refused one as a
   `DUPLICATE`; the sender has meanwhile purged the root the receiver is still on, and its own heuristic is
@@ -347,6 +370,26 @@ this surface is reserved for the registered `sealv = 2` epoch-keyed extension. E
 pairwise-shared per (direction, epoch) — the receiver derives the same `epochSecret` to decrypt —
 so either side could compute the other's seal keys for a scope when that extension lands.
 
+**Which sessions export** (ADR 019, ADR 032, ADR 2026-10.j67x; the consumer's rules are
+`docs/SPOOL_PROTOCOL.md` C-3.1-4 and C-3.1-5). The relay plane is handed `pairwiseRoot` of the active root
+and, while its 48 h drain is open, of `prevRoot`, for:
+
+- every **confirmed** session; and
+- one unconfirmed kind: **our own reset, still unanswered, over a root it replaced** — `weAreInitiator`, not
+  `confirmed`, `prevRoot` present, and `lastResetSentAt == establishedAt` (the reset's re-root stamps both with
+  the same clock reading; a plain first-send init leaves `lastResetSentAt = 0`, and a reset *marked* under a
+  plain init stamps it later). The export then also names that reset's init ephemeral (`initEphPub`), which is
+  how the plane tells the reset frame apart from the other frames of the session that carry the same init:
+  the flagged one, and only it, may be sealed into the drained root's scope, the one the peer is still on. It
+  holds only while `prevRoot` is inside its drain window, and ends when the session confirms (the answer
+  clears `initEphPub`) or the session is lost to a race (the winner's root is adopted, confirmed). After a
+  race we won it stands, with the loser's root in the `prevRoot` slot — the root that peer is on until it
+  adopts ours.
+
+Every other unconfirmed session exports nothing: a first-contact init (the spool spec's pair scope, its
+§3.5, carries it), and a reset that replaced no root (a restore's, or one toward a peer we never held a session with). A
+change to what a session exports is an event the plane re-derives on, our own reset and its answer included.
+
 ## 9. Security claim (honest, epoch-granular)
 
 Full compromise of a device at time T exposes, per DM conversation:
@@ -375,7 +418,7 @@ today); group/broadcast coverage (separate designs).
 | `MAX_EPOCH_NUMBER` | 2^24 | header sanity ceiling (unreachable by a real conversation) |
 | `MAX_EPOCH_JUMP` | 1024 | per-adoption epoch jump bound, once anchored |
 | `MAX_EPOCH_AGE_MS` | 24 h | custody TTL |
-| `PREV_ROOT_TTL_MS` | 48 h | 2× custody TTL |
+| `PREV_ROOT_TTL_MS` | 48 h | 2× custody TTL; restarts on each re-root over our own pending reset, which keeps the drained root (§7) — uncapped on purpose: the peer may still be on it, and the reset floors bound the chain |
 | recv-epoch / skipped-key sweep | 48 h after last use | 2× custody TTL |
 | skipped keys | ≤200/epoch, ≤2000 global | epoch cap; DoS bound |
 | local epoch privs | superseded+acked+48 h; keep newest 3; ≤16/peer; 30 d hard | the PFS window |

@@ -3,6 +3,8 @@ package app.getknit.knit.data.relay
 import app.getknit.knit.data.message.Conversations
 import app.getknit.knit.mesh.crypto.scope.ScopeCrypto
 import app.getknit.knit.mesh.protocol.Protocol
+import app.getknit.knit.mesh.spool.ScopeStatus
+import app.getknit.knit.mesh.spool.SpoolStatus
 import app.getknit.knit.ui.peer
 import org.junit.Assert.assertEquals
 import org.junit.Test
@@ -22,6 +24,53 @@ class RelayReachTest {
             coveredLabels = setOf("peer-a", "group-1"),
             maxAttachBytes = 16 * 1024 * 1024,
         )
+
+    private fun spool(vararg scopes: ScopeStatus) =
+        SpoolStatus(url = "wss://relay.test/spool/v1", connected = true, powBits = 0, lastError = null, scopes = scopes.toList())
+
+    private fun dmScope(
+        hex: String,
+        retiring: Boolean = false,
+        pendingReset: Boolean = false,
+    ) = ScopeStatus(
+        scopeHex = hex,
+        label = "peer-a",
+        localCount = 0,
+        spoolCount = 0,
+        converged = true,
+        invalidCount = 0,
+        retiring = retiring,
+        pendingReset = pendingReset,
+    )
+
+    /**
+     * ADR 2026-10.j67x: while our reset is unanswered the peer's live scope is the new root's, which the peer derives
+     * only once it adopts the reset — "Not covered by relays yet", and no relay promise for its pictures. The answer
+     * clears the flag and the thread is covered again.
+     */
+    @Test
+    fun `a thread whose only live scope is our unanswered reset is pending, then covered once answered`() {
+        val waiting =
+            covered.copy(
+                coveredLabels =
+                    coveredLabelsOf(
+                        listOf(spool(dmScope("new", pendingReset = true), dmScope("old", retiring = true, pendingReset = true))),
+                    ),
+            )
+        assertEquals(RelayReach.Pending, reachFor("peer-a", waiting))
+        assertEquals(AttachmentRelay.Silent, attachmentReach("peer-a", 1024, waiting))
+        assertEquals(AttachmentWait.Nearby, attachmentWait("peer-a", waiting))
+
+        val answered = covered.copy(coveredLabels = coveredLabelsOf(listOf(spool(dmScope("new"), dmScope("old", retiring = true)))))
+        assertEquals(RelayReach.Covered, reachFor("peer-a", answered))
+        assertEquals(AttachmentRelay.Relayable, attachmentReach("peer-a", 1024, answered))
+        assertEquals(AttachmentWait.Relay, attachmentWait("peer-a", answered))
+    }
+
+    @Test
+    fun `a retiring scope alone covers nothing`() {
+        assertEquals(emptySet<String>(), coveredLabelsOf(listOf(spool(dmScope("old", retiring = true)))))
+    }
 
     @Test
     fun `plane off says nothing at all`() {

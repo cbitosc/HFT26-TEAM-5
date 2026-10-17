@@ -1051,7 +1051,7 @@ class InboundPipeline(
         val thread = env.recipientId.orEmpty()
         val aad = MessageCrypto.header(env.id, env.senderId, env.sentAt, thread)
         val now = System.currentTimeMillis()
-        val peek = ratchet.peekOpen(me, env.senderId, peerIkPub, wireHeader, nonce, enc.ct, aad, now)
+        val peek = ratchet.peekOpen(me, env.senderId, peerIkPub, wireHeader, nonce, enc.ct, aad, now, env.sentAt)
         if (peek !is RatchetEngine.OpenOutcome.Opened) {
             onRatchetFailure(env, peek, me, now, authenticated = signed)
             return
@@ -1074,7 +1074,7 @@ class InboundPipeline(
         val commit: suspend (suspend () -> Unit) -> Boolean = { onOpened ->
             val committed =
                 db.withWriteTransaction {
-                    ratchet.commitOpen(me, env.senderId, peerIkPub, wireHeader, nonce, enc.ct, aad, now, onOpened)
+                    ratchet.commitOpen(me, env.senderId, peerIkPub, wireHeader, nonce, enc.ct, aad, now, env.sentAt, onOpened)
                 }
             // After the transaction and outside the session lock: the hook may seal an answer of its own.
             if (committed) onPeerFrameOpened(env.senderId, wireHeader.init?.eph, wireHeader.flags and RatchetHeader.FLAG_RESET != 0)

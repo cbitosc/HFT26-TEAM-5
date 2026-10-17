@@ -577,7 +577,11 @@ class MeshLab {
     suspend fun awaitDmScope(
         node: LabNode,
         peer: LabNode,
-    ) = awaitScope(node, peer.nodeId, peer)
+        // A scope the wait must not be satisfied by — the one the pair was on before a reset moved it (ADR
+        // 2026-10.j67x): the table re-derives on its own coroutine, so the old scope is still listed, converged,
+        // for a moment after the root moved.
+        notScope: String? = null,
+    ) = awaitScope(node, peer.nodeId, peer, notScope = notScope)
 
     /** Waits until [node]'s relay lists the scope of [groupId] as converged; [others] are listed on failure. */
     suspend fun awaitGroupScope(
@@ -590,8 +594,18 @@ class MeshLab {
         node: LabNode,
         label: String,
         vararg peers: LabNode,
+        notScope: String? = null,
     ) {
-        val ok = tryAwait(1, timeoutMs = SPOOL_AWAIT_MS) { if (node.scopeStatus(label)?.converged == true) 1 else 0 }
+        // The live scope only: a retiring one is drained and never converges on what the pair says now.
+        val ok =
+            tryAwait(1, timeoutMs = SPOOL_AWAIT_MS) {
+                val live =
+                    node.manager
+                        .spoolStatus()
+                        .flatMap { it.scopes }
+                        .firstOrNull { it.label == label && !it.pair && !it.retiring }
+                if (live != null && live.scopeHex != notScope && live.converged) 1 else 0
+            }
         if (ok) return
         val peer = peers.firstOrNull() ?: node
         // A scope that will not converge is nearly always one frame id held as two byte-variants (the
@@ -663,6 +677,28 @@ class MeshLab {
             assertConverged(listOf(a, b), atLeast = 2) { it.dmWith(if (it === a) b else a) }
         }
         return Triple(alice, bob, carol)
+    }
+
+    /**
+     * Takes [node] off its relay and waits until no worker is left — a phone with no route to the Internet, its
+     * radios untouched, and a restart meanwhile keeps it off. [rejoinRelay] brings it back. The settings write is the
+     * relay editor's own switch.
+     */
+    suspend fun leaveRelay(node: LabNode) {
+        node.relayLeft = true
+        node.settings.setSpoolEnabled(false)
+        node.manager.refreshRelays()
+        val gone = tryAwait(1) { if (node.manager.spoolStatus().isEmpty()) 1 else 0 }
+        assertTrue("${node.name}'s relay workers never stopped: ${node.manager.spoolStatus().map { it.url }}", gone)
+    }
+
+    /** Puts [node] back on its relay and waits for the hello. */
+    suspend fun rejoinRelay(node: LabNode) {
+        node.relayLeft = false
+        node.settings.setSpoolEnabled(true)
+        node.manager.refreshRelays()
+        val back = tryAwait(1, timeoutMs = SPOOL_AWAIT_MS) { if (node.manager.spoolStatus().any { it.connected }) 1 else 0 }
+        assertTrue("${node.name} never reconnected to its relay", back)
     }
 
     /** Waits until [node]'s spool has heard from [peer] recently enough for the mesh to route on it. */
@@ -986,6 +1022,13 @@ class LabNode internal constructor(
     /** The composite the manager runs on when the node has a board ([lora] beside the radio), else null. */
     private var composite: CompositeMeshTransport? = null
 
+    /** Set by [MeshLab.leaveRelay] until [MeshLab.rejoinRelay]: a [restart] meanwhile boots with the relay still off. */
+    @Volatile
+    internal var relayLeft = false
+
+    /** Whether a boot opts this node into its relay, as the relay editor would. */
+    private fun optsIntoRelay(): Boolean = spool != null && spoolOptIn && !relayLeft
+
     /** Everything the LoRa plane logged this boot — `lora tx <label> parts=N` lines are the air oracle. */
     val loraLog = CopyOnWriteArrayList<String>()
     lateinit var manager: MeshManager
@@ -1039,7 +1082,7 @@ class LabNode internal constructor(
         metrics = MeshMetrics()
         // The Internet plane is opted into through the same two settings the relay editor writes; the
         // settings file persists, so a restart() dials the same spool again.
-        if (spool != null && spoolOptIn) {
+        if (optsIntoRelay()) {
             settings.setSpoolEnabled(true)
             settings.addSpoolUrl(MeshLab.SPOOL_URL)
         }

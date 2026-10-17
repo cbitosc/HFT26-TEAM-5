@@ -6,6 +6,8 @@ import app.getknit.knit.mesh.protocol.CommonsPost
 import app.getknit.knit.mesh.protocol.EncEnvelope
 import app.getknit.knit.mesh.protocol.FrameType
 import app.getknit.knit.mesh.protocol.GroupInfo
+import app.getknit.knit.mesh.protocol.RatchetHeader
+import app.getknit.knit.mesh.protocol.RatchetInit
 import app.getknit.knit.mesh.protocol.RelayEnvelope
 import app.getknit.knit.mesh.protocol.WireCodec
 import org.junit.Assert.assertArrayEquals
@@ -301,6 +303,85 @@ class ScopeFramesTest {
     }
 
     private fun EncEnvelope.copyWithoutDmHeader() = EncEnvelope(v = v, nonce = nonce, ct = ct, keys = keys, r = null)
+
+    // C-3.1-5 (ADR 2026-10.j67x): the one refill a retiring DM scope takes — our own unanswered reset.
+    private val resetEph = ByteArray(32) { 5 }
+
+    private fun ratchetHeader(
+        eph: ByteArray? = resetEph,
+        flags: Int = RatchetHeader.FLAG_RESET,
+    ) = RatchetHeader(
+        se = 1,
+        ek =
+            ByteArray(32) {
+                7
+            },
+        pe = 0,
+        n = 0,
+        init = eph?.let { RatchetInit(eph = it, pkid = 1, at = 9L) },
+        flags = flags,
+    )
+
+    private fun retiring(resetInit: ByteArray?) =
+        Scope(
+            id = ScopeCrypto.dmScopeId(root, alice, bob),
+            keys = ScopeCrypto.dmSealKeys(root, alice, bob),
+            bounds = ScopeRegistry.DEFAULT_BOUNDS,
+            retiring = true,
+            peerId = bob,
+            resetInit = resetInit,
+        )
+
+    @Test
+    fun `a retiring scope our unanswered reset replaced takes that reset and nothing else`() {
+        val carrier = retiring(resetInit = resetEph)
+        val reset = dmFrame("r1", from = alice, to = bob, header = ratchetHeader()).envelope
+        assertTrue("the reset rides the scope its peer is still on", ScopeFrames.mayRefill(reset, alice, carrier))
+
+        // #90: every frame of the unanswered session carries the same init, but only the flagged one is adopted
+        // under the reset floor — and the peer needs nothing else from this scope.
+        val unflagged = dmFrame("m1", from = alice, to = bob, header = ratchetHeader(flags = 0)).envelope
+        val olderReset = dmFrame("r0", from = alice, to = bob, header = ratchetHeader(eph = ByteArray(32) { 6 })).envelope
+        val peersReset = dmFrame("r2", from = bob, to = alice, header = ratchetHeader()).envelope
+        val noInit = dmFrame("m2", from = alice, to = bob, header = ratchetHeader(eph = null)).envelope
+        val notToThePeer = dmFrame("r3", from = alice, to = carol, header = ratchetHeader()).envelope
+        listOf(unflagged, olderReset, peersReset, noInit, notToThePeer).forEach {
+            assertFalse("${it.id} must not refill a retiring scope", ScopeFrames.mayRefill(it, alice, carrier))
+        }
+        // The pull side is the frame-set rule, unchanged: the peer's own frames still drain out of the scope.
+        assertTrue(ScopeFrames.eligibleFor(peersReset, alice, carrier))
+    }
+
+    @Test
+    fun `a plain retiring scope is never refilled, and a live one takes every eligible frame but a reset we left`() {
+        val reset = dmFrame("r1", from = alice, to = bob, header = ratchetHeader()).envelope
+        assertFalse("C-3.1-3: no pending reset, no refill", ScopeFrames.mayRefill(reset, alice, retiring(resetInit = null)))
+        val plain = dmFrame("m1", from = alice, to = bob).envelope
+        val unflagged = dmFrame("m2", from = alice, to = bob, header = ratchetHeader(flags = 0)).envelope
+        val peersReset = dmFrame("r2", from = bob, to = alice, header = ratchetHeader()).envelope
+        listOf(
+            plain,
+            unflagged,
+            peersReset,
+        ).forEach { assertTrue("${it.id} rides a live scope", ScopeFrames.mayRefill(it, alice, scope())) }
+        val pending = scope().let { Scope(it.id, it.keys, it.bounds, peerId = bob, resetInit = resetEph) }
+        assertTrue("the pending reset rides the new scope too", ScopeFrames.mayRefill(reset, alice, pending))
+    }
+
+    /**
+     * A reset of ours that is no longer the pending one — the race we lost on it, so we adopted the peer's root —
+     * is never pushed again, live scope or not: a peer that pulls it after confirming us adopts it as a
+     * replacement and the pair ends on two roots.
+     */
+    @Test
+    fun `a reset of ours that is no longer pending is pushed into no DM scope`() {
+        val stale = dmFrame("r1", from = alice, to = bob, header = ratchetHeader()).envelope
+        assertFalse("a confirmed session's live scope", ScopeFrames.mayRefill(stale, alice, scope()))
+        val superseded = scope().let { Scope(it.id, it.keys, it.bounds, peerId = bob, resetInit = ByteArray(32) { 6 }) }
+        assertFalse("a later reset is the pending one", ScopeFrames.mayRefill(stale, alice, superseded))
+        val pairScope = scope().let { Scope(it.id, it.keys, it.bounds, peerId = bob, pair = true) }
+        assertTrue("a pair scope is not the ratchet's and keeps the plain rule", ScopeFrames.mayRefill(stale, alice, pairScope))
+    }
 
     // The commons form (§7.4): a room keyed by an invite secret, no roster.
     private val commonsSecret = ByteArray(32) { (it + 40).toByte() }

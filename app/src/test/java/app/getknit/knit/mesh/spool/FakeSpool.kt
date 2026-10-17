@@ -228,6 +228,30 @@ class FakeSpool(
         gossip(SpoolCodec.encode(digestRecord(unhex(scopeHex))))
     }
 
+    // Scopes whose SUB answers are held back ([holdSubscriptions]), and the subscriptions parked meanwhile.
+    private val heldSubScopes = mutableSetOf<String>()
+    private val parkedSubs = mutableListOf<Pair<FakeSocket, ByteArray>>()
+
+    /**
+     * From now on a SUB for [scopeHex] is taken but not answered: no digest, and no live events for it on that
+     * socket — a spool slow to answer one scope. A client's heal round for a scope returns early until its SUB is
+     * answered, so this holds that scope's pulls back while every other scope runs; a scenario uses it to fix the
+     * order two scopes' pulls land in. [releaseSubscriptions] answers the parked SUBs.
+     */
+    @Synchronized
+    fun holdSubscriptions(scopeHex: String) {
+        heldSubScopes.add(scopeHex)
+    }
+
+    /** Answers every SUB [holdSubscriptions] parked for [scopeHex], and stops holding new ones. */
+    @Synchronized
+    fun releaseSubscriptions(scopeHex: String) {
+        heldSubScopes.remove(scopeHex)
+        val due = parkedSubs.filter { hex(it.second) == scopeHex }
+        parkedSubs.removeAll(due)
+        due.forEach { (socket, scope) -> socket.completeSub(scope) }
+    }
+
     /**
      * Says the current digest again, unprompted (S-7.2-3 style) — the cue that makes a client look at the
      * live set without anything having changed at the spool, e.g. after [plantGarbage].
@@ -466,11 +490,23 @@ class FakeSpool(
                     return@forEach
                 }
                 entry.pow?.let { stamps[scopeHex] = it }
-                subscribed.add(scopeHex)
-                subscribedScopes.add(scopeHex)
-                scopes.getOrPut(scopeHex) { ScopeState() }
-                emit(SpoolCodec.encode(digestFor(entry.scope)))
+                // Check-and-park under the spool's monitor: `handle` runs every record inside synchronized(this@FakeSpool),
+                // the monitor [holdSubscriptions] and [releaseSubscriptions] take, so a release cannot slip between them.
+                if (scopeHex in heldSubScopes) {
+                    parkedSubs.add(this to entry.scope)
+                    return@forEach
+                }
+                completeSub(entry.scope)
             }
+        }
+
+        /** Takes the subscription and answers it with the scope's digest. */
+        fun completeSub(scope: ByteArray) {
+            val scopeHex = hex(scope)
+            subscribed.add(scopeHex)
+            subscribedScopes.add(scopeHex)
+            scopes.getOrPut(scopeHex) { ScopeState() }
+            emit(SpoolCodec.encode(digestFor(scope)))
         }
 
         private fun onList(list: SpoolList) {
@@ -722,6 +758,8 @@ fun dmFrame(
     // Null by default, which is what this build emits since ADR 035: a sealed frame names the hash and
     // nothing else. Pass a value explicitly to model a frame from an OLDER peer that still sends one.
     attachmentMime: String? = null,
+    // The cleartext ratchet header; a reset is one carrying an init and `FLAG_RESET` (ADR 2026-10.j67x).
+    header: RatchetHeader = RatchetHeader(se = 1, ek = ByteArray(32) { 7 }, pe = 0, n = 0),
 ): CarriedFrame {
     val enc =
         EncEnvelope(
@@ -729,7 +767,7 @@ fun dmFrame(
             nonce = ByteArray(12) { it.toByte() },
             ct = body,
             keys = emptyList(),
-            r = RatchetHeader(se = 1, ek = ByteArray(32) { 7 }, pe = 0, n = 0),
+            r = header,
         )
     val env =
         RelayEnvelope(

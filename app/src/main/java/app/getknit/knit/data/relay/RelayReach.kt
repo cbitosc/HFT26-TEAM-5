@@ -6,13 +6,15 @@ import app.getknit.knit.data.peer.PeerEntity
 import app.getknit.knit.mesh.crypto.scope.ScopeCrypto
 import app.getknit.knit.mesh.protocol.Protocol
 import app.getknit.knit.mesh.spool.ScopeAttachments
+import app.getknit.knit.mesh.spool.SpoolStatus
 
 /**
  * What the Internet-relay plane can currently do, flattened out of `SpoolStatus` into the few facts the
  * UI actually reasons about. Pure data so the rules below are unit-testable without a socket, a spool,
  * or Android.
  *
- * [coveredLabels] holds the labels of live (non-retiring) scopes on **connected** spools. A scope's
+ * [coveredLabels] holds the labels of live (non-retiring) scopes on **connected** spools, minus the scopes of our
+ * own unanswered reset ([coveredLabelsOf]). A scope's
  * label is `peerId ?: groupId` (`ScopeFrames.Scope.label`), which is exactly what
  * [Conversations.idFor] produces for the same conversation — so a thread is covered precisely when its
  * `conversationId` is in this set, with no extra key to keep in sync.
@@ -35,6 +37,23 @@ data class RelayFacts(
     val coveredLabels: Set<String> = emptySet(),
     val maxAttachBytes: Int? = null,
 )
+
+/**
+ * The [RelayFacts.coveredLabels] of the **connected** spools in [live]: every live scope's label, but for two kinds
+ * a new message would not reach the peer through.
+ *
+ * - A **retiring** scope is drained but never refilled (spec §3.1/§3.3).
+ * - A scope of **our own unanswered reset** (`ScopeStatus.pendingReset`, ADR 2026-10.j67x): we push into the new
+ *   root's scope, but the peer derives it only once it adopts the reset, which reaches it through the retiring
+ *   scope it is still on. Until it answers the thread reads [RelayReach.Pending] — "Not covered by relays yet" —
+ *   and the attachment rules, which all read [reachFor], promise no relay delivery either. The answer confirms the
+ *   session and clears the flag, and the thread reads [RelayReach.Covered]. This closes ADR 032's open coverage
+ *   note for this one case: there the table says "we can push", not "the pair shares a scope".
+ */
+fun coveredLabelsOf(live: List<SpoolStatus>): Set<String> =
+    live
+        .flatMap { spool -> spool.scopes.filterNot { it.retiring || it.pendingReset }.map { it.label } }
+        .toSet()
 
 /**
  * The Internet plane's state as the connection header reports it: one answer for the whole device, where
@@ -70,7 +89,10 @@ enum class RelayReach {
     /** The broadcast room, which is never scope-eligible (spec §4.4). Permanent and by design. */
     Room,
 
-    /** Relays are live but this thread has no scope yet — a peer or group still becoming eligible. */
+    /**
+     * Relays are live but this thread has no scope yet — a peer or group still becoming eligible, or a DM whose
+     * only live scope is our own reset the peer has not answered ([coveredLabelsOf]).
+     */
     Pending,
 
     /**

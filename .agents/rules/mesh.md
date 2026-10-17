@@ -68,7 +68,7 @@ free). Two invariants that are easy to break:
   a group root minted or adopted, a commons joined or left, the relay list edited — through
   `ScopeSync.onScopeTableChanged`, with a 60 s poll under the calendar-only transitions (a drain window or
   a pair grace lapsing, a swept root; ADR 2026-09.dcah); `reconcile` wakes a worker only when that table
-  differs. A scope is healed when its spool digest *moved*, it took a delivery or a direct push, or local
+  differs — in its ids, or in a kept scope's push set (retiring, the pending reset it takes; ADR 2026-10.j67x). A scope is healed when its spool digest *moved*, it took a delivery or a direct push, or local
   custody changed (every scope), else on the 60 s tick — one custody read per round, shared by every due
   scope. `republishPresence` stays first in every round because the tick is what lets a stamp lapse. A
   pushed-whole, fetched or dead attachment is settled for the connection and asked about again only on a
@@ -88,7 +88,9 @@ free). Two invariants that are easy to break:
   **both** forms (ADR 022) and is the exception to the addressing pattern: it names no recipient and no
   group, so the DM half matches it on sender alone and the group half rests wholly on the founding roster.
   Do not "tighten" that back to a recipient match — it is the only carrier of the prekey, and without it a
-  peer off the radios can never bootstrap or repair a DM session, nor receive group sender-key seeds.
+  peer off the radios can never bootstrap or repair a DM session, nor receive group sender-key seeds. A retiring
+  scope is pulled and never pushed into, with one exception (C-3.1-5, ADR 2026-10.j67x): the scope our own
+  unanswered reset replaced takes that reset (`ScopeFrames.mayRefill`), since its peer is still on it.
 - **A *pulled* blob that fails validation is quarantined per (spool, scope), never merely dropped** (spec
   C-9.3-1). Spools are untrusted storage: a garbage blob folds into *their* digest and never ours, so
   without the invalid set the two digests diverge forever and the client re-pulls it on every heal round.

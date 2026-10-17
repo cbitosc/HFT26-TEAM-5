@@ -60,6 +60,9 @@ document:
 - After Knit restarted, old messages passed on by a nearby phone could make it reset the encryption of a chat
   that was working fine, and a contact out of range then dropped off your internet relays until you met. Those
   messages no longer cause a reset.
+- When Knit reset the encryption of a chat with someone your phone reaches only through an internet relay, the
+  chat could stay off the relay until you met. The reset now goes through the relay, and the chat says "Not
+  covered by relays yet" until they answer.
 
 ## [2.9.0](https://github.com/getknit/knit/releases/tag/v2.9.0) — 2026-10-12T23:11:38Z
 

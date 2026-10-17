@@ -71,9 +71,7 @@ class RelayStatusRepository(
                 configured = urls.size,
                 active = active.size,
                 connected = live.size,
-                // Only non-retiring scopes count as coverage: a retiring scope is drained but never
-                // refilled (spec §3.1/§3.3), so a new message would not reach it.
-                coveredLabels = live.flatMap { spool -> spool.scopes.filterNot { it.retiring }.map { it.label } }.toSet(),
+                coveredLabels = coveredLabelsOf(live),
                 // The union rule (§9.1): one relay willing to carry the bytes is enough.
                 maxAttachBytes = live.mapNotNull { it.maxAttachBytes }.maxOrNull(),
             )

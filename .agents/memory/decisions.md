@@ -231,6 +231,7 @@ carries; never renumber an old one.
 | [2026-10.gpa3](decisions/2026-10-gpa3-a-quote-is-checked-against-the-original-it-names.md) | A quote is checked against the original it names | chat, moderation, security |
 | [2026-10.gtmm](decisions/2026-10-gtmm-compose-previews-are-screenshot-tested-on-the-alpha-preview-plugin.md) | Compose previews are screenshot-tested on the alpha preview plugin | testing, toolchain, ui |
 | [2026-10.hmfe](decisions/2026-10-hmfe-a-short-video-is-re-encoded-small-before-it-is-sent.md) | A short video is re-encoded small before it is sent | attachments, wire, moderation |
+| [2026-10.j67x](decisions/2026-10-j67x-our-unanswered-reset-keeps-the-scope-it-replaced-and-may-refill-it-with-the-rese.md) | Our unanswered reset keeps the scope it replaced and may refill it with the reset alone | crypto, pfs, spool |
 | [2026-10.jbsa](decisions/2026-10-jbsa-conversation-shortcuts-follow-the-chat-list.md) | Conversation shortcuts follow the chat list | notifications, contacts, ui |
 | [2026-10.js2p](decisions/2026-10-js2p-ask-before-large-bluetooth-only-downloads.md) | Ask before large Bluetooth-only downloads | blobs, ui, wire |
 | [2026-10.k8ge](decisions/2026-10-k8ge-a-name-clash-fades-a-week-after-the-look-alike-was-last-heard.md) | A name clash fades a week after the look-alike was last heard | identity, ui, contacts |

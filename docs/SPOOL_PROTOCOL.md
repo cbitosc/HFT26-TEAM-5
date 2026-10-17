@@ -175,10 +175,25 @@ sealKey  = sealOkm[0…32)        nonceKey = sealOkm[32…64)
 |-------------|----------------------------------------------------------------------------------------------------------------------------------------------|
 | **C-3.1-1** | A DM scope follows the *active session*. A session replacement yields a new pairwiseRoot and therefore a new scope.                          |
 | **C-3.1-2** | The retiring scope stays derivable from the retiring root for the ratchet's 48 h drain window, during which a member MAY keep it subscribed. |
-| **C-3.1-3** | A retiring scope MUST be drained but never refilled: a member MUST NOT seal fresh frames into it.                                            |
+| **C-3.1-3** | A retiring scope MUST be drained but never refilled: a member MUST NOT seal fresh frames into it, except as C-3.1-5 allows.                  |
+| **C-3.1-4** | A member derives DM scopes from **confirmed** sessions only, with one exception: while its **own reset** is unanswered — the session it minted to replace a root it held, still carrying the reset's init — it SHOULD keep the replaced root's scope subscribed as retiring and SHOULD also derive the new root's scope, both for as long as the replaced root's drain window is open. Past the window, and for every other unconfirmed session (a first-contact init, a reset that replaced no root), it derives none. |
+| **C-3.1-5** | Into the retiring scope C-3.1-4 keeps, a member MAY seal exactly one frame class: its own reset to the scope's peer — the `chat` whose ratchet header carries `FLAG_RESET` and the init of that unanswered reset. It MUST stop the moment the session confirms. Nothing else, its other frames on the same session included, refills the scope. A reset of its own that is no longer the unanswered one — a reset it lost a race on, or one a later reset superseded — it MUST NOT seal into any DM scope, live or retiring: a peer that has confirmed would adopt it as a replacement. |
 
 > **Why the ids appear in the context.** Defence in depth only. The ikm is already pair-secret, so a
 > spool holding both public node ids still cannot compute the scopeId.
+>
+> **Why our own unanswered reset is the exception (C-3.1-4, C-3.1-5).** The peer of a reset learns the new
+> root only by receiving it, and until then it seals into the old root's scope and subscribes nothing else.
+> Dropping both scopes for the wait — the rule before — left a pair the relay was the only path between with
+> no scope at all: the reset stayed on the radios, and the peer's own new DMs, still under the old session,
+> were no longer pulled. Keeping the old scope keeps that drain; letting the reset into it is how the peer
+> hears of the new root; deriving the new root's scope is where the peer's answer lands. The confirmed-only
+> bound stays for everything else, and the exception cannot be started by anyone but this member: it needs a
+> root this member held and replaced. The refill is the reset alone, not every frame of the unanswered session
+> (all of which carry its init): only the flagged frame is adopted under the receiver's one-minute reset floor
+> and is exempt from its race-remnant guard (`docs/FORWARD_SECRECY_RATCHET.md` §7), and once the peer adopts it
+> derives the new scope, where everything else was sealed. The reset is an ordinary sealed v2 DM, so a spool
+> sees nothing new and §4.4's rule admits it unchanged.
 >
 > **On losing session state.** A device that loses its own session state cannot recover its scopes.
 > Continuity dies with the session and re-establishment takes an out-of-band re-meet, over the mesh
@@ -493,7 +508,7 @@ blobId  = SHA-256(blob)
 |-------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | **C-4.4-1** | On a pulled or evented blob a member MUST, in order: verify `blobId = SHA-256(blob)`; open the AEAD; split `sig`/`signed`; decode the `RelayEnvelope`; verify the Ed25519 frame signature against the **pinned** sender key exactly as mesh inbound does; then apply the frame-set rule below. |
 | **C-4.4-2** | A blob failing any step MUST be discarded and quarantined (§9.3).                                                                                                                                                                                                                              |
-| **C-4.4-3** | The same rule governs the push side: only frames matching it MAY be sealed into a scope.                                                                                                                                                                                                       |
+| **C-4.4-3** | The same rule governs the push side: only frames matching it MAY be sealed into a scope, and into a retiring scope only what C-3.1-5 allows.                                                                                                                                                    |
 | **C-4.4-4** | A scope with neither a DM peer nor a group id carries nothing.                                                                                                                                                                                                                                 |
 
 **DM scope.** The envelope's group field MUST be unset, and then per type:
@@ -1566,6 +1581,14 @@ a relay.
 - For a **pair scope** (§3.5), an id that is stable per pair rather than per session era — two
   bootstraps of the same pair, years apart, share it. Bounded by the subscription window: pending plus
   `pairGrace`, after which the scope is gone and the pair lives on its rotating DM scope.
+- Across a **reset** (C-3.1-4, C-3.1-5), a timing edge between the two eras' scopes: the reset's blob lands in
+  the old era's scope in the same moment, over the same connection, as the new era's scope is first
+  subscribed, so a spool can link the two. It is not a new class — the C-3.1-2 drain already keeps both
+  scopes subscribed from one connection for 48 h after any replacement — but it is sharper, since one blob,
+  not only a subscription, marks the hand-over. And it can last longer: a member that resets again over its
+  own unanswered reset keeps the same old scope and restarts its 48 h, so the old era's scope, and its link
+  to each new one, stays alive for as long as the member keeps resetting. Not capped: the peer may still be
+  on that root, and the reset floors (`docs/FORWARD_SECRECY_RATCHET.md` §7, §10) bound the chain.
 - Where a member defers the §9.5 push half, a **proximity** signal on top of that: an upload that
   only
   happens once the radios stopped carrying the bytes tells a spool roughly when a conversation's
@@ -1954,7 +1977,7 @@ wire.
 | Section                                         | Status                                                                                                                                     | Where                                                            |
 |-------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------|
 | §2 encodings, §6.3 digest                       | Shipped both sides                                                                                                                         | `ScopeCrypto`, `SpoolCodec`, `knit-spool`                        |
-| §3.1 DM scopes                                  | Shipped                                                                                                                                    | `ScopeCrypto`, `ScopeRegistry`                                   |
+| §3.1 DM scopes                                  | Shipped, C-3.1-4/5 included (2026-10-16)                                                                                                    | `ScopeCrypto`, `ScopeRegistry`, `RatchetSessions.exportedRoots`  |
 | §3.2 group root, §3.3 group scopes              | Shipped                                                                                                                                    | `GroupRootPolicy`, `GroupRootStore`, `GroupKeyPayload.gr`, DB v3 |
 | §3.5 pair scopes                                | Shipped                                                                                                                                    | `ScopeCrypto.pairSecret`, `ScopeRegistry.pairs`, `IntroSync`      |
 | §7.4 the commons                                | Shipped both sides; text and reply quotes only — the room takes no attachments yet whatever the spool advertises                          | `ScopeCrypto.commons*`, `CommonsInvite`, `ScopeSync`, `knit-spool` |
@@ -2009,3 +2032,4 @@ the plane itself was unaffected either time, since a spool never decodes a frame
 | 2026-09-15 | **The deferral reads both ends, and not before an ack could exist (ADR 2026-09.p7j8).** §9.5's non-normative reference-client paragraph again: the evidence half is one fact read from whichever end of the DM the member is — the author's receipt over a radio, or the recipient's own arrival plane — and a missing ack counts for nothing until 60 s after the frame's `sentAt`, because a client that wakes on a local custody change asks first on the send itself. Without the first, a recipient re-uploaded every photo a radio had just handed it; without the second, the gate never fired at all. C-9.5-5…9 are unchanged | None for spools. Clients: a member that defers more, which no spool can tell apart; no record, derivation or vector moved |
 | 2026-09-14 | **The relay invite link (§7.4 note, `docs/RELAY_INVITE.md`).** A non-normative pointer: the reference client mints and accepts the relay, its token and its commons secret as one `https://getknit.app/r#…` link, applied on one confirmation. Client-side only; the link never reaches a spool | None for spools. Daemons SHOULD print the link beside `knit-commons:v1:…`; no record, derivation or vector moved |
 | 2026-10-15 | **TURN credentials, entitlement tickets, STUN and casts (§7.6, §7.7; knit-spool ADR 2026-10.bxsg, knit-spool ADR 2026-10.h6pt, knit-spool ADR 2026-10.3wdy).** Four optional HELLO capabilities, each signalled by its presence: `turn` with `turnreq`/`turncred`, short-lived TURN REST credentials that name no scope; `ent`/`entGates` with an `ent` record presenting an Ed25519 ticket that gates `turnreq`, `aput` and `cast` per connection, and a TURN username suffix hashed from the ticket's daily pseudonym; `stun`, a credential-free STUN list; and `cast`, a sealed frame fanned out live to a scope's other subscribers and never stored, under its own seal (`sealv = 0x04`). New error code `ticket` (B-7.2-8); B-7.1-8 gains its one exception, a client record with no `q`. §10.1 bullets, §11 rows, §12 constants and §13 vectors appended | **Spools:** optional; a spool that enables none of them omits every field and is unaffected. **Clients:** tolerate-and-ignore until the client half lands; no existing record, derivation or vector moved |
+| 2026-10-16 | **Our own unanswered reset keeps its scopes (§3.1 C-3.1-4, C-3.1-5; ADR 2026-10.j67x).** While a member's own reset over a root it held is unanswered, it keeps the replaced root's scope (retiring) and derives the new root's, and it may seal that one reset — the `chat` flagged `FLAG_RESET` with the reset's init — into the retiring scope, the one named exception to C-3.1-3 (C-4.4-3 points to it); a reset of its own that is no longer the unanswered one goes into no DM scope; §10.1 names the timing edge the hand-over shows a spool. Before it the confirmed-only bound dropped both scopes for the wait, and a reset to a peer only a relay reached never arrived. All client-side | None for spools: the reset is an ordinary sealed v2 DM, admitted by §4.4 unchanged. Clients: no record, derivation or vector moved |

@@ -5727,12 +5727,13 @@ class InboundPipelineTest {
 
     /**
      * The other writer of the root (ADR 2026-09.dcah): a reset request WE send replaces a confirmed session
-     * with an unconfirmed one, so `exportedRoots` drops the peer until it answers — the peer's scopes leave
-     * the table, and that is a change to report. A reset toward a peer we hold no session with mints an
-     * unconfirmed session out of nothing, which the table never saw: nothing to report.
+     * with an unconfirmed one, and `exportedRoots` moves the peer to the reset's view — the new root beside the
+     * replaced one, which carries the reset (ADR 2026-10.j67x) — a change to report. A reset toward a peer we
+     * hold no session with mints an unconfirmed session out of nothing, which the table never saw: nothing to
+     * report.
      */
     @Test
-    fun ourOwnResetRequestTakesAConfirmedPeerOffTheScopeTable() =
+    fun ourOwnResetRequestMovesAConfirmedPeerToTheResetsScopeView() =
         runTest {
             val rig = Rig(backgroundScope)
             val alice = party()
@@ -5745,6 +5746,13 @@ class InboundPipelineTest {
             assertNull(rig.pipeline.sendSessionReset(alice.nodeId, rig.self.nodeId, rig.nowMs))
             assertFalse(checkNotNull(rig.ratchetStore.session(alice.nodeId)).confirmed)
             assertEquals(listOf(alice.nodeId, alice.nodeId), rig.rootChanges)
+            assertNotNull(
+                "the peer stays on the table, carrying the reset",
+                rig.ratchet
+                    .exportedRoots()
+                    .single()
+                    .pendingResetInit,
+            )
 
             assertNull(rig.pipeline.sendSessionReset(carol.nodeId, rig.self.nodeId, rig.nowMs))
             assertEquals("an initiation from nothing was never on the table", 2, rig.rootChanges.size)

@@ -165,6 +165,13 @@ class RatchetEngine(
          * candidate: a reset is adopted or refused, never read without adoption.
          */
         val resetRequested: Boolean = false,
+        /**
+         * Whether the caller judged this frame sealed before the session we hold began — the era gate's initiator
+         * rule (ADR 026): its `sentAt` (the sender's clock) more than the skew bound before our own
+         * `establishedAt`. Supplied by the caller, which holds the envelope; the engine is wire-agnostic. Only
+         * the replaced-era check in [resolveSession] reads it.
+         */
+        val predatesSession: Boolean = false,
     )
 
     sealed interface OpenOutcome {
@@ -544,7 +551,17 @@ class RatchetEngine(
         // Both-initiate race: we hold an unconfirmed session WE started and the peer's own init just
         // arrived. Resolved by nodeId tiebreak, deliberately NOT by comparing `init.at` — concurrent
         // inits can carry the identical timestamp, and both sides must pick the same winner.
-        if (!session.confirmed && session.weAreInitiator) return resolveRace(ctx, session, init, now)
+        if (!session.confirmed && session.weAreInitiator) {
+            // A frame from before our reset, carrying the init that minted the root we replaced, is not a race
+            // (ADR 2026-10.j67x). A re-root drops the old era's anchor with the rest of the state, and while our
+            // reset waits the old root's scope is subscribed, holding for 48 h every frame the peer sealed as that
+            // root's unconfirmed initiator — each with its init. Raced, a smaller-id peer "wins" and we adopt the
+            // root we left while it may already be on ours. Read it under the drained root, read-only. A frame
+            // sealed since — the peer is *still* that root's unconfirmed initiator, it never heard our answer —
+            // races as before: it wins, keeps that root, and we adopt it, or neither side would ever confirm.
+            if (ctx.predatesSession && derivesPrevRoot(ctx, session, init, now)) return ResolvedSession(session, candidates)
+            return resolveRace(ctx, session, init, now)
+        }
         // A genuinely stale init (older than the session we already share) changes nothing.
         if (init.at <= session.establishedAt) return ResolvedSession(session, candidates + remnantCandidates(ctx, header, init))
         if (ctx.spkPrivForInit == null || !ctx.allowReplacement) {
@@ -592,6 +609,22 @@ class RatchetEngine(
             rootCandidates = listOf(RootCandidate(newRoot, senderIsInitiator = true, active = true)),
             purge = true,
         )
+    }
+
+    /**
+     * Whether [init] is the X3DH init that derived [session]'s `prevRoot` — the era we replaced, not a new one. A
+     * peer's reset that crossed ours carries a fresh ephemeral and derives a root of its own, so it still races.
+     */
+    private fun derivesPrevRoot(
+        ctx: OpenContext,
+        session: SessionState,
+        init: InitPayload,
+        now: Long,
+    ): Boolean {
+        // Past its drain the root is no candidate either: the frame would race, as it always did.
+        val prev = session.prevRoot?.takeIf { session.prevRootExpiresAt > now } ?: return false
+        if (ctx.spkPrivForInit == null) return false
+        return respond(ctx, init).contentEquals(prev)
     }
 
     /**

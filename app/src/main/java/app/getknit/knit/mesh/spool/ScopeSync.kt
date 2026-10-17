@@ -120,6 +120,11 @@ class ScopeStatus(
     val peerSeenAt: Long? = null,
     /** A pair scope (spec §3.5) — it shares its [label] with the DM scope that supersedes it. */
     val pair: Boolean = false,
+    /**
+     * A DM scope of our own reset that the peer has not answered (`Scope.resetInit`, ADR 2026-10.j67x): we push
+     * into it, but the peer derives it only once it adopts the reset, so it is no coverage yet ([RelayReach]).
+     */
+    val pendingReset: Boolean = false,
 )
 
 /**
@@ -391,10 +396,9 @@ class ScopeSync(
         }
         scopes = registry.scopes(clock())
         metrics.onSpoolTableDerived()
-        val live = scopes.mapTo(HashSet()) { it.idHex }
         wanted.forEach { url ->
             val worker = workers.computeIfAbsent(url) { Worker(it) }
-            val changed = worker.adoptScopes(live)
+            val changed = worker.adoptScopes(scopes)
             worker.ensureRunning(host)
             // Only a changed table wakes the heal loop — a scope that appeared needs its SUB now. An
             // unchanged one used to wake every worker on every reconcile regardless, and each wake ran a
@@ -533,6 +537,9 @@ class ScopeSync(
         @Volatile
         private var lastLive: Set<String> = emptySet()
 
+        // scopeHex → what this worker pushes into it ([pushShape]) as of the last adopted table.
+        private var lastShapes: Map<String, String> = emptyMap()
+
         // scopeHex → attachment hash → when a round last found nothing left to do for it: fetched, pushed
         // whole, dead, or past its frame's TTL. Skipped until a timed round finds the entry older than
         // ATTACHMENT_RECHECK_MS (the spool may have evicted it since), and dropped with the connection.
@@ -627,14 +634,26 @@ class ScopeSync(
          * Takes the reconciled scope table: [forgetScopesNotIn] for what left, and whether the table differs
          * from the one this worker last adopted — the only reason a reconcile wakes the heal loop.
          */
-        fun adoptScopes(live: Set<String>): Boolean {
+        fun adoptScopes(table: List<Scope>): Boolean {
+            val live = table.mapTo(HashSet()) { it.idHex }
             forgetScopesNotIn(live)
             dirty.retainAll(live)
             synchronized(settledAttachments) { settledAttachments.keys.retainAll(live) }
-            val changed = live != lastLive
+            // A scope that stayed but now takes a different push set — a live DM scope that became the retiring
+            // one our reset rides, or the reset's ephemeral cleared on the answer (ADR 2026-10.j67x) — is healed
+            // now: the round that ran on the custody change may have judged the reset against the old table, and
+            // nothing else marks the scope before the 60 s tick.
+            val shapes = table.associate { it.idHex to pushShape(it) }
+            val reshaped = shapes.filter { (id, shape) -> lastShapes[id]?.let { it != shape } == true }.keys
+            dirty += reshaped
+            val changed = live != lastLive || reshaped.isNotEmpty()
             lastLive = live
+            lastShapes = shapes
             return changed
         }
+
+        /** What decides a scope's push set beyond its id: retiring, and the pending reset it takes. */
+        private fun pushShape(scope: Scope): String = "${scope.retiring}:${scope.resetInit?.let { hex(it) }.orEmpty()}"
 
         /** Asks for the next dial now, unless this worker already has a spool talking to it. */
         fun redialNow() {
@@ -697,6 +716,7 @@ class ScopeSync(
                             accountedCount = accountedFor(scope.idHex).size,
                             peerSeenAt = peerSeenAt[scope.idHex],
                             pair = scope.pair,
+                            pendingReset = scope.resetInit != null,
                         )
                     },
             )
@@ -1197,9 +1217,16 @@ class ScopeSync(
             tombstoned: Set<String>,
             quarantined: Set<String>,
         ): List<ByteArray> {
-            if (scope.retiring) return emptyList() // a retiring scope is drained, never refilled
+            // A retiring scope is drained, never refilled (C-3.1-3) — but for our own unanswered reset into the
+            // scope its peer is still on (C-3.1-5, ADR 2026-10.j67x).
+            if (scope.retiring && scope.resetInit == null) return emptyList()
+            val me = selfId()
             val pushed = mutableListOf<ByteArray>()
-            for (entry in pushable(conn, scope, local, spoolIds, tombstoned, quarantined)) {
+            val refill =
+                pushable(conn, scope, local, spoolIds, tombstoned, quarantined).filter {
+                    ScopeFrames.mayRefill(it.carried.envelope, me, scope)
+                }
+            for (entry in refill) {
                 val pow = stampFor(scope, conn.powBits)
                 val reply = conn.push(scope.id, entry.sealed.blobId, entry.sealed.blob, pow)
                 if (reply is SpoolReply.Ok) {

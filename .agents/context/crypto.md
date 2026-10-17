@@ -128,8 +128,25 @@ LoRa plane (2026-09.ggq4).
   `prekey`, and never inserts a peer row.
 - **When touching `RatchetSessions.exportedRoots` / `rootChanges`, `RatchetCrypto`'s export functions, or what the
   spool's `ScopeRegistry` reads from the ratchet:** READ ADR 019 (FSR §8, GFS §8), ADR 032 and ADR 2026-09.dcah. Only
-  `pairwiseRoot` exports leave the facade, under the ratchet mutex, confirmed sessions only — a raw root never does.
-  A root change is an event the scope table derives on; don't fire it on an unchanged root.
+  `pairwiseRoot` exports leave the facade, under the ratchet mutex, confirmed sessions only — a raw root never does —
+  with the one exception below. A root change is an event the scope table derives on; don't fire it on an unchanged
+  root.
+- **When touching `RatchetSessions.pendingResetInit` / `exports`, `ExportedRoots.pendingResetInit` / `confirmed`,
+  `ScopeRoots.pendingResetInit`, `Scope.resetInit`, `ScopeFrames.mayRefill` / `ownResetInit`, the `prevRoot` slot
+  `RatchetSessions.reRoot` fills over our own unanswered reset, or what `ScopeSync` pushes into a DM scope:** READ ADR 2026-10.j67x, then `docs/SPOOL_PROTOCOL.md` C-3.1-4/5 and FSR §8. Our own
+  reset, unanswered, over a root it replaced (`weAreInitiator`, unconfirmed, `prevRoot` present, `lastResetSentAt ==
+  establishedAt`) exports both roots while the replaced one drains, and the retiring scope takes exactly one refill:
+  that reset, matched on `FLAG_RESET` and its init's ephemeral — never the session's other init-bearing frames (#90).
+  A flagged reset of ours that is no longer the pending one goes into no DM scope at all (a confirmed winner would
+  adopt it, a pair on two roots), and a second reset over our own keeps the drained root in the slot. While we wait,
+  a peer init that derives our own `prevRoot` (`RatchetEngine.resolveSession`'s replaced-era check) on a frame that
+  predates our session (`RatchetSessions.predates`, ADR 026's initiator rule) is read under it, read-only, never
+  raced: the drained scope re-serves that era's init-bearing frames for 48 h. One sealed since still races. While
+  the reset is unanswered the thread reads not covered (`ScopeStatus.pendingReset`, `coveredLabelsOf`). The winner
+  adopting a race loser's stale flagged reset is #184.
+  Every other unconfirmed session exports nothing; a caller that wants confirmed peers reads `ExportedRoots.confirmed`
+  (`broadcastSealedProfile`). Regression: `RatchetSessionsExportTest`, `ScopeSyncTest`'s carrier push,
+  `ResetOverRelayLabTest.aResetToAPeerOnlyTheRelayReaches…`.
 - **When touching the self branch of `InboundPipeline.handleProfile` / `handleChat`, `PeerRepository.forgetSelf`,
   `RatchetSessions.forget`, or `GroupRepository.forgetSelf`:** a node never pins its own key and never holds a session
   with itself — a re-served copy of our own profile once pinned `peers[me]` and sealed every group's seed to self in a

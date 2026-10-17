@@ -6,6 +6,8 @@ import app.getknit.knit.mesh.MeshMetrics
 import app.getknit.knit.mesh.PRESENCE_FRESH_MS
 import app.getknit.knit.mesh.SPOOL_COVER_MS
 import app.getknit.knit.mesh.crypto.scope.ScopeCrypto
+import app.getknit.knit.mesh.protocol.RatchetHeader
+import app.getknit.knit.mesh.protocol.RatchetInit
 import app.getknit.knit.mesh.protocol.RelayEnvelope
 import app.getknit.knit.mesh.protocol.WireEnvelope
 import app.getknit.knit.mesh.sha256Hex
@@ -695,6 +697,113 @@ class ScopeSyncTest {
             assertTrue("the retiring scope is drained, not refilled", spool.liveIds(v1).isEmpty())
             assertTrue(v1 != v2)
             holder.sync.stop()
+        }
+
+    /**
+     * C-3.1-5 (ADR 2026-10.j67x, #182), end to end over one spool: alice reset the session and bob, away from her
+     * radios, is still on the old root. Her retiring scope — the one bob is subscribed to — takes the reset and
+     * only the reset; the new scope takes everything of hers; bob pulls the reset out of the scope he holds, and
+     * his own old-era DM still drains to her through it.
+     */
+    @Test
+    fun `our unanswered reset is pushed into the scope it replaced, and nothing else of ours is`() =
+        runTest {
+            val spool = FakeSpool()
+            val newRoot = ByteArray(32) { (it + 90).toByte() }
+            val eph = ByteArray(32) { 3 }
+            val old = hex(ScopeCrypto.dmScopeId(pairwiseRoot, alice, bob))
+            val fresh = hex(ScopeCrypto.dmScopeId(newRoot, alice, bob))
+            val resetting =
+                member(
+                    spool,
+                    alice,
+                    bob,
+                    roots = {
+                        listOf(
+                            ScopeRoots(
+                                bob,
+                                newRoot,
+                                prevPairwiseRoot = pairwiseRoot,
+                                prevRootExpiresAt = now + 1_000_000L,
+                                pendingResetInit = eph,
+                            ),
+                        )
+                    },
+                )
+            val init = RatchetInit(eph = eph, pkid = 1, at = now)
+            val header = { flags: Int -> RatchetHeader(se = 1, ek = ByteArray(32) { 7 }, pe = 0, n = 0, init = init, flags = flags) }
+            val reset = dmFrame("reset", from = alice, to = bob, sentAt = now, header = header(RatchetHeader.FLAG_RESET))
+            val after = dmFrame("after", from = alice, to = bob, sentAt = now, header = header(0))
+            resetting.custody.store(reset, ForwardStore.ORIGIN_SELF, now)
+            resetting.custody.store(after, ForwardStore.ORIGIN_SELF, now)
+            val away = member(spool, bob, alice)
+            away.custody.store(dmFrame("old-era", from = bob, to = alice, sentAt = now), ForwardStore.ORIGIN_SELF, now)
+
+            resetting.sync.start(backgroundScope)
+            away.sync.start(backgroundScope)
+            pump()
+
+            fun blob(
+                root: ByteArray,
+                frame: CarriedFrame,
+            ): String {
+                val scope =
+                    Scope(ScopeCrypto.dmScopeId(root, alice, bob), ScopeCrypto.dmSealKeys(root, alice, bob), ScopeRegistry.DEFAULT_BOUNDS)
+                return hex(ScopeFrames.seal(scope, frame.sig, frame.signed).blobId)
+            }
+            assertTrue("the reset refills the scope bob is on", blob(pairwiseRoot, reset) in spool.liveIds(old))
+            assertFalse("and nothing else of alice's does (#90)", blob(pairwiseRoot, after) in spool.liveIds(old))
+            assertTrue(
+                "everything of alice's goes to the new scope",
+                spool.liveIds(fresh).containsAll(listOf(blob(newRoot, reset), blob(newRoot, after))),
+            )
+            assertTrue("bob pulled the reset", "reset" in away.delivered.map { it.id })
+            assertTrue("bob's old-era DM still drains to alice", "old-era" in resetting.delivered.map { it.id })
+            resetting.sync.stop()
+            away.sync.stop()
+        }
+
+    /**
+     * The custody change that carries our reset can wake a round before the table has re-derived: that round
+     * sees the old scope still live and the reset not yet pending, and rightly refuses it. The table change that
+     * follows keeps every scope id — the old scope only turns retiring and starts carrying the reset — so it must
+     * mark that scope itself, or the reset waits out the 60 s tick (found by the chaos sweep on
+     * `ResetOverRelayLabTest`, 14 runs in 20).
+     */
+    @Test
+    fun `a scope whose push set changed with the table is healed at once, not on the tick`() =
+        runTest {
+            val spool = FakeSpool()
+            val newRoot = ByteArray(32) { (it + 90).toByte() }
+            val eph = ByteArray(32) { 3 }
+            val old = hex(ScopeCrypto.dmScopeId(pairwiseRoot, alice, bob))
+            var table = listOf(ScopeRoots(bob, pairwiseRoot))
+            val member = member(spool, alice, bob, roots = { table })
+            member.sync.start(backgroundScope)
+            pump(3)
+
+            val header =
+                RatchetHeader(
+                    se = 1,
+                    ek = ByteArray(32) { 7 },
+                    pe = 0,
+                    n = 0,
+                    init = RatchetInit(eph, 1, now),
+                    flags = RatchetHeader.FLAG_RESET,
+                )
+            member.custody.store(dmFrame("reset", from = alice, to = bob, sentAt = now, header = header), ForwardStore.ORIGIN_SELF, now)
+            member.sync.onCustodyChanged() // the round runs on the old table and refuses the reset
+            pump(2)
+            assertEquals("the stale-table round refused it", 0, spool.liveIds(old).size)
+
+            table =
+                listOf(
+                    ScopeRoots(bob, newRoot, prevPairwiseRoot = pairwiseRoot, prevRootExpiresAt = now + 1_000_000L, pendingResetInit = eph),
+                )
+            member.sync.onScopeTableChanged()
+            pump(3)
+            assertEquals("the retiring scope took the reset without waiting for the tick", 1, spool.liveIds(old).size)
+            member.sync.stop()
         }
 
     @Test

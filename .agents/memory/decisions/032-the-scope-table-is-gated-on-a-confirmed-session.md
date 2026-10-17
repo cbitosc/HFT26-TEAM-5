@@ -41,3 +41,8 @@ one side's ability to push, not that the pair share a scope. Honest per-thread c
 new copy for the outbound-only case or a peer-participation signal inferred in `ScopeSync.accept`
 (a spool-sourced blob whose `senderId` is the scope's peer). The extension register's `CAP_SPOOL` bit
 does **not** answer it: it says the peer's build speaks the plane, not that the peer derived this scope.
+
+*Amendment (2026-10-16, ADR 2026-10.j67x, #182).* One unconfirmed kind now exports: our own reset, unanswered, over a
+root it replaced — both roots while the replaced one drains, the retiring scope carrying the reset. It cannot be
+started by anyone but this phone (it needs a root we held and replaced), so the bound above still holds for every
+session someone else could make us hold.

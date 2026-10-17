@@ -581,7 +581,7 @@ class MeshManager(
                         selfId = { identity.nodeId() },
                         roots = {
                             ratchet.exportedRoots().map {
-                                ScopeRoots(it.peerId, it.pairwiseRoot, it.prevPairwiseRoot, it.prevRootExpiresAt)
+                                ScopeRoots(it.peerId, it.pairwiseRoot, it.prevPairwiseRoot, it.prevRootExpiresAt, it.pendingResetInit)
                             }
                         },
                         groupRoots = ::groupScopeRoots,
@@ -2990,7 +2990,9 @@ class MeshManager(
         if (version <= 0L) return
         // Who is owed this version comes first: on every heal with nobody owed — the common case — the payload's
         // five settings reads and its build are skipped, not just the sends.
-        val owed = ratchet.exportedRoots().filter { sentProfileVersions[it.peerId] != version }
+        // Confirmed sessions only: our unanswered reset also exports (ADR 2026-10.j67x), and a profile sealed on it
+        // would carry the reset's init unflagged (#90) — the peer's answer confirms it, and the next heal sends.
+        val owed = ratchet.exportedRoots().filter { it.confirmed && sentProfileVersions[it.peerId] != version }
         if (owed.isEmpty()) return
         val me = identity.nodeId()
         val avatarHash = settings.ownAvatarHash.first()

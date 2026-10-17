@@ -6,6 +6,7 @@ import app.getknit.knit.mesh.protocol.CommonsPost
 import app.getknit.knit.mesh.protocol.EncEnvelope
 import app.getknit.knit.mesh.protocol.FrameType
 import app.getknit.knit.mesh.protocol.GroupLeaveContent
+import app.getknit.knit.mesh.protocol.RatchetHeader
 import app.getknit.knit.mesh.protocol.RelayEnvelope
 import app.getknit.knit.mesh.protocol.WireCodec
 import app.getknit.knit.mesh.protocol.WireEnvelope
@@ -20,7 +21,14 @@ import app.getknit.knit.mesh.protocol.WireEnvelope
  * [retiring] marks a scope derived from a *superseded* secret, kept subscribed for its drain window so a
  * rotation doesn't strand blobs: a replaced DM session (spec §3.1) or a rotated-away group root, whether
  * rotated by a departure re-mint or by losing a competing v1 mint (§3.2/§3.3). We still pull and heal a
- * retiring scope, but never seal fresh frames into it.
+ * retiring scope, but never seal fresh frames into it — with one exception, [resetInit].
+ *
+ * [resetInit] is set on both DM scopes of a peer while **our own reset** to it is unanswered (spec C-3.1-4/5,
+ * ADR 2026-10.j67x): the public ephemeral of that reset's init. On the retiring one — the root the reset
+ * replaced, which the peer is still on — it is the one refill that scope takes; on both it is the only flagged
+ * reset of ours either may take ([ScopeFrames.mayRefill]). It is null on every other scope, so a reset of ours
+ * that is no longer the pending one — a race we lost on our own reset, a reset an earlier one superseded — is
+ * never pushed anywhere again.
  */
 class Scope(
     val id: ByteArray,
@@ -38,6 +46,7 @@ class Scope(
     // identity pair secret rather than a session root. Kept apart here so a reader of the status list can
     // tell the two scopes of one peer apart — nothing downstream treats them differently.
     val pair: Boolean = false,
+    val resetInit: ByteArray? = null,
 ) {
     /** The spec's display form — lowercase hex — and this scope's identity in maps/logs/diagnostics. */
     val idHex: String = hex(id)
@@ -92,6 +101,50 @@ object ScopeFrames {
             scope.commonsId != null -> eligibleForCommons(env, scope.id)
             else -> false
         }
+
+    /**
+     * Whether a frame that matches [scope]'s frame-set rule may be **pushed** into it (spec C-3.1-3, C-3.1-5,
+     * C-4.4-3; ADR 2026-10.j67x). The pull side never asks this — a retiring scope is drained of whatever the
+     * rule admits, the peer's frames above all.
+     *
+     * - **A reset of ours** ([ownResetInit]) goes into a DM scope only while it is the pending one
+     *   ([Scope.resetInit]), live or retiring. A flagged init we minted and then left — we lost the race on it and
+     *   adopted the peer's root, or a later reset superseded it — is still in our custody for a day, and pushing it
+     *   into a scope the peer pulls after it has confirmed us hands it a fresh-looking `FLAG_RESET` init it adopts
+     *   as a replacement: a pair on two roots. A pair scope (§3.5) is not the ratchet's and keeps the plain rule.
+     * - **Anything else** goes into a live scope, never into a retiring one (C-3.1-3).
+     *
+     * So a retiring scope takes exactly one frame, the pending reset — and only the flagged one. Every frame
+     * sealed on the unanswered session carries the same init (#90), but only the flagged one is adopted under the
+     * peer's one-minute reset floor and is exempt from its race-remnant guard; an unflagged copy reaching the
+     * peer first meets the hour-long incidental floor or is read without adoption. And the peer needs only the
+     * reset from that scope: once it adopts, it derives the new scope, where everything else of ours went.
+     */
+    fun mayRefill(
+        env: RelayEnvelope,
+        selfId: String,
+        scope: Scope,
+    ): Boolean {
+        val reset = if (scope.pair) null else ownResetInit(env, selfId, scope)
+        return if (reset != null) reset.contentEquals(scope.resetInit) else !scope.retiring
+    }
+
+    /**
+     * The init ephemeral of [env] when it is **our own** session reset to [scope]'s peer, read off the cleartext v2
+     * ratchet header (the `CTL_SESSION_RESET` inside is sealed): a DM-form `chat` from us to the peer whose header
+     * sets `FLAG_RESET` and carries an init. Null for anything else.
+     */
+    fun ownResetInit(
+        env: RelayEnvelope,
+        selfId: String,
+        scope: Scope,
+    ): ByteArray? {
+        val peerId = scope.peerId ?: return null
+        val ours = env.senderId == selfId && env.recipientId == peerId
+        if (!ours || env.group != null || env.type != FrameType.CHAT) return null
+        val r = WireCodec.decodePayload<ChatContent>(env.payload)?.enc?.r ?: return null
+        return r.init?.eph?.takeIf { r.flags and RatchetHeader.FLAG_RESET != 0 }
+    }
 
     /**
      * The commons half of the §4.4 rule (spec §7.4). A commons has no roster — whoever holds the invite is
