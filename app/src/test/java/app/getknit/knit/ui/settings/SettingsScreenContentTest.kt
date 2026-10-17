@@ -1,11 +1,13 @@
 package app.getknit.knit.ui.settings
 
 import android.content.Context
+import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
 import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
@@ -231,8 +233,8 @@ class SettingsScreenContentTest {
     @Test
     fun theLargeDownloadRowNamesWifiAwareOnlyWhereThePhoneHasIt() {
         render(wifiAware = false)
-        compose.onNodeWithTag("settings_bt_download").performScrollTo()
-        compose.onNodeWithText("Wi-Fi Aware", substring = true).assertDoesNotExist()
+        // Scoped to the row: the low-power row names Wi-Fi Aware whatever the phone has.
+        compose.onNodeWithTag("settings_bt_download").performScrollTo().assert(!hasText("Wi-Fi Aware", substring = true))
         compose.onNodeWithText("before Bluetooth brings it", substring = true).assertExists()
     }
 
