@@ -106,7 +106,46 @@ class SpoolTicketRecordsTest {
         assertEquals(false, printed.contains("0001020304"))
     }
 
+    @Test
+    fun theAmTicketsMatchTheDaemonsVectorsAndReadTheirLimit() {
+        // `tkFilesAm`: files alone, `ab` and `am`, nine keys ending v, …, fl, ab, am; `tkAmOnly`: `am` with no `ab`, eight.
+        val both = SpoolCodec.decode<SpoolTicket>(TK_FILES_AM.fromHex())!!
+        assertEquals("lab.example", both.aud)
+        assertEquals(SpoolTicket.FL_FILES, both.fl)
+        assertEquals(1_310_720L, both.ab)
+        assertEquals(262_144L, both.am)
+        assertEquals(5, both.maxChunks)
+        val amOnly = SpoolCodec.decode<SpoolTicket>(TK_AM_ONLY.fromHex())!!
+        assertNull(amOnly.ab)
+        assertEquals(262_144L, amOnly.am)
+        assertEquals(5, amOnly.maxChunks)
+        // Held as they came: an `ent` carries the issuer's bytes, and the claims read off them never print `ps`.
+        for ((tk, sig) in listOf(TK_FILES_AM to SIG_FILES_AM, TK_AM_ONLY to SIG_AM_ONLY)) {
+            val held = HeldTicket.parse(SpoolTicketsTest.text(tk.fromHex(), sig.fromHex()))!!
+            assertEquals(true, held.grantsFiles)
+            assertEquals(false, held.grantsTurn)
+            assertArrayEquals(tk.fromHex(), held.tk)
+            assertArrayEquals(sig.fromHex(), held.sig)
+            assertEquals(false, held.toString().contains("0001020304"))
+        }
+    }
+
     companion object {
+        // knit-spool `feat/free-tickets` @ 061bad2, protocol/src/test/kotlin/app/getknit/spool/TicketVectorTest.kt:138-151
+        // (knit-spool ADR 2026-10.h4ps): copied, never recomputed.
+        const val TK_FILES_AM =
+            "a9617601636b69644821fe31dfa154a261636175646b6c61622e6578616d706c65636e62661a6b49d200636578701a6b4b2380" +
+                "62707350000102030405060708090a0b0c0d0e0f62666c026261621a0014000062616d1a00040000"
+        const val SIG_FILES_AM =
+            "6ca646d923b0d93996c771aed64d590d8fc515214eb04ec01cbc7ad838863e45" +
+                "c60d831eaa035258542758592712cd7a33e23f7969884f6ae9585053275bc000"
+        const val TK_AM_ONLY =
+            "a8617601636b69644821fe31dfa154a261636175646b6c61622e6578616d706c65636e62661a6b49d200636578701a6b4b2380" +
+                "62707350000102030405060708090a0b0c0d0e0f62666c0262616d1a00040000"
+        const val SIG_AM_ONLY =
+            "705b1efffa580108dd8eabad93b680366701020bb37fa5b728c65f9f2a86e1c6" +
+                "0689cf76ae17a6584b30c2b3e312a5c309d0cece323fc17cad480a61998f9b06"
+
         // knit-spool `exp/turn` @ 17a6b84, protocol/src/test/kotlin/app/getknit/spool/TicketVectorTest.kt:139-145:
         // copied, never recomputed.
         const val TK_FILES =

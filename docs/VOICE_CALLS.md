@@ -280,6 +280,17 @@ valid  ⇔ leadingZeroBits(h) ≥ bits, counted as SPOOL_PROTOCOL.md §8 counts 
          day is today or yesterday (UTC) at the issuer, and (day, nonce) is spent once
 ```
 
+**Test vector**, copied from knit-spool-coordinator `feat/free-tickets` @ `05b7ec4` (`packages/core/src/free-tier.test.ts`,
+computed there with Python's `hashlib`): `day = 20743`, `nonce = 00 01 … 0f` (`AAECAwQFBgcICQoLDA0ODw`). The first `n`
+whose `h` has at least 16 leading zero bits, and the first with exactly 15, one short of 16:
+
+```
+input  = 6b6e69742f6973737565722f76312f6163636f756e74 0000000000005107 000102030405060708090a0b0c0d0e0f
+         000000000002ab06                                        // label ‖ u64be(20743) ‖ nonce ‖ u64be(174854)
+n      = 174854   h = 00000d2a3c4d623b4eb90ef544c507c7760cf1a4dbf5968173a09277f841510c   // 20 zero bits
+n      = 96100    h = 00018266ffcdc658d739b8a2c7ff73a32f78a0af100c402e07fb99a0d57434df   // 15: refused at 16
+```
+
 The issuer checks a `POST` in this order: the audience (503); the stamp's form, day and bits (400); then, in one
 transaction, the day's cap (503), the spent stamp (400) and the address (429). A refusal spends neither the stamp nor
 the address's count.

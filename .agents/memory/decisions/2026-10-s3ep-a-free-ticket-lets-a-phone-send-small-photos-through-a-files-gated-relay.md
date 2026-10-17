@@ -12,9 +12,10 @@ Status: Accepted (2026-10-17). Experimental and debug-only, like ADR 2026-10.3te
 `CALLS_WIRED` and ships when calls do. Amends ADR 2026-10.3sk7 (a free key beside the customer key; a waiting upload
 is a reason to ask) and ADR 2026-10.8t2y (`size`, and the per-attachment limit in the sender's reach). The client half
 of the Knit Anywhere change `free-tickets`: specified in `docs/SPOOL_PROTOCOL.md` §7.6 (`am`, S-7.6-31, C-7.6-32) and
-`docs/VOICE_CALLS.md` §2.6 (C-7.6-27 and C-7.6-28 amended, C-7.6-33 to C-7.6-38). The spool reads `am` from
-`0.4.0-dev.3` (knit-spool, by hand); the issuer's account route, free-tier row and values are
-knit-spool-coordinator ADR 2026-10.3aqb (`feat/free-tickets` @ `5883035`).
+`docs/VOICE_CALLS.md` §2.6 (C-7.6-27 and C-7.6-28 amended, C-7.6-33 to C-7.6-38). The spool's half — the claim, the
+`size` gate and the version `0.4.0-dev.3` that reads it — is knit-spool ADR 2026-10.h4ps (`feat/free-tickets` @
+`061bad2`, amending h6pt and bxsg); the issuer's account route, free-tier row and values are knit-spool-coordinator ADR
+2026-10.3aqb (`feat/free-tickets` @ `5883035`).
 
 **What was observed.** A files-gated relay took attachments only from a phone with a paid ticket (8t2y), so every
 other phone's photos read "Nearby only" there. The brief changed on 2026-10-16: free users send small photos over the
@@ -92,7 +93,8 @@ an issuer only from an invite's `i`.
   Kept true by `FreeTicketRefresherTest` (no upload, no ask; a waiting upload asks once; a refused ticket asks again no
   sooner than an hour after its 200; every answer of both routes; the forgotten key's next day; the customer fallback),
   `FreeTicketsTest` (the stamp vectors copied from knit-spool-coordinator `feat/free-tickets` @ `05b7ec4`, every answer,
-  the backoff), `OkHttpTicketIssuerTest` (the route on a socket), `ScopeSyncTest` (never `aput` over `am`; `size` locks
+  the backoff), `SpoolTicketRecordsTest` (`tkFilesAm`, `sigFilesAm`, `tkAmOnly`, `sigAmOnly`, copied from knit-spool
+  `feat/free-tickets` @ `061bad2`), `OkHttpTicketIssuerTest` (the route on a socket), `ScopeSyncTest` (never `aput` over `am`; `size` locks
   nothing; the wake; the whole loop across a reconnect), `RelayReachTest`, `FreeUploadsTest` (the offers and the fit,
   revision 4's three cases), `TicketKeyStoreTest`, `AttachmentStoreIngestTest` and `FreeTicketLabTest`'s
   `anUnticketedPhoneGetsAFreeTicketAndItsSmallPhotoReachesThePeerByRelay` (a `LabFreeIssuer` beside a files-gated
