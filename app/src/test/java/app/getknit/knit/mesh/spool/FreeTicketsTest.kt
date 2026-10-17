@@ -163,7 +163,13 @@ class FreeTicketsTest {
 
     @Test
     fun aCappedDaysRetryAfterHoldsTheNextAsk() {
-        val after = TicketRefreshPolicy.afterAnswer(KeyState(KeyAnswer.OK), IssuerAnswer.Unavailable(5 * 3_600_000L), held = false, now = now)
+        val after =
+            TicketRefreshPolicy.afterAnswer(
+                KeyState(KeyAnswer.OK),
+                IssuerAnswer.Unavailable(5 * 3_600_000L),
+                held = false,
+                now = now,
+            )
         assertEquals(now + 5 * 3_600_000L, after.notBefore)
         assertEquals(KeyAnswer.OK, after.answer)
         val bare = TicketRefreshPolicy.afterAnswer(KeyState(KeyAnswer.OK), IssuerAnswer.Unavailable(null), held = false, now = now)

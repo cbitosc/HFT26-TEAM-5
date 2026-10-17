@@ -582,6 +582,14 @@ class InternetPlaneLabTest {
                         .toInt()
                 },
             )
+            // Alice holds Bob's "nearby only" message before the jump, so her want for its photo is born before the
+            // re-link below and that link-up's re-ask covers it, rather than the 60 s timed one (seed 964296187).
+            assertTrue(
+                "alice never got bob's nearby-only message\n${lab.report(listOf(alice, bob))}",
+                lab.tryAwait(1, timeoutMs = MeshLab.SPOOL_AWAIT_MS) {
+                    alice.decrypted(alice.dmWith(bob)).count { it.second == "nearby only" }
+                },
+            )
             // Alice's push waits out the radio sighting of the acquaintance (ADR 021); the lapse is when it goes up.
             lab.clock.advance(AttachmentDeferPolicy.RADIO_WINDOW_MS + 60_000L)
             assertTrue(
@@ -603,62 +611,6 @@ class InternetPlaneLabTest {
             lab.link(alice, bob)
             lab.assertConverged(listOf(alice, bob), atLeast = 4) { alice.dmThreadWith(bob)(it) }
             assertEquals(0L, bob.metrics.spool().spoolAttachPushed)
-            assertTrue(spool.aputRefusals.isEmpty())
-        }
-
-    /**
-     * docs/VOICE_CALLS.md C-7.6-27 amended, C-7.6-32, C-7.6-35: a phone with no ticket on a files-gated relay, whose
-     * person allowed free tickets, sends two photos. The small one waits locked, wakes the refresher, which makes a free
-     * account, swaps its key and imports a ticket with `am`; the relay then takes the small photo and the peer fetches
-     * it. The large one is over the ticket's `am` and is never `aput`: it still goes nearby once the two meet.
-     */
-    @Test
-    fun anUnticketedPhoneGetsAFreeTicketAndItsSmallPhotoReachesThePeerByRelay() =
-        runBlocking {
-            val spool = FakeSpool(ent = true, entGates = SpoolTicket.FL_FILES)
-            val host = checkNotNull(SpoolUrl.hostname(MeshLab.SPOOL_URL))
-            val issuer = LabFreeIssuer(aud = host, clock = lab.clock.forNode("issuer"))
-            val alice = lab.node("alice", spool = spool).apply { setDisplayName("Alice") }
-            val bob = lab.node("bob", spool = spool, freeIssuer = issuer).apply { setDisplayName("Bob") }
-            bob.ticketKeys.setFreeConsent(host, true)
-            lab.meetOnTheRelay(alice, bob)
-            assertEquals(SpoolUploads.Locked(SpoolUploads.MISSING), bob.uploads())
-
-            // 4 KiB fits the free ticket's 5 chunks; 300 000 B (7 chunks) does not.
-            assertTrue(bob.sendImage(Random(93).nextBytes(4_096), "small", to = alice))
-            assertTrue(bob.sendImage(Random(94).nextBytes(300_000), "large", to = alice))
-            val small = checkNotNull(bob.attachmentHash(bob.dmWith(alice), bob.ownMessageId(bob.dmWith(alice), "small")))
-            val large = checkNotNull(bob.attachmentHash(bob.dmWith(alice), bob.ownMessageId(bob.dmWith(alice), "large")))
-
-            // The locked upload asks: one account, one ticket, and the connection takes uploads under it.
-            assertTrue(
-                "bob's locked upload never got a free ticket\n${lab.report(listOf(alice, bob))}",
-                lab.tryAwait(1, timeoutMs = MeshLab.SPOOL_AWAIT_MS) { if (bob.uploads() == SpoolUploads.Open) 1 else 0 },
-            )
-            assertEquals(1, issuer.accounts.get())
-            assertEquals(1, issuer.tickets.get())
-            assertTrue(checkNotNull(bob.ticketKeys.keys.first()[host]).free)
-
-            // The radio sighting's deferral (ADR 021) lapses, and the small photo goes up and across.
-            lab.clock.advance(AttachmentDeferPolicy.RADIO_WINDOW_MS + 60_000L)
-            assertTrue(
-                "alice never got bob's small photo over the relay\n${lab.report(listOf(alice, bob))}",
-                lab.tryAwait(1, timeoutMs = MeshLab.SPOOL_AWAIT_MS) { if (alice.blobs.exists(small)) 1 else 0 },
-            )
-            // The large one never went up, nor was it refused: it was never tried.
-            assertFalse("the large photo reached alice by relay", alice.blobs.exists(large))
-            assertEquals("one attachment went up: ${spool.aputs}", 1, spool.aputs.map { it.substringBefore(':') }.distinct().size)
-            assertTrue("the spool refused an upload: ${spool.aputRefusals}", spool.aputRefusals.isEmpty())
-            // Nothing more waits, so nothing more is asked of the issuer.
-            assertEquals(1, issuer.tickets.get())
-
-            // In range again, the radio carries the one the relay would not take.
-            lab.link(alice, bob)
-            lab.assertConverged(listOf(alice, bob), atLeast = 4) { alice.dmThreadWith(bob)(it) }
-            assertTrue(
-                "the large photo never crossed the radio\n${lab.report(listOf(alice, bob))}",
-                lab.tryAwait(1, timeoutMs = MeshLab.AWAIT_MS) { if (alice.blobs.exists(large)) 1 else 0 },
-            )
             assertTrue(spool.aputRefusals.isEmpty())
         }
 

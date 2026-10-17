@@ -635,6 +635,7 @@ private fun accountLine(account: RelayAccount): String =
     when {
         // A free key (C-7.6-37) has no end to show, and is never called an account.
         account.free -> freeKeyLine(account)
+
         else -> customerKeyLine(account)
     }
 

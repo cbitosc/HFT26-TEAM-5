@@ -464,7 +464,12 @@ class FreeTicketRefresherTest {
             r.runOnce()
             assertNull(store.held.value[HOST])
             val tomorrow = FreeAccountPolicy.nextUtcDay(now)
-            assertEquals(tomorrow, store.free.value.getValue(HOST).notBefore)
+            assertEquals(
+                tomorrow,
+                store.free.value
+                    .getValue(HOST)
+                    .notBefore,
+            )
             r.uploadWanted(URL)
             assertEquals(tomorrow, r.runOnce())
             assertTrue(accounts.gets.isEmpty())

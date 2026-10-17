@@ -52,7 +52,13 @@ class OkHttpTicketIssuer(
         origin: String,
         key: String,
     ): IssuerAnswer =
-        call(origin, IssuerOrigin.ticketUrl(origin), key, ByteArray(0).toRequestBody(null), IssuerAnswer::NoVerdict) { code, body, retryAfter ->
+        call(
+            origin,
+            IssuerOrigin.ticketUrl(origin),
+            key,
+            ByteArray(0).toRequestBody(null),
+            IssuerAnswer::NoVerdict,
+        ) { code, body, retryAfter ->
             IssuerAnswer.read(code, body, retryAfter)
         }
 
@@ -111,9 +117,9 @@ class OkHttpTicketIssuer(
                 put("n", n)
             }.toString()
         return call(origin, IssuerOrigin.accountUrl(origin), key = null, body.toRequestBody(JSON.toMediaType()), AccountAnswer::NoAnswer) {
-                code,
-                bytes,
-                retryAfter,
+            code,
+            bytes,
+            retryAfter,
             ->
             AccountAnswer.read(code, bytes, retryAfter)
         }

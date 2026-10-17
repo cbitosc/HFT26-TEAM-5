@@ -283,7 +283,10 @@ class RelayReachTest {
             )
         assertEquals(AttachmentRelay.TooLarge, attachmentReach("peer-a", sixChunks, covered.copy(uploadRooms = rooms)))
         // Either relay alone is enough for what it does take (the union rule).
-        assertEquals(AttachmentRelay.Relayable, attachmentReach("peer-a", ScopeCrypto.ATTACH_CHUNK_BYTES * 5, covered.copy(uploadRooms = rooms)))
+        assertEquals(
+            AttachmentRelay.Relayable,
+            attachmentReach("peer-a", ScopeCrypto.ATTACH_CHUNK_BYTES * 5, covered.copy(uploadRooms = rooms)),
+        )
     }
 
     @Test

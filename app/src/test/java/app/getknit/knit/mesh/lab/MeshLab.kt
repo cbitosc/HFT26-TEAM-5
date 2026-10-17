@@ -1024,6 +1024,9 @@ class LabNode internal constructor(
     /** The ticket keys and the free half (docs/VOICE_CALLS.md §2.6), seeded with [freeIssuer] for its audience. */
     val ticketKeys = TicketKeyStore(dataStore, freeIssuer?.let { mapOf(it.aud to it.origin) }.orEmpty())
 
+    // What the manager is handed: the store only where a free issuer is wired, so every other node runs without tickets.
+    private val freeKeys: TicketKeyStore? = ticketKeys.takeIf { freeIssuer != null }
+
     /** The holder's side of the supporter badge (ADR 2026-10.r99s), in the same settings file, kept across restarts. */
     val badges = BadgeStore(dataStore)
 
@@ -1298,9 +1301,9 @@ class LabNode internal constructor(
                 ingressBudget = IngressBudget(burst = limits.ingressBurst, perMinute = limits.ingressPerMinute, clock = now),
                 spoolDialer = spool,
                 commons = commons,
-                ticketKeys = freeIssuer?.let { ticketKeys },
+                ticketKeys = freeKeys,
                 ticketIssuer = freeIssuer,
-                freeKeys = freeIssuer?.let { ticketKeys },
+                freeKeys = freeKeys,
                 accountIssuer = freeIssuer,
                 badgeJournal = badges,
                 badgePins = listOf(BadgeKeys.RFC8032_TEST1),

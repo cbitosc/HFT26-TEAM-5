@@ -205,7 +205,8 @@ class TicketKeyStore(
             this[SettingsKeys.spoolKeyKey(host)]?.let(::decodeKey)
                 ?: this[SettingsKeys.spoolFreeKeyKey(host)]?.let(::decodeKey)?.copy(free = true)
 
-        fun encodeFreeState(state: FreeState): String = json.encodeToString(StoredFreeState(state.notBefore, state.unavailable, state.failures))
+        fun encodeFreeState(state: FreeState): String =
+            json.encodeToString(StoredFreeState(state.notBefore, state.unavailable, state.failures))
 
         fun decodeFreeState(text: String): FreeState? =
             runCatching { json.decodeFromString<StoredFreeState>(text) }.getOrNull()?.let { FreeState(it.nb, it.u, it.f) }

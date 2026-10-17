@@ -12,6 +12,9 @@ import app.getknit.knit.data.settings.ModelLoadJournal
 import app.getknit.knit.fieldlog.FieldJournal
 import app.getknit.knit.identity.IdentitySource
 import app.getknit.knit.mesh.RadioSupport
+import app.getknit.knit.mesh.spool.FreeKeyJournal
+import app.getknit.knit.mesh.spool.SpoolTicketJournal
+import app.getknit.knit.mesh.spool.TicketKeyJournal
 import app.getknit.knit.moderation.TextModerator
 import com.google.crypto.tink.KeysetHandle
 import kotlinx.coroutines.flow.Flow
@@ -72,6 +75,11 @@ class KoinGraphVerifyTest {
                 ContributionJournal::class,
                 ModelLoadJournal::class,
                 IdentitySource::class,
+                // Free tickets' stores (ADR 2026-10.s3ep): `get<TicketKeyStore>()` as TicketKeyJournal / FreeKeyJournal and
+                // `get<SettingsStore>()` as SpoolTicketJournal, handed to FreeUploads.
+                TicketKeyJournal::class,
+                FreeKeyJournal::class,
+                SpoolTicketJournal::class,
                 // The voice calls' seams, written inline over MeshManager so building the call graph builds nothing
                 // else (di/CallWiring), and the ring's alert timeout.
                 CallSignals::class,

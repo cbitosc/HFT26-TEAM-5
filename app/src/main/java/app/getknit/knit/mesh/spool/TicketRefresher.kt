@@ -116,7 +116,10 @@ object TicketRefreshPolicy {
             // A capped day (C-7.6-28): no ticket before the issuer's `retry-after`, so no ask before it either; without
             // one, the ordinary backoff.
             is IssuerAnswer.Unavailable -> {
-                noVerdict(prior, now).let { next -> answer.retryAfterMs?.let { next.copy(notBefore = maxOf(next.notBefore, now + it)) } ?: next }
+                noVerdict(prior, now).let { next ->
+                    answer.retryAfterMs?.let { next.copy(notBefore = maxOf(next.notBefore, now + it)) }
+                        ?: next
+                }
             }
         }
 
@@ -288,8 +291,14 @@ class TicketRefresher(
         if (free?.freeConsent?.first()?.get(host) == false) return null
         val due = TicketRefreshPolicy.freeDueAt(state, waitingAt(host), tickets.presentable(url) != null) ?: return null
         return when {
-            due > clock() -> due
-            !online() -> clock() + maxSleepMs
+            due > clock() -> {
+                due
+            }
+
+            !online() -> {
+                clock() + maxSleepMs
+            }
+
             else -> {
                 val next = asking(host) { ask(host, url, key, state) }
                 TicketRefreshPolicy.freeDueAt(next, waitingAt(host), tickets.presentable(url) != null)
@@ -317,8 +326,14 @@ class TicketRefresher(
         val journal = free ?: return null
         val prior = journal.freeStates.first()[host] ?: FreeState()
         return when {
-            prior.notBefore > clock() -> prior.notBefore
-            !online() -> clock() + maxSleepMs
+            prior.notBefore > clock() -> {
+                prior.notBefore
+            }
+
+            !online() -> {
+                clock() + maxSleepMs
+            }
+
             else -> {
                 val key = asking(host) { createAccount(host, origin, prior) }
                 if (key == null) {
@@ -335,6 +350,7 @@ class TicketRefresher(
      * One account request at [origin] for [host] (C-7.6-35, C-7.6-36): the parameters, a stamp, the `POST`, and once
      * more on a first `bad-stamp`. The key it made, or null with the backoff recorded.
      */
+    @Suppress("ReturnCount") // each answer of the route ends the request its own way (C-7.6-38)
     private suspend fun createAccount(
         host: String,
         origin: String,

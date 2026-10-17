@@ -2577,7 +2577,14 @@ class ScopeSyncTest {
             val (small, smallBytes) = image(size = 30_000)
             val tickets = filesTickets(SpoolTicketsTest.ticket(fl = SpoolTicket.FL_FILES, am = 49_152))
             val phone =
-                member(spool, alice, bob, blobs = FakeBlobs(big to bigBytes, small to smallBytes), urls = listOf(filesUrl), tickets = tickets)
+                member(
+                    spool,
+                    alice,
+                    bob,
+                    blobs = FakeBlobs(big to bigBytes, small to smallBytes),
+                    urls = listOf(filesUrl),
+                    tickets = tickets,
+                )
             phone.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now, attachmentHash = big), ForwardStore.ORIGIN_SELF, now)
             phone.custody.store(dmFrame("m2", from = alice, to = bob, sentAt = now, attachmentHash = small), ForwardStore.ORIGIN_SELF, now)
             phone.sync.start(backgroundScope)
@@ -2618,7 +2625,13 @@ class ScopeSyncTest {
             pump(rounds = 16)
             assertEquals(listOf("size"), spool.aputRefusals)
             // Not a lock and not a spent day: uploads stay open, and nothing was charged.
-            assertEquals(SpoolUploads.Open, phone.sync.status().single().uploads)
+            assertEquals(
+                SpoolUploads.Open,
+                phone.sync
+                    .status()
+                    .single()
+                    .uploads,
+            )
             assertEquals(0L, spool.uploadCharged(ticket))
             val tried = spool.aputs.size
             pump(rounds = 40)
@@ -2638,7 +2651,8 @@ class ScopeSyncTest {
             val (aHash, bytes) = image()
             // No ticket: locked `missing`, a reason to ask now.
             val bare = FakeSpool(ent = true, entGates = SpoolTicket.FL_FILES)
-            val phone = member(bare, alice, bob, blobs = FakeBlobs(aHash to bytes), urls = listOf(filesUrl), onUploadWanted = { wanted += it })
+            val phone =
+                member(bare, alice, bob, blobs = FakeBlobs(aHash to bytes), urls = listOf(filesUrl), onUploadWanted = { wanted += it })
             phone.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now, attachmentHash = aHash), ForwardStore.ORIGIN_SELF, now)
             phone.sync.start(backgroundScope)
             pump(rounds = 16)
@@ -2662,7 +2676,13 @@ class ScopeSyncTest {
             other.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now, attachmentHash = aHash), ForwardStore.ORIGIN_SELF, now)
             other.sync.start(backgroundScope)
             pump(rounds = 16)
-            assertEquals(SpoolUploads.Locked(SpoolUploads.PENDING), other.sync.status().single().uploads)
+            assertEquals(
+                SpoolUploads.Locked(SpoolUploads.PENDING),
+                other.sync
+                    .status()
+                    .single()
+                    .uploads,
+            )
             assertTrue(waiting.isEmpty())
             other.sync.stop()
         }
@@ -2678,45 +2698,8 @@ class ScopeSyncTest {
             val tickets = SpoolTickets(journal) { now }
             val keys = TicketRefresherTest.MemoryKeyJournal(journal)
             val host = SpoolUrl.hostname(filesUrl)!!
-            val free = MemoryFree(keys).apply { issuers.value = mapOf(host to "https://free.example"); consent.value = mapOf(host to true) }
-            val swap =
-                object : TicketIssuer {
-                    var asks = 0
-
-                    override suspend fun swap(
-                        origin: String,
-                        key: String,
-                    ): IssuerAnswer {
-                        asks++
-                        val ticket = SpoolTicketsTest.ticket(aud = host, nbf = now / 1_000, exp = now / 1_000 + 90_000, fl = SpoolTicket.FL_FILES, am = 262_144)
-                        return IssuerAnswer.Issued(ticket.text, now + 30 * 86_400_000L)
-                    }
-                }
-            val accounts =
-                object : AccountIssuer {
-                    override suspend fun accountParams(
-                        origin: String,
-                        aud: String,
-                    ) = AccountAnswer.Params(aud, 4, 20_000)
-
-                    override suspend fun createAccount(
-                        origin: String,
-                        aud: String,
-                        day: Long,
-                        nonce: ByteArray,
-                        n: Long,
-                    ) = AccountAnswer.Created("kak1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", aud)
-                }
-            val refresher =
-                TicketRefresher(
-                    keys = keys,
-                    tickets = tickets,
-                    issuer = swap,
-                    urls = MutableStateFlow(setOf(filesUrl)),
-                    clock = { now },
-                    free = free,
-                    accounts = accounts,
-                )
+            val swap = LoopSwap(host) { now }
+            val refresher = freeRefresher(host, keys, tickets, swap)
             val phone =
                 member(
                     spool,
@@ -2730,7 +2713,13 @@ class ScopeSyncTest {
             phone.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now, attachmentHash = aHash), ForwardStore.ORIGIN_SELF, now)
             phone.sync.start(backgroundScope)
             pump(rounds = 16)
-            assertEquals(SpoolUploads.Locked(SpoolUploads.MISSING), phone.sync.status().single().uploads)
+            assertEquals(
+                SpoolUploads.Locked(SpoolUploads.MISSING),
+                phone.sync
+                    .status()
+                    .single()
+                    .uploads,
+            )
             assertTrue(refresher.isWaiting(host))
             assertTrue(spool.aputs.isEmpty())
 
@@ -2738,17 +2727,84 @@ class ScopeSyncTest {
             spool.dropSockets()
             refresher.runOnce()
             assertEquals(1, swap.asks)
-            assertTrue(keys.held.value.getValue(host).free)
+            assertTrue(
+                keys.held.value
+                    .getValue(host)
+                    .free,
+            )
             assertFalse(refresher.isWaiting(host))
             // Back online: the new connection presents the ticket, and the waiting photo goes up whole.
             pump(rounds = 30)
-            assertEquals(SpoolUploads.Open, phone.sync.status().single().uploads)
+            assertEquals(
+                SpoolUploads.Open,
+                phone.sync
+                    .status()
+                    .single()
+                    .uploads,
+            )
             assertEquals(1, spool.chunkCount(scopeHex(alice, bob), aidHex(alice, bob, aHash)))
             // Nothing more waits, so the free key asks nothing more, however long the session runs.
             refresher.runOnce()
             assertEquals(1, swap.asks)
             phone.sync.stop()
         }
+
+    /** A refresher for [filesUrl] whose host has a free issuer the person allowed, over [keys] and [tickets]. */
+    private fun freeRefresher(
+        host: String,
+        keys: TicketRefresherTest.MemoryKeyJournal,
+        tickets: SpoolTickets,
+        swap: TicketIssuer,
+    ): TicketRefresher {
+        val free =
+            MemoryFree(keys).apply {
+                issuers.value = mapOf(host to "https://free.example")
+                consent.value = mapOf(host to true)
+            }
+        return TicketRefresher(
+            keys = keys,
+            tickets = tickets,
+            issuer = swap,
+            urls = MutableStateFlow(setOf(filesUrl)),
+            clock = { now },
+            free = free,
+            accounts = LoopAccounts(),
+        )
+    }
+
+    /** The key swap for the free loop: one 25 h files ticket with a five-chunk `am` per ask, counted. */
+    private class LoopSwap(
+        private val host: String,
+        private val clock: () -> Long,
+    ) : TicketIssuer {
+        var asks = 0
+
+        override suspend fun swap(
+            origin: String,
+            key: String,
+        ): IssuerAnswer {
+            asks++
+            val nowS = clock() / 1_000
+            val ticket = SpoolTicketsTest.ticket(aud = host, nbf = nowS, exp = nowS + 90_000, fl = SpoolTicket.FL_FILES, am = 262_144)
+            return IssuerAnswer.Issued(ticket.text, clock() + 30 * 86_400_000L)
+        }
+    }
+
+    /** The account route for the free loop: a 4-bit stamp, and an account for any stamp. */
+    private class LoopAccounts : AccountIssuer {
+        override suspend fun accountParams(
+            origin: String,
+            aud: String,
+        ) = AccountAnswer.Params(aud, 4, 20_000)
+
+        override suspend fun createAccount(
+            origin: String,
+            aud: String,
+            day: Long,
+            nonce: ByteArray,
+            n: Long,
+        ) = AccountAnswer.Created("kak1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", aud)
+    }
 
     /** The free half of the key store in memory, beside [TicketRefresherTest.MemoryKeyJournal]'s one slot per host. */
     private class MemoryFree(

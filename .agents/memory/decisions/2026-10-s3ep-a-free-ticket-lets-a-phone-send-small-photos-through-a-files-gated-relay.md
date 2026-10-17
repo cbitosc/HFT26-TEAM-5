@@ -94,8 +94,9 @@ an issuer only from an invite's `i`.
   `FreeTicketsTest` (the stamp vectors copied from knit-spool-coordinator `feat/free-tickets` @ `05b7ec4`, every answer,
   the backoff), `OkHttpTicketIssuerTest` (the route on a socket), `ScopeSyncTest` (never `aput` over `am`; `size` locks
   nothing; the wake; the whole loop across a reconnect), `RelayReachTest`, `FreeUploadsTest` (the offers and the fit,
-  revision 4's three cases), `TicketKeyStoreTest`, `AttachmentStoreIngestTest` and `InternetPlaneLabTest`'s
-  `anUnticketedPhoneGetsAFreeTicketAndItsSmallPhotoReachesThePeerByRelay`.
+  revision 4's three cases), `TicketKeyStoreTest`, `AttachmentStoreIngestTest` and `FreeTicketLabTest`'s
+  `anUnticketedPhoneGetsAFreeTicketAndItsSmallPhotoReachesThePeerByRelay` (a `LabFreeIssuer` beside a files-gated
+  `FakeSpool`, which now refuses `size` in the spool's order).
 - **What the iOS port must copy:** the C-7.6-32 check before any `ahave`, `size` as no lock; the waiting-upload ask and
   the free key's rule (no margin, the floor kept); the account exchange and its backoff; the one slot per host, the
   free key out of every backup; the notice before any request; fitting the first photo.

@@ -816,8 +816,9 @@ class FakeSpool(
 
         /**
          * The daemon's `filesAdmitted` (S-7.6-22, S-7.6-31): where `files` is gated, only this connection's own live files
-         * ticket admits an upload, of an attachment within its `am`, while its pseudonym has room for the chunk's charge. A refusal is `err ticket` with the
-         * record's `q` and `scope`, recorded, and stores nothing. Returns the pseudonym to charge, or null to stop.
+         * ticket admits an upload, of an attachment within its `am`, while its pseudonym has room for the chunk's charge.
+         * A refusal is `err ticket` with the record's `q` and `scope`, recorded, and stores nothing. Returns the pseudonym
+         * to charge, or null to stop.
          */
         private fun filesAdmitted(aput: SpoolAput): String? {
             if (!gated(SpoolTicket.FL_FILES)) return ""

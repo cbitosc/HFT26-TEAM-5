@@ -124,42 +124,79 @@ internal fun photoChunks(
     keys: Map<String, HeldKey>,
     expectedAm: Map<String, Long>,
 ): Int? {
-    val limits = mutableListOf<Int>()
-    for (status in statuses) {
-        if (!status.connected || status.maxAttachBytes == null) continue
-        if (status.entGates and SpoolTicket.FL_FILES == 0L) return null
-        val host = SpoolUrl.hostname(status.url) ?: continue
-        when (val uploads = status.uploads) {
-            SpoolUploads.Open -> {
-                limits += status.uploadLimitChunks ?: return null
-            }
+    val facts = FitFacts(held, issuers, consent, keys, expectedAm)
+    val fits = statuses.filter { it.connected && it.maxAttachBytes != null }.map { relayFit(it, facts) }
+    if (fits.any { it == Fit.Whole }) return null
+    return fits.filterIsInstance<Fit.Chunks>().minOfOrNull { it.chunks }
+}
 
-            is SpoolUploads.Locked -> {
-                if (uploads.reason !in WAITING) continue
-                val key = keys[host]
-                val origin = issuers[host]
-                val freeAllowed = origin != null && consent[host] != false
-                if (key == null && !freeAllowed) continue
-                val lastAm = held[host]?.let { HeldTicket.parse(it.text) }?.takeIf { it.claims.aud == host }?.claims?.am
-                // A customer key's ticket without `am` takes any size; only a free ticket's expectation stands in.
-                val am = lastAm ?: (if (key == null || key.free) origin?.let(expectedAm::get) else null)
-                if (am == null && key != null && !key.free) return null
-                limits += am?.let(SpoolTicket::chunksOf) ?: continue
-            }
+/** What one relay asks of a photo: nothing ([Whole]), a chunk limit ([Chunks]), or nothing today ([None]). */
+private sealed interface Fit {
+    /** It takes the photo as it is. */
+    data object Whole : Fit
 
-            SpoolUploads.Spent -> {
-                continue
-            }
-        }
+    /** It takes one of at most [chunks] chunks. */
+    data class Chunks(
+        val chunks: Int,
+    ) : Fit
+
+    /** It takes no upload of this phone's today, so it sizes nothing. */
+    data object None : Fit
+}
+
+/** [photoChunks]' stores, read once per pass. */
+private class FitFacts(
+    val held: Map<String, StoredSpoolTicket>,
+    val issuers: Map<String, String>,
+    val consent: Map<String, Boolean>,
+    val keys: Map<String, HeldKey>,
+    val expectedAm: Map<String, Long>,
+)
+
+private fun relayFit(
+    status: SpoolStatus,
+    facts: FitFacts,
+): Fit {
+    if (status.entGates and SpoolTicket.FL_FILES == 0L) return Fit.Whole
+    val uploads = status.uploads
+    if (uploads == SpoolUploads.Open) return status.uploadLimitChunks?.let(Fit::Chunks) ?: Fit.Whole
+    val host = SpoolUrl.hostname(status.url)
+    if (host == null || uploads !is SpoolUploads.Locked || uploads.reason !in WAITING) return Fit.None
+    return lockedFit(host, facts)
+}
+
+/**
+ * A relay locked for want of a ticket: the last held ticket's `am`; else, under a customer key, any size (its ticket's
+ * `am` is unknown, and the hint is a free ticket's, contract revision 4); else, with a free key or none and a free
+ * account not turned down, the hint; else nothing.
+ */
+private fun lockedFit(
+    host: String,
+    facts: FitFacts,
+): Fit {
+    val key = facts.keys[host]
+    val lastAm =
+        facts.held[host]
+            ?.let { HeldTicket.parse(it.text) }
+            ?.takeIf { it.claims.aud == host }
+            ?.claims
+            ?.am
+    val origin = facts.issuers[host]
+    val hint = origin?.takeIf { key != null || facts.consent[host] != false }?.let(facts.expectedAm::get)
+    return when {
+        lastAm != null -> Fit.Chunks(SpoolTicket.chunksOf(lastAm))
+        key != null && !key.free -> Fit.Whole
+        hint != null -> Fit.Chunks(SpoolTicket.chunksOf(hint))
+        else -> Fit.None
     }
-    return limits.minOrNull()
 }
 
 /**
  * The most plaintext bytes a photo may be to fit [chunks] chunks once sealed end to end (`AttachmentCrypto`: a 12 B
  * nonce and a 16 B tag ride with every blob, docs/VOICE_CALLS.md §2.6), or 0 when even an empty one would not.
  */
-fun photoFitBytes(chunks: Int): Int = (chunks.toLong() * ScopeCrypto.ATTACH_CHUNK_BYTES - SEAL_OVERHEAD).coerceIn(0, Int.MAX_VALUE.toLong()).toInt()
+fun photoFitBytes(chunks: Int): Int =
+    (chunks.toLong() * ScopeCrypto.ATTACH_CHUNK_BYTES - SEAL_OVERHEAD).coerceIn(0, Int.MAX_VALUE.toLong()).toInt()
 
 private const val SEAL_OVERHEAD = 12 + 16
 

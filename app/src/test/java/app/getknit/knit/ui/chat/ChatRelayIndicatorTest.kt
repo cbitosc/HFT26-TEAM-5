@@ -246,7 +246,7 @@ class ChatRelayIndicatorTest {
         // the same marker fronts an oversize voice note.
         compose
             .onNodeWithText(
-                "This attachment is bigger than any of your relays will hold, so it is not being uploaded. " +
+                "This attachment is bigger than your relays will take from this phone, so it is not being uploaded. " +
                     "It still arrives when you and Ana are in Wi-Fi or Bluetooth range of each other.",
             ).assertIsDisplayed()
     }

@@ -2400,7 +2400,12 @@ class ChatViewModel(
      * dropping it would look like the camera simply did nothing.
      */
     fun attachCaptured(jpeg: ByteArray) {
-        viewModelScope.launch { stage(attachments.ingest(jpeg, "image/jpeg", screen = isRoom, fitBytes = photoFit()), notifyFailure = true) }
+        viewModelScope.launch {
+            stage(
+                attachments.ingest(jpeg, "image/jpeg", screen = isRoom, fitBytes = photoFit()),
+                notifyFailure = true,
+            )
+        }
     }
 
     /**

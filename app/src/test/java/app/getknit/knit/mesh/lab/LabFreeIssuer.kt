@@ -36,8 +36,7 @@ class LabFreeIssuer(
     override suspend fun accountParams(
         origin: String,
         aud: String,
-    ): AccountAnswer =
-        if (aud == this.aud) AccountAnswer.Params(aud, bits, SpoolPow.utcDay(clock())) else AccountAnswer.Unavailable(null)
+    ): AccountAnswer = if (aud == this.aud) AccountAnswer.Params(aud, bits, SpoolPow.utcDay(clock())) else AccountAnswer.Unavailable(null)
 
     override suspend fun createAccount(
         origin: String,
