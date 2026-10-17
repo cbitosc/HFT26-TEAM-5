@@ -1,14 +1,18 @@
 package app.getknit.knit.data.relay
 
+import app.getknit.knit.mesh.crypto.scope.ScopeCrypto
 import app.getknit.knit.mesh.spool.FreeKeyJournal
 import app.getknit.knit.mesh.spool.HeldKey
+import app.getknit.knit.mesh.spool.HeldTicket
 import app.getknit.knit.mesh.spool.IssuerOrigin
 import app.getknit.knit.mesh.spool.KeyAnswer
 import app.getknit.knit.mesh.spool.KeyState
 import app.getknit.knit.mesh.spool.SpoolStatus
 import app.getknit.knit.mesh.spool.SpoolTicket
+import app.getknit.knit.mesh.spool.SpoolTicketJournal
 import app.getknit.knit.mesh.spool.SpoolUploads
 import app.getknit.knit.mesh.spool.SpoolUrl
+import app.getknit.knit.mesh.spool.StoredSpoolTicket
 import app.getknit.knit.mesh.spool.TicketKeyJournal
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
@@ -42,9 +46,25 @@ class FreeUploads(
     statuses: Flow<List<SpoolStatus>>,
     private val free: FreeKeyJournal,
     keys: TicketKeyJournal,
+    tickets: SpoolTicketJournal,
+    // Issuer origin → the `am` a free ticket from it is expected to carry (`res/values/spools.xml`), for the photo a
+    // phone sends before it has ever held one.
+    expectedAm: Map<String, Long> = emptyMap(),
 ) {
     val offers: Flow<List<FreeUploadOffer>> =
         combine(statuses, free.freeIssuers, free.freeConsent, keys.keys, keys.keyStates, ::freeUploadOffers)
+            .distinctUntilChanged()
+
+    /**
+     * The most chunks a photo staged now should take, to go up through the connected relays ([photoChunks]), or null
+     * to leave it as it is. What the composer hands `AttachmentStore` as the size a photo must fit (C-7.6-32).
+     */
+    val photoChunks: Flow<Int?> =
+        combine(
+            statuses,
+            tickets.spoolTickets,
+            combine(free.freeIssuers, free.freeConsent, keys.keys, ::Triple),
+        ) { live, held, (issuers, consent, keyed) -> photoChunks(live, held, issuers, consent, keyed, expectedAm) }
             .distinctUntilChanged()
 
     val choices: Flow<Map<String, FreeUploadChoice>> =
@@ -86,5 +106,61 @@ internal fun freeUploadOffers(
         }.distinct()
         .sortedBy { it.relayHost }
         .toList()
+
+/**
+ * The chunk limit a photo is fitted to (C-7.6-32), over the connected relays that carry attachments: null — no
+ * re-encode — when any of them would take it as it is (no files gate, or an open one whose ticket sets no `am`), since
+ * one relay that takes it is enough (§9.1's union rule); else the smallest limit among the rest. An open relay's is its
+ * live ticket's. One locked for want of a ticket counts where one could come — a key held, or a free issuer the person
+ * has not turned down — at the `am` of the ticket last held there, live or lapsed, or with none yet, the `am` a free
+ * ticket from its issuer is expected to carry. Spent, pending and refused relays take nothing today and do not count.
+ */
+@Suppress("LongParameterList") // the facts one rule reads; a holder would only rename them
+internal fun photoChunks(
+    statuses: List<SpoolStatus>,
+    held: Map<String, StoredSpoolTicket>,
+    issuers: Map<String, String>,
+    consent: Map<String, Boolean>,
+    keys: Map<String, HeldKey>,
+    expectedAm: Map<String, Long>,
+): Int? {
+    val limits = mutableListOf<Int>()
+    for (status in statuses) {
+        if (!status.connected || status.maxAttachBytes == null) continue
+        if (status.entGates and SpoolTicket.FL_FILES == 0L) return null
+        val host = SpoolUrl.hostname(status.url) ?: continue
+        when (val uploads = status.uploads) {
+            SpoolUploads.Open -> {
+                limits += status.uploadLimitChunks ?: return null
+            }
+
+            is SpoolUploads.Locked -> {
+                if (uploads.reason !in WAITING) continue
+                val key = keys[host]
+                val origin = issuers[host]
+                val freeAllowed = origin != null && consent[host] != false
+                if (key == null && !freeAllowed) continue
+                val lastAm = held[host]?.let { HeldTicket.parse(it.text) }?.takeIf { it.claims.aud == host }?.claims?.am
+                // A customer key's ticket without `am` takes any size; only a free ticket's expectation stands in.
+                val am = lastAm ?: (if (key == null || key.free) origin?.let(expectedAm::get) else null)
+                if (am == null && key != null && !key.free) return null
+                limits += am?.let(SpoolTicket::chunksOf) ?: continue
+            }
+
+            SpoolUploads.Spent -> {
+                continue
+            }
+        }
+    }
+    return limits.minOrNull()
+}
+
+/**
+ * The most plaintext bytes a photo may be to fit [chunks] chunks once sealed end to end (`AttachmentCrypto`: a 12 B
+ * nonce and a 16 B tag ride with every blob, docs/VOICE_CALLS.md §2.6), or 0 when even an empty one would not.
+ */
+fun photoFitBytes(chunks: Int): Int = (chunks.toLong() * ScopeCrypto.ATTACH_CHUNK_BYTES - SEAL_OVERHEAD).coerceIn(0, Int.MAX_VALUE.toLong()).toInt()
+
+private const val SEAL_OVERHEAD = 12 + 16
 
 private val WAITING = setOf(SpoolUploads.MISSING, SpoolUploads.EXPIRED)

@@ -154,20 +154,25 @@ class AttachmentStore(
      *
      * The source is read whole first (bounded) so a picture this phone already holds is found by its bytes
      * ([ingestPicked]). One past [MAX_BYTES] can be nothing we hold, so it takes the long way, decoded from [uri].
+     *
+     * [fitBytes], when set, is the most a still photo should take to go up through the relays this conversation
+     * uses ([fitted], C-7.6-32): over it, the picture is re-encoded smaller.
      */
     suspend fun ingest(
         uri: Uri,
         screen: Boolean = false,
+        fitBytes: Int? = null,
     ): IngestResult =
         withContext(Dispatchers.IO) {
             val sourceMime = context.contentResolver.getType(uri)
-            readBounded(uri)?.let { raw -> return@withContext ingestPicked(raw, sourceMime, screen) }
+            readBounded(uri)?.let { raw -> return@withContext ingestPicked(raw, sourceMime, screen, fitBytes) }
             ingest(
                 sourceMime = sourceMime,
                 screen = screen,
                 held = null,
                 readRaw = { context.contentResolver.openInputStream(uri)?.use { it.readBytes() } },
                 decodeOriented = { decodeOrientedBounded(context, uri, MAX_DIMENSION) },
+                fitBytes = fitBytes,
             )
         }
 
@@ -180,6 +185,7 @@ class AttachmentStore(
         raw: ByteArray,
         sourceMime: String?,
         screen: Boolean = false,
+        fitBytes: Int? = null,
     ): IngestResult =
         withContext(Dispatchers.IO) {
             reused(raw, screen = screen)?.let { return@withContext it }
@@ -190,6 +196,7 @@ class AttachmentStore(
                     held = raw,
                     readRaw = { raw },
                     decodeOriented = { decodeOrientedBounded(raw, MAX_DIMENSION) },
+                    fitBytes = fitBytes,
                 )
             if (result !is IngestResult.Success) return@withContext result
             val source = sha256(raw)
@@ -241,6 +248,7 @@ class AttachmentStore(
         bytes: ByteArray,
         sourceMime: String?,
         screen: Boolean = false,
+        fitBytes: Int? = null,
     ): IngestResult =
         withContext(Dispatchers.IO) {
             ingest(
@@ -249,6 +257,7 @@ class AttachmentStore(
                 held = bytes,
                 readRaw = { bytes },
                 decodeOriented = { decodeOrientedBounded(bytes, MAX_DIMENSION) },
+                fitBytes = fitBytes,
             )
         }
 
@@ -479,12 +488,14 @@ class AttachmentStore(
      * or a still ([passThrough]) can skip the decode; null for a source too large to read whole, which goes by
      * [sourceMime] alone and which no pass-through would take.
      */
+    @Suppress("LongParameterList") // the two sources a picture can come from, and what it must fit
     private suspend fun ingest(
         sourceMime: String?,
         screen: Boolean,
         held: ByteArray?,
         readRaw: () -> ByteArray?,
         decodeOriented: () -> Bitmap?,
+        fitBytes: Int? = null,
     ): IngestResult {
         val kind = held?.let(FileTypes::imageMimeOf) ?: sourceMime
         val (mime, bytes) =
@@ -497,8 +508,12 @@ class AttachmentStore(
                 if (webp != null) "image/webp" to webp else "image/gif" to raw
             } else {
                 held?.let(::animated)
-                    ?: held?.let(::passThrough)
-                    ?: reencoded(decodeOriented() ?: return IngestResult.Failed(IngestResult.Reason.Unreadable))
+                    ?: fitted(
+                        held?.let(::passThrough)
+                            ?: reencoded(decodeOriented() ?: return IngestResult.Failed(IngestResult.Reason.Unreadable)),
+                        fitBytes,
+                        decodeOriented,
+                    )
             }
         failureFor(bytes)?.let { return it }
         // Screen the exact bytes we store and transmit (decoded at the receiver's bound), so the
@@ -517,24 +532,50 @@ class AttachmentStore(
     /** [bitmap] bounded to [MAX_DIMENSION] and encoded afresh — the long way, and one generation of loss. */
     private fun reencoded(bitmap: Bitmap): Pair<String, ByteArray> {
         val scaled = downscale(bitmap, MAX_DIMENSION)
-        // JPEG has no alpha channel, so a transparent PNG would flatten its transparent regions to
-        // black. When the source carries transparency, re-encode as lossy WebP instead — it keeps
-        // the alpha channel and still compresses well; opaque photos stay JPEG (smallest).
-        return if (scaled.hasAlpha()) {
-            val webp =
-                ByteArrayOutputStream().use { out ->
-                    scaled.compress(lossyWebpFormat(), WEBP_QUALITY, out)
-                    out.toByteArray()
-                }
-            "image/webp" to webp
-        } else {
-            val jpeg =
-                ByteArrayOutputStream().use { out ->
-                    scaled.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, out)
-                    out.toByteArray()
-                }
-            "image/jpeg" to jpeg
+        return encoded(scaled, if (scaled.hasAlpha()) WEBP_QUALITY else JPEG_QUALITY)
+    }
+
+    /**
+     * [scaled] encoded at [quality]. JPEG has no alpha channel, so a transparent PNG would flatten its transparent
+     * regions to black: when the source carries transparency it is lossy WebP instead, which keeps the alpha channel
+     * and still compresses well; opaque photos stay JPEG (smallest).
+     */
+    private fun encoded(
+        scaled: Bitmap,
+        quality: Int,
+    ): Pair<String, ByteArray> {
+        val alpha = scaled.hasAlpha()
+        val bytes =
+            ByteArrayOutputStream().use { out ->
+                scaled.compress(if (alpha) lossyWebpFormat() else Bitmap.CompressFormat.JPEG, quality, out)
+                out.toByteArray()
+            }
+        return (if (alpha) WEBP else "image/jpeg") to bytes
+    }
+
+    /**
+     * [plain], or the same picture re-encoded smaller when it is over [fitBytes] — the most a photo may be to go up
+     * through the relays its conversation uses, under the per-attachment limit a ticket there carries (`am`,
+     * C-7.6-32). Quality first, then size, down [FIT_STEPS] to its floor; the first step that fits is kept. One that
+     * never fits keeps [plain]: too large for that relay, it still goes nearby at its best. A still photo only — the
+     * GIF and animation doors keep their frames, and a video is never squeezed twice (ADR 2026-10.hmfe).
+     */
+    private fun fitted(
+        plain: Pair<String, ByteArray>,
+        fitBytes: Int?,
+        decodeOriented: () -> Bitmap?,
+    ): Pair<String, ByteArray> {
+        if (fitBytes == null || plain.second.size <= fitBytes) return plain
+        val bitmap = decodeOriented() ?: return plain
+        for ((edge, quality) in FIT_STEPS) {
+            val step = encoded(downscale(bitmap, edge), quality)
+            if (step.second.size <= fitBytes) {
+                Log.i(TAG, "photo fitted to $fitBytes B: ${plain.second.size} → ${step.second.size} B at $edge px, q$quality")
+                return step
+            }
         }
+        Log.i(TAG, "photo (${plain.second.size} B) does not fit $fitBytes B even at the floor; it stays nearby only there")
+        return plain
     }
 
     /**
@@ -596,6 +637,14 @@ class AttachmentStore(
         const val WEBP = "image/webp"
         const val MAX_DIMENSION = 1280
         const val JPEG_QUALITY = 85
+
+        /**
+         * The re-encode ladder [fitted] walks, (long edge, quality): quality first at full size, then smaller. Measured
+         * 2026-10-17 with libjpeg on a desktop over five Pixel camera originals (4080×3072), whose 1280 px q85 encodes
+         * ran 219–361 KB against the 245,732 B a five-chunk `am` admits: q75 fit four of them, q65 all five (134–227
+         * KB). The 640 px q50 floor came to 32–59 KB, inside any `am` of two chunks; a screenshot is far under at q85.
+         */
+        val FIT_STEPS = listOf(1280 to 75, 1280 to 65, 1280 to 55, 1024 to 60, 800 to 55, 640 to 50)
         const val WEBP_QUALITY = 85
 
         /**

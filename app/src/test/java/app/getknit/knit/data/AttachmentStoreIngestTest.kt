@@ -94,6 +94,59 @@ class AttachmentStoreIngestTest {
         return result as IngestResult.Success
     }
 
+    /**
+     * A photo-like JPEG: a gradient under per-pixel noise, which compresses about as a camera frame does, so its 1280 px
+     * q85 encode is too large for a five-chunk `am` and a lower step is not.
+     */
+    private fun noisyPhoto(): ByteArray {
+        val random = java.util.Random(7)
+        val width = 2000
+        val height = 1500
+        val pixels =
+            IntArray(width * height) { i ->
+                val x = i % width
+                val y = i / width
+                val n = random.nextInt(48) - 24
+                Color.rgb((x * 255 / width + n).coerceIn(0, 255), (y * 255 / height + n).coerceIn(0, 255), (128 + n).coerceIn(0, 255))
+            }
+        val bitmap = Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888)
+        return java.io.ByteArrayOutputStream().use {
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 95, it)
+            it.toByteArray()
+        }
+    }
+
+    private val fiveChunks = 5 * 49_152 - 28
+
+    @Test
+    fun aPhotoOverTheRelaysLimitIsReencodedUnderIt() =
+        runTest {
+            val plain = success(store.ingest(noisyPhoto(), "image/jpeg")).ingested
+            assertTrue("the fixture must be too large at q85: ${plain.sizeBytes}", plain.sizeBytes > fiveChunks)
+            val fitted = success(store.ingest(noisyPhoto(), "image/jpeg", fitBytes = fiveChunks)).ingested
+            assertTrue("fitted: ${fitted.sizeBytes}", fitted.sizeBytes <= fiveChunks)
+            val (mime, bytes) = stored.getValue(fitted.hash)
+            assertEquals("image/jpeg", mime)
+            assertNoMetadata(bytes)
+            assertTrue(checkNotNull(decodeOrientedBounded(bytes, MAX_DIMENSION)).width > 0)
+        }
+
+    @Test
+    fun aPhotoUnderTheLimitOrWithNoneIsLeftAsItIs() =
+        runTest {
+            val plain = success(store.ingest(geotaggedJpeg(), "image/jpeg")).ingested
+            assertEquals(plain.hash, success(store.ingest(geotaggedJpeg(), "image/jpeg", fitBytes = fiveChunks)).ingested.hash)
+            assertEquals(plain.hash, success(store.ingest(geotaggedJpeg(), "image/jpeg", fitBytes = null)).ingested.hash)
+        }
+
+    @Test
+    fun aPhotoNoStepCanFitKeepsItsBestForNearby() =
+        runTest {
+            // Under the floor's reach: too large for that relay, it still goes nearby at its full quality.
+            val plain = success(store.ingest(noisyPhoto(), "image/jpeg")).ingested
+            assertEquals(plain.hash, success(store.ingest(noisyPhoto(), "image/jpeg", fitBytes = 1_000)).ingested.hash)
+        }
+
     @Test
     fun aCapturedPhotoIsStoredUprightBoundedAndWithoutItsMetadata() =
         runTest {

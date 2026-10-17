@@ -6,6 +6,7 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.room3.withWriteTransaction
 import app.getknit.knit.BuildConfig
+import app.getknit.knit.R
 import app.getknit.knit.badge.BadgeIssuer
 import app.getknit.knit.badge.BadgeKeys
 import app.getknit.knit.call.CallManager
@@ -73,6 +74,7 @@ import app.getknit.knit.mesh.power.PowerStateSource
 import app.getknit.knit.mesh.power.awareSwitchedOff
 import app.getknit.knit.mesh.protocol.Protocol
 import app.getknit.knit.mesh.spool.AccountIssuer
+import app.getknit.knit.mesh.spool.FreeIssuers
 import app.getknit.knit.mesh.spool.OkHttpSpoolDialer
 import app.getknit.knit.mesh.spool.OkHttpTicketIssuer
 import app.getknit.knit.mesh.spool.SpoolDialer
@@ -463,7 +465,15 @@ val meshModule =
         // relay settings screen and Diagnostics all read.
         single { RelayStatusRepository(get(), get()) }
         // Free accounts' notice and switch (docs/VOICE_CALLS.md C-7.6-34): read only where tickets are wired.
-        single { FreeUploads(get<RelayStatusRepository>().statuses, get<TicketKeyStore>(), get<TicketKeyStore>()) }
+        single {
+            FreeUploads(
+                get<RelayStatusRepository>().statuses,
+                get<TicketKeyStore>(),
+                get<TicketKeyStore>(),
+                get<SettingsStore>(),
+                FreeIssuers.expectedAm(androidContext().resources.getStringArray(R.array.free_issuer_am)),
+            )
+        }
         // The LoRa plane's UI face: the transport itself when the build ships the plane, a dark stand-in
         // otherwise — so the chat header's repository (resolved by every open chat) never instantiates the
         // board session in release. Its facts feed the header glyph, the DM notice and the composer hint.

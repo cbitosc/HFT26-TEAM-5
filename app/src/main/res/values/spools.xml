@@ -24,4 +24,12 @@
     <string-array name="free_issuers" translatable="false">
         <item>lax.spool.getknit.app https://anywhere.getknit.app</item>
     </string-array>
+    <!--
+      The `am` a free ticket from each free issuer is expected to carry: `<issuer origin> <bytes>`. Only sizes the photo
+      a phone sends before it has ever held a ticket there (data/relay/FreeUploads); the ticket's own `am` wins after.
+      The issuer's operator can change the real value without a release, so this is a starting guess, never a limit.
+    -->
+    <string-array name="free_issuer_am" translatable="false">
+        <item>https://anywhere.getknit.app 262144</item>
+    </string-array>
 </resources>

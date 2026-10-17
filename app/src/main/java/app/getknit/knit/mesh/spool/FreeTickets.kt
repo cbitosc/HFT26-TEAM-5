@@ -25,6 +25,21 @@ object FreeIssuers {
                 if (parts.size != 2 || !IssuerOrigin.isAcceptable(parts[1], allowCleartext = false)) return@mapNotNull null
                 parts[0].lowercase() to parts[1]
             }.toMap()
+
+    /**
+     * Reads the seeded `free_issuer_am` items, each `<issuer origin> <bytes>`: the `am` a free ticket from that issuer
+     * is expected to carry, which sizes the photo a phone sends before it has ever held one (`data/relay/FreeUploads`).
+     * The issuer's own ticket always wins once one is held. An item that is not an origin and a positive number is
+     * dropped.
+     */
+    fun expectedAm(items: Array<String>): Map<String, Long> =
+        items
+            .mapNotNull { item ->
+                val parts = item.trim().split(Regex("\\s+"))
+                val am = parts.getOrNull(1)?.toLongOrNull()?.takeIf { it > 0 }
+                if (parts.size != 2 || am == null || !IssuerOrigin.isAcceptable(parts[0], allowCleartext = false)) return@mapNotNull null
+                parts[0] to am
+            }.toMap()
 }
 
 /**

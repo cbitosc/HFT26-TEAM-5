@@ -58,6 +58,7 @@ import app.getknit.knit.data.relay.attachmentReach
 import app.getknit.knit.data.relay.attachmentWait
 import app.getknit.knit.data.relay.lacksForwardSecrecy
 import app.getknit.knit.data.relay.noticeFor
+import app.getknit.knit.data.relay.photoFitBytes
 import app.getknit.knit.data.relay.planeFor
 import app.getknit.knit.data.relay.reachFor
 import app.getknit.knit.data.settings.SettingsStore
@@ -1401,6 +1402,16 @@ class ChatViewModel(
             }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
         }
 
+    /**
+     * The most a photo staged here may be to go up through this conversation's relays under their tickets' `am`
+     * (C-7.6-32), or null to leave it as it is: the broadcast room and the Meshtastic room never ride a relay, and a
+     * build without tickets holds none.
+     */
+    private suspend fun photoFit(): Int? {
+        if (isRoom || isBridged) return null
+        return freeUploads?.photoChunks?.first()?.let(::photoFitBytes)
+    }
+
     /** The person's answer to [offer]'s notice. Written past the screen's life: a Back must not lose it. */
     fun answerFreeUploads(
         offer: FreeUploadOffer,
@@ -2075,7 +2086,7 @@ class ChatViewModel(
             if (attachments.isVideo(uri)) {
                 attachVideo(uri)
             } else {
-                stage(attachments.ingest(uri, screen = isRoom), notifyFailure = false)
+                stage(attachments.ingest(uri, screen = isRoom, fitBytes = photoFit()), notifyFailure = false)
             }
         }
     }
@@ -2389,7 +2400,7 @@ class ChatViewModel(
      * dropping it would look like the camera simply did nothing.
      */
     fun attachCaptured(jpeg: ByteArray) {
-        viewModelScope.launch { stage(attachments.ingest(jpeg, "image/jpeg", screen = isRoom), notifyFailure = true) }
+        viewModelScope.launch { stage(attachments.ingest(jpeg, "image/jpeg", screen = isRoom, fitBytes = photoFit()), notifyFailure = true) }
     }
 
     /**

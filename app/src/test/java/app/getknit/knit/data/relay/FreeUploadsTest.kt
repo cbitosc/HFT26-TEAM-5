@@ -5,8 +5,11 @@ import app.getknit.knit.mesh.spool.KeyAnswer
 import app.getknit.knit.mesh.spool.KeyState
 import app.getknit.knit.mesh.spool.SpoolStatus
 import app.getknit.knit.mesh.spool.SpoolTicket
+import app.getknit.knit.mesh.spool.SpoolTicketsTest
 import app.getknit.knit.mesh.spool.SpoolUploads
+import app.getknit.knit.mesh.spool.StoredSpoolTicket
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
@@ -22,7 +25,19 @@ class FreeUploadsTest {
         uploads: SpoolUploads = SpoolUploads.Locked(SpoolUploads.MISSING),
         gates: Long = SpoolTicket.FL_FILES,
         connected: Boolean = true,
-    ) = SpoolStatus(url, connected, 0, null, emptyList(), maxAttachBytes = 16 shl 20, ent = true, entGates = gates, uploads = uploads)
+        limit: Int? = null,
+    ) = SpoolStatus(
+        url,
+        connected,
+        0,
+        null,
+        emptyList(),
+        maxAttachBytes = 16 shl 20,
+        ent = true,
+        entGates = gates,
+        uploads = uploads,
+        uploadLimitChunks = limit,
+    )
 
     private fun offers(
         status: SpoolStatus = status(),
@@ -62,6 +77,51 @@ class FreeUploadsTest {
         assertEquals(emptyList<FreeUploadOffer>(), offers(keys = held))
         assertEquals(offer, offers(keys = held, states = mapOf("lax.spool.getknit.app" to KeyState(KeyAnswer.ENDED))))
         assertEquals(emptyList<FreeUploadOffer>(), offers(keys = mapOf("lax.spool.getknit.app" to key.copy(free = true))))
+    }
+
+    // ── the size a photo is fitted to (C-7.6-32) ───────────────────────────────────────────────────────
+
+    private val expected = mapOf("https://anywhere.getknit.app" to 262_144L)
+
+    private fun chunks(
+        status: SpoolStatus,
+        held: Map<String, StoredSpoolTicket> = emptyMap(),
+        consent: Map<String, Boolean> = emptyMap(),
+        keys: Map<String, HeldKey> = emptyMap(),
+    ) = photoChunks(listOf(status), held, issuers, consent, keys, expected)
+
+    @Test
+    fun anOpenRelaysTicketSetsTheLimitAndOneWithoutAmSetsNone() {
+        assertEquals(5, chunks(status(uploads = SpoolUploads.Open, limit = 5)))
+        assertNull(chunks(status(uploads = SpoolUploads.Open)))
+        // An ungated relay takes anything: one is enough (the union rule).
+        assertNull(chunks(status(gates = SpoolTicket.FL_TURN)))
+    }
+
+    @Test
+    fun aLockedRelayWithAFreeIssuerFitsTheExpectedAmBeforeAnyTicketAndTheLastTicketsAfter() {
+        assertEquals(5, chunks(status()))
+        val lapsed = SpoolTicketsTest.ticket(aud = "lax.spool.getknit.app", fl = SpoolTicket.FL_FILES, am = 3L * 49_152)
+        val held = mapOf("lax.spool.getknit.app" to StoredSpoolTicket(lapsed.text, null))
+        assertEquals(3, chunks(status(uploads = SpoolUploads.Locked(SpoolUploads.EXPIRED)), held = held))
+        // Turned down: nothing will come, so nothing is fitted for it.
+        assertNull(chunks(status(), consent = mapOf("lax.spool.getknit.app" to false)))
+        // Pending, spent or refused for its flags: no upload today, nothing fitted.
+        assertNull(chunks(status(uploads = SpoolUploads.Locked(SpoolUploads.PENDING))))
+        assertNull(chunks(status(uploads = SpoolUploads.Spent)))
+    }
+
+    @Test
+    fun aCustomersTicketWithoutAmIsNeverFittedToTheFreeExpectation() {
+        val key = HeldKey("https://anywhere.getknit.app", "kak1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+        val customer = mapOf("lax.spool.getknit.app" to key)
+        assertNull(chunks(status(uploads = SpoolUploads.Locked(SpoolUploads.EXPIRED)), keys = customer))
+    }
+
+    @Test
+    fun aPhotosFitIsItsChunksLessTheSeal() {
+        assertEquals(245_732, photoFitBytes(5))
+        assertEquals(0, photoFitBytes(0))
     }
 
     @Test
