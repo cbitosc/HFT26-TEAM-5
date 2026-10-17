@@ -119,6 +119,64 @@ class SessionLabTest {
         }
 
     /**
+     * #174: the initiator's session stays unconfirmed past a day — the responder's answers never reach it — while the
+     * responder's weekly prekey rotation lands and its re-flooded profile does reach the initiator. The initiator's
+     * next DM opens a new epoch, which used to be based on the newest pinned prekey under an init naming the old one:
+     * the responder resolves the base by `init.pkid`, so every such frame failed as RATCHET_AEAD_FAIL, and when the
+     * initiator held the smaller id it also won every race against the responder's resets, dark for days.
+     *
+     * Custody keeps frames three days here, not one: the responder's tick for the first DM is held back with the rest
+     * of its answers, and only a TTL that outlives the day's jump lets it come home once the hold lifts — which is
+     * what makes the ✓✓ half of the oracle honest. In the field that tick expires with the epoch (both are 24 h), and
+     * the first DM goes without its ✓✓; the epoch age the bug needs is the ratchet's own 24 h either way.
+     */
+    private suspend fun anUnconfirmedSessionOutlivesThePeersPrekeyRotation(initiatorHasTheSmallerId: Boolean) {
+        val limits = LabLimits(custodyTtlMs = 3 * DAY_MS)
+        val one = lab.node("alice", limits).apply { setDisplayName("Alice") }
+        val two = lab.node("bob", limits).apply { setDisplayName("Bob") }
+        val (smaller, larger) = if (one.nodeId < two.nodeId) one to two else two to one
+        val (initiator, responder) = if (initiatorHasTheSmallerId) smaller to larger else larger to smaller
+        lab.link(initiator, responder)
+        lab.awaitAcquainted(initiator, responder)
+        val firstPrekey = checkNotNull(initiator.pinned(responder.nodeId)?.prekeyId)
+
+        responder.transport.lossy(initiator.transport) { wire ->
+            WireCodec.decodeEnvelope(wire.signed)?.let { it.type == FrameType.CHAT && it.senderId == responder.nodeId } == true
+        }
+        assertTrue(initiator.sendDm(responder, "before the rotation"))
+        lab.await(1) { responder.decrypted(responder.dmWith(initiator)).size }
+
+        // A day on, past the epoch's age, the responder's weekly rotation lands. It is driven by hand rather than by a
+        // seven-day jump and a heal, whose retention sweep would judge everything by a calendar this scenario does not
+        // need: the rotation mints the next prekey, and a profile edit re-floods the profile that carries it.
+        lab.clock.advance(DAY_MS + 60_000L)
+        assertTrue(responder.identity.rotatePrekeyIfDue(responder.now() + 7 * DAY_MS))
+        responder.setStatus("rotated")
+        lab.await(1) { if ((initiator.pinned(responder.nodeId)?.prekeyId ?: 0) > firstPrekey) 1 else 0 }
+        assertEquals("still unconfirmed: the init rides every frame", false, initiator.session(responder)?.confirmed)
+
+        assertTrue(initiator.sendDm(responder, "after the rotation"))
+        lab.await(2) { responder.decrypted(responder.dmWith(initiator)).size }
+        assertEquals(0L, responder.drops(DropReason.RATCHET_AEAD_FAIL))
+        assertEquals(0L, responder.drops(DropReason.RATCHET_EPOCH_GONE))
+
+        // The hold lifts the way a field link's loss does: the link drops and comes back, and the digest exchange of
+        // the new link re-serves the responder's custodied answers — the first DM's tick among them.
+        responder.transport.lossy(initiator.transport)
+        lab.unlink(initiator, responder)
+        lab.link(initiator, responder)
+        lab.assertConverged(listOf(initiator, responder), atLeast = 2) { it.dmWith(if (it === initiator) responder else initiator) }
+    }
+
+    @Test
+    fun theSmallerIdsUnconfirmedSessionOutlivesThePeersPrekeyRotation() =
+        runBlocking { anUnconfirmedSessionOutlivesThePeersPrekeyRotation(initiatorHasTheSmallerId = true) }
+
+    @Test
+    fun theLargerIdsUnconfirmedSessionOutlivesThePeersPrekeyRotation() =
+        runBlocking { anUnconfirmedSessionOutlivesThePeersPrekeyRotation(initiatorHasTheSmallerId = false) }
+
+    /**
      * Bob sends while apart; Alice forces a reset while apart. On the merge Bob gets the reset and re-seals
      * his unacked DM under the fresh session, Alice reads it, and — the storm check — Bob never resets back
      * on the old-era copy custody also served him.
@@ -502,5 +560,6 @@ class SessionLabTest {
         /** The turnarounds that take one side's epochs past the 16-row cap, and a margin. */
         const val MAX_CAP_TURNS = 20
         const val A_DAY_AND_A_MINUTE_MS = 24 * 60 * 60_000L + 60_000L
+        const val DAY_MS = 24 * 60 * 60_000L
     }
 }

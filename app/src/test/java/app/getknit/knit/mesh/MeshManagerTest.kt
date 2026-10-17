@@ -1174,6 +1174,82 @@ class MeshManagerTest {
             assertEquals(listOf(FanoutHint.CONTENT), rig.transport.longRangeHints)
         }
 
+    /**
+     * #171 (ADR 2026-10.dmgw): a relay that saw an id in its ten-minute window drops the reset's re-seal, so the
+     * same ids are re-sealed once more after [ResetReseal.SECOND_PASS_MS] — only those still unacked, once.
+     */
+    @Test
+    fun aResetsResealGoesOutOnceMoreAfterTheDedupWindow() =
+        runTest(UnconfinedTestDispatcher()) {
+            val rig = Rig(backgroundScope)
+            rig.pin(rig.bob)
+            repeat(3) { i -> assertTrue(rig.manager.sendChat("dm $i", recipientId = rig.bob.nodeId)) }
+            advanceUntilIdle()
+            val (acked, stillOwed, alsoOwed) = rig.saved.toList()
+
+            // Every distinct seal of [id] that went out: a re-seal keeps the original id, so count by payload.
+            fun seals(id: String): Int =
+                rig.transport.sent
+                    .mapNotNull { WireCodec.decodeEnvelope(it.first.signed) }
+                    .filter { it.type == FrameType.CHAT && it.id == id }
+                    .distinctBy { it.payload.toList() }
+                    .size
+
+            coEvery { rig.messages.unackedDmsTo(rig.bob.nodeId, rig.me.nodeId, any()) } returns
+                listOf(acked, stillOwed, alsoOwed)
+            rig.manager.resealRecentDmsTo(rig.bob.nodeId)
+            advanceUntilIdle()
+            assertEquals("the reset re-seals each at once", listOf(2, 2, 2), rig.saved.take(3).map { seals(it.id) })
+
+            rig.clockNow += ResetReseal.SECOND_PASS_MS - 1
+            rig.manager.reofferToNeighbors()
+            advanceUntilIdle()
+            assertEquals("nothing before the window has passed", listOf(2, 2, 2), rig.saved.take(3).map { seals(it.id) })
+
+            // Since the reset: one acked, and a new DM sent under the fresh session.
+            assertTrue(rig.manager.sendChat("after the reset", recipientId = rig.bob.nodeId))
+            advanceUntilIdle()
+            val afterReset = rig.saved.last()
+            coEvery { rig.messages.unackedDmsTo(rig.bob.nodeId, rig.me.nodeId, any()) } returns
+                listOf(stillOwed, alsoOwed, afterReset)
+            rig.clockNow += 1
+            rig.manager.reofferToNeighbors()
+            advanceUntilIdle()
+            assertEquals("the acked one is left alone", 2, seals(acked.id))
+            assertEquals("the still-unacked ones go once more", listOf(3, 3), listOf(seals(stillOwed.id), seals(alsoOwed.id)))
+            assertEquals("a DM sent after the reset is not the reset's to re-seal", 1, seals(afterReset.id))
+
+            rig.clockNow += ResetReseal.SECOND_PASS_MS
+            rig.manager.reofferToNeighbors()
+            advanceUntilIdle()
+            assertEquals(
+                "once per reset: the second pass never re-arms",
+                listOf(2, 3, 3, 1),
+                listOf(acked, stillOwed, alsoOwed, afterReset).map { seals(it.id) },
+            )
+        }
+
+    /** The second pass honours a block that landed after the reset, as the first pass does. */
+    @Test
+    fun aResetsSecondResealSkipsAPeerBlockedSince() =
+        runTest(UnconfinedTestDispatcher()) {
+            val rig = Rig(backgroundScope)
+            rig.pin(rig.bob)
+            assertTrue(rig.manager.sendChat("hello", recipientId = rig.bob.nodeId))
+            advanceUntilIdle()
+            val row = rig.saved.single()
+            coEvery { rig.messages.unackedDmsTo(rig.bob.nodeId, rig.me.nodeId, any()) } returns listOf(row)
+            rig.manager.resealRecentDmsTo(rig.bob.nodeId)
+            advanceUntilIdle()
+            val sealsAfterReset = rig.transport.sent.size
+
+            coEvery { rig.settings.blockedNodeIds } returns MutableStateFlow(setOf(rig.bob.nodeId))
+            rig.clockNow += ResetReseal.SECOND_PASS_MS
+            rig.manager.reofferToNeighbors()
+            advanceUntilIdle()
+            assertEquals("nothing sealed to a blocked peer", sealsAfterReset, rig.transport.sent.size)
+        }
+
     @Test
     fun relayedFarPeerFramesAreCappedAtTheirOwnLimit() =
         runTest(UnconfinedTestDispatcher()) {
@@ -2119,6 +2195,138 @@ class MeshManagerTest {
 
             val enc = WireCodec.decodePayload<ChatContent>(rig.sentChatFrames().single().payload)!!.enc!!
             assertEquals(1, enc.v)
+            assertEquals(1L, rig.metrics.seals().dmSealedV1Fallback)
+        }
+
+    // --- #172: a pinned key X25519 refuses is "cannot seal", never a throw ---
+
+    /** 32 zero bytes: a point a peer can sign as its prekey (the signature verifies) and every X25519 DH refuses. */
+    private val lowOrderPoint = ByteArray(RatchetCrypto.KEY_BYTES)
+
+    @Test
+    fun aDmToALowOrderPrekeyFallsBackToV1AndCounts() =
+        runTest(UnconfinedTestDispatcher()) {
+            val rig = Rig(backgroundScope)
+            rig.pinRatchetCapable(rig.bob, lowOrderPoint)
+
+            assertTrue(rig.manager.sendChat("hello", recipientId = rig.bob.nodeId))
+            advanceUntilIdle()
+
+            val enc = WireCodec.decodePayload<ChatContent>(rig.sentChatFrames().single().payload)!!.enc!!
+            assertEquals(1, enc.v)
+            assertTrue(enc.keys.isNotEmpty())
+            assertFalse(rig.saved.single().pendingKey)
+            assertEquals(1L, rig.metrics.seals().dmSealedV1Fallback)
+            assertEquals(0L, rig.metrics.seals().dmSealedV2)
+        }
+
+    @Test
+    fun aRoomTickHeldForALowOrderPrekeysAuthorGoesAsTheCleartextReceiptOverTheLink() =
+        runTest(UnconfinedTestDispatcher()) {
+            val rig = Rig(backgroundScope)
+            rig.pinRatchetCapable(rig.bob, lowOrderPoint)
+            rig.manager.ackSync.giveBackRiding(rig.bob.nodeId, listOf("room-1"))
+            val bob = Peer(rig.bob.nodeId)
+            rig.transport.nearby.value = setOf(bob)
+
+            rig.manager.ackSync.onNeighborAdded(bob)
+            advanceUntilIdle()
+
+            val receipt =
+                rig.transport.sent
+                    .single { (_, to) -> to == bob }
+                    .first
+            assertEquals(FrameType.RECEIPT, WireCodec.decodeEnvelope(receipt.signed)?.type)
+            assertEquals(1L, rig.metrics.receipts().receiptsSealedFallback)
+            assertEquals(0, rig.manager.ackSync.ridingFor(rig.bob.nodeId))
+        }
+
+    @Test
+    fun aGroupPostWhoseSeedCannotSealToALowOrderPrekeyFallsBackToV1() =
+        runTest(UnconfinedTestDispatcher()) {
+            val rig = Rig(backgroundScope)
+            rig.pinRatchetCapable(rig.bob, lowOrderPoint)
+            val group = GroupInfo(id = "g-1", name = "Team", members = listOf(rig.me.nodeId, rig.bob.nodeId), createdBy = rig.me.nodeId)
+
+            assertTrue(rig.manager.sendChat("group", group = group))
+            advanceUntilIdle()
+
+            val frame = rig.sentChatFrames().single()
+            assertNotNull("the post itself, not a seed DM", frame.group)
+            val enc = WireCodec.decodePayload<ChatContent>(frame.payload)!!.enc!!
+            assertEquals(1, enc.v)
+            assertTrue(enc.keys.isNotEmpty())
+            assertEquals(1L, rig.metrics.groups().groupSealedV1Fallback)
+            assertEquals(0L, rig.metrics.groups().groupSeedsSent)
+        }
+
+    /**
+     * The reviewer's finding on #172: a group member whose identity key X25519 refuses used to strand the whole
+     * group — no seed could seal to it, the v1 wrap then refused the whole message, and the row was saved unsent
+     * with nothing to retry it. The group now goes v1 (no seed minted), wrapped to every member but that one.
+     */
+    @Test
+    fun aGroupMemberWithALowOrderIdentityKeyIsSkippedAndTheRestGetThePost() =
+        runTest(UnconfinedTestDispatcher()) {
+            val rig = Rig(backgroundScope)
+            rig.pinRatchetCapable(rig.bob, RatchetCrypto.generateKeyPair().pub)
+            val mallory = party()
+            val forged = checkNotNull(PublicKeyBundle.fromRaw(mallory.bundle.sigPublicKey(), lowOrderPoint))
+            coEvery { rig.peers.find(mallory.nodeId) } returns
+                PeerEntity(
+                    nodeId = mallory.nodeId,
+                    pubKey = forged.encoded,
+                    capabilities = Protocol.LOCAL_CAPABILITIES,
+                    prekeyId = 1,
+                    prekeyPub = b64(RatchetCrypto.generateKeyPair().pub),
+                    prekeyProfileAt = 1L,
+                    updatedAt = 1L,
+                )
+            val group =
+                GroupInfo(
+                    id = "g-1",
+                    name = "Team",
+                    members = listOf(rig.me.nodeId, rig.bob.nodeId, mallory.nodeId),
+                    createdBy = rig.me.nodeId,
+                )
+
+            assertTrue(rig.manager.sendChat("still reaches bob", group = group))
+            advanceUntilIdle()
+
+            val frame = rig.sentChatFrames().single()
+            assertNotNull("the post itself, no seed DM", frame.group)
+            val enc = WireCodec.decodePayload<ChatContent>(frame.payload)!!.enc!!
+            assertEquals(1, enc.v)
+            assertEquals(listOf(rig.bob.nodeId), enc.keys.map { it.to })
+            assertEquals(0L, rig.metrics.groups().groupSeedsSent)
+            assertNull("no seed was minted for a distribution that cannot succeed", rig.groupRatchet.currentSeeds("g-1").firstOrNull())
+        }
+
+    /**
+     * A low-order *identity* key: every DH against it refuses, the ratchet's X3DH and the v1 HPKE wrap alike. The
+     * DM is kept as a pendingKey row, as for a peer whose key is unknown, rather than crashing the send.
+     */
+    @Test
+    fun aDmToALowOrderIdentityKeyIsKeptPendingNotThrown() =
+        runTest(UnconfinedTestDispatcher()) {
+            val rig = Rig(backgroundScope)
+            val bundle = checkNotNull(PublicKeyBundle.fromRaw(rig.bob.bundle.sigPublicKey(), lowOrderPoint))
+            coEvery { rig.peers.find(rig.bob.nodeId) } returns
+                PeerEntity(
+                    nodeId = rig.bob.nodeId,
+                    pubKey = bundle.encoded,
+                    capabilities = Protocol.LOCAL_CAPABILITIES,
+                    prekeyId = 1,
+                    prekeyPub = b64(RatchetCrypto.generateKeyPair().pub),
+                    prekeyProfileAt = 1L,
+                    updatedAt = 1L,
+                )
+
+            assertTrue(rig.manager.sendChat("hello", recipientId = rig.bob.nodeId))
+            advanceUntilIdle()
+
+            assertTrue(rig.sentChatFrames().isEmpty())
+            assertTrue(rig.saved.single().pendingKey)
             assertEquals(1L, rig.metrics.seals().dmSealedV1Fallback)
         }
 

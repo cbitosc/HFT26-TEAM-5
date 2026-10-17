@@ -3,6 +3,8 @@ package app.getknit.knit.data
 import app.getknit.knit.data.ratchet.GroupRatchetRepository
 import app.getknit.knit.mesh.crypto.ratchet.GroupRatchetEngine
 import app.getknit.knit.mesh.crypto.ratchet.GroupRatchetSessions
+import app.getknit.knit.mesh.protocol.GroupRatchetHeader
+import app.getknit.knit.mesh.protocol.GroupSeed
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -105,16 +107,57 @@ class GroupRatchetRepositoryTest : RoomDbTest() {
             assertEquals(3, repo.recvChains(GROUP, SENDER, 1).single().next)
             assertArrayEquals(ByteArray(32) { 9 }, repo.skippedKeys(GROUP, SENDER, 1, 0).single().msgKey)
 
-            // Consuming idx 0 deletes every mint era's row at that position and touches nothing else.
+            // Consuming idx 0 deletes the named mint's row at that position and touches nothing else.
             repo.applyOpen(
                 GROUP,
                 SENDER,
-                GroupRatchetEngine.OpenDelta(recvChain = null, consumedSkippedIdx = 0),
+                GroupRatchetEngine.OpenDelta(recvChain = null, consumedSkippedMintedAt = NOW),
                 headerSe = 1,
                 headerN = 0,
             )
             assertTrue(repo.skippedKeys(GROUP, SENDER, 1, 0).isEmpty())
             assertEquals(1, repo.skippedKeys(GROUP, SENDER, 1, 1).size)
+        }
+
+    /**
+     * #177 over the real SQL: a receiver holding two mints of epoch 1 banks a key per mint at index 3, and spending
+     * the new mint's must leave the old mint's. The delete used to ignore `mintedAt`, so the old era's n = 3 found no
+     * key, both chains were past it, and it dropped as DUPLICATE on every re-serve.
+     */
+    @Test
+    fun aSkippedKeyIsSpentByItsMintAndTheSiblingEraStillOpens() =
+        runTest {
+            val engine = GroupRatchetEngine()
+            val receiver = GroupRatchetSessions(repo)
+            val oldMint = engine.mint(GROUP, SENDER, prevEpoch = 0, now = NOW - 10)
+            val newMint = engine.mint(GROUP, SENDER, prevEpoch = 0, now = NOW)
+
+            fun frames(chain: GroupRatchetEngine.SendChain): List<GroupRatchetEngine.SealResult> {
+                var at = chain
+                return (0..5).map { checkNotNull(engine.seal(at, "${chain.mintedAt}:$it".toByteArray(), AAD)).also { r -> at = r.chain } }
+            }
+            val old = frames(oldMint)
+            val new = frames(newMint)
+            receiver.adoptSeeds(GROUP, SENDER, listOf(GroupSeed(1, oldMint.seed, oldMint.mintedAt)), now = NOW)
+            receiver.adoptSeeds(GROUP, SENDER, listOf(GroupSeed(1, newMint.seed, newMint.mintedAt)), now = NOW)
+
+            suspend fun open(frame: GroupRatchetEngine.SealResult): Boolean =
+                receiver.commitOpen(
+                    GROUP,
+                    SENDER,
+                    GroupRatchetHeader(frame.header.se, frame.header.n),
+                    frame.nonce,
+                    frame.ct,
+                    AAD,
+                    NOW,
+                ) {}
+
+            assertTrue(open(old[5]))
+            assertTrue(open(new[5]))
+            assertTrue(open(new[3]))
+            assertEquals(listOf(NOW - 10), repo.skippedKeys(GROUP, SENDER, 1, 3).map { it.mintedAt })
+            assertTrue("the old era's n = 3 opens on its own key", open(old[3]))
+            assertTrue(repo.skippedKeys(GROUP, SENDER, 1, 3).isEmpty())
         }
 
     @Test
@@ -363,5 +406,6 @@ class GroupRatchetRepositoryTest : RoomDbTest() {
         const val GROUP = "g-0123456789abcdef01234567"
         const val SENDER = "sender00"
         const val MEMBER = "member00"
+        val AAD = "frame|$GROUP".toByteArray()
     }
 }

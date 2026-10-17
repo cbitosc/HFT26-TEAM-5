@@ -219,6 +219,12 @@ class RatchetEngine(
      * Starts a session toward [peerId] (X3DH against their identity + signed prekey) and its first send
      * epoch. The X3DH ephemeral's private half is consumed by the root derivation and never retained —
      * only its public half rides the wire ([FrameHeader.init]) until the session confirms.
+     *
+     * [peerSpk] is also the session's DH base ([SessionState.peerBasePub], at `peerBaseEpoch = 0`) until the
+     * peer contributes an epoch of its own, which [touch] adopts over it. Every `pe = 0` epoch of this session
+     * is therefore based on the prekey its init names: the receiver resolves the base for such a frame by the
+     * init's `pkid`, and an epoch based on whatever prekey the peer had rotated to by then was unreadable to it
+     * (#174).
      */
     fun initiate(
         peerId: String,
@@ -238,6 +244,7 @@ class RatchetEngine(
                 establishedAt = now,
                 initEphPub = eph.pub,
                 initPkid = peerSpk.id,
+                peerBasePub = peerSpk.pub,
             )
         val started = startSendEpoch(base, basePub = peerSpk.pub, baseEpoch = 0, now = now)
         return Initiation(started.session, started.epoch)
@@ -245,10 +252,14 @@ class RatchetEngine(
 
     /**
      * Seals [plaintext] in the session's current send epoch, first advancing to a fresh epoch when an
-     * advance rule fires (see [needsNewEpoch]). [peerSpkPub] is the DH base while the peer has
-     * contributed no epoch of their own yet (`pe = 0`). Returns null only if a fresh epoch is needed
-     * and no base exists — callers gate on prekey presence, so that is an upstream bug, not a wire
-     * condition. [v3] seals crypto scheme v3 (ADR 059): the ratchet header is bound into the AEAD's
+     * advance rule fires (see [needsNewEpoch]). The fresh epoch's DH base is [SessionState.peerBasePub]:
+     * the peer's newest epoch once it has contributed one, else the prekey our init named ([initiate] sets
+     * it). [peerSpkPub] is only the fallback for a session that holds neither — one we initiated before
+     * [initiate] recorded its prekey (#174) — and callers pass it through [prekeyBase], which refuses a prekey
+     * the init does not name. Returns null when a fresh epoch is needed and no base exists; the caller falls
+     * back. Throws Tink's `GeneralSecurityException` when X25519 refuses the base (a low-order point a peer
+     * signed as its prekey, #172); `RatchetSessions` maps that to "cannot seal".
+     * [v3] seals crypto scheme v3 (ADR 059): the ratchet header is bound into the AEAD's
      * associated data and the nonce is derived from the message key (`RatchetCrypto.messageNonce`) instead
      * of drawn at random and carried — the chain, epochs and header are exactly v2's.
      */
@@ -303,6 +314,20 @@ class RatchetEngine(
             )
         return SealResult(header, nonce, ct, advanced, newLocal)
     }
+
+    /**
+     * The prekey to hand [seal] as its fallback base for [session], from the peer's pinned [peerSpk] — the one
+     * place the #174 rule lives. A session we initiated and the peer has not answered bases every `pe = 0` epoch
+     * on the prekey its init names, because that is the key the receiver resolves by `init.pkid`. [initiate]
+     * records it, so this matters only for a row an older build initiated with no base recorded: the peer's
+     * current prekey serves it only while it is still that one, and null otherwise makes the next epoch boundary
+     * return null (the caller falls back to v1, which the peer reads) instead of sealing a frame it cannot open.
+     * Any other session is based on the peer's own epoch and never reads the prekey.
+     */
+    fun prekeyBase(
+        session: SessionState,
+        peerSpk: PeerPrekey?,
+    ): ByteArray? = peerSpk?.takeUnless { session.weAreInitiator && !session.confirmed && it.id != session.initPkid }?.pub
 
     private fun needsNewEpoch(
         session: SessionState,

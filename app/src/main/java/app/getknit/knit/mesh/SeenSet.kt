@@ -38,8 +38,10 @@ class SeenSet(
     /**
      * Lets **one** more copy of [id] through inside its window, for a frame this node took and could not
      * use: a sealed DM addressed to us whose session we no longer hold. The sender's answer to our reset
-     * is a fresh seal under the *same* id — by design, so every other node dedups it — and it lands
-     * seconds after the copy custody just served us, well inside the window. Once per id per window:
+     * is a fresh seal under the *same* id (no wire change, and the exists-gate dedups it), and it can land
+     * seconds after the copy custody just served us, well inside the window. Only we reopen: a relay that
+     * saw the id in its window drops that seal too, so the sender re-seals once more after the window
+     * (`MeshManager.resealRecentDmsTo`, ADR 2026-10.dmgw). Once per id per window:
      * a second reopen is refused, so a peer re-serving an unopenable frame can buy at most one extra
      * relay of it from us. Returns whether the id was reopened.
      */

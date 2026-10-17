@@ -6,6 +6,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -32,7 +33,19 @@ class RatchetEngineTest {
     ) {
         val ik = RatchetCrypto.generateKeyPair()
         var spk = RatchetCrypto.generateKeyPair()
+        var spkId = 1
+
+        /** Prekeys this side rotated away from, by id: kept, as `IdentityKeyStore` keeps the last four. */
+        val retiredSpks = mutableMapOf<Int, RatchetCrypto.KeyPair>()
         var spkResolvable = true
+
+        /** The weekly rotation: a new current prekey under the next id, the old one still resolvable. */
+        fun rotatePrekey() {
+            retiredSpks[spkId] = spk
+            spkId += 1
+            spk = RatchetCrypto.generateKeyPair()
+        }
+
         var session: RatchetEngine.SessionState? = null
         val localEpochs = mutableMapOf<Int, RatchetEngine.LocalEpoch>()
 
@@ -49,7 +62,7 @@ class RatchetEngineTest {
 
         fun initiate(now: Long) {
             val initiation =
-                engine.initiate(peer.nodeId, ik.priv, peer.ik.pub, RatchetEngine.PeerPrekey(id = 1, pub = peer.spk.pub), now)
+                engine.initiate(peer.nodeId, ik.priv, peer.ik.pub, RatchetEngine.PeerPrekey(id = peer.spkId, pub = peer.spk.pub), now)
             session = initiation.session
             localEpochs[initiation.epoch.epoch] = initiation.epoch
         }
@@ -83,8 +96,8 @@ class RatchetEngineTest {
                     peerIkPub = peer.ik.pub,
                     spkPrivForInit =
                         frame.header.init
-                            ?.takeIf { spkResolvable && it.pkid == 1 }
-                            ?.let { spk.priv },
+                            ?.takeIf { spkResolvable }
+                            ?.let { if (it.pkid == spkId) spk.priv else retiredSpks[it.pkid]?.priv },
                     resetRequested = resetRequested,
                 )
             val outcome = engine.open(ctx, frame.header, frame.nonce, frame.ct, AAD, now)
@@ -116,7 +129,7 @@ class RatchetEngineTest {
         fun reset(now: Long): Frame {
             val old = session
             val initiation =
-                engine.initiate(peer.nodeId, ik.priv, peer.ik.pub, RatchetEngine.PeerPrekey(id = 1, pub = peer.spk.pub), now)
+                engine.initiate(peer.nodeId, ik.priv, peer.ik.pub, RatchetEngine.PeerPrekey(id = peer.spkId, pub = peer.spk.pub), now)
             session =
                 initiation.session.copy(
                     prevRoot = old?.root,
@@ -700,6 +713,111 @@ class RatchetEngineTest {
         // B, the adopter, replies. Its peerBaseEpoch is 0, so the frame carries pe=0 and no init.
         val back = a.open(b.seal("reply after adopting", NOW + 601_000), NOW + 601_000)
         assertEquals("reply after adopting", text(back))
+    }
+
+    // --- #174: every pe = 0 epoch is based on the prekey its init names ---
+
+    /**
+     * Alice's session stays unconfirmed past a day while Bob rotates his prekey and his profile reaches her. Her
+     * next epoch used to be based on the prekey she was handed then (`peerSpkPub`, Bob's newest), under an init that
+     * still names the old one — the key Bob resolves by `init.pkid` — so it failed as AEAD_FAIL for good.
+     */
+    @Test
+    fun anUnconfirmedSessionsNextEpochAfterAPrekeyRotationIsBasedOnTheInitsPrekey() {
+        val (alice, bob) = pair()
+        alice.initiate(NOW)
+        val first = alice.seal("first", NOW)
+        val pinned = checkNotNull(alice.session)
+        assertArrayEquals("initiate records the init's prekey as the base", bob.spk.pub, pinned.peerBasePub)
+        assertEquals(0, pinned.peerBaseEpoch)
+
+        bob.rotatePrekey()
+        val later = alice.seal("a day later", NOW + RatchetEngine.MAX_EPOCH_AGE_MS + 1)
+        assertEquals("a new epoch", 2, later.header.se)
+        assertEquals(0, later.header.pe)
+        assertEquals(1, checkNotNull(later.header.init).pkid)
+
+        assertEquals("a day later", text(bob.open(later, NOW + RatchetEngine.MAX_EPOCH_AGE_MS + 2)))
+        assertEquals("first", text(bob.open(first, NOW + RatchetEngine.MAX_EPOCH_AGE_MS + 3)))
+    }
+
+    /** The same, across the 200-frame boundary instead of the day. */
+    @Test
+    fun anUnconfirmedSessionsEpochPastTheMessageCapAfterAPrekeyRotationStillOpens() {
+        val (alice, bob) = pair()
+        alice.initiate(NOW)
+        repeat(RatchetEngine.MAX_EPOCH_MESSAGES) { alice.seal("m$it", NOW) }
+        bob.rotatePrekey()
+        val next = alice.seal("the 201st", NOW + 1)
+        assertEquals(2, next.header.se)
+        assertEquals("the 201st", text(bob.open(next, NOW + 2)))
+    }
+
+    /** Once Bob answers, his epoch replaces the prekey as Alice's base, as before #174. */
+    @Test
+    fun thePeersFirstEpochReplacesTheInitsPrekeyAsTheBase() {
+        val (alice, bob) = pair()
+        alice.initiate(NOW)
+        bob.open(alice.seal("hello", NOW), NOW)
+        val reply = bob.seal("hi", NOW + 1)
+        alice.open(reply, NOW + 1)
+        val session = checkNotNull(alice.session)
+        assertTrue(session.confirmed)
+        assertEquals(reply.header.se, session.peerBaseEpoch)
+        assertArrayEquals(reply.header.ek, session.peerBasePub)
+    }
+
+    /**
+     * A row an older build initiated holds no base. [RatchetEngine.prekeyBase] hands its seal the peer's prekey
+     * only while it is the one the init names; after a rotation the epoch boundary returns null (the caller's v1
+     * fallback) instead of a frame the peer cannot open, and the current epoch keeps sealing.
+     */
+    @Test
+    fun aLegacyUnconfirmedRowSealsInEpochAndRefusesTheBoundaryAfterARotation() {
+        val (alice, bob) = pair()
+        alice.initiate(NOW)
+        alice.session = checkNotNull(alice.session).copy(peerBasePub = null)
+        val oldPrekey = RatchetEngine.PeerPrekey(id = bob.spkId, pub = bob.spk.pub)
+        assertArrayEquals(oldPrekey.pub, engine.prekeyBase(checkNotNull(alice.session), oldPrekey))
+
+        bob.rotatePrekey()
+        val newPrekey = RatchetEngine.PeerPrekey(id = bob.spkId, pub = bob.spk.pub)
+        val session = checkNotNull(alice.session)
+        assertNull(engine.prekeyBase(session, newPrekey))
+        assertNull(engine.prekeyBase(session, null))
+
+        val inEpoch = checkNotNull(engine.seal(session, "in epoch".toByteArray(), AAD, engine.prekeyBase(session, newPrekey), NOW + 1))
+        alice.session = inEpoch.session
+        assertEquals("in epoch", text(bob.open(Frame(inEpoch.header, inEpoch.nonce, inEpoch.ct), NOW + 2)))
+
+        val past = NOW + RatchetEngine.MAX_EPOCH_AGE_MS + 1
+        assertNull(engine.seal(checkNotNull(alice.session), "x".toByteArray(), AAD, engine.prekeyBase(inEpoch.session, newPrekey), past))
+    }
+
+    /** A confirmed session or a responder never reads the prekey: its base is the peer's epoch. */
+    @Test
+    fun prekeyBaseIgnoresTheInitPkidOnceTheSessionIsConfirmed() {
+        val (alice, bob) = pair()
+        alice.initiate(NOW)
+        bob.open(alice.seal("hello", NOW), NOW)
+        val other = RatchetEngine.PeerPrekey(id = 9, pub = RatchetCrypto.generateKeyPair().pub)
+        assertArrayEquals(other.pub, engine.prekeyBase(checkNotNull(bob.session), other))
+    }
+
+    // --- #172: a key X25519 refuses throws out of the engine; RatchetSessions maps it to "cannot seal" ---
+
+    @Test
+    fun aLowOrderPrekeyThrowsOutOfInitiateAndAFreshEpoch() {
+        val (alice, bob) = pair()
+        val lowOrder = RatchetEngine.PeerPrekey(id = 1, pub = ByteArray(RatchetCrypto.KEY_BYTES))
+        assertThrows(java.security.GeneralSecurityException::class.java) {
+            engine.initiate(bob.nodeId, alice.ik.priv, bob.ik.pub, lowOrder, NOW)
+        }
+        alice.initiate(NOW)
+        val legacy = checkNotNull(alice.session).copy(peerBasePub = null)
+        assertThrows(java.security.GeneralSecurityException::class.java) {
+            engine.seal(legacy, "x".toByteArray(), AAD, lowOrder.pub, NOW, forceNewEpoch = true)
+        }
     }
 
     // --- wipe and replacement ---

@@ -74,12 +74,17 @@ interface GroupRatchetDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertSkippedKeys(rows: List<GroupSkippedKeyEntity>)
 
-    /** Deletes every mint era's stored key at one chain position (consumption — see the store kdoc). */
-    @Query("DELETE FROM group_skipped_keys WHERE groupId = :groupId AND senderId = :senderId AND epoch = :epoch AND idx = :idx")
-    suspend fun deleteSkippedKeysAt(
+    // One mint's key only, by the full primary key: another mint's key at the same (epoch, idx) opens another era's
+    // frame (#177).
+    @Query(
+        "DELETE FROM group_skipped_keys WHERE groupId = :groupId AND senderId = :senderId AND epoch = :epoch " +
+            "AND mintedAt = :mintedAt AND idx = :idx",
+    )
+    suspend fun deleteSkippedKey(
         groupId: String,
         senderId: String,
         epoch: Int,
+        mintedAt: Long,
         idx: Int,
     )
 

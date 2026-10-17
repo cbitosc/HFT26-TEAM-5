@@ -102,7 +102,10 @@ class GroupRatchetSoakTest {
                 delta.skippedInserts.forEach {
                     skipped.getOrPut(Triple(frame.senderId, it.epoch, it.idx)) { mutableListOf() } += it
                 }
-                delta.consumedSkippedIdx?.let { skipped.remove(Triple(frame.senderId, frame.header.se, it)) }
+                // Only the consumed mint's key goes, as the store spends it (#177).
+                delta.consumedSkippedMintedAt?.let { minted ->
+                    skipped[Triple(frame.senderId, frame.header.se, frame.header.n)]?.removeAll { it.mintedAt == minted }
+                }
             }
             return outcome
         }

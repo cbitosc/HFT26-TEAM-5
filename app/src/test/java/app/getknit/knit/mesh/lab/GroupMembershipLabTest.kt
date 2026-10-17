@@ -56,6 +56,31 @@ class GroupMembershipLabTest {
     }
 
     /**
+     * #172, the crypto review's finding: a member whose identity key no one can wrap to — a forged profile pairing a
+     * real Ed25519 key with a low-order X25519 key, pinned like any profile — used to strand the whole group. No
+     * seed could seal to it, the v1 fallback then refused the whole message, and every post was saved unsent with
+     * nothing to retry it. The group now goes v1 to everyone else, and the two real members converge.
+     */
+    @Test
+    fun aMemberWhoseKeyNoOneCanWrapToDoesNotStrandTheGroup() =
+        runBlocking {
+            val alice = lab.node("alice").apply { setDisplayName("Alice") }
+            val bob = lab.node("bob").apply { setDisplayName("Bob") }
+            val mallory = lab.node("mallory").apply { setDisplayName("Mallory") }
+            lab.linkAll(alice to bob, alice to mallory)
+            lab.awaitAcquainted(alice, bob)
+            val phantom = mallory.floodLowOrderIdentityProfile("Phantom")
+            lab.await(2) { listOf(alice, bob).count { it.pinned(phantom)?.pubKey != null } }
+            lab.unlink(alice, mallory)
+
+            val groupId = alice.createGroupWith(listOf(bob.nodeId, phantom))
+            assertTrue(alice.sendGroup(groupId, "from alice"))
+            lab.await(1) { bob.decrypted(groupId).size }
+            assertTrue(bob.sendGroup(groupId, "from bob"))
+            lab.assertConverged(listOf(alice, bob), atLeast = 2) { groupId }
+        }
+
+    /**
      * Alice leaves. Bob's next message is sealed under a fresh epoch that Alice never receives a seed for;
      * Bob and Carol converge on it, Alice holds nothing of the thread any more, and both remaining members
      * carry her as departed with the `left` notice in the thread.

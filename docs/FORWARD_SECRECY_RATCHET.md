@@ -69,7 +69,10 @@ prekey stays re-verifiable once stored apart from its frame (the `peers` row), a
 implementation can verify a prekey in isolation. Receivers verify `sig` against the (self-certified,
 immutably pinned) bundle before adopting. Rotation mints `id+1`, bumps `profileVersion`, and rides
 the ordinary profile re-flood; a *newer* profile carrying `prekey = null` clears the pin (peer
-downgraded — outbound falls back to v1).
+downgraded — outbound falls back to v1). A prekey whose signature verifies but which X25519 refuses as a
+public key (a low-order point, #172) is treated exactly as an absent one: it is not pinned, and a newer profile
+carrying it clears the pin. A seal that still meets a refused key — a prekey pinned before this rule, or a peer
+identity key — is "cannot seal", never an error: the sender takes the same fallback it takes without a prekey.
 
 ## 3. Session bootstrap (X3DH, no one-time prekeys)
 
@@ -95,8 +98,9 @@ invariant, not a new requirement.
 
 Each direction advances through numbered **epochs**. The sender of epoch `se` mints a fresh X25519
 pair `(ek, ekPriv)` and DHs against the peer's newest contribution (`pe` = which of the *receiver's*
-epochs supplied the base; `pe = 0` means the receiver's SPK, which is only legal while an init is
-attached; both numbers are bounded `0..MAX_EPOCH_NUMBER` on the wire, and a header outside those
+epochs supplied the base; `pe = 0` means the receiver's SPK — exactly the one the attached init's `pkid` names,
+never a newer one the sender has pinned since, because that is the key the receiver resolves (#174) — which is
+only legal while an init is attached; both numbers are bounded `0..MAX_EPOCH_NUMBER` on the wire, and a header outside those
 bounds is `BAD_HEADER` — never a missing-key report, which would drive the reset heuristic below):
 
 ```
@@ -305,8 +309,14 @@ skipped-key path absorbs.
   would refuse to custody (`isCustodial` is a fixed list); as a chat frame it floods, custodies,
   and reaches an offline peer. The receiver (frame-signed, newer `init.at`) adopts per the
   replacement rules and **re-seals its still-unacked DMs from the last 24 h** under the fresh
-  session (the `flushPendingFor` mechanics: fresh seal, original `id`/`sentAt` header), recovering
-  what the wiped device lost from custody. Control frames are never persisted, notified, or acked
+  session (the `flushPendingFor` mechanics: fresh seal, original `id`/`sentAt` header), flooded
+  live. Its reach is the routers it meets, not custody: every custody keeps the first bytes it
+  stored under an id (the resetter's own included), and a relay drops an id it first saw inside
+  its 10 min dedup window — for the DMs whose failures fired the reset, every relay between the
+  pair. So the receiver **re-seals the same ids once more** 11 min later (the dedup window + 60 s),
+  those still unacked only, once per reset; that pass records nothing and never re-arms, and a
+  later reset replaces a pending one (ADR 2026-10.dmgw). A peer reachable live at neither pass
+  still misses those DMs, and the pending pass is in-memory state a restart loses. Control frames are never persisted, notified, or acked
   as messages; inbound replacements are additionally rate-limited (1/peer/h). The resetter's session
   stays unconfirmed until it opens a frame the peer sealed under the new root: a dead-era frame drained
   under its `prevRoot` never confirms it (§4), so every frame it seals meanwhile carries the init, and
@@ -424,3 +434,4 @@ today); group/broadcast coverage (separate designs).
 | local epoch privs | superseded+acked+48 h; keep newest 3; ≤16/peer; 30 d hard | the PFS window |
 | SPK rotation / retention | 7 d / current + 4 | initiation-lateness window |
 | reset trigger / outbound rate / inbound rate | 3 distinct ids / 6 h / 1 h | abuse + loop bounds |
+| reset re-seal second pass | 11 min after the first | router dedup window + 60 s |

@@ -87,7 +87,7 @@ internal object MessageContentV2 {
                         version = it.version,
                         openToChat = it.openToChat,
                         loraNode = it.loraNode,
-                        loraKey = it.loraKey?.let(::b64d),
+                        loraKey = it.loraKey?.let(::keyBytes),
                     )
                 },
         )

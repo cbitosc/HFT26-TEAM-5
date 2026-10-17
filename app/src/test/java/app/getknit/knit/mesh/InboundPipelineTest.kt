@@ -5873,6 +5873,24 @@ class InboundPipelineTest {
             assertEquals(null, rig.peerMap[alice.nodeId]?.prekeyId)
         }
 
+    /** #172: a signature over a low-order point verifies, and every seal against it would throw — never pinned. */
+    @Test
+    fun aSignedLowOrderPrekeyIsNotPinned() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.deliver(alice, rig.profileWithPrekey(alice, sentAt = 10L, prekey = signedPrekey(alice)))
+            assertEquals(7, rig.peerMap[alice.nodeId]?.prekeyId)
+
+            val lowOrder = ByteArray(RatchetCrypto.KEY_BYTES)
+            val signed = PrekeyInfo(id = 8, pub = lowOrder, sig = alice.crypto.signRaw(RatchetCrypto.spkSigningBytes(8, lowOrder)))
+            rig.deliver(alice, rig.profileWithPrekey(alice, sentAt = 11L, prekey = signed))
+
+            assertEquals("read as no prekey: the earlier pin is cleared, not replaced", null, rig.peerMap[alice.nodeId]?.prekeyId)
+            assertEquals(null, rig.peerMap[alice.nodeId]?.prekeyPub)
+            assertEquals("the rest of the profile still applies", "Ann", rig.peerMap[alice.nodeId]?.name)
+        }
+
     @Test
     fun aNewerProfileWithoutAPrekeyClearsThePin() =
         runTest {

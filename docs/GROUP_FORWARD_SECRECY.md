@@ -222,7 +222,8 @@ DM-addressed one without `r`) is malformed by construction.
 Capability gating: `Protocol.CAP_RATCHET` covers **both** ratchet forms — they ship in the same
 release, so a second bit would never vary independently. Outbound group-form requires, for **every**
 other member, a pinned authenticated profile carrying `CAP_RATCHET` and a valid `PrekeyInfo` (the
-seed rides the DM ratchet, so DM-sealability is a prerequisite), *and*
+seed rides the DM ratchet, so DM-sealability is a prerequisite), an identity key X25519 accepts (a
+low-order key demotes the message to v1, #172), *and*
 the current epoch's seed distributable to them. **All-or-nothing per message**: any ineligible
 member demotes that message (not the group) to v1, which every build reads; eligibility is
 re-evaluated per send, so a group upgrades the instant the last capable profile lands and downgrades
@@ -299,7 +300,8 @@ per-(group, member) floor, then re-seal the **current + draining previous** seed
 **A request never advances the epoch** — advance-on-request would be a rekey-amplification lever.
 
 The v1 fallback path keeps the old silent gap (members without pinned keys are skipped); that
-residual shrinks as capability floods and is noted in the roadmap.
+residual shrinks as capability floods and is noted in the roadmap. A member whose identity key HPKE
+refuses is skipped the same way, and the message is refused only when no wrap remains (#172).
 
 ## 8. Export API (for the internet relay plane — root mechanism confirmed)
 

@@ -247,6 +247,43 @@ class MessageCryptoTest {
         )
     }
 
+    // --- #172: a recipient whose key HPKE refuses ---
+
+    /** A forged bundle: [of]'s real signing key beside a low-order X25519 key (32 zero bytes) no wrap can use. */
+    private fun lowOrder(of: Party): PublicKeyBundle = checkNotNull(PublicKeyBundle.fromRaw(of.bundle.sigPublicKey(), ByteArray(32)))
+
+    /** Skipped like an unknown key: one such group member must not strand the post for everyone else. */
+    @Test
+    fun aRecipientWhoseKeyHpkeRefusesIsSkippedAndTheRestStillRead() {
+        val alice = party("alice000")
+        val bob = party("bob00000")
+        val mallory = party("mallory0")
+        val header = MessageCrypto.header("m9", alice.nodeId, 1L, "g-1")
+
+        val envelope =
+            checkNotNull(
+                alice.crypto.seal(
+                    content("hello group"),
+                    header,
+                    mapOf(
+                        bob.nodeId to bob.bundle,
+                        mallory.nodeId to lowOrder(mallory),
+                    ),
+                ),
+            )
+
+        assertEquals(listOf(bob.nodeId), envelope.keys.map { it.to })
+        assertEquals("hello group", bob.crypto.open(envelope, header, bob.nodeId)?.body)
+    }
+
+    @Test
+    fun noWrapLeftIsNullNotAThrow() {
+        val alice = party("alice000")
+        val mallory = party("mallory0")
+        val header = MessageCrypto.header("m10", alice.nodeId, 1L, mallory.nodeId)
+        assertNull(alice.crypto.seal(content("x"), header, mapOf(mallory.nodeId to lowOrder(mallory))))
+    }
+
     private companion object {
         const val HYBRID_TEMPLATE = "DHKEM_X25519_HKDF_SHA256_HKDF_SHA256_AES_256_GCM_RAW"
         const val SIG_TEMPLATE = "ED25519_RAW"

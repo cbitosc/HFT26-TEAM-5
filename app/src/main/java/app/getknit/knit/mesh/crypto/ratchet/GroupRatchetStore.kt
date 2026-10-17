@@ -73,9 +73,9 @@ interface GroupRatchetStore {
 
     /**
      * Persists everything a successful open changed: the recv-chain upsert, the skipped-key inserts,
-     * and the consumed skipped key(s) — every mint era's row for `(headerSe, headerN)`, since the
-     * delta only flags the index (deleting a sibling era's same-index key at worst costs one late
-     * frame a benign AEAD_FAIL → key-request).
+     * and the consumed skipped key — only the mint era the delta names at `(headerSe, headerN)`. A sibling
+     * era's key at the same index opens a different frame: deleting it lost that frame for good, read as
+     * DUPLICATE on every re-serve, which no key request can repair (#177).
      */
     suspend fun applyOpen(
         groupId: String,

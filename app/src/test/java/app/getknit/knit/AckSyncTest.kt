@@ -339,6 +339,37 @@ class AckSyncTest {
         }
 
     @Test
+    fun aRideWiderThanTheReceiversCapGoesOverTheLinkInChunks() =
+        runTest(UnconfinedTestDispatcher()) {
+            // The author applies at most MAX_RECEIPT_ACKS ids from one tick, and nothing re-owes the rest once
+            // the hold is gone (#173): the link route cuts the hold like the spool and air routes do.
+            val sealed = CopyOnWriteArrayList<List<String>>()
+            val author = Author("author")
+            val recip = FakeLoopTransport("recip")
+            author.start(backgroundScope)
+            val ack =
+                ackSyncOn(
+                    recip,
+                    "recip",
+                    canSeal = { true },
+                    sealTick = { a, ids ->
+                        sealed.add(ids)
+                        sealedWire("recip", a, ids)
+                    },
+                )
+
+            // One past InboundPipeline's (private) MAX_RECEIPT_ACKS, the most ids it applies from one tick.
+            val owedIds = (0..2 * AckSync.MAX_BATCH_ACKS).map { "m$it" }
+            owedIds.forEach { ack.owe(it, "author") }
+            recip.connect(author.transport)
+            ack.onNeighborAdded(Peer("author"))
+
+            assertTrue("no tick wider than one batch", sealed.all { it.size <= AckSync.MAX_BATCH_ACKS })
+            assertEquals("together they carry every id", owedIds, sealed.flatten())
+            assertEquals("and nothing left waiting", 0, ack.ridingFor("author"))
+        }
+
+    @Test
     fun aLegacyAuthorsRoomTickKeepsTheCleartextBestEffortForm() =
         runTest(UnconfinedTestDispatcher()) {
             // A ride only exists inside a frame sealed to that author, so an author that cannot read one

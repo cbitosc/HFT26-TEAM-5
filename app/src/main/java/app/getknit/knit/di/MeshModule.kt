@@ -237,6 +237,7 @@ val meshModule =
                 spkPrivFor = identityKeys::prekeyPrivFor,
                 mutex = get(ratchetMutex),
                 transact = get(),
+                log = { Log.w("RatchetSessions", it) },
             )
         }
         // The group sender-key session service (crypto scheme v2's group form, docs/GROUP_FORWARD_SECRECY.md).

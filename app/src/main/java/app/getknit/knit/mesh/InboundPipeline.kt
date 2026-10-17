@@ -1835,7 +1835,9 @@ class InboundPipeline(
             // The frame is addressed to us and we could not open it. If a reset is on its way (ours, sent
             // already or about to be), the sender answers with a fresh seal of this very frame under the
             // same id — which the router would otherwise dedup for ten minutes, since the copy custody just
-            // served us is what put the id in its set. Let that one copy through.
+            // served us is what put the id in its set. Let that one copy through. This opens our gate only:
+            // a relay between us that saw the id in its window drops that seal, which is why the sender seals
+            // it once more after the window (MeshManager.resealRecentDmsTo, ADR 2026-10.dmgw).
             reopenFrame(env.id)
             maybeRequestReset(env, me, now, epochGoneBase = r?.pe?.takeIf { reason == DropReason.RATCHET_EPOCH_GONE })
         }
@@ -3519,6 +3521,12 @@ class InboundPipeline(
                 prekey.pub.size == RatchetCrypto.KEY_BYTES
         if (!valid) {
             Log.w(TAG, "ignore prekey from $senderId: bad signature or shape")
+            return null
+        }
+        // A signature proves the peer chose it, not that it is a key: a low-order point verifies, and every seal
+        // against it throws (#172). Such a peer reads as having no prekey and gets v1.
+        if (!RatchetCrypto.acceptsPublicKey(prekey.pub)) {
+            Log.w(TAG, "ignore prekey from $senderId: X25519 refuses it")
             return null
         }
         return prekey

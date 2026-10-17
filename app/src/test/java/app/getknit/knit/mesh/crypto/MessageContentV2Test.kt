@@ -126,6 +126,18 @@ class MessageContentV2Test {
         assertNull("a direct-transfer ctl", MessageContentV2.encodeOrNull(transfer))
         assertEquals(EncEnvelope.VERSION_RATCHET, transfer.sealBytes(v3 = true).scheme)
         assertNull("a foreign content version", MessageContentV2.encodeOrNull(MessageContent(v = 2, body = "")))
+        // The board key goes through the same canonical check (#175): an unpadded one would be rewritten padded, and
+        // one that does not decode at all used to throw IllegalArgumentException out of the seal.
+        for (loraKey in listOf("QQ", "!!!!")) {
+            val profile =
+                MessageContent(
+                    body = "",
+                    ctl = MessageContent.CTL_PROFILE,
+                    pr = ProfilePayload(name = "A", status = "", version = 5L, loraNode = 7L, loraKey = loraKey),
+                )
+            assertNull("board key $loraKey", MessageContentV2.encodeOrNull(profile))
+            assertEquals(EncEnvelope.VERSION_RATCHET, profile.sealBytes(v3 = true).scheme)
+        }
         // And the seam every seal site uses falls back to the named form instead of losing the frame.
         val (bytes, scheme) = MessageContent(body = "", ctl = 5, ack = uuid).sealBytes(v3 = true)
         assertEquals(EncEnvelope.VERSION_RATCHET, scheme)

@@ -571,8 +571,10 @@ class AckSync(
     }
 
     /**
-     * The author linked while its batch was still debouncing: send the whole batch over the link as one
-     * sealed `relay = false` tick — reliable, and no custody rows. Deliberately NOT marked escalated: a
+     * The author linked while its batch was still debouncing: send the whole batch over the link as sealed
+     * `relay = false` ticks of at most [MAX_BATCH_ACKS] ids each — reliable, and no custody rows. A ride hold
+     * is capped only by [PENDING_CAP], and a receiver applies no more than `MAX_RECEIPT_ACKS` ids from one tick,
+     * so one tick for the whole hold lost every id past that (#173). Deliberately NOT marked escalated: a
      * live-link send is today's drop-the-entry semantics, so a custody re-serve re-owes and re-sends,
      * which markReceived absorbs idempotently.
      */
@@ -583,12 +585,15 @@ class AckSync(
         val batch = batches.remove(peer.nodeId) ?: return
         val ids = synchronized(batch) { LinkedHashMap(batch.ids) }
         if (ids.isEmpty()) return
-        val wire = sealTick(peer.nodeId, ids.keys.toList())
-        if (wire != null) {
-            transport.send(wire, peer)
-            metrics.onReceiptResent()
-        } else {
-            restoreAsCleartext(peer.nodeId, ids)
+        ids.entries.chunked(MAX_BATCH_ACKS).forEach { chunk ->
+            val chunkIds = LinkedHashMap<String, Long>().apply { chunk.forEach { put(it.key, it.value) } }
+            val wire = sealTick(peer.nodeId, chunkIds.keys.toList())
+            if (wire != null) {
+                transport.send(wire, peer)
+                metrics.onReceiptResent()
+            } else {
+                restoreAsCleartext(peer.nodeId, chunkIds)
+            }
         }
     }
 

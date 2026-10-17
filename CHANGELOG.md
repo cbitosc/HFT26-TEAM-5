@@ -63,6 +63,18 @@ document:
 - When Knit reset the encryption of a chat with someone your phone reaches only through an internet relay, the
   chat could stay off the relay until you met. The reset now goes through the relay, and the chat says "Not
   covered by relays yet" until they answer.
+- Messages you kept sending to someone out of reach for more than a day could stay unreadable on their phone
+  for days after you met again. They now open as soon as they arrive.
+- After someone restored Knit from a backup, messages you had sent them in the ten minutes before could miss
+  them for good if another phone was passing your messages along. Knit now sends those messages a second time
+  a few minutes later.
+- After a group member restored Knit from a backup, some of their older group messages could fail to open on
+  your phone for good. Messages from before and after the restore now both open.
+- A modified copy of Knit nearby could make yours close when you wrote to it, or stop your phone noticing new
+  phones until Knit restarted. Knit now stays open and sends to that copy with its older encryption, or holds
+  the message back.
+- If you read more than 128 of someone's Nearby room posts before you next met, their phone showed your double
+  tick on only 128 of them. It now shows on all of them.
 
 ## [2.9.0](https://github.com/getknit/knit/releases/tag/v2.9.0) — 2026-10-12T23:11:38Z
 

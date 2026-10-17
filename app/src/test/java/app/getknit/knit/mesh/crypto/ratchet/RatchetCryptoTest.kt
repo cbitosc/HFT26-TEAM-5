@@ -3,6 +3,7 @@ package app.getknit.knit.mesh.crypto.ratchet
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
@@ -17,6 +18,15 @@ import javax.crypto.spec.SecretKeySpec
  */
 class RatchetCryptoTest {
     // --- RFC 7748 anchors ---
+
+    /** #172: the probe answers what every DH against the key would, so a prekey it refuses is never pinned. */
+    @Test
+    fun acceptsPublicKeyRefusesWhatX25519Refuses() {
+        assertTrue(RatchetCrypto.acceptsPublicKey(RatchetCrypto.generateKeyPair().pub))
+        assertFalse("the zero point", RatchetCrypto.acceptsPublicKey(ByteArray(RatchetCrypto.KEY_BYTES)))
+        assertFalse("u = 1, order 1", RatchetCrypto.acceptsPublicKey(ByteArray(RatchetCrypto.KEY_BYTES).also { it[0] = 1 }))
+        assertFalse("a short key", RatchetCrypto.acceptsPublicKey(ByteArray(31) { 9 }))
+    }
 
     @Test
     fun x25519MatchesRfc7748Vector1() {

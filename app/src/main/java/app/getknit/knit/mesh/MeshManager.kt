@@ -41,6 +41,7 @@ import app.getknit.knit.mesh.crypto.PublicKeyBundle
 import app.getknit.knit.mesh.crypto.b64
 import app.getknit.knit.mesh.crypto.b64d
 import app.getknit.knit.mesh.crypto.ratchet.GroupRatchetSessions
+import app.getknit.knit.mesh.crypto.ratchet.RatchetCrypto
 import app.getknit.knit.mesh.crypto.ratchet.RatchetEngine
 import app.getknit.knit.mesh.crypto.ratchet.RatchetSessions
 import app.getknit.knit.mesh.crypto.readsCryptoV3
@@ -92,6 +93,7 @@ import app.getknit.knit.notifications.Notifier
 import app.getknit.knit.presence.OpenToChatPolicy
 import app.getknit.knit.presence.OpenToChatWatch
 import app.getknit.knit.transfer.TransferSignals
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -1401,7 +1403,11 @@ class MeshManager(
     private suspend fun groupRatchetEligible(members: List<String>): Boolean =
         members.all { nodeId ->
             val peer = peers.find(nodeId) ?: return@all false
-            peer.pubKey != null &&
+            // An identity key X25519 refuses can never take a seed (#172): the group goes v1, as for a member
+            // without the bit, rather than minting and retrying a distribution that cannot succeed.
+            val bundle = peer.pubKey?.let { PublicKeyBundle.decode(it) }
+            bundle != null &&
+                RatchetCrypto.acceptsPublicKey(bundle.dhPublicKey()) &&
                 (peer.capabilities ?: 0L) and Protocol.CAP_RATCHET != 0L &&
                 ratchetPrekeyOf(peer) != null
         }
@@ -2134,12 +2140,16 @@ class MeshManager(
                 recipientId != null -> listOf(recipientId)
                 else -> emptyList()
             }
+        // A bundle whose wrap key X25519 refuses (a low-order point a forged profile published, #172) is skipped as a
+        // member whose key we don't know is: nobody could wrap to it, and refusing the whole message for it would
+        // leave every other member of the group without the post.
         return targets
             .mapNotNull { nodeId ->
                 peers
                     .find(nodeId)
                     ?.pubKey
                     ?.let { PublicKeyBundle.decode(it) }
+                    ?.takeIf { RatchetCrypto.acceptsPublicKey(it.dhPublicKey()) }
                     ?.let { nodeId to it }
             }.toMap()
     }
@@ -2604,6 +2614,9 @@ class MeshManager(
      * inside a scenario, whose `delay()`-based loop a lab clock jump never wakes.
      */
     internal suspend fun reofferToNeighbors() {
+        // First, and outside the link-set guards: a reset's second re-seal is due by the clock, not by a link, and a
+        // pass due with nobody linked still takes its long-range and coordination-plane sends (ADR 2026-10.dmgw).
+        resealSecondPass()
         val neighbors = transport.neighbors.value
         // Before the blob re-ask below, so a want the 30-min sweep reclaimed is back in the memo it
         // reads from; skipped with nobody linked, where a want has nowhere to go anyway.
@@ -3501,23 +3514,90 @@ class MeshManager(
         }
     }
 
+    /** One reset's re-seal, owed a second pass once the routers' dedup window has run out ([resealSecondPass]). */
+    private class SecondPass(
+        val dueAt: Long,
+        val ids: Set<String>,
+    )
+
+    /**
+     * Per peer, the DM ids its last reset re-sealed, owed one more seal at [SecondPass.dueAt] (#171, ADR
+     * 2026-10.dmgw). A later reset of the same peer replaces its entry; the second pass never records one, so
+     * nothing loops. In memory only: a process that restarts inside the window loses its second pass, and the
+     * DMs it would have carried reach a peer behind a relay only on the next reset's re-seal.
+     */
+    private val pendingSecondReseal = ConcurrentHashMap<String, SecondPass>()
+
     /**
      * Re-seals our recent unacked DMs to [recipientId] under the CURRENT session state — the recovery
      * half of an inbound ratchet **session reset**: a wiped peer can no longer open frames sealed to
-     * its dead session, but custody still carries them (≤ the 24 h TTL), so a fresh seal under the
-     * replacement session puts recoverable copies back on the mesh. Receiver-side idempotency (the
-     * exists-gate + upsert) makes duplicates harmless.
+     * its dead session, so each gets a fresh seal under the replacement session, flooded live under
+     * its original id. Receiver-side idempotency (the exists-gate + upsert) makes duplicates harmless.
+     *
+     * Its reach is what the routers it meets let through, not custody. Every custody keeps the first bytes
+     * it stored under an id (the reset peer's own included), and a relay drops an id it first saw inside
+     * [SeenSet.DEFAULT_TTL_MS] — which, for the DMs whose failures fired the reset, is every relay between
+     * us. So the same ids are re-sealed once more after [ResetReseal.SECOND_PASS_MS] (the tick in
+     * [reofferToNeighbors]), when any window this pass ran into has lapsed (#171, ADR 2026-10.dmgw). A peer
+     * reachable live at neither pass still misses them: custody serves only the originals. So does one behind a
+     * relay that first saw an original after the reset (a custody pull inside the window), whose own window can
+     * cover the second pass too.
      */
     internal suspend fun resealRecentDmsTo(recipientId: String) {
-        if (recipientId in settings.blockedNodeIds.first()) return
+        val rows = unackedToReseal(recipientId)
+        // Recorded before the first copy leaves, so whoever sees one (a scenario's oracle) sees the pass owed too. A
+        // row that cannot seal now (no key) is owed the second try with the rest; it is still unacked.
+        if (rows.isNotEmpty()) {
+            pendingSecondReseal[recipientId] = SecondPass(clock() + ResetReseal.SECOND_PASS_MS, rows.mapTo(HashSet()) { it.id })
+        }
+        reseal(rows, recipientId)
+    }
+
+    /**
+     * The second pass of every reset re-seal now due ([pendingSecondReseal]): the ids that pass recorded and that
+     * are still unacked — not one acked since, not a DM sent after the reset (that one flew under the new
+     * session). Once per reset; it records nothing, so it never re-arms. Run from the 60 s tick whether or not
+     * anyone is linked, since a due entry would otherwise wait for a link to come back. Each re-seal costs one
+     * chain key per DM still unacked at ~11 min.
+     */
+    private suspend fun resealSecondPass() {
+        val now = clock()
+        pendingSecondReseal.entries.toList().forEach { (peer, pass) ->
+            if (now < pass.dueAt) return@forEach
+            // Conditional: a reset that replaced the entry since the snapshot keeps its own.
+            if (!pendingSecondReseal.remove(peer, pass)) return@forEach
+            // Removed before it runs, so a failure costs this pass and never repeats it; caught, so it never ends
+            // the 60 s loop that runs it.
+            try {
+                val rows = unackedToReseal(peer).filter { it.id in pass.ids }
+                Log.d(TAG, "reset re-seal second pass to $peer: ${rows.size} of ${pass.ids.size} still unacked")
+                reseal(rows, peer)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (
+                @Suppress("TooGenericExceptionCaught") e: Exception, // never ends the re-offer loop
+            ) {
+                Log.w(TAG, "reset re-seal second pass to $peer failed: ${e.message}")
+            }
+        }
+    }
+
+    /** Our unacked DMs of the last [RESEAL_WINDOW_MS] to [recipientId]; none for a blocked peer. */
+    private suspend fun unackedToReseal(recipientId: String): List<MessageEntity> {
+        if (recipientId in settings.blockedNodeIds.first()) return emptyList()
+        return messages.unackedDmsTo(recipientId, identity.nodeId(), since = clock() - RESEAL_WINDOW_MS)
+    }
+
+    private suspend fun reseal(
+        rows: List<MessageEntity>,
+        recipientId: String,
+    ) {
         val me = identity.nodeId()
-        messages
-            .unackedDmsTo(recipientId, me, since = clock() - RESEAL_WINDOW_MS)
-            // CONTENT, not CHAT: custody keeps the first-stored seal of this id (`ForwardSync.onSeen` returns early on
-            // `has(id)`), so a re-seal the LoRa reach gate held would later be re-offered as the old bytes the reset
-            // peer cannot open. Exempt, the fresh seal flies now (ADR 2026-10.a4pm) — and, sharing the frame's key, it
-            // replaces an old-seal copy still queued, which is the copy worth losing.
-            .forEach { row -> resealAndFlood(row, recipientId, me, FanoutHint.CONTENT) }
+        // CONTENT, not CHAT: custody keeps the first-stored seal of this id (`ForwardSync.onSeen` returns early on
+        // `has(id)`), so a re-seal the LoRa reach gate held would later be re-offered as the old bytes the reset
+        // peer cannot open. Exempt, the fresh seal flies now (ADR 2026-10.a4pm) — and, sharing the frame's key, it
+        // replaces an old-seal copy still queued, which is the copy worth losing.
+        rows.forEach { row -> resealAndFlood(row, recipientId, me, FanoutHint.CONTENT) }
     }
 
     /**
@@ -3659,6 +3739,19 @@ class MeshManager(
 internal object HealFloors {
     const val RETENTION_SWEEP_MS = 60 * 60_000L
     const val GROUP_REPLAY_MS = 60 * 60_000L
+}
+
+/**
+ * When a reset's re-seal goes out again ([MeshManager.resealRecentDmsTo], #171, ADR 2026-10.dmgw). Beside
+ * `RESEAL_WINDOW_MS` in spirit; outside the private companion so `MeshManagerTest` and the lab can step a clock past it.
+ */
+internal object ResetReseal {
+    /**
+     * How long after a reset's re-seal its second pass is due: the routers' dedup window plus one 60 s tick, so a
+     * relay that dropped the first re-seal as a duplicate of the original has forgotten the id. Tied to
+     * [SeenSet.DEFAULT_TTL_MS] so the two move together.
+     */
+    const val SECOND_PASS_MS = SeenSet.DEFAULT_TTL_MS + 60_000L
 }
 
 /** The own-profile fields whose edit republishes the profile (`watchProfileChanges`). */

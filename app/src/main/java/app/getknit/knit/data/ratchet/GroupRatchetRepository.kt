@@ -94,7 +94,7 @@ class GroupRatchetRepository(
                 },
             )
         }
-        if (delta.consumedSkippedIdx != null) dao.deleteSkippedKeysAt(groupId, senderId, headerSe, headerN)
+        delta.consumedSkippedMintedAt?.let { dao.deleteSkippedKey(groupId, senderId, headerSe, mintedAt = it, idx = headerN) }
     }
 
     // The send chain is retired, not deleted (ADR 2026-10.xgwj): a group left or deleted here comes back under

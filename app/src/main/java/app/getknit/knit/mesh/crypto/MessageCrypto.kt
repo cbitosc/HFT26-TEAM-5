@@ -6,6 +6,7 @@ import com.google.crypto.tink.HybridDecrypt
 import com.google.crypto.tink.KeysetHandle
 import com.google.crypto.tink.PublicKeySign
 import com.google.crypto.tink.RegistryConfiguration
+import java.security.GeneralSecurityException
 
 /**
  * The end-to-end message cipher. Holds this device's **private** keysets (hybrid for decrypting wrapped
@@ -45,8 +46,11 @@ class MessageCrypto(
 
     /**
      * Encrypts [content] to [recipients] (nodeId → published bundle). Returns null if there are no
-     * recipients with known keys (caller must not send a frame nobody can read). The returned envelope
-     * is authenticated by the frame signature, not separately signed here.
+     * recipients with known keys (caller must not send a frame nobody can read). A recipient whose key HPKE
+     * refuses — a low-order X25519 point a peer published as its identity key, which Tink throws on (#172) — is
+     * skipped like an unknown key, and null comes back only when no wrap remains, so one such member never
+     * strands a group's post or crashes the send (`MeshManager.recipientBundles` filters them first; this is the
+     * backstop). The returned envelope is authenticated by the frame signature, not separately signed here.
      */
     fun seal(
         content: ByteArray,
@@ -57,9 +61,14 @@ class MessageCrypto(
         val key = AesGcm.randomKey()
         val (iv, ct) = AesGcm.encrypt(key, content, header)
         val wrapped =
-            recipients.entries.sortedBy { it.key }.map { (to, bundle) ->
-                WrappedKey(to, bundle.hybridEncrypt().encrypt(key, header))
+            recipients.entries.sortedBy { it.key }.mapNotNull { (to, bundle) ->
+                try {
+                    WrappedKey(to, bundle.hybridEncrypt().encrypt(key, header))
+                } catch (_: GeneralSecurityException) {
+                    null
+                }
             }
+        if (wrapped.isEmpty()) return null
         return EncEnvelope(nonce = iv, ct = ct, keys = wrapped)
     }
 

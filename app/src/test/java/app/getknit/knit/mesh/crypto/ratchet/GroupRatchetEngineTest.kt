@@ -88,7 +88,10 @@ class GroupRatchetEngineTest {
                 delta.skippedInserts.forEach {
                     skipped.getOrPut(Triple(frame.senderId, it.epoch, it.idx)) { mutableListOf() } += it
                 }
-                delta.consumedSkippedIdx?.let { skipped.remove(Triple(frame.senderId, frame.header.se, it)) }
+                // Only the consumed mint's key goes, as the store spends it (#177).
+                delta.consumedSkippedMintedAt?.let { minted ->
+                    skipped[Triple(frame.senderId, frame.header.se, frame.header.n)]?.removeAll { it.mintedAt == minted }
+                }
             }
             return outcome
         }
@@ -224,6 +227,30 @@ class GroupRatchetEngineTest {
         // New era opens on the newer chain; the old era's in-flight frame still opens on the draining row.
         assertEquals("new 0", bob.openedText(postWipe, now = 13L))
         assertEquals("old 1", bob.openedText(preWipe[1], now = 14L))
+    }
+
+    /**
+     * #177: a receiver holding two mints of one epoch banks a skipped key per mint at the same index. Spending the
+     * new mint's key used to delete the old mint's too, and the old era's frame at that index then read as
+     * DUPLICATE for good — both chains are past it, and a re-sent seed never rewinds a chain.
+     */
+    @Test
+    fun spendingOneMintsSkippedKeyLeavesTheOtherMintsKeyAtTheSameIndex() {
+        val alice = Member("alice000")
+        val bob = Member("bob00000")
+        bob.adopt(alice, alice.mint(now = 1L), now = 1L)
+        val old = (0..5).map { alice.seal("old$it", "old $it", now = 2L) }
+        alice.wipe()
+        bob.adopt(alice, alice.mint(now = 10L), now = 11L)
+        val new = (0..5).map { alice.seal("new$it", "new $it", now = 12L) }
+
+        assertEquals("old 5", bob.openedText(old[5], now = 13L))
+        assertEquals("new 5", bob.openedText(new[5], now = 14L))
+        assertEquals("new 3", bob.openedText(new[3], now = 15L))
+        assertEquals("old 3", bob.openedText(old[3], now = 16L))
+        // Each spent key went with its own frame: a re-serve of either is a duplicate.
+        assertEquals(GroupRatchetEngine.OpenOutcome.Failed.DUPLICATE, bob.open(old[3], now = 17L))
+        assertEquals(GroupRatchetEngine.OpenOutcome.Failed.DUPLICATE, bob.open(new[3], now = 17L))
     }
 
     @Test

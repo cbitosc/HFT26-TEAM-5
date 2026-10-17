@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.security.GeneralSecurityException
 
 /**
  * The session service for the DM epoch ratchet (crypto scheme v2): composes the pure [RatchetEngine]
@@ -41,6 +42,8 @@ class RatchetSessions(
     // Opens the DB transaction that must enclose the lock. Shared with GroupRatchetSessions for the
     // same reason the mutex is.
     private val transact: SessionTransactor = SessionTransactor.None,
+    // Diagnostics for a seal X25519 refused (#172); the facade stays Android-free, the DI wires Log.
+    private val log: (String) -> Unit = {},
 ) {
     /**
      * One critical section, in the one global order: transaction OUTER, [mutex] INNER. Every locked
@@ -246,9 +249,12 @@ class RatchetSessions(
      * plaintext row afterwards (a crash between this commit and the flood is just a chain hole the
      * receiver's skipped-key path absorbs — nothing received can be lost, unlike the open side).
      *
-     * Returns null when no epoch base exists — an established session whose peer has since cleared its
-     * prekey and contributed no epoch, or a first send with [peerSpk] null. Callers treat null as
-     * "fall back to v1", which the peer can always read.
+     * Returns null — nothing persisted — when it cannot seal: a first send with [peerSpk] null; a session we
+     * initiated before the init's prekey was recorded as its base, at an epoch boundary after the peer's pinned
+     * prekey moved on ([RatchetEngine.prekeyBase], #174); or a key X25519 refuses — a low-order point the peer
+     * signed as its prekey, or one in its identity bundle (#172). Tink throws there, and a throw used to crash
+     * the chat screen and end the mesh's neighbour watcher. Callers treat null as "fall back": a chat to v1,
+     * which the peer can always read, a ctl to its cleartext form, a seed to the v1 group message.
      */
     suspend fun sealDm(
         peerId: String,
@@ -265,13 +271,16 @@ class RatchetSessions(
             val initiation =
                 if (existing == null) {
                     peerSpk ?: return@locked null
-                    engine.initiate(peerId, dhIdentityPriv(), peerIkPub, peerSpk, now)
+                    // Read outside the catch: only X25519's refusal of a peer key is "cannot seal", never our own key store.
+                    val ownIk = dhIdentityPriv()
+                    refusedAsNull(peerId) { engine.initiate(peerId, ownIk, peerIkPub, peerSpk, now) } ?: return@locked null
                 } else {
                     null
                 }
             val session = initiation?.session ?: existing ?: return@locked null
+            val base = engine.prekeyBase(session, peerSpk)
             val sealed =
-                engine.seal(session, plaintext, aad, peerSpk?.pub, now, v3 = scheme == EncEnvelope.VERSION_DM_V3)
+                refusedAsNull(peerId) { engine.seal(session, plaintext, aad, base, now, v3 = scheme == EncEnvelope.VERSION_DM_V3) }
                     ?: return@locked null
             store.commitSend(sealed.session, initiation?.epoch ?: sealed.newLocalEpoch)
             val h = sealed.header
@@ -449,7 +458,8 @@ class RatchetSessions(
         aad: ByteArray,
         now: Long,
     ): ResetSeal {
-        val sealed = engine.seal(old, plaintext, aad, peerSpk.pub, now) ?: return ResetSeal.NoPrekey
+        val base = engine.prekeyBase(old, peerSpk)
+        val sealed = refusedAsNull(old.peerId) { engine.seal(old, plaintext, aad, base, now) } ?: return ResetSeal.NoPrekey
         store.commitSend(sealed.session.copy(lastResetSentAt = now), sealed.newLocalEpoch)
         synchronized(lastResetSentAt) { lastResetSentAt[old.peerId] = now }
         synchronized(undecryptable) { undecryptable.remove(old.peerId) }
@@ -467,7 +477,8 @@ class RatchetSessions(
         aad: ByteArray,
         now: Long,
     ): ResetSeal {
-        val initiation = engine.initiate(peerId, dhIdentityPriv(), peerIkPub, peerSpk, now)
+        val ownIk = dhIdentityPriv() // outside the catch, as in sealDm
+        val initiation = refusedAsNull(peerId) { engine.initiate(peerId, ownIk, peerIkPub, peerSpk, now) } ?: return ResetSeal.NoPrekey
         // Over our own reset, still unanswered and still draining the root it replaced, the slot keeps that root:
         // the one the peer is provably on (it sealed under it), and the one whose scope it still subscribes even
         // if it did adopt the first reset (its drain). The first reset's root goes — the peer may never have
@@ -481,7 +492,7 @@ class RatchetSessions(
                 prevRootExpiresAt = if (old != null) now + RatchetEngine.PREV_ROOT_TTL_MS else 0L,
                 lastResetSentAt = now,
             )
-        val sealed = engine.seal(session, plaintext, aad, peerSpk.pub, now) ?: return ResetSeal.NoPrekey
+        val sealed = refusedAsNull(peerId) { engine.seal(session, plaintext, aad, peerSpk.pub, now) } ?: return ResetSeal.NoPrekey
         // Abandon our receive side along with the root. Before the root tag (ADR 2026-10.gcrd) a dead era's recv
         // epoch that survived here judged the peer's post-replacement frames of its number against a stale chain
         // index and dropped them as DUPLICATE, which drives no reset; now the tag keeps eras apart and this is
@@ -493,6 +504,23 @@ class RatchetSessions(
         synchronized(confirmedAt) { confirmedAt.remove(peerId) }
         return ResetSeal.Sealed(resetEnvelope(sealed, RatchetHeader.FLAG_RESET), reRooted = true)
     }
+
+    /**
+     * [block]'s result, or null when X25519 refused a key it was handed (#172): a peer can sign a low-order point
+     * as its prekey, or publish one as its identity key, and Tink throws on either. Every seal runs its key work
+     * before it writes, so null here has persisted nothing; the callers' null is "cannot seal". Only Tink's
+     * refusal is caught — anything else is a bug and still throws.
+     */
+    private inline fun <T> refusedAsNull(
+        peerId: String,
+        block: () -> T?,
+    ): T? =
+        try {
+            block()
+        } catch (e: GeneralSecurityException) {
+            log("cannot seal to $peerId: X25519 refused a key (${e.message})")
+            null
+        }
 
     /** A reset always seals v2 — the most compatible form toward a peer that may have reinstalled. */
     private fun resetEnvelope(
@@ -552,7 +580,7 @@ class RatchetSessions(
             val reason: String,
         ) : ResetSeal
 
-        /** The peer has no usable prekey. */
+        /** The peer has no usable prekey, or X25519 refuses its prekey or identity key (#172). */
         data object NoPrekey : ResetSeal
     }
 

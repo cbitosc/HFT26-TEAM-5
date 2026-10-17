@@ -3,6 +3,7 @@ package app.getknit.knit.mesh.crypto.ratchet
 import app.getknit.knit.mesh.crypto.AesGcm
 import com.google.crypto.tink.subtle.Hkdf
 import com.google.crypto.tink.subtle.X25519
+import java.security.GeneralSecurityException
 
 /**
  * The primitive layer of the DM epoch-rekey ratchet (crypto scheme v2 — see
@@ -27,6 +28,9 @@ object RatchetCrypto {
     private const val MAC = "HMACSHA256"
     private const val BYTE_MASK = 0xFFL
     private val ZERO_SALT = ByteArray(KEY_BYTES)
+
+    /** A fixed, public X25519 scalar for [acceptsPublicKey]'s probe; nothing derived from it is ever used. */
+    private val PROBE_PRIV = ByteArray(KEY_BYTES) { 0x5A }
 
     private val LABEL_X3DH = "knit/dm/v2/x3dh".toByteArray()
     private val LABEL_EPOCH = "knit/dm/v2/epoch".toByteArray()
@@ -53,11 +57,31 @@ object RatchetCrypto {
     /** Recomputes the public half of a stored raw X25519 private key (prekeys persist priv-only). */
     fun publicFromPrivate(priv: ByteArray): ByteArray = X25519.publicFromPrivate(priv)
 
-    /** Raw X25519 shared secret; throws on an invalid public key (callers treat that as decrypt failure). */
+    /**
+     * Raw X25519 shared secret; throws Tink's `InvalidKeyException` (a `GeneralSecurityException`) on a public key
+     * it refuses — a low-order point, or the wrong length. On the open side a refused epoch key (`ek`) is a bad
+     * header, while a refused init ephemeral or peer identity key throws out of the X3DH response and the pipeline
+     * drops the frame as undecryptable; the seal side (`RatchetSessions`) treats it as "cannot seal", because a peer
+     * can sign such a point as its prekey (#172).
+     */
     fun dh(
         priv: ByteArray,
         pub: ByteArray,
     ): ByteArray = X25519.computeSharedSecret(priv, pub)
+
+    /**
+     * Whether X25519 takes [pub] as a peer's public key at all — the same check every [dh] against it runs, done
+     * once with a fixed throwaway scalar. Tink refuses by the public key alone (its banned low-order points and
+     * the length), so the scalar is irrelevant; asking Tink rather than listing the points keeps the two from
+     * drifting. A prekey that fails is never pinned (#172).
+     */
+    fun acceptsPublicKey(pub: ByteArray): Boolean =
+        try {
+            dh(PROBE_PRIV, pub)
+            true
+        } catch (_: GeneralSecurityException) {
+            false
+        }
 
     /**
      * Initiator side of the session bootstrap: three DHs against the responder's identity and signed

@@ -69,8 +69,10 @@ import app.getknit.knit.mesh.StoreDigest
 import app.getknit.knit.mesh.crypto.AttachmentCrypto
 import app.getknit.knit.mesh.crypto.ContactCard
 import app.getknit.knit.mesh.crypto.MessageCrypto
+import app.getknit.knit.mesh.crypto.PublicKeyBundle
 import app.getknit.knit.mesh.crypto.b64d
 import app.getknit.knit.mesh.crypto.ratchet.GroupRatchetSessions
+import app.getknit.knit.mesh.crypto.ratchet.RatchetCrypto
 import app.getknit.knit.mesh.crypto.ratchet.RatchetSessions
 import app.getknit.knit.mesh.crypto.ratchet.SessionTransactor
 import app.getknit.knit.mesh.lora.FakeMeshtasticAir
@@ -80,9 +82,14 @@ import app.getknit.knit.mesh.lora.LoraGossipPolicy
 import app.getknit.knit.mesh.lora.LoraMeshTransport
 import app.getknit.knit.mesh.lora.LoraPacePolicy
 import app.getknit.knit.mesh.protocol.FrameType
+import app.getknit.knit.mesh.protocol.PrekeyInfo
+import app.getknit.knit.mesh.protocol.ProfileContent
 import app.getknit.knit.mesh.protocol.Protocol
+import app.getknit.knit.mesh.protocol.RelayEnvelope
 import app.getknit.knit.mesh.protocol.ReplyRef
 import app.getknit.knit.mesh.protocol.VideoInfo
+import app.getknit.knit.mesh.protocol.WireCodec
+import app.getknit.knit.mesh.protocol.WireEnvelope
 import app.getknit.knit.mesh.sha256Hex
 import app.getknit.knit.mesh.spool.FakeSpool
 import app.getknit.knit.mesh.spool.RelayInvite
@@ -1417,9 +1424,12 @@ class LabNode internal constructor(
      * ViewModel needs a Main dispatcher; the body is the same three writes). Returns the group id — which is
      * the hash of the member set, so the same people are always the same group.
      */
-    suspend fun createGroup(vararg others: LabNode): String {
+    suspend fun createGroup(vararg others: LabNode): String = createGroupWith(others.map { it.nodeId })
+
+    /** [createGroup] over raw member ids — for a member no [LabNode] stands behind (a forged profile's phantom id). */
+    suspend fun createGroupWith(otherIds: List<String>): String {
         val me = nodeId
-        val members = (others.map { it.nodeId } + me).distinct()
+        val members = (otherIds + me).distinct()
         val groupId = Conversations.groupIdFor(members)
         val existing = groups.find(groupId)
         if (existing != null && !existing.left) return groupId
@@ -1438,6 +1448,41 @@ class LabNode internal constructor(
         messages.save(StatusNotices.groupCreated(groupId, me, createdAt))
         manager.mintGroupRoots()
         return groupId
+    }
+
+    /**
+     * Floods over this node's links the profile a modified client can publish (#172): this node's own Ed25519 key
+     * beside a low-order X25519 key (32 zero bytes) that every DH and HPKE wrap refuses, with a prekey signed by that
+     * same Ed25519 key. The bundle self-certifies a phantom node id, which every receiver pins like any profile; the
+     * phantom is returned. Nothing stands behind it — no stack answers for it.
+     */
+    suspend fun floodLowOrderIdentityProfile(name: String): String {
+        val sigPub = checkNotNull(PublicKeyBundle.decode(identity.publicKeyBundle())).sigPublicKey()
+        val forged = checkNotNull(PublicKeyBundle.fromRaw(sigPub, ByteArray(RatchetCrypto.KEY_BYTES)))
+        val phantom = NodeId.fromPublicKeyBundle(forged.encoded)
+        val spk = RatchetCrypto.generateKeyPair().pub
+        val at = now()
+        val content =
+            ProfileContent(
+                name = name,
+                status = "",
+                pubKey = forged.encoded,
+                protoVersion = Protocol.VERSION,
+                capabilities = Protocol.LOCAL_CAPABILITIES,
+                prekey = PrekeyInfo(id = 1, pub = spk, sig = messageCrypto.signRaw(RatchetCrypto.spkSigningBytes(1, spk))),
+                version = at,
+            )
+        val env =
+            RelayEnvelope(
+                type = FrameType.PROFILE,
+                id = "profile-$phantom-$at",
+                senderId = phantom,
+                sentAt = at,
+                payload = WireCodec.encodePayload(content),
+            )
+        val signed = WireCodec.encodeEnvelope(env)
+        transport.send(WireEnvelope(sig = messageCrypto.signRaw(signed), signed = signed), null)
+        return phantom
     }
 
     /** Sends into a group this node holds, quoting [replyTo] when given; the frame the chat screen's composer would send. */
@@ -1920,6 +1965,9 @@ class LabNode internal constructor(
 
     /** Whether this node has pinned [peer]'s key (its profile arrived). */
     suspend fun knows(peer: LabNode): Boolean = peers.find(peer.nodeId)?.pubKey != null
+
+    /** The peer row this node pinned for [nodeId] — for an id no [LabNode] stands behind (a forged profile's phantom). */
+    suspend fun pinned(nodeId: String): PeerEntity? = peers.find(nodeId)
 
     /** How many distinct phones this node has been in range of — the met-peers table's count. */
     suspend fun peopleMet(): Int = db.metPeerDao().count()

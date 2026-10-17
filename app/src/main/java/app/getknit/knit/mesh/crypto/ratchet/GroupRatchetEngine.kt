@@ -126,8 +126,13 @@ class GroupRatchetEngine(
         /** Upsert (advanced chain); null when only a skipped key was consumed. */
         val recvChain: RecvChain?,
         val skippedInserts: List<SkippedKey> = emptyList(),
-        /** Chain index whose stored skipped key(s) were consumed — delete every mint's row for it. */
-        val consumedSkippedIdx: Int? = null,
+        /**
+         * The `mintedAt` of the stored skipped key this open consumed, at the header's `(se, n)`: only that mint's
+         * key goes. A sibling era's key at the same index belongs to another frame, and deleting it lost that frame
+         * for good — both chains are past the index, so it read as DUPLICATE, and a re-sent seed never rewinds a
+         * chain (#177; the DM store's `consumedSkippedTag` is the same rule).
+         */
+        val consumedSkippedMintedAt: Long? = null,
     )
 
     /** Verdict on an inbound seed distribution (from a `CTL_GROUP_KEY` ctl DM). */
@@ -243,7 +248,7 @@ class GroupRatchetEngine(
         now: Long,
     ): OpenOutcome {
         if (header.se !in 1..MAX_EPOCH_NUMBER || header.n !in 0 until MAX_EPOCH_MESSAGES) return OpenOutcome.Failed.BAD_HEADER
-        openFromSkipped(ctx, header, nonce, ct, aad)?.let { return it }
+        openFromSkipped(ctx, nonce, ct, aad)?.let { return it }
         return openOnChains(ctx, header, nonce, ct, aad, now)
     }
 
@@ -277,10 +282,9 @@ class GroupRatchetEngine(
         }
     }
 
-    /** Tries the stored out-of-order keys for `(se, n)`; a hit consumes them without touching a chain. */
+    /** Tries the stored out-of-order keys for `(se, n)`; a hit spends that mint's key without touching a chain. */
     private fun openFromSkipped(
         ctx: OpenContext,
-        header: FrameHeader,
         nonce: ByteArray,
         ct: ByteArray,
         aad: ByteArray,
@@ -288,7 +292,7 @@ class GroupRatchetEngine(
         for (skipped in ctx.skippedMsgKeys) {
             val plain = runCatching { AesGcm.decrypt(skipped.msgKey, nonce, ct, aad) }.getOrNull()
             if (plain != null) {
-                return OpenOutcome.Opened(plain, OpenDelta(recvChain = null, consumedSkippedIdx = header.n))
+                return OpenOutcome.Opened(plain, OpenDelta(recvChain = null, consumedSkippedMintedAt = skipped.mintedAt))
             }
         }
         return null

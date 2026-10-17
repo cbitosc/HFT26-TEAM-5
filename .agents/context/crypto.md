@@ -50,6 +50,23 @@ LoRa plane (2026-09.ggq4).
   abandons a root era drops the receive state tied to it, at every site an era changes. An init is answered once
   per init, not once per peer per hour. Regression: `RatchetEngineTest`'s pz9g cases, `IntroSyncTest`,
   `SessionLabTest`, `CustodyLabTest.bothSidesSendWhileApartAndMerge`.
+- **When touching `RatchetEngine.initiate` / `seal`'s new-epoch base, `RatchetEngine.prekeyBase`, `SessionState.peerBasePub`,
+  or what `RatchetSessions.sealDm` / `sealResetDm` pass as the peer's prekey:** READ FSR §4 and §7, and ADR 2026-09.pz9g. Every
+  `pe = 0` epoch is based on the prekey its init names: the receiver resolves the base by `init.pkid`, so `initiate`
+  records that prekey as the session's base until the peer contributes an epoch (`touch` adopts it over the prekey),
+  and an epoch based on the peer's newer prekey was unreadable for days (#174). A row initiated before that holds no
+  base and seals a new epoch only while the pinned prekey is the init's; otherwise the boundary falls back to v1.
+- **When touching what `RatchetSessions.sealDm` / `sealResetDm` return when they cannot seal, `RatchetCrypto.dh` /
+  `acceptsPublicKey`, `MessageCrypto.seal`'s refusal, `MeshManager.recipientBundles` / `groupRatchetEligible`, or
+  `InboundPipeline.verifiedPrekey`:** READ FSR §2.1. A signature proves a peer chose a key, not that X25519 takes it
+  — a low-order point verifies, and Tink throws on every DH against it. The seal facades map Tink's
+  `GeneralSecurityException` (only that) to "cannot seal" (`null`, `ResetSeal.NoPrekey`) with nothing persisted, so
+  every caller takes its existing fallback (v1 chat, cleartext ctl and tick, v1 group message); a prekey
+  `acceptsPublicKey` refuses is never pinned (#172). A member whose identity key it refuses is skipped by the v1 wrap
+  like an unknown key (`recipientBundles`, with `MessageCrypto.seal` dropping a wrap that throws as the backstop) and
+  makes its groups ineligible for the ratchet, so the rest of the group still gets the post; a DM to it parks
+  `pendingKey`. The pin itself stands — its signing half is valid. A throw out of a seal crashed the chat screen and
+  ended the neighbour watcher; a whole-message refusal stranded every group the member was in.
 - **When touching `RESET_TRIGGERING_DROPS`, `InboundPipeline.onRatchetFailure` / `isLiveEvidence` /
   `maybeRequestReset`, `RatchetSessions.RESET_DISTINCT_FRAMES` / `RESET_MIN_INTERVAL_MS` / `STRANDED_TAIL_MS`,
   `headerSane`, or a ratchet `DropReason`:** READ ADR 023, ADR 024, ADR 026 and ADR 053. The heuristic counts three
@@ -90,6 +107,13 @@ LoRa plane (2026-09.ggq4).
   flagged) or declines, and on the heuristic's word over an init answered under a minute ago it declines.
   The group seed floor counts only sends under the pairwise root held now, never `force`. Regression:
   `RatchetSessionsResetTest`, and `RestoreLabTest` under `scripts/lab-chaos.sh`.
+- **When touching what a committed reset re-seals — `MeshManager.resealRecentDmsTo`, its second pass in
+  `reofferToNeighbors`, `RESEAL_WINDOW_MS` / `ResetReseal.SECOND_PASS_MS`, or `SeenSet.reopen`:** READ ADR 2026-10.dmgw
+  and FSR §7. The re-seal keeps the original id, so it reaches only what it meets live past each router's 10 min
+  dedup window (custody keeps the originals): it goes out once at the reset and once more 11 min later, for the ids
+  still unacked, once per reset — the second pass never records an entry, and the drain is clock-driven, outside
+  the link-set guards. Regression: `MeshManagerTest.aResetsResealGoesOutOnceMoreAfterTheDedupWindow`,
+  `RestoreLabTest`'s relayed-restore scenarios.
 - **When touching `GroupRatchetEngine` / `GroupRatchetSessions`, `MeshManager.sealGroupRatchet` / `groupKeyPayload` /
   `currentSeeds`, the seed outbox (`group_key_sends`, `CTL_GROUP_KEY_ACK`), `InboundPipeline.flushPendingGroupKeysFor`
   / `adoptGroupSeeds` / `maybeRequestGroupKey`, `CTL_GROUP_KEY_REQ`, `MAX_ADOPTIONS_PER_DAY`, or

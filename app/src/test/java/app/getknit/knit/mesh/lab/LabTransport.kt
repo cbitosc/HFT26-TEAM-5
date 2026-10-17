@@ -168,7 +168,11 @@ class LabTransport(
     // Under chaos each collector may be late to what it was handed — the router busy on the frame before.
     private val _inbound = MutableSharedFlow<InboundFrame>(extraBufferCapacity = BUFFER)
 
-    /** Frames handed to [inbound] (every emit site counts one) against frames its collector has finished. */
+    /**
+     * Frames handed to [inbound] against frames its collector has finished. A link frame is counted in [received]
+     * before its crossing is logged on the sender, so a scenario that waits on that line and then on
+     * [awaitInboundDrained] never sees the frame logged but not yet counted; a page is counted in [hearPage].
+     */
     private val framesIn = AtomicLong()
     private val framesHandled = AtomicLong()
 
@@ -858,6 +862,7 @@ class LabTransport(
     ) {
         if (env.senderId == nodeId) return // OWN_ECHO
         heardOnPages += "${env.type} ${env.id} ${env.senderId.take(NODE_ID_CHARS)}"
+        framesIn.incrementAndGet()
         emitNow(InboundFrame(wire, env, env.senderId))
     }
 
@@ -968,7 +973,6 @@ class LabTransport(
         via: String,
     ) {
         val frame = received(wire, fromNodeId, via) ?: return
-        framesIn.incrementAndGet()
         _inbound.emit(frame)
     }
 
@@ -1014,6 +1018,7 @@ class LabTransport(
                 }
             }
         }
+        framesIn.incrementAndGet() // before the sender's log line: see framesIn
         pipes[fromNodeId]?.target?.sent?.add(
             "#${SEQ.incrementAndGet()} ${nodeId.take(NODE_ID_CHARS)} ${envelope.type} ${envelope.id} relay=${wire.relay} via=$via",
         )
@@ -1021,7 +1026,6 @@ class LabTransport(
     }
 
     private fun emitNow(frame: InboundFrame) {
-        framesIn.incrementAndGet()
         check(_inbound.tryEmit(frame)) { "$nodeId: inbound buffer full ($BUFFER) — a fast-path frame was dropped" }
     }
 
