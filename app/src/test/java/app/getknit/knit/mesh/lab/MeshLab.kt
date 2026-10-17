@@ -113,11 +113,13 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.job
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
@@ -279,8 +281,11 @@ class MeshLab {
 
     /** Stops every node and drops its state. */
     fun close() {
-        nodes.forEach { it.shutdown() }
+        // Every node goes down even when one fails its shutdown: a node left running leaks its collectors into the
+        // next test class in this JVM. The first failure is rethrown, the rest ride along as suppressed.
+        val failures = nodes.mapNotNull { runCatching { it.shutdown() }.exceptionOrNull() }
         dir.deleteRecursively()
+        failures.firstOrNull()?.let { first -> throw first.apply { failures.drop(1).forEach(::addSuppressed) } }
     }
 
     /**
@@ -1331,7 +1336,14 @@ class LabNode internal constructor(
             peers.flushSeen()
         }
         manager.stop()
-        scope?.cancel()
+        // Joined, not only cancelled: a collector still mid-query (the name-clash fade's anchors) when [shutdown] closes
+        // the database next throws on the closed pool, and that lands as an uncaught exception on whichever `runTest`
+        // class this JVM runs after the scenario. Bounded and checked: a child that ignores cancellation fails the
+        // scenario that owns it, by name, instead of racing the database close as before.
+        scope?.coroutineContext?.job?.let { job ->
+            val joined = runBlocking { withTimeoutOrNull(SCOPE_JOIN_MS) { job.cancelAndJoin() } }
+            check(joined != null) { "$name: session scope still running $SCOPE_JOIN_MS ms after cancel: ${job.children.toList()}" }
+        }
         scope = null
         return linked
     }
@@ -2255,6 +2267,7 @@ class LabNode internal constructor(
         const val IMAGE_MIME = "image/jpeg"
         const val VIDEO_MIME = "video/mp4"
         const val LORA_LOG_LINES = 24
+        const val SCOPE_JOIN_MS = 5_000L
 
         /** The text classifier's answer to words it minds, under [flaggedText]. */
         val FLAGGED_TEXT = TextVerdict(allowed = false, category = TextVerdict.Category.TOXICITY, score = 0.99f)

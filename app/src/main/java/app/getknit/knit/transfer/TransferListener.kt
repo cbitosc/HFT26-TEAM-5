@@ -92,9 +92,10 @@ internal class TransferListener(
         while (true) {
             val remaining = deadline - clock()
             if (remaining <= 0) return null
-            server.soTimeout = remaining.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
             val socket =
                 try {
+                    // Inside the try: a listener whose thread starts late can find the winner already closed it.
+                    server.soTimeout = remaining.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
                     server.accept()
                 } catch (_: IOException) {
                     // The window ran out, or another listener won the race and closed this one.

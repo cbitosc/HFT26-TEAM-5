@@ -765,7 +765,8 @@ class InboundPipeline(
         val group = env.group
         if (group != null) {
             if (reconcileGroup(group, env.senderId, clampFuture(env.sentAt), me)) {
-                decryptAndDeliver(env, content, me, group.id, plane, signed)
+                // The source too: it names the hop the picture's first blind ask ranks next (ADR 2026-10.f7gg).
+                decryptAndDeliver(env, content, me, group.id, plane, signed, source)
             }
             return
         }
