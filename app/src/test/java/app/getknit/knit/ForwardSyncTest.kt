@@ -98,7 +98,7 @@ class ForwardSyncTest {
 
         // Attachment hashes of held chat frames (the fake doesn't track blob presence, so it doesn't filter
         // already-held ones — enough for the sync tests, which drive the pull via the onCarried hook).
-        override suspend fun attachmentsNeedingFetch(): Map<String, String> =
+        override suspend fun attachmentsNeedingFetch(now: Long): Map<String, String> =
             rows.values
                 .mapNotNull { row ->
                     WireCodec.decodePayload<ChatContent>(row.frame.envelope.payload)?.attachmentHash?.let {

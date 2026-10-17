@@ -16,6 +16,7 @@ import app.getknit.knit.data.PeerRepository
 import app.getknit.knit.data.QuoteVerifier
 import app.getknit.knit.data.ReactionRepository
 import app.getknit.knit.data.VoiceAudio
+import app.getknit.knit.data.forward.ForwardRepository
 import app.getknit.knit.data.group.GroupEntity
 import app.getknit.knit.data.group.GroupMembersStore
 import app.getknit.knit.data.message.AttachmentFetchRow
@@ -327,7 +328,14 @@ class InboundPipeline(
         when {
             env.type == FrameType.BLOB_REQ -> {
                 decodeCounted<BlobReqContent>(env.payload)?.let { req ->
-                    blobExchange.onRequest(req.hash, fromNodeId, req.offset, fastOnly = req.fastOnly == true)
+                    blobExchange.onRequest(
+                        req.hash,
+                        fromNodeId,
+                        req.offset,
+                        fastOnly = req.fastOnly == true,
+                        pull = req.pull,
+                        until = req.until,
+                    )
                 }
                 metrics.onBlobAskHandled()
             }
@@ -2110,7 +2118,9 @@ class InboundPipeline(
             return
         }
         val fastOnly = carriedFastOnly(env, content, hash, member) ?: return
-        blobExchange.want(hash, author = env.senderId, via = via, fastOnly = fastOnly)
+        // A DM's carrier pulls it through for its custody window and no longer: frame-global, the same on every node (#195).
+        val until = env.recipientId?.let { clampFuture(env.sentAt) + ForwardRepository.DEFAULT_TTL_MS }
+        blobExchange.want(hash, author = env.senderId, via = via, fastOnly = fastOnly, until = until)
     }
 
     /**
@@ -2120,28 +2130,49 @@ class InboundPipeline(
      * photo pay nothing. Only a gated row reads the rows naming the hash, once (by index): it comes in tapped when the user
      * already tapped the hash — it would show the card again otherwise — and it is fast-only when every row, this one
      * included, is gated ([BluetoothFetchGate.fastOnly]); one free row fetches it for all.
+     *
+     * A DM's row reads the rows too, for the deadline its want pulls it through by (`PullThroughGate.until`, #195): a DM
+     * delivered past its custody window must not ask anyone to pull it, from its first step. A group's or a room's row has
+     * none, so it still pays nothing.
      */
     private suspend fun deliveredFetch(
         hash: String?,
         declaredSize: Long?,
         isNew: Boolean,
-        senderId: String,
+        env: RelayEnvelope,
         me: String,
     ): DeliveredFetch {
         if (hash == null) return DeliveredFetch.PLAIN
         val limit = settings.bluetoothDownloadLimitBytes.first()
+        val senderId = env.senderId
         val own = senderId == me
-        if (!BluetoothFetchGate.fastOnly(declaredSize, limit, approved = false, own = own)) return DeliveredFetch.PLAIN
+        val gated = BluetoothFetchGate.fastOnly(declaredSize, limit, approved = false, own = own)
+        if (!gated && env.recipientId == null) return DeliveredFetch.PLAIN
         val stored = messages.attachmentFetchRows(hash, me)
         val tapped = stored.any { it.approved }
-        val rows = if (isNew) stored + AttachmentFetchRow(hash, senderId, declaredSize, tapped, own) else stored
-        return DeliveredFetch(inheritsTap = isNew && tapped, fastOnly = BluetoothFetchGate.fastOnly(rows, limit))
+        val rows = if (isNew) stored + newRow(hash, env, declaredSize, tapped, own) else stored
+        return DeliveredFetch(
+            inheritsTap = gated && isNew && tapped,
+            fastOnly = gated && BluetoothFetchGate.fastOnly(rows, limit),
+            until = PullThroughGate.until(rows),
+        )
     }
+
+    /** The fetch row [env] will store for its attachment [hash], before it is stored: what the gates fold it as. */
+    private fun newRow(
+        hash: String,
+        env: RelayEnvelope,
+        declaredSize: Long?,
+        approved: Boolean,
+        own: Boolean,
+    ) = AttachmentFetchRow(hash, env.senderId, declaredSize, approved, own, sentAt = clampFuture(env.sentAt), dm = env.recipientId != null)
 
     /** [deliveredFetch]'s verdict: whether the new row comes in tapped, and whether its want is fast-only. */
     private class DeliveredFetch(
         val inheritsTap: Boolean,
         val fastOnly: Boolean,
+        // The deadline the want pulls it through by: a DM's custody window, null for anything else (#195).
+        val until: Long? = null,
     ) {
         companion object {
             val PLAIN = DeliveredFetch(inheritsTap = false, fastOnly = false)
@@ -2173,7 +2204,7 @@ class InboundPipeline(
             val own = env.senderId == me
             if (!BluetoothFetchGate.fastOnly(declared, limit, approved = false, own = own)) return false
             val stored = messages.attachmentFetchRows(hash, me)
-            val post = AttachmentFetchRow(hash, env.senderId, declared, approved = stored.any { it.approved }, own = own)
+            val post = newRow(hash, env, declared, approved = stored.any { it.approved }, own = own)
             return BluetoothFetchGate.fastOnly(stored + post, limit)
         }
         val rows = messages.attachmentFetchRows(hash, me).takeIf { it.isNotEmpty() } ?: return null
@@ -2846,7 +2877,7 @@ class InboundPipeline(
         val hash = content.attachmentHash
         val moderation = inboundModeration(isNew, content.body, conversationId)
         val (declaredSize, video) = deliveredDescription(content, sealed)
-        val fetch = deliveredFetch(hash, declaredSize, isNew, env.senderId, me)
+        val fetch = deliveredFetch(hash, declaredSize, isNew, env, me)
         val built =
             MessageEntity(
                 id = env.id,
@@ -2900,7 +2931,8 @@ class InboundPipeline(
             if (blobStore.has(hash)) {
                 describeHeldAttachment(hash, sealed?.attachmentKey, content.attachmentMime)
             } else if (sealed?.attachmentKey != null || !copyFromOwnStore(hash, env.senderId)) {
-                blobExchange.want(hash, author = env.senderId, via = via, fastOnly = fetch.fastOnly)
+                // The delivery read every row naming the hash, or its own is no DM's: its deadline, none included, is known.
+                blobExchange.want(hash, author = env.senderId, via = via, fastOnly = fetch.fastOnly, until = fetch.until, untilKnown = true)
                 // Arm the fast plane toward the author — the guaranteed holder — so the pull can ride a NAN
                 // NDP instead of crawling over BLE (the serve side arms its own half in the composite; only
                 // the larger nodeId of a pair ever initiates, so an inert mark here is harmless). Freshness/

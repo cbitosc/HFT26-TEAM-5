@@ -346,13 +346,14 @@ interface MessageDao {
     /**
      * Every stored row naming an attachment whose bytes aren't in the `blobs` table yet, earliest first (`sentAt`, then
      * id), with what `BluetoothFetchGate` judges each on (ADR 2026-10.js2p): its declared size, the user's tap, and
-     * whether [me] sent it. One entry per *row*, not per hash: a stranger's row naming a contact's attachment hash must
-     * not decide the contact's fetch, so the rule folds over the rows in Kotlin (`MessageRepository.attachmentsNeedingFetch`),
-     * and the earliest row's sender is the one holder a re-armed want can name (ADR 2026-10.f7gg).
+     * whether [me] sent it; and, for `PullThroughGate` (#195), when it was sent and whether it is a DM's. One entry per
+     * *row*, not per hash: a stranger's row naming a contact's attachment hash must not decide the contact's fetch, so the
+     * rule folds over the rows in Kotlin (`MessageRepository.attachmentsNeedingFetch`), and the earliest row's sender is
+     * the one holder a re-armed want can name (ADR 2026-10.f7gg).
      */
     @Query(
         "SELECT attachmentHash AS hash, senderId, attachmentSize, attachmentFetchApproved AS approved, " +
-            "(senderId = :me) AS own FROM messages " +
+            "(senderId = :me) AS own, sentAt, (recipientId IS NOT NULL) AS dm FROM messages " +
             "WHERE attachmentHash IS NOT NULL AND attachmentHash NOT IN (SELECT hash FROM blobs) " +
             "ORDER BY sentAt, id",
     )
@@ -361,7 +362,8 @@ interface MessageDao {
     /** [attachmentFetchRows] for the one attachment [hash], held or not: what a delivery judges its want on. */
     @Query(
         "SELECT attachmentHash AS hash, senderId, attachmentSize, attachmentFetchApproved AS approved, " +
-            "(senderId = :me) AS own FROM messages WHERE attachmentHash = :hash ORDER BY sentAt, id",
+            "(senderId = :me) AS own, sentAt, (recipientId IS NOT NULL) AS dm FROM messages " +
+            "WHERE attachmentHash = :hash ORDER BY sentAt, id",
     )
     suspend fun attachmentFetchRowsFor(
         hash: String,
@@ -769,6 +771,10 @@ data class AttachmentFetchRow(
     val approved: Boolean,
     /** Whether this node sent the row. */
     val own: Boolean,
+    /** The row's `sentAt`: the frame's own clock, which custody's TTL keys on (`PullThroughGate`, #195). */
+    val sentAt: Long = 0L,
+    /** Whether the row is a DM's (a `recipientId`); a group's and a room's have none. */
+    val dm: Boolean = false,
 )
 
 /**

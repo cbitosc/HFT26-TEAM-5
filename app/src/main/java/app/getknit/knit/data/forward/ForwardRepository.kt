@@ -208,15 +208,19 @@ class ForwardRepository(
             WireCodec.decodeEnvelope(row.signed)?.let { CarriedFrame(it, row.sig, row.signed) }
         }
 
-    override suspend fun attachmentsNeedingFetch(): Map<String, String> = dao.attachmentsNeedingFetch().associate { it.hash to it.senderId }
+    override suspend fun attachmentsNeedingFetch(now: Long): Map<String, String> =
+        dao.attachmentsNeedingFetch(now).associate {
+            it.hash to
+                it.senderId
+        }
 
     /**
      * A group frame's roster and a room post's declared size are read off the frame's own signed bytes: what says a
      * group frame is ours before any group row does (ADR 2026-10.js2p), and what says a room post is large before its
      * row exists (ADR 2026-10.hmfe). Only a cleartext post's size is read: an encrypted frame's rides sealed.
      */
-    override suspend fun carriedAttachments(): List<CarriedAttachment> =
-        dao.carriedAttachments().map {
+    override suspend fun carriedAttachments(now: Long): List<CarriedAttachment> =
+        dao.carriedAttachments(now).map {
             // Only a group frame's and a room post's bytes are loaded (the query's CASE): a DM names neither.
             val env = it.signed?.let(WireCodec::decodeEnvelope)
             val roster = env?.group?.members?.toSet()
@@ -227,7 +231,16 @@ class ForwardRepository(
                     ?.takeIf { c -> c.enc == null }
                     ?.attachmentSize
                     ?.takeIf { size -> size > 0 }
-            CarriedAttachment(it.hash, it.recipientId, it.receivedAt, it.senderId, it.groupId, roster = roster, declaredSize = declaredSize)
+            CarriedAttachment(
+                it.hash,
+                it.recipientId,
+                it.receivedAt,
+                it.senderId,
+                it.groupId,
+                roster = roster,
+                declaredSize = declaredSize,
+                sentAt = it.sentAt,
+            )
         }
 
     override suspend fun recipientOf(id: String): String? = dao.recipientOf(id)

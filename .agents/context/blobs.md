@@ -60,8 +60,23 @@ Adjacent routing that stays where its owner is, because another subsystem owns i
   trip); the rest keep f7gg's round. A query is not an ask (it serves, pulls and stamps nothing), HAVE is the serve
   predicate read without materialising, SENDING peeks the memo, an unknown state is never HAVE (PARTIAL is reserved
   for a range ask), every build answers and the asking is on in every build since 2026-10-08
-  (`BuildConfig.BLOB_QUERY`). Wire change: the iOS port owes the responder as a companion change. Lab:
-  `BlobHaveLabTest`; unit: `BlobHolderQueryTest`.
+  (`BuildConfig.BLOB_QUERY`). Wire change: the iOS port owes the responder as a companion change. Step 4's
+  pull-through is bounded by ADR 2026-10.2drc (the next entry). Lab: `BlobHaveLabTest`; unit: `BlobHolderQueryTest`.
+- **Before touching the pull-through's budget and deadline — `BlobReqContent.pull` / `until`, `BlobExchange.PULL_BUDGET`,
+  `budgetOf`, `noteAsker`, `pullNewcomers`, `Want.budget` / `until` / `freshLinks`, `PullThroughGate`, `wantAll`'s
+  `until`, the `sentAt` / `dm` of `AttachmentFetchRow`, `deliveredFetch`'s deadline, `CarriedAttachment.sentAt`,
+  `ForwardStore.attachmentsNeedingFetch(now)`, `ParkedAsk.ask`, `BlobEvent.PullWithheld` / `EchoDeclined`, `Want.dead`'s blind
+  half, `Want.cycleGap`'s long backoff (`LONG_DEAD_MS`, `MAX_LONG_BACKOFF_SHIFT`):** READ ADR 2026-10.2drc (#195).
+  Every `blobreq` carries how many phones deep it may still pull, the receiver counted, and the root's deadline. A want
+  of our own mints `PULL_BUDGET` (3); a neighbour that lacks the blob wants it with one less, and an absent field (an
+  older build, the iOS port today) is a fetch only and never refreshes a want. An ask keeps a want alive only when it
+  carries at least the want's own budget, so only a root mints liveness: no local rule could tell a root's ask from an echo's, and each one tried
+  in review opened another loop. The deadline is a DM's custody window from its latest row (`PullThroughGate.until`);
+  past it nobody pulls or makes an echo. A pull never needed a carrier, so reach to a far end two or more hops away is
+  the cost. Past two lead-less cycles a blind cycle that brought nothing is dead (amending f7gg), and a streak dead for a
+  day backs off into hours, fast-only wants excepted. Wire change: two vectors added; the iOS port owes the fields and
+  rules as a companion change. Lab: `StrandedAttachmentLabTest`, `PullBudgetLabTest`; unit: `BlobHolderQueryTest`, `PullThroughGateTest`,
+  `WireSerializationTest`, `GoldenVectorTest`.
 - **Before touching `CarrierPullPolicy`, `ForwardStore.carriedAttachments`, what `onCarriedFrame` /
   `rewantMissingBlobs` hold back, `BlobExchange`'s parked asks (`parkBehindFeed`, `waitsBehindFeed`, `serveParked`),
   or `answersIn`'s author rule:** READ ADR 2026-10.g24x. A carrier leaves a DM's picture to its linked recipient for

@@ -1306,6 +1306,8 @@ class MeshMetrics {
             blobCancelsTaken = blob(BlobExchange.BlobEvent.CancelTaken),
             blobFastOnlyHeld = blob(BlobExchange.BlobEvent.FastOnlyHeld),
             blobFastOnlyRefused = blob(BlobExchange.BlobEvent.FastOnlyRefused),
+            blobPullsWithheld = blob(BlobExchange.BlobEvent.PullWithheld),
+            blobEchoesDeclined = blob(BlobExchange.BlobEvent.EchoDeclined),
             fastOnlyDropped = fastOnlyDropped.get(),
         )
 
@@ -1554,6 +1556,10 @@ class MeshMetrics {
             val blobFastOnlyHeld: Long = 0,
             val blobFastOnlyRefused: Long = 0,
             val fastOnlyDropped: Long = 0,
+            // #195: a cycle that asked nobody to pull a blob through — past its deadline, or with no budget left — and
+            // an ask for a blob this phone lacks that made no want here, for the same two reasons.
+            val blobPullsWithheld: Long = 0,
+            val blobEchoesDeclined: Long = 0,
         )
 
         /**

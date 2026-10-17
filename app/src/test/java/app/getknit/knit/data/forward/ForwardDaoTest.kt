@@ -131,8 +131,26 @@ class ForwardDaoTest : RoomDbTest() {
             dao.insert(fwd("f4", attachmentHash = null)) // null → excluded
             db.blobDao().insert(BlobEntity(hash = "H2", mime = "image/jpeg", bytes = ByteArray(0)))
 
-            assertEquals(listOf(NeededAttachment("H1", "peer")), dao.attachmentsNeedingFetch())
+            assertEquals(listOf(NeededAttachment("H1", "peer")), dao.attachmentsNeedingFetch(now = 0L))
             assertEquals(2, dao.countByAttachmentHash("H1"))
+        }
+
+    @Test
+    fun `the carrier's attachment reads see live frames only, by liveIds' expiry predicate`() =
+        runTest {
+            // #195: a frame past its TTL is carried by nobody, and the 60 s tick re-armed a full-budget want from it until
+            // the prune swept the row.
+            dao.insert(fwd("dead", attachmentHash = "H1", expiresAt = 100L))
+            dao.insert(fwd("edge", attachmentHash = "H2", expiresAt = 1_000L)) // expiresAt == now → still live (>=)
+            // receivedAt apart from sentAt, so the projection is pinned to the frame's own clock.
+            dao.insert(fwd("live", attachmentHash = "H3", expiresAt = 9_000L, sentAt = 5L).copy(receivedAt = 7L))
+            // A dead frame naming H3 too, earlier and by someone else: the author a re-arm asks is the live frame's.
+            dao.insert(fwd("dead-earlier", senderId = "gone", attachmentHash = "H3", expiresAt = 100L, sentAt = 1L))
+
+            assertEquals(setOf("H2", "H3"), dao.attachmentsNeedingFetch(now = 1_000L).mapTo(HashSet()) { it.hash })
+            assertEquals("peer", dao.attachmentsNeedingFetch(now = 1_000L).single { it.hash == "H3" }.senderId)
+            assertEquals(setOf("H2", "H3"), dao.carriedAttachments(now = 1_000L).mapTo(HashSet()) { it.hash })
+            assertEquals("each with its frame's sentAt", 5L, dao.carriedAttachments(now = 1_000L).single { it.hash == "H3" }.sentAt)
         }
 
     @Test
@@ -151,13 +169,16 @@ class ForwardDaoTest : RoomDbTest() {
                     listOf("H1", null, 9L, "peer", null),
                     listOf("H1", null, 11L, "peer", "g-1"),
                 ),
-                dao.carriedAttachments().mapTo(HashSet()) { listOf(it.hash, it.recipientId, it.receivedAt, it.senderId, it.groupId) },
+                dao
+                    .carriedAttachments(
+                        now = 0L,
+                    ).mapTo(HashSet()) { listOf(it.hash, it.recipientId, it.receivedAt, it.senderId, it.groupId) },
             )
             // Only a frame with no cleartext recipient brings its bytes: a group's for its roster (ADR 2026-10.js2p), a
             // room post's for its declared size (ADR 2026-10.hmfe). A DM's are never loaded.
             assertEquals(
                 mapOf("dm" to true, "room" to false, "group" to false),
-                dao.carriedAttachments().associate { row ->
+                dao.carriedAttachments(now = 0L).associate { row ->
                     val kind =
                         when {
                             row.groupId != null -> "group"
@@ -183,7 +204,7 @@ class ForwardDaoTest : RoomDbTest() {
 
             assertEquals(
                 mapOf("room" to true, "group" to false),
-                dao.carriedAttachments().associate { (if (it.groupId != null) "group" else "room") to (it.signed == null) },
+                dao.carriedAttachments(now = 0L).associate { (if (it.groupId != null) "group" else "room") to (it.signed == null) },
             )
         }
 

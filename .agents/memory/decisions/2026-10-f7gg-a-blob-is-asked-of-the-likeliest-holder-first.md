@@ -13,7 +13,10 @@ serve rules are unchanged; it changes who the asker asks, and when. No wire chan
 2026-10.6e5t (2026-10-05): a neighbour whose link advertises `CAP_BLOB_HAVE` is queried first and the best holder
 asked; this round is now the tier for the neighbours that cannot be queried (and for every neighbour while
 `BuildConfig.BLOB_QUERY` is off), unchanged but for one fix — a grace counts from the first look that finds the holder
-no longer streaming to us, not from the last look that saw it streaming (the #136 trial's S4).
+no longer streaming to us, not from the last look that saw it streaming (the #136 trial's S4). Amended again by ADR
+2026-10.2drc (2026-10-17, #195): a cycle that asked blind keeps this round's pace for its first two lead-less cycles
+only; from the third, one whose blind asks brought nothing is dead and backs off. A blind ask carries the asker's pull
+budget and deadline like any other.
 
 **What was observed.** In scenario 3 of the ADR 2026-10.mptm device trial (2026-10-04, every lab phone on
 `eb1bdf9b`), the Pixel 3 posted a 101,691 B picture to the Nearby room. The Pixel 7 copied it from its own sealed

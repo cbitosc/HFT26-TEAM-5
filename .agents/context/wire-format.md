@@ -21,7 +21,9 @@ can evolve *additively* without another break. The three layers:
   inside `payload`; only endpoints parse it. Current `type`s: `chat`, `groupupdate`, `profile`, `receipt`, `reaction`,
   `groupleave`, `blobreq`, `blobhave`, `blobhas`, `blobprog`, `blobcancel`, `keyreq`, `typing` (a best-effort, single-hop, never-custodied "now
   typing" cue — see the typing-indicator flow), `commons`. A `blobreq` may carry an `offset`: the bytes the asker kept
-  from a transfer a link drop cut off, answered by a link `FILE_HEADER` that echoes it (ADR 2026-10.wtyc). A
+  from a transfer a link drop cut off, answered by a link `FILE_HEADER` that echoes it (ADR 2026-10.wtyc), a `fastOnly`
+  (Wi-Fi Aware only, ADR 2026-10.js2p), and a `pull` budget and `until` deadline (how many phones deep it may still
+  pull, the receiver counted, absent read as 1; and until when, epoch ms: ADR 2026-10.2drc). A
   `blobhave` asks a neighbour whose link carries `CAP_BLOB_HAVE` which of up to 32 blobs it holds; its `blobhas`
   answers each with a state (NONE, HAVE, SENDING, FETCHING; PARTIAL reserved), a size, the responder's load and the
   query's id (ADR 2026-10.6e5t), and a SENDING one may say when the asker's copy should land (`eta`, ms). A `blobprog`

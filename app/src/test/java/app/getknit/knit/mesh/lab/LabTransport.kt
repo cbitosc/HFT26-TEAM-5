@@ -370,6 +370,9 @@ class LabTransport(
         val hash: String,
         val offset: Long?,
         val fastOnly: Boolean = false,
+        // The ask's pull budget and deadline, null when it carried none (ADR 2026-10.2drc).
+        val pull: Int? = null,
+        val until: Long? = null,
     )
 
     /** Every `blobreq` this node sent that reached its peer, in arrival order — what an ask said, offset included. */
@@ -996,7 +999,9 @@ class LabTransport(
         when (envelope.type) {
             FrameType.BLOB_REQ -> {
                 WireCodec.decodePayload<BlobReqContent>(envelope.payload)?.let { ask ->
-                    pipes[fromNodeId]?.target?.blobAsks?.add(BlobAsk(nodeId, ask.hash, ask.offset, ask.fastOnly == true))
+                    pipes[fromNodeId]?.target?.blobAsks?.add(
+                        BlobAsk(nodeId, ask.hash, ask.offset, ask.fastOnly == true, ask.pull, ask.until),
+                    )
                 }
             }
 

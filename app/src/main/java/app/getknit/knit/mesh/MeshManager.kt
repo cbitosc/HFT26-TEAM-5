@@ -214,6 +214,9 @@ class MeshManager(
     // `BuildConfig.BLOB_QUERY`, on in every build by default), and how long it waits for their answers.
     // Off, every neighbour gets ADR 2026-10.f7gg's blind round; answering a query is never gated.
     blobHolderQuery: BlobExchange.HolderQuery = BlobExchange.HolderQuery(),
+    // Whether the blob exchange carries the pull budget and deadline (ADR 2026-10.2drc). On in every build; `mesh/lab`
+    // turns it off to play the iOS port's rules beside ours.
+    blobPullBudgets: Boolean = true,
     // What the session's collectors and everything they launch run on. Production takes the default; the
     // `mesh/lab` harness hands in its seeded chaos dispatcher (`LabChaos`), a busy pool on demand.
     private val sessionDispatcher: CoroutineDispatcher = Dispatchers.Default,
@@ -281,6 +284,7 @@ class MeshManager(
             // A first ask's grace runs on the session (ADR 2026-10.f7gg); stopped, the tick and link-ups step it.
             firstAskGraceMs = firstAskGraceMs,
             holderQuery = blobHolderQuery,
+            pullBudgets = blobPullBudgets,
             onEvent = metrics::onBlobEvent,
             timers = { sessionScope },
             addressees = ::addresseesOf,
@@ -2357,8 +2361,17 @@ class MeshManager(
         scope.launch {
             messages.approveAttachmentFetch(hash)
             rewantLock.withLock {
-                val author = messages.attachmentFetchRows(hash, me = identity.nodeId()).firstOrNull()?.senderId ?: return@withLock
-                blobExchange.want(hash, author = author, fastOnly = false, approved = true)
+                val rows = messages.attachmentFetchRows(hash, me = identity.nodeId())
+                val author = rows.firstOrNull()?.senderId ?: return@withLock
+                // The rows' deadline too (#195): a tap on a DM past its custody window asks nobody to pull it through.
+                blobExchange.want(
+                    hash,
+                    author = author,
+                    fastOnly = false,
+                    approved = true,
+                    until = PullThroughGate.until(rows),
+                    untilKnown = true,
+                )
                 transport.expectBulkTransfer(author)
             }
         }
@@ -2425,7 +2438,7 @@ class MeshManager(
         pendingInbound.sweepExpired()
         pendingGroupKeys.sweepExpired()
         keyExchange.sweepExpired()
-        blobExchange.sweepExpired()
+        lastSweptBlobs = blobExchange.sweepExpiredHashes()
         // A kept prefix past its hour, or whose blob arrived some other way (the spool, a second link) (#116).
         partials.sweep { blobStore.has(it) }
     }
@@ -2441,6 +2454,14 @@ class MeshManager(
      * a hash already in flight and returns at once for one the store has, so the repeat costs one bounded query.
      */
     private suspend fun rewantMissingBlobs() = rewantLock.withLock { rewantMissingBlobsLocked() }
+
+    /** The blob wants the last [sweepExpired] reclaimed: `mesh/lab` counts a want's generations by them (#195). */
+    @Volatile
+    internal var lastSweptBlobs: Set<String> = emptySet()
+        private set
+
+    /** The blobs this node wants now ([BlobExchange.wantedHashes]): `mesh/lab` asserts a want ended (#195). */
+    internal fun wantedBlobs(): Set<String> = blobExchange.wantedHashes()
 
     /**
      * [rewantMissingBlobs]'s body. Its callers — the tick, a link-up, the limit collector — and the user's tap
@@ -2461,19 +2482,29 @@ class MeshManager(
         // 2026-10.js2p): an attachment every row of which declares over the user's limit, untapped, is fetched over
         // Wi-Fi Aware only. One row that would fetch it fetches it for all (a stranger's row cannot hold a contact's).
         val fastOnly = needed.filter { BluetoothFetchGate.fastOnly(it.rows, limit) }.mapTo(HashSet()) { it.hash }
+        // And until when its neighbours may be asked to pull it through (#195, ADR 2026-10.2drc): a DM's custody window
+        // from its latest row, carried on every ask so nobody echoes it past the window; none for a group's or a room's.
+        val until = needed.mapNotNull { m -> PullThroughGate.until(m.rows)?.let { m.hash to it } }.toMap(HashMap())
         // Carrier-only custody blobs backfill only while under the byte budget (the same pull-time soft cap
         // onCarriedFrame applies), so a restart re-attempts pulls that a live-session over-budget skip left
         // missing; skip ones already re-requested above as our own/received attachments, and ones a DM's linked
         // recipient is fetching now ([CarrierPullPolicy], ADR 2026-10.g24x) — this tick re-reads them, so the hold
         // ends by itself when the recipient's link goes or the window passes.
         if (blobs.carrierOnlyBlobBytes() < CARRIER_BLOB_BUDGET_BYTES) {
-            val carried = forwardStore.attachmentsNeedingFetch()
+            val now = clock()
+            // Live frames only (#195): a frame past its TTL is carried by nobody, and a re-arm from it minted a root.
+            val carried = forwardStore.attachmentsNeedingFetch(now)
             val linked = transport.neighbors.value.mapTo(HashSet()) { it.nodeId }
-            // One read of custody's per-frame rows for both judgements below, and only when one of them can act.
-            val frames = if (carried.isNotEmpty() && (linked.isNotEmpty() || limit != null)) carriedFrames(me) else emptyList()
+            // One read of custody's per-frame rows for the judgements below: the deferral, the fast-only hold and the
+            // deadline a DM's carrier pulls it through by.
+            val frames = if (carried.isNotEmpty()) carriedFrames(me, now) else emptyList()
             val held = heldForLinkedRecipients(carried.keys, frames, linked)
+            val carriedUntil = carrierDeadlines(frames)
             carried.forEach { (hash, author) ->
-                if (hash !in ownHashes && hash !in held) wanted += hash to author
+                if (hash !in ownHashes && hash !in held) {
+                    wanted += hash to author
+                    carriedUntil[hash]?.let { until[hash] = it }
+                }
             }
             if (limit != null) fastOnly += unopenedForUs(carried.keys - ownHashes, frames, me, limit)
         }
@@ -2482,7 +2513,7 @@ class MeshManager(
         // screening refused keeps its verdict and is never asked for again while filtering is on.
         groups.photoHashesNeedingFetch().forEach { if (!refusedImage(it)) wanted += it to null }
         beforeRewantApplies?.invoke()
-        blobExchange.wantAll(wanted, fastOnly)
+        blobExchange.wantAll(wanted, fastOnly, until)
     }
 
     /**
@@ -2490,12 +2521,32 @@ class MeshManager(
      * we are in — by the roster the frame itself carries first (a member whose seed is late holds the frame and no group
      * row yet), then by our group rows. The one read [rewantMissingBlobsLocked] makes of them per re-arm.
      */
-    private suspend fun carriedFrames(me: String): List<CarriedAttachment> {
+    private suspend fun carriedFrames(
+        me: String,
+        now: Long,
+    ): List<CarriedAttachment> {
         val ours = groups.active().mapTo(HashSet()) { it.groupId }
-        return forwardStore.carriedAttachments().map {
+        return forwardStore.carriedAttachments(now).map {
             if (it.groupId in ours || me in it.roster.orEmpty()) it.copy(member = true) else it
         }
     }
+
+    /**
+     * Until when a carrier pulls each carried attachment through (#195, ADR 2026-10.2drc): when every frame naming it is a
+     * DM's, a custody window past the latest one's `sentAt` — frame-global, the same on every node — and none otherwise,
+     * as `PullThroughGate` folds a recipient's rows.
+     */
+    private fun carrierDeadlines(frames: List<CarriedAttachment>): Map<String, Long> =
+        frames
+            .groupBy { it.hash }
+            .mapNotNull { (hash, named) ->
+                val sent = named.map { it.sentAt }
+                if (named.any { it.recipientId == null } || sent.any { it == null }) {
+                    null
+                } else {
+                    hash to sent.maxOf { it!! } + ForwardRepository.DEFAULT_TTL_MS
+                }
+            }.toMap()
 
     /**
      * The carried attachments among [hashes] that no stored row names and that *every* carried frame naming them

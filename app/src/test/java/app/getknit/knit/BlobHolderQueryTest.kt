@@ -120,7 +120,9 @@ class BlobHolderQueryTest {
                 heard += Triple(env.type, from, env)
                 when (env.type) {
                     FrameType.BLOB_REQ -> {
-                        WireCodec.decodePayload<BlobReqContent>(env.payload)?.let { exchange.onRequest(it.hash, from, it.offset) }
+                        WireCodec.decodePayload<BlobReqContent>(env.payload)?.let {
+                            exchange.onRequest(it.hash, from, it.offset, fastOnly = it.fastOnly == true, pull = it.pull, until = it.until)
+                        }
                     }
 
                     FrameType.BLOB_HAVE -> {
@@ -776,6 +778,28 @@ class BlobHolderQueryTest {
             h.transport.feeds -= "a" to hash
             h.exchange.feedsChanged() // no virtual time passes
             assertEquals(1, h.served(hash, "b"))
+        }
+
+    @Test
+    fun aParkedAskThatEchoesOnceTheBlobIsGoneKeepsItsBudgetAndDeadline() =
+        runTest(UnconfinedTestDispatcher()) {
+            val h = Node("h", backgroundScope, timers = backgroundScope)
+            val a = Node("a", backgroundScope)
+            val b = Node("b", backgroundScope)
+            val c = Node("c", backgroundScope)
+            listOf(a, b, c).forEach { h.transport.connect(it.transport) }
+            val hash = h.store.seed(picture(3_180))
+            h.transport.feeds["a" to hash] = feeding(60_000)
+            val deadline = 10 * 60_000L
+
+            h.exchange.onRequest(hash, "b", pull = BlobExchange.PULL_BUDGET, until = deadline) // parked behind a's feed
+            h.store.blobs.remove(hash) // the blob went meanwhile: the unpark finds nothing to serve
+            h.transport.feeds -= "a" to hash
+            h.exchange.feedsChanged()
+
+            // It echoes as b asked: a hop less of b's budget, and b's deadline (#195's review: the unpark dropped both).
+            assertEquals(listOf<Int?>(BlobExchange.PULL_BUDGET - 1), c.pullsFrom("h", hash))
+            assertEquals(deadline, decodeUntil(c, "h", hash))
         }
 
     @Test
@@ -1658,8 +1682,495 @@ class BlobHolderQueryTest {
             assertTrue(a.store.has(hash))
         }
 
+    /** How many times [hash] was asked of each node in [of] by [asker]. */
+    private fun pullsBy(
+        asker: String,
+        hash: String,
+        vararg of: Node,
+    ): Int = of.sumOf { n -> n.asksFrom(hash).count { it == asker } }
+
+    /** The `pull` of every ask for [hash] this node received from [from], in order. */
+    private fun Node.pullsFrom(
+        from: String,
+        hash: String,
+    ): List<Int?> =
+        heard
+            .filter { (type, sender, _) -> type == FrameType.BLOB_REQ && sender == from }
+            .mapNotNull { WireCodec.decodePayload<BlobReqContent>(it.third.payload)?.takeIf { r -> r.hash == hash }?.pull }
+
+    /** Sets every node's clock to [t]. */
+    private fun at(
+        t: Long,
+        vararg nodes: Node,
+    ) = nodes.forEach { it.now = t }
+
     @Test
-    fun aCycleThatAskedANeighbourBlindIsNotDeadAndKeepsItsPace() =
+    fun aWantPastItsDeadlineAsksNobodyToPullItAndStillFetchesFromAHolder() =
+        runTest(UnconfinedTestDispatcher()) {
+            val a = Node("a", backgroundScope)
+            val b = Node("b", backgroundScope)
+            val c = Node("c", backgroundScope)
+            a.transport.connect(b.transport)
+            a.transport.connect(c.transport)
+            val bytes = picture()
+            val hash = sha256Hex(bytes) // nobody in reach holds it, and its DM's custody window is over (#195)
+            val past = mapOf(hash to 0L)
+
+            a.exchange.wantAll(listOf(hash to null), until = past)
+            for (minute in 1L..25L) {
+                at(minute * 60_000L, a, b, c)
+                a.exchange.wantAll(listOf(hash to null), until = past) // the tick's re-arm, re-derived
+                a.exchange.reask()
+            }
+
+            assertEquals("nobody was asked to pull it", 0, pullsBy("a", hash, b, c))
+            assertEquals("each dead cycle said so once", 7, a.events.count { it == BlobExchange.BlobEvent.PullWithheld })
+            // The same backoff as a cycle that pulled, and no rechecks: nobody was pulled.
+            assertEquals("a query a cycle", 7, b.queriesFrom("a").size)
+
+            val e = Node("e", backgroundScope)
+            e.store.seed(bytes)
+            backgroundScope.recordServes(e, a)
+            a.transport.connect(e.transport)
+            a.exchange.linked(listOf("e"))
+            a.exchange.reask()
+            assertEquals("a newcomer is queried at once", listOf(listOf(hash)), e.queriesFrom("a"))
+            assertEquals("and a holder that says so is asked for it", 1, e.served(hash, "a"))
+            assertTrue(a.store.has(hash))
+        }
+
+    @Test
+    fun theLatestWantOfOurOwnSetsTheDeadlineAndANeighboursAskNeverDoes() =
+        runTest(UnconfinedTestDispatcher()) {
+            val a = Node("a", backgroundScope)
+            val b = Node("b", backgroundScope)
+            val c = Node("c", backgroundScope)
+            a.transport.connect(b.transport)
+            a.transport.connect(c.transport)
+            val hash = sha256Hex(picture())
+            val past = mapOf(hash to 0L)
+
+            val withheld = { a.events.count { it == BlobExchange.BlobEvent.PullWithheld } }
+            a.exchange.wantAll(listOf(hash to null), until = past)
+            assertEquals("both said they lack it: a pull was due, and withheld", 1, withheld())
+            assertEquals(0, pullsBy("a", hash, b, c))
+            a.now += BlobExchange.CYCLE_MS
+            a.exchange.onRequest(hash, "b", pull = 3) // b lacks it too: its ask opens the next cycle, and c is queried
+            assertEquals("c was queried again in the cycle b's ask opened", 2, c.queriesFrom("a").size)
+            assertEquals("and its NONE made a pull due again, withheld again", 2, withheld())
+            assertEquals("a neighbour's ask did not lift the deadline", 0, pullsBy("a", hash, c))
+
+            a.now += 10 * BlobExchange.CYCLE_MS
+            a.exchange.want(hash) // a delivery's want that names no deadline keeps the re-arm's (#195's review)
+            a.exchange.reask()
+            assertEquals("it did not lift it", 0, pullsBy("a", hash, b, c))
+
+            a.now += 10 * BlobExchange.CYCLE_MS
+            a.exchange.wantAll(listOf(hash to null)) // the re-arm, reading a group's row now: no deadline at all
+            a.exchange.reask()
+            assertEquals("the re-arm lifted it", 2, pullsBy("a", hash, b, c))
+
+            a.now += 10 * BlobExchange.CYCLE_MS
+            a.exchange.wantAll(listOf(hash to null), until = past) // and set it again
+            a.exchange.reask()
+            assertEquals(2, pullsBy("a", hash, b, c))
+        }
+
+    @Test
+    fun eachRingSpendsAHopOfTheBudgetAndTheLastOneOnlyQueries() =
+        runTest(UnconfinedTestDispatcher()) {
+            // a — b — c — d — e, a line: a wants it, nobody holds it.
+            val nodes = listOf("a", "b", "c", "d", "e").map { Node(it, backgroundScope) }
+            val a = nodes[0]
+            val b = nodes[1]
+            val c = nodes[2]
+            val d = nodes[3]
+            val e = nodes[4]
+            nodes.zipWithNext { x, y -> x.transport.connect(y.transport) }
+            val hash = sha256Hex(picture())
+
+            a.exchange.want(hash)
+            for (step in 1L..4L) {
+                at(step * SEVEN_MINUTES_MS, *nodes.toTypedArray())
+                nodes.forEach { it.exchange.reask() }
+            }
+
+            assertTrue("a pulls b with the whole budget", b.pullsFrom("a", hash).all { it == BlobExchange.PULL_BUDGET })
+            assertTrue("b pulls c with one less", c.pullsFrom("b", hash).isNotEmpty() && c.pullsFrom("b", hash).all { it == 2 })
+            assertTrue("c pulls d with one", d.pullsFrom("c", hash).isNotEmpty() && d.pullsFrom("c", hash).all { it == 1 })
+            assertTrue("d, at 0, asks nobody to pull it: ${e.pullsFrom("d", hash)}", e.asksFrom(hash).isEmpty())
+            assertTrue("but still queries its neighbours", e.queriesFrom("d").isNotEmpty())
+            assertTrue("e never wants it", hash !in e.exchange.wantedHashes())
+        }
+
+    @Test
+    fun anAskThatCarriesLessThanTheWantsBudgetNeverKeepsItAlive() =
+        runTest(UnconfinedTestDispatcher()) {
+            val b = Node("b", backgroundScope)
+            val a = Node("a", backgroundScope)
+            val c = Node("c", backgroundScope)
+            b.transport.connect(a.transport)
+            b.transport.connect(c.transport)
+            val hash = sha256Hex(picture())
+
+            b.exchange.onRequest(hash, "a", pull = 3) // a root's pull: b wants it with 2
+            var minute = 0L
+            var gone = false
+            while (!gone && minute < BlobExchange.FETCH_TTL_MS / 60_000L + 10L) {
+                minute += 5L
+                at(minute * 60_000L, a, b, c)
+                b.exchange.sweepExpired()
+                gone = hash !in b.exchange.wantedHashes()
+                if (!gone) b.exchange.onRequest(hash, "c", pull = 2) // c, an echo of b's, asks back with one hop less
+            }
+            assertTrue("c's asks kept b's want alive", gone)
+            assertTrue("within one sweep of a TTL", minute <= BlobExchange.FETCH_TTL_MS / 60_000L + 5L)
+
+            b.exchange.onRequest(hash, "a", pull = 3)
+            for (step in 1..10) {
+                minute += 5L
+                at(minute * 60_000L, a, b, c)
+                // Swept first, read, then asked: a want an ask re-made would read as one an ask kept.
+                b.exchange.sweepExpired()
+                assertTrue("a root's asks keep it (step $step)", hash in b.exchange.wantedHashes())
+                b.exchange.onRequest(hash, "a", pull = 3) // the root, still asking
+            }
+        }
+
+    @Test
+    fun aWantOfOurOwnWhoseReArmStoppedEndsWithinItsBudgetsTtls() =
+        runTest(UnconfinedTestDispatcher()) {
+            val a = Node("a", backgroundScope)
+            val b = Node("b", backgroundScope)
+            val c = Node("c", backgroundScope)
+            a.transport.connect(b.transport)
+            a.transport.connect(c.transport)
+            b.transport.connect(c.transport)
+            val three = listOf(a, b, c)
+            val hash = sha256Hex(picture())
+
+            a.exchange.want(hash) // a row named it once, and then went: nothing re-arms it
+            var step = 0L
+            while (three.any { hash in it.exchange.wantedHashes() } && step < GENERATIONS_STEPS) {
+                step++
+                at(step * SEVEN_MINUTES_MS, *three.toTypedArray())
+                three.forEach { it.exchange.reask() }
+                three.forEach { it.exchange.sweepExpired() }
+            }
+            // b and c ask a back, but always with less than a's own budget: a's own want is swept a TTL after its last
+            // re-arm, and what their asks make of it again is an echo with less, and so on down — each generation has a
+            // hop less, so the lot ends within a TTL per budget from ours to 0 (#195).
+            assertTrue(
+                "b and c asked a back with less than its own budget",
+                (a.pullsFrom("b", hash) + a.pullsFrom("c", hash)).all {
+                    (
+                        it
+                            ?: 1
+                    ) <
+                        BlobExchange.PULL_BUDGET
+                },
+            )
+            assertTrue("every want ended (after $step steps)", three.none { hash in it.exchange.wantedHashes() })
+        }
+
+    @Test
+    fun aNewcomerIsAskedToPullAtOnceOncePerLinkUpEvenDeepInTheBackoff() =
+        runTest(UnconfinedTestDispatcher()) {
+            val a = Node("a", backgroundScope)
+            val b = Node("b", backgroundScope)
+            a.transport.connect(b.transport)
+            val hash = sha256Hex(picture()) // only b in reach, and b lacks it
+
+            a.exchange.want(hash)
+            for (minute in 1L..60L) {
+                at(minute * 60_000L, a, b)
+                a.exchange.want(hash) // the tick's re-arm
+                a.exchange.reask()
+            }
+            // An hour of dead cycles: the gap is 6 min now, and the cycle that last opened pulled b already.
+            val n = Node("n", backgroundScope)
+            at(60 * 60_000L + 30_000L, a, b, n) // mid-cycle
+            a.transport.connect(n.transport)
+            a.exchange.linked(listOf("n"))
+            a.exchange.reask()
+            assertEquals("pulled at once, with the whole budget", listOf<Int?>(BlobExchange.PULL_BUDGET), n.pullsFrom("a", hash))
+
+            a.exchange.reask() // the same cycle again: a newcomer is pulled once per link-up
+            assertEquals(1, n.pullsFrom("a", hash).size)
+
+            a.exchange.linked(listOf("n")) // a fresh link-up of n's pulls it once more
+            a.exchange.reask()
+            assertEquals("a new one pulls it once more", 2, n.pullsFrom("a", hash).size)
+
+            // A newcomer whose answer comes only after its link went: m is queried, stays silent, unlinks, is back with no
+            // link-up handed over, and only then says it lacks the blob. Its old link-up never fires.
+            val m = Node("m", backgroundScope).apply { mute = true }
+            at(60 * 60_000L + 40_000L, a, b, n, m)
+            a.transport.connect(m.transport)
+            a.exchange.linked(listOf("m"))
+            a.exchange.reask()
+            assertTrue("queried, unanswered", m.queriesFrom("a").isNotEmpty() && m.pullsFrom("a", hash).isEmpty())
+            a.transport.disconnect(m.transport)
+            a.exchange.unlinked(listOf("m"))
+            a.transport.connect(m.transport)
+            m.mute = false
+            a.exchange.onHaveAnswer(BlobHasContent(listOf(BlobHasItem(hash, BlobHasItem.NONE))), "m")
+            assertEquals("an old link-up never fires later", 0, m.pullsFrom("a", hash).size)
+        }
+
+    @Test
+    fun aNewcomerFromACycleThatClosedIsNotPulledInTheNext() =
+        runTest(UnconfinedTestDispatcher()) {
+            val a = Node("a", backgroundScope)
+            val v = Node("v", backgroundScope) // the hop the frame came from
+            val h = Node("h", backgroundScope) // fetching it itself: a lead, so the next cycle pulls the hop alone
+            a.transport.connect(v.transport)
+            a.transport.connect(h.transport)
+            val hash = sha256Hex(picture())
+            h.transport.arriving += hash
+
+            a.exchange.want(hash, via = "v")
+            assertTrue("v and h answered", v.queriesFrom("a").isNotEmpty() && h.queriesFrom("a").isNotEmpty())
+
+            // A newcomer mid-cycle: h is fetching, so nobody is pulled, and n is left in the cycle's newcomers.
+            val n = Node("n", backgroundScope)
+            at(10_000L, a, v, h, n)
+            a.transport.connect(n.transport)
+            a.exchange.linked(listOf("n"))
+            a.exchange.reask()
+            assertTrue("n answered, and was not pulled", n.queriesFrom("a").isNotEmpty() && n.pullsFrom("a", hash).isEmpty())
+
+            // h walks off; the next cycle opens after one that saw a lead, so its first pull is the hop alone.
+            a.transport.disconnect(h.transport)
+            a.exchange.unlinked(listOf("h"))
+            at(10_000L + BlobExchange.CYCLE_MS, a, v, n)
+            a.exchange.reask()
+            a.exchange.reask() // a later step of the same cycle: where a stale newcomer would be pulled
+            assertEquals("the hop alone, with the whole budget", listOf<Int?>(BlobExchange.PULL_BUDGET), v.pullsFrom("a", hash))
+            assertTrue("n's link-up was the closed cycle's: ${n.pullsFrom("a", hash)}", n.pullsFrom("a", hash).isEmpty())
+        }
+
+    @Test
+    fun aWantOfOurOwnTakesAnEchoBackToTheWholeBudget() =
+        runTest(UnconfinedTestDispatcher()) {
+            val a = Node("a", backgroundScope)
+            val b = Node("b", backgroundScope)
+            val c = Node("c", backgroundScope)
+            b.transport.connect(a.transport)
+            b.transport.connect(c.transport)
+            val hash = sha256Hex(picture())
+
+            b.exchange.onRequest(hash, "a", pull = 3) // an echo of a's: b pulls c with one less
+            assertEquals(listOf<Int?>(2), c.pullsFrom("b", hash))
+            at(10 * BlobExchange.CYCLE_MS, a, b, c)
+            b.exchange.want(hash) // a row of b's own names it now: a root
+            assertEquals("pulled with the whole budget", listOf<Int?>(2, BlobExchange.PULL_BUDGET), c.pullsFrom("b", hash))
+        }
+
+    @Test
+    fun newcomersEveryFewMinutesCannotKeepAnEchoAlive() =
+        runTest(UnconfinedTestDispatcher()) {
+            val a = Node("a", backgroundScope)
+            val b = Node("b", backgroundScope)
+            b.transport.connect(a.transport)
+            val hash = sha256Hex(picture())
+
+            b.exchange.onRequest(hash, "a", pull = 3) // a root's one pull, then a walks away
+            b.transport.disconnect(a.transport)
+            var minute = 0L
+            var round = 0
+            val pulledOnce = mutableListOf<Int>()
+            var askedBack = 0
+            while (hash in b.exchange.wantedHashes() && round < 20) {
+                minute += 4L
+                round++
+                val n = Node("n$round", backgroundScope) // a stranger walks by
+                at(minute * 60_000L, b, n)
+                b.transport.connect(n.transport)
+                b.exchange.linked(listOf(n.id))
+                b.exchange.reask()
+                n.now += 2 * BlobExchange.CYCLE_MS // its echo's next cycle, in which b is no longer whom it pulls for
+                n.exchange.reask() // so it asks b back
+                pulledOnce += n.asksFrom(hash).count { it == "b" }
+                if (b.pullsFrom(n.id, hash).isNotEmpty()) askedBack++
+                b.transport.disconnect(n.transport)
+                b.exchange.sweepExpired()
+            }
+            assertTrue("b's want ended within a TTL and a step ($round rounds)", hash !in b.exchange.wantedHashes())
+            assertTrue("each newcomer was pulled at most once: $pulledOnce", pulledOnce.all { it <= 1 })
+            assertTrue("and they asked b back", askedBack > 0)
+        }
+
+    @Test
+    fun pastItsDeadlineAnAskMakesNoEchoAndAnEchoStopsPulling() =
+        runTest(UnconfinedTestDispatcher()) {
+            val a = Node("a", backgroundScope)
+            val b = Node("b", backgroundScope)
+            val c = Node("c", backgroundScope)
+            b.transport.connect(a.transport)
+            b.transport.connect(c.transport)
+            val hash = sha256Hex(picture())
+            val late = sha256Hex(picture(2_300))
+            val deadline = 10 * 60_000L
+
+            b.exchange.onRequest(hash, "a", pull = 3, until = deadline)
+            assertEquals("inside the deadline, b pulls c through", listOf<Int?>(2), c.pullsFrom("b", hash))
+            assertEquals("and passes the deadline on", deadline, decodeUntil(c, "b", hash))
+            at(deadline, a, b, c)
+            b.exchange.reask()
+            assertEquals("past it, b asks nobody to pull it", 1, c.pullsFrom("b", hash).size)
+            assertTrue(b.events.contains(BlobExchange.BlobEvent.PullWithheld))
+
+            b.exchange.onRequest(late, "a", pull = 3, until = deadline)
+            assertTrue("and an ask past it makes no want at all", late !in b.exchange.wantedHashes())
+            assertTrue(b.events.contains(BlobExchange.BlobEvent.EchoDeclined))
+        }
+
+    /** The `until` of the last ask for [hash] [node] received from [from]. */
+    private fun decodeUntil(
+        node: Node,
+        from: String,
+        hash: String,
+    ): Long? =
+        node.heard
+            .filter { (type, sender, _) -> type == FrameType.BLOB_REQ && sender == from }
+            .mapNotNull { WireCodec.decodePayload<BlobReqContent>(it.third.payload)?.takeIf { r -> r.hash == hash } }
+            .lastOrNull()
+            ?.until
+
+    @Test
+    fun anAskWithNoBudgetFieldIsAFetchOnlyAndOneWithNoneLeftIsServedOnly() =
+        runTest(UnconfinedTestDispatcher()) {
+            val b = Node("b", backgroundScope)
+            val c = Node("c", backgroundScope)
+            val d = Node("d", backgroundScope)
+            b.transport.connect(c.transport)
+            val hash = sha256Hex(picture())
+
+            b.exchange.onRequest(hash, "a") // an older build's ask, or the iOS port's today: no field
+            assertTrue("b wants it", hash in b.exchange.wantedHashes())
+            assertTrue("queries c", c.queriesFrom("b").isNotEmpty())
+            assertTrue("but asks nobody to pull it", c.asksFrom(hash).isEmpty())
+
+            // c comes to hold it: a fetch-only want still fetches.
+            val held = picture(2_400)
+            val heldHash = c.store.seed(held)
+            backgroundScope.recordServes(c, b)
+            b.exchange.onRequest(heldHash, "a")
+            assertEquals("fetched from the holder that said so", 1, c.served(heldHash, "b"))
+
+            // Asked with nothing left: served if held, else nothing at all.
+            b.transport.connect(d.transport)
+            backgroundScope.recordServes(b, d)
+            b.exchange.onRequest(heldHash, "d", pull = 0)
+            assertEquals("served", 1, b.served(heldHash, "d"))
+            val lacking = sha256Hex(picture(2_500))
+            b.exchange.onRequest(lacking, "d", pull = 0)
+            assertTrue("no want", lacking !in b.exchange.wantedHashes())
+        }
+
+    @Test
+    fun aDayOfDeadCyclesStretchesTheGapIntoHoursAndALeadOrANewcomerStillActsAtOnce() =
+        runTest(UnconfinedTestDispatcher()) {
+            val a = Node("a", backgroundScope)
+            val b = Node("b", backgroundScope)
+            a.transport.connect(b.transport)
+            val bytes = picture()
+            val hash = sha256Hex(bytes) // nobody holds it, for good
+
+            val opened = mutableListOf(0L)
+            a.exchange.wantAll(listOf(hash to null), until = mapOf(hash to 0L))
+            for (minute in 1L..2_010L) { // the 60 s tick, for a day and a half
+                listOf(a, b).forEach { it.now = minute * 60_000L } // b's answer budget refills on its own clock
+                val before = b.queriesFrom("a").size
+                a.exchange.wantAll(listOf(hash to null), until = mapOf(hash to 0L))
+                a.exchange.reask()
+                if (b.queriesFrom("a").size > before) opened += minute
+            }
+            val gaps = opened.zipWithNext { x, y -> y - x }
+            assertEquals("45 s, 90 s, 3 min, then 6 min", listOf(1L, 2L, 3L), gaps.take(3))
+            assertTrue("6 min for a day", gaps.subList(3, opened.indexOf(1_440L)).all { it == 6L })
+            assertEquals(
+                "past a day, each dead cycle doubles on, to about 3.2 h",
+                listOf(1_440L, 1_452L, 1_476L, 1_524L, 1_620L, 1_812L, 2_004L),
+                opened.filter { it >= 1_440L },
+            )
+
+            // A neighbour fetching it is a lead: the streak is over, and the next cycle keeps the plain pace.
+            val e = Node("e", backgroundScope)
+            e.transport.arriving += hash
+            a.transport.connect(e.transport)
+            a.exchange.linked(listOf("e"))
+            a.exchange.reask()
+            assertEquals("a newcomer is queried at once", 1, e.queriesFrom("a").size)
+            e.transport.arriving -= hash
+            listOf(a, b).forEach { it.now += 60_000L }
+            val before = b.queriesFrom("a").size
+            a.exchange.reask()
+            assertEquals("the next cycle a minute on, not hours", before + 1, b.queriesFrom("a").size)
+        }
+
+    @Test
+    fun aFastOnlyWantDeadForADayKeepsItsSixMinuteCeiling() =
+        runTest(UnconfinedTestDispatcher()) {
+            val a = Node("a", backgroundScope)
+            val b = Node("b", backgroundScope)
+            a.transport.connect(b.transport)
+            a.transport.bulkRoutes["b"] = BulkRoute.Reachable // a Wi-Fi Aware link to b that never comes up
+            val hash = b.store.seed(picture()) // b holds it, and refuses a fast-only ask it has no Wi-Fi Aware route for
+
+            val queriedIn = mutableListOf<Long>() // the minute of every query b heard
+            a.exchange.wantAll(listOf(hash to null), fastOnly = setOf(hash))
+            for (minute in 1L..1_700L) {
+                listOf(a, b).forEach { it.now = minute * 60_000L }
+                val before = b.queriesFrom("a").size
+                a.exchange.wantAll(listOf(hash to null), fastOnly = setOf(hash)) // the tick's re-arm, re-derived
+                a.exchange.reask()
+                repeat(b.queriesFrom("a").size - before) { queriedIn += minute }
+            }
+            // Its dead cycle is a link that did not come up, not a blob nobody holds: past the day it keeps the pace it had
+            // before it (a cycle every 6 min, its confirms included), where a plain want's would fall to one in hours (#195).
+            val lastDay = queriedIn.count { it in 1_180L until 1_440L }
+            val pastIt = queriedIn.count { it in 1_440L until 1_700L }
+            assertTrue("queried before the day's mark", lastDay > 0)
+            assertEquals("and as often past it", lastDay.toDouble(), pastIt.toDouble(), 3.0)
+            assertTrue(!a.store.has(hash))
+        }
+
+    @Test
+    fun aLinkThatReformsBetweenTwoEchoesRefreshesNeither() =
+        runTest(UnconfinedTestDispatcher()) {
+            val a = Node("a", backgroundScope)
+            val b = Node("b", backgroundScope)
+            val c = Node("c", backgroundScope)
+            listOf(b, c).forEach { a.transport.connect(it.transport) }
+            b.transport.connect(c.transport)
+            val hash = sha256Hex(picture()) // nobody holds it
+
+            b.exchange.onRequest(hash, "a", pull = 3) // both echo a root's one pull, then a walks away
+            c.exchange.onRequest(hash, "a", pull = 3)
+            listOf(b, c).forEach { a.transport.disconnect(it.transport) }
+            // A Wi-Fi Aware sync or a Bluetooth redial re-forms their link, again and again, a few minutes apart.
+            var minute = 0L
+            repeat(8) {
+                minute += 4L
+                at(minute * 60_000L, a, b, c)
+                b.transport.disconnect(c.transport)
+                b.transport.connect(c.transport)
+                b.exchange.linked(listOf("c"))
+                c.exchange.linked(listOf("b"))
+                b.exchange.reask()
+                c.exchange.reask()
+                b.exchange.sweepExpired()
+                c.exchange.sweepExpired()
+            }
+            // Each pulls the other with one hop less than the other holds, so nothing refreshed them since a's pull.
+            assertTrue("b's want is gone", hash !in b.exchange.wantedHashes())
+            assertTrue("c's want is gone", hash !in c.exchange.wantedHashes())
+        }
+
+    @Test
+    fun aCycleThatAskedANeighbourBlindKeepsItsPaceForTwoCyclesThenBacksOff() =
         runTest(UnconfinedTestDispatcher()) {
             val a = Node("a", backgroundScope)
             val b = Node("b", backgroundScope)
@@ -1669,12 +2180,18 @@ class BlobHolderQueryTest {
             val hash = sha256Hex(picture()) // nobody holds it, but c cannot say so
 
             a.exchange.want(hash)
-            for (minute in 1L..5L) {
-                a.now = minute * 60_000L
+            val asked = mutableListOf(0L)
+            for (minute in 1L..12L) {
+                listOf(a, b, c).forEach { it.now = minute * 60_000L }
+                val before = c.asksFrom(hash).size
+                a.exchange.wantAll(listOf(hash to null)) // the tick's re-arm: a want of our own
                 a.exchange.reask()
+                if (c.asksFrom(hash).size > before) asked += minute
             }
 
-            assertEquals("ADR 2026-10.f7gg's round every tick: c may hold it", 6, c.asksFrom(hash).size)
+            // f7gg's pace through the first two lead-less cycles and into the third's opening, then gaps that grow: a
+            // blind cycle that brought nothing is dead from there on (#195). c is still asked in every cycle that opens.
+            assertEquals("ADR 2026-10.f7gg's round for two cycles, then the backoff", listOf(0L, 1L, 2L, 3L, 6L, 10L), asked)
         }
 
     @Test
@@ -1771,4 +2288,13 @@ class BlobHolderQueryTest {
             assertEquals(listOf("a"), c.asksFrom(hash))
             assertTrue(a.store.has(hash))
         }
+
+    private companion object {
+        // Past the longest dead-cycle gap inside a day (6 min): every step opens one cycle.
+        const val SEVEN_MINUTES_MS = 7 * 60_000L
+
+        // A generation for each budget from ours down to 0, each a TTL in seven-minute steps and a step for its sweep, and
+        // one step more: what was made from a want lives at most a TTL past the last ask that kept it, with a hop less.
+        const val GENERATIONS_STEPS = (BlobExchange.PULL_BUDGET + 1) * (BlobExchange.FETCH_TTL_MS / SEVEN_MINUTES_MS + 1) + 1
+    }
 }

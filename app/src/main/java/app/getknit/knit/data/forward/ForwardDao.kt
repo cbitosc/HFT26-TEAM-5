@@ -129,16 +129,18 @@ interface ForwardDao {
      * Content hashes referenced by a carried frame whose bytes aren't in the `blobs` table yet, each with the author of
      * the earliest frame naming it — the carrier's side of the "still-missing blobs" set (mirrors
      * [app.getknit.knit.data.message.MessageDao.attachmentFetchRows]).
-     * Re-requested on startup / neighbour-join so a carrier keeps trying to pull the image it's custodying.
+     * Re-requested on startup / neighbour-join so a carrier keeps trying to pull the image it's custodying. Live rows only,
+     * by [liveIds]' predicate: a frame past its TTL is one no node carries any more, and until the prune swept it the
+     * 60 s tick re-armed a full-budget want from it (#195, the mesh-lab review of ADR 2026-10.2drc).
      */
     @Query(
         "SELECT DISTINCT f.attachmentHash AS hash, " +
-            "(SELECT s.senderId FROM forward_store AS s WHERE s.attachmentHash = f.attachmentHash " +
+            "(SELECT s.senderId FROM forward_store AS s WHERE s.attachmentHash = f.attachmentHash AND s.expiresAt >= :now " +
             "ORDER BY s.sentAt, s.id LIMIT 1) AS senderId " +
             "FROM forward_store AS f " +
-            "WHERE f.attachmentHash IS NOT NULL AND f.attachmentHash NOT IN (SELECT hash FROM blobs)",
+            "WHERE f.attachmentHash IS NOT NULL AND f.expiresAt >= :now AND f.attachmentHash NOT IN (SELECT hash FROM blobs)",
     )
-    suspend fun attachmentsNeedingFetch(): List<NeededAttachment>
+    suspend fun attachmentsNeedingFetch(now: Long): List<NeededAttachment>
 
     /**
      * One row per carried frame naming an attachment not in the `blobs` table yet: whom it is for, when it was carried,
@@ -146,16 +148,17 @@ interface ForwardDao {
      * A frame with no cleartext recipient — a group's, for the roster it carries, or a room post's, for the size it
      * declares (ADR 2026-10.hmfe) — brings its signed bytes; a DM's are never loaded. A room post's only while no
      * message row names its hash: the tick reads the declared size only for hashes no row covers (`unopenedForUs`),
-     * and a delivered, untapped room video would otherwise reload its poster-sized frame on every re-arm.
+     * and a delivered, untapped room video would otherwise reload its poster-sized frame on every re-arm. Live rows only,
+     * as [attachmentsNeedingFetch]; each with its frame's `sentAt`, the clock a DM's pull deadline keys on (#195).
      */
     @Query(
-        "SELECT attachmentHash AS hash, recipientId, receivedAt, senderId, groupId, " +
+        "SELECT attachmentHash AS hash, recipientId, receivedAt, senderId, groupId, sentAt, " +
             "CASE WHEN recipientId IS NULL AND (groupId IS NOT NULL OR NOT EXISTS " +
             "(SELECT 1 FROM messages AS m WHERE m.attachmentHash = forward_store.attachmentHash)) " +
             "THEN signed END AS signed FROM forward_store " +
-            "WHERE attachmentHash IS NOT NULL AND attachmentHash NOT IN (SELECT hash FROM blobs)",
+            "WHERE attachmentHash IS NOT NULL AND expiresAt >= :now AND attachmentHash NOT IN (SELECT hash FROM blobs)",
     )
-    suspend fun carriedAttachments(): List<CarriedAttachmentRow>
+    suspend fun carriedAttachments(now: Long): List<CarriedAttachmentRow>
 
     /**
      * Every carried frame including expired-but-unswept rows, newest first — the `debug.STORE` bridge dump.
@@ -262,6 +265,8 @@ class CarriedAttachmentRow(
     val receivedAt: Long,
     val senderId: String,
     val groupId: String?,
+    /** The frame's own clock, which custody's TTL and a DM's pull deadline key on (#195). */
+    val sentAt: Long,
     /** A group frame's or a room post's signed bytes (its roster, its declared size); null for a DM, never loaded. */
     val signed: ByteArray?,
 )

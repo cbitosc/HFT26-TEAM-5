@@ -114,6 +114,10 @@ class GoldenVectorTest {
             "blobReqContentResumed" to WireCodec.encodePayload(BlobReqContent(hash = "h1", offset = 400_000)),
             // An ask for the bytes over Wi-Fi Aware only: the user has not approved a large Bluetooth download (ADR 2026-10.js2p).
             "blobReqContentFastOnly" to WireCodec.encodePayload(BlobReqContent(hash = "h1", fastOnly = true)),
+            // A pull-through with its hop budget and its deadline (#195, ADR 2026-10.2drc): a root's ask, and an echo's
+            // fetch-only ask with no budget left.
+            "blobReqContentPull" to WireCodec.encodePayload(BlobReqContent(hash = "h1", pull = 3, until = 1_800_000_000_000)),
+            "blobReqContentPullSpent" to WireCodec.encodePayload(BlobReqContent(hash = "h1", pull = 0)),
             // The holder query and its answer (ADR 2026-10.6e5t): every state a build emits, the load and the query echo.
             "blobHaveContent" to WireCodec.encodePayload(BlobHaveContent(hashes = listOf("h1", "h2"))),
             "blobHasContent" to

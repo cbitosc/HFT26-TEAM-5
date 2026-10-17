@@ -725,6 +725,20 @@ passes the unknown key through and verifies its own rebuild). No version bump, n
 wire's account; `vectors/wire-v1.json` gained `blobReqContentFastOnly`, and nothing moved. *Metadata cost:* a
 neighbour asked learns that this phone holds back a large download over Bluetooth — a setting, never which message.
 
+**Precedent — a pull-through's hop budget and deadline (`BlobReqContent.pull`, `BlobReqContent.until`, ADR
+2026-10.2drc, #195).** Every `blobreq` says how many phones deep it may still pull the blob through, the receiver
+counted, and the root's deadline for pulling at all. The ask is CBOR, so rule 1 holds as for `offset` and `fastOnly`:
+both nulls are omitted, a plain ask is the bytes it always was (`blobReqContent` did not move), and every older reader
+skips the keys and serves as before. Rule 2 shaped the default: an absent `pull` reads as 1, a fetch only. That is the
+conservative reading of every ask an older build or the iOS port sends today, never a repurpose of their silence. No
+capability bit: the fields only narrow what a receiver does with an ask it cannot serve, and a holder serves whatever
+it is told. The fast codecs were not touched: `FrameTranscoder` passes the two unknown keys through as text and verifies
+its own rebuild (`FrameTranscoderTest`), and `FastFrameCodec` carries `signed` verbatim. No version bump, no discovery
+marker; the database only projects two existing columns for the deadline. `vectors/wire-v1.json` gained
+`blobReqContentPull` and `blobReqContentPullSpent`, and nothing moved. The iOS companion owes the fields, the rules and
+the two vectors. *Metadata cost:* the budget tells a neighbour how far the asker is from the want's root, at most
+`PULL_BUDGET` (3) rings, and the deadline is a DM's `sentAt` plus a day, which every carrier of the frame already reads.
+
 **Precedent — a short video's description and a room post's size (`VideoInfo`, `ChatContent.attachmentSize`, ADR
 2026-10.hmfe).** A video's bubble needs its duration, size and a poster before the bytes arrive, and none of the three
 is a function of bytes the receiver holds yet, so derive-don't-carry cannot reach them until the blob lands (when the

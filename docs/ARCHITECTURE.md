@@ -363,7 +363,7 @@ data class ChatContent(body="", mentions, attachmentHash?, attachmentMime?, enc?
 data class ProfileContent(name, status, avatarHash?, pubKey?, deviceTag?, protoVersion?, capabilities?, prekey?, version?,
                           openToChat = false)                                    // the flag is elided while off
 data class ReactionContent(messageId, emoji?)  ·  ReceiptContent(ackId)  ·  GroupLeaveContent(groupId)
-data class BlobReqContent(hash, offset?)  ·  KeyReqContent(nodeIds)               // a groupupdate carries its GroupInfo in `group`
+data class BlobReqContent(hash, offset?, fastOnly?, pull?, until?)  ·  KeyReqContent(nodeIds)   // a groupupdate carries its GroupInfo in `group`
 
 data class Mention(nodeId, name)                                    // canonical id + rendered @name span
 data class GroupInfo(id, name?, members, createdBy, photoHash?, photoUpdatedAt?)   // self-describing roster on every group frame

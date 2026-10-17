@@ -1195,7 +1195,7 @@ class BlobExchangeTest {
             assertTrue("nothing armed", r.bulkArmed.isEmpty())
 
             exchange.want("H", author = "author") // the user's tap
-            assertEquals("asked at once, of the author, plain", listOf(BlobReqContent("H")), toAuthor)
+            assertEquals("asked at once, of the author, plain", listOf(BlobReqContent("H", pull = BlobExchange.PULL_BUDGET)), toAuthor)
             assertTrue(toOther.isEmpty())
         }
 
@@ -1215,12 +1215,20 @@ class BlobExchangeTest {
             val toReach = backgroundScope.requestsArrivingAt(reach)
 
             exchange.want("H", author = "author", fastOnly = true)
-            assertEquals("the fast-linked neighbour first, the author passed over", listOf(BlobReqContent("H", fastOnly = true)), toFast)
+            assertEquals(
+                "the fast-linked neighbour first, the author passed over",
+                listOf(BlobReqContent("H", fastOnly = true, pull = BlobExchange.PULL_BUDGET)),
+                toFast,
+            )
             assertTrue(toReach.isEmpty())
 
             now += BlobExchange.FIRST_ASK_GRACE_MS
             exchange.reask()
-            assertEquals("widened to the reachable one, fast-only", listOf(BlobReqContent("H", fastOnly = true)), toReach)
+            assertEquals(
+                "widened to the reachable one, fast-only",
+                listOf(BlobReqContent("H", fastOnly = true, pull = BlobExchange.PULL_BUDGET)),
+                toReach,
+            )
             assertEquals("and armed toward it: no Bluetooth copy to fall back on", listOf("reach"), r.bulkArmed)
             now += BlobExchange.ROUND_MS
             exchange.reask()
@@ -1252,13 +1260,24 @@ class BlobExchangeTest {
             val exchange = exchangeOn(h)
             val toSource = backgroundScope.requestsArrivingAt(source)
 
-            exchange.onRequest("H", "asker", fastOnly = true) // we lack it: pull it through
+            exchange.onRequest("H", "asker", fastOnly = true, pull = BlobExchange.PULL_BUDGET) // we lack it: pull it through
             exchange.reask()
             assertTrue("the Bluetooth-only source is not asked on its behalf", toSource.isEmpty())
 
             h.bulkRoutes["source"] = BulkRoute.Linked
             exchange.reask()
-            assertEquals(listOf(BlobReqContent("H", fastOnly = true)), toSource)
+            assertEquals(
+                "one hop less of the asker's budget",
+                listOf(
+                    BlobReqContent(
+                        "H",
+                        fastOnly = true,
+                        pull =
+                            BlobExchange.PULL_BUDGET - 1,
+                    ),
+                ),
+                toSource,
+            )
         }
 
     @Test
@@ -1303,13 +1322,17 @@ class BlobExchangeTest {
 
             exchange.want("H", author = "author", fastOnly = true)
             exchange.want("H", author = "author", approved = true) // the tap
-            assertEquals(listOf(BlobReqContent("H")), toAuthor)
+            assertEquals(listOf(BlobReqContent("H", pull = BlobExchange.PULL_BUDGET)), toAuthor)
 
             exchange.wantAll(listOf("H" to "author"), fastOnly = setOf("H")) // stale: read before the tap
             exchange.want("H", author = "author", fastOnly = true) // a delivery that read its row before the tap
             now += BlobExchange.FIRST_ASK_GRACE_MS + BlobExchange.ROUND_MS
             exchange.reask()
-            assertEquals("still fetched plain, over Bluetooth", listOf(BlobReqContent("H"), BlobReqContent("H")), toAuthor)
+            assertEquals(
+                "still fetched plain, over Bluetooth",
+                listOf(BlobReqContent("H", pull = BlobExchange.PULL_BUDGET), BlobReqContent("H", pull = BlobExchange.PULL_BUDGET)),
+                toAuthor,
+            )
         }
 
     @Test
@@ -1341,7 +1364,7 @@ class BlobExchangeTest {
                 BlobHasContent(listOf(BlobHasItem("H", BlobHasItem.HAVE, 2_000_000L)), load = 0, re = queries.single()),
                 "author",
             )
-            assertEquals("the tap's ask, standing on the holder", listOf(BlobReqContent("H")), toAuthor)
+            assertEquals("the tap's ask, standing on the holder", listOf(BlobReqContent("H", pull = BlobExchange.PULL_BUDGET)), toAuthor)
 
             exchange.wantAll(listOf("H" to "author"), fastOnly = setOf("H"))
             exchange.want("H", author = "author", fastOnly = true)
@@ -1514,7 +1537,7 @@ class BlobExchangeTest {
             val before = toReach.size
             exchange.want("H", author = "reach", approved = true) // the tap, deep in a backoff
             assertEquals("a fresh plain cycle, at once", before + 1, toReach.size)
-            assertEquals(BlobReqContent("H"), toReach.last())
+            assertEquals(BlobReqContent("H", pull = BlobExchange.PULL_BUDGET), toReach.last())
         }
 
     private companion object {

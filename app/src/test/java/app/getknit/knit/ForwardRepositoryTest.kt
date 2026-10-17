@@ -145,7 +145,7 @@ class ForwardRepositoryTest : RoomDbTest() {
             repo.store(CarriedFrame(env, sig = ByteArray(0), signed = WireCodec.encodeEnvelope(env)), ForwardStore.ORIGIN_RELAY, now = 0L)
             repo.store(chat("d1", "peer", 2L, "bob", ChatContent(attachmentHash = "DM")), ForwardStore.ORIGIN_RELAY, now = 0L)
 
-            val byHash = repo.carriedAttachments().associateBy { it.hash }
+            val byHash = repo.carriedAttachments(0L).associateBy { it.hash }
             assertEquals(setOf("alice", "bob"), byHash.getValue("CT").roster)
             assertNull("a DM names no roster", byHash.getValue("DM").roster)
         }
@@ -164,7 +164,7 @@ class ForwardRepositoryTest : RoomDbTest() {
                 now = 0L,
             )
 
-            val byHash = repo.carriedAttachments().associateBy { it.hash }
+            val byHash = repo.carriedAttachments(0L).associateBy { it.hash }
             assertEquals(3_000_000L, byHash.getValue("CLIP").declaredSize)
             assertNull("a post that declares nothing", byHash.getValue("PIC").declaredSize)
             assertNull("a DM's bytes are never loaded", byHash.getValue("DM").declaredSize)

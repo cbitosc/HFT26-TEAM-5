@@ -14,6 +14,7 @@ import app.getknit.knit.data.PeerRepository
 import app.getknit.knit.data.ReactionRepository
 import app.getknit.knit.data.VoiceAudio
 import app.getknit.knit.data.crypto.SignedPrekey
+import app.getknit.knit.data.forward.ForwardRepository
 import app.getknit.knit.data.group.GroupEntity
 import app.getknit.knit.data.group.GroupMembersStore
 import app.getknit.knit.data.group.toFoundingInfo
@@ -261,9 +262,9 @@ class MeshManagerTest {
         @Volatile
         var carried: List<CarriedAttachment> = emptyList()
 
-        override suspend fun attachmentsNeedingFetch(): Map<String, String> = carried.associate { it.hash to (it.senderId ?: "") }
+        override suspend fun attachmentsNeedingFetch(now: Long): Map<String, String> = carried.associate { it.hash to (it.senderId ?: "") }
 
-        override suspend fun carriedAttachments(): List<CarriedAttachment> = carried
+        override suspend fun carriedAttachments(now: Long): List<CarriedAttachment> = carried
 
         override suspend fun recipientOf(id: String): String? = synchronized(frames) { frames[id]?.envelope?.recipientId }
 
@@ -2865,7 +2866,65 @@ class MeshManagerTest {
 
             rig.bluetoothDownloadLimit.value = null // the user chose "Never ask"
             rig.await(4) { rig.blobAsks().size }
-            assertEquals(author to BlobReqContent("big"), rig.blobAsks().last())
+            assertEquals(author to BlobReqContent("big", pull = BlobExchange.PULL_BUDGET), rig.blobAsks().last())
+            rig.manager.stop()
+        }
+
+    @Test
+    fun theReArmCarriesADmsCustodyWindowAsItsAsksDeadlineAndNoneForAGroupsRow() =
+        runTest(UnconfinedTestDispatcher()) {
+            // #195, ADR 2026-10.2drc: the deadline is the latest DM row's sentAt plus custody's TTL; a group's row has none.
+            val rig = Rig(backgroundScope)
+            val author = "author-node"
+            val sentAt = 1_000_000L
+            coEvery { rig.messages.attachmentsNeedingFetch(any()) } returns
+                listOf(
+                    MissingAttachment(
+                        "dm",
+                        author,
+                        listOf(AttachmentFetchRow("dm", author, null, false, false, sentAt = sentAt, dm = true)),
+                    ),
+                    MissingAttachment(
+                        "group",
+                        author,
+                        listOf(AttachmentFetchRow("group", author, null, false, false, sentAt = sentAt, dm = false)),
+                    ),
+                )
+            rig.transport.nearby.value = setOf(Peer(author))
+            rig.stubProfileState(MutableStateFlow(0L))
+            coEvery { rig.groups.observeGroups() } returns flowOf(emptyList())
+
+            rig.manager.start()
+            rig.await(2) { rig.blobAsks().size }
+            val asks = rig.blobAsks().associate { it.second.hash to it.second }
+            assertEquals(sentAt + ForwardRepository.DEFAULT_TTL_MS, asks.getValue("dm").until)
+            assertEquals(null, asks.getValue("group").until)
+            assertEquals(BlobExchange.PULL_BUDGET, asks.getValue("dm").pull)
+            rig.manager.stop()
+        }
+
+    @Test
+    fun aCarrierPullsADmsPictureThroughForItsCustodyWindowAndAGroupsWithoutOne() =
+        runTest(UnconfinedTestDispatcher()) {
+            // #195's review: a carrier's want of a DM's picture once had no deadline. It keys on the frame's own sentAt,
+            // frame-global, so every carrier stops pulling it through at the same moment.
+            val rig = Rig(backgroundScope)
+            val author = "author-node"
+            val sentAt = 1_000_000L
+            rig.forwardStore.carried =
+                listOf(
+                    CarriedAttachment("dm", recipientId = "carol", carriedAt = 0L, senderId = author, sentAt = sentAt),
+                    CarriedAttachment("group", recipientId = null, carriedAt = 0L, senderId = author, groupId = "g-1", sentAt = sentAt),
+                )
+            rig.transport.nearby.value = setOf(Peer(author))
+            rig.stubProfileState(MutableStateFlow(0L))
+            coEvery { rig.groups.observeGroups() } returns flowOf(emptyList())
+
+            rig.manager.start()
+            rig.await(2) { rig.blobAsks().size }
+            val asks = rig.blobAsks().associate { it.second.hash to it.second }
+            assertEquals(sentAt + ForwardRepository.DEFAULT_TTL_MS, asks.getValue("dm").until)
+            assertEquals(null, asks.getValue("group").until)
             rig.manager.stop()
         }
 
@@ -2931,7 +2990,7 @@ class MeshManagerTest {
 
             rig.bluetoothDownloadLimit.value = null // "Never ask": the room post is fetched as a carrier pull
             rig.await(3) { rig.blobAsks().size }
-            assertEquals(author to BlobReqContent("big-clip"), rig.blobAsks().last())
+            assertEquals(author to BlobReqContent("big-clip", pull = BlobExchange.PULL_BUDGET), rig.blobAsks().last())
             rig.manager.stop()
         }
 
@@ -2947,7 +3006,7 @@ class MeshManagerTest {
             rig.manager.downloadAttachment("big")
 
             coVerify { rig.messages.approveAttachmentFetch("big") }
-            assertEquals(listOf(author to BlobReqContent("big")), rig.blobAsks())
+            assertEquals(listOf(author to BlobReqContent("big", pull = BlobExchange.PULL_BUDGET)), rig.blobAsks())
         }
 
     private companion object {

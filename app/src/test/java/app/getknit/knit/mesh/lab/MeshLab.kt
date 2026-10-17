@@ -900,6 +900,12 @@ data class LabLimits(
      */
     val answersHolderQueries: Boolean = true,
     /**
+     * Whether the node's blob exchange carries the pull budget and deadline (ADR 2026-10.2drc). False plays the iOS port's
+     * rules today, with [answersHolderQueries] false and [blobQuery] off beside it: its asks name no `pull` or `until`,
+     * any ask refreshes its wants, and every echo of its pulls through without bound.
+     */
+    val pullBudgets: Boolean = true,
+    /**
      * The custody store's bounds ([ForwardRepository]'s constructor). Give every node in a scenario the
      * same numbers: the content digest is folded over what these keep, and the bound must be identical
      * everywhere or the stores diverge by construction (`rules/mesh.md`).
@@ -1248,6 +1254,7 @@ class LabNode internal constructor(
                         waitMs = limits.queryWaitMs,
                         fetchingRecheckMs = limits.fetchingRecheckMs,
                     ),
+                blobPullBudgets = limits.pullBudgets,
                 sessionDispatcher = session,
                 ingressBudget = IngressBudget(burst = limits.ingressBurst, perMinute = limits.ingressPerMinute, clock = now),
                 spoolDialer = spool,

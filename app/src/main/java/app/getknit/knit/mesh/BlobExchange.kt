@@ -65,7 +65,21 @@ import kotlin.coroutines.cancellation.CancellationException
  * said it lacks it from the next empty cycle on; a neighbour asked to pull it is queried again shortly, a few times,
  * since it holds the blob the moment its own fetch lands. A cycle in which every neighbour said it lacks the blob
  * doubles the wait for the next one ([Want.cycleGap]): a blob nobody in reach holds costs a query and a pull a few
- * times an hour, not every tick, while a neighbour that links is still queried at once.
+ * times an hour, not every tick, and past a day of that a query a few times a day, while a neighbour that links is
+ * still queried at once.
+ *
+ * **A pull-through carries a hop budget and a deadline (work item #195, ADR 2026-10.2drc).** Every `blobreq` says how
+ * many phones deep the pull may still go, the receiver counted ([BlobReqContent.pull]), and until when a pull-through is
+ * worth making at all ([BlobReqContent.until], on the frame's own clock). A want of our own mints [PULL_BUDGET]; a
+ * neighbour that lacks the blob and is asked with `pull = n` wants it with `n − 1` and passes that on, so the pull
+ * reaches [PULL_BUDGET] rings past our neighbours and stops; at 0 it only queries and fetches, and an ask with no field
+ * (an older build, the iOS port today) counts as 1. A want is kept alive by an ask only when that ask carries at least
+ * its own budget ([Want.budget]), so only a root mints liveness and every hop spends some: no loop between echoes, no
+ * link that keeps re-forming and no stream of newcomers can keep a want alive once its root stops. Past [Want.until] —
+ * a DM's custody window, `PullThroughGate` — nobody pulls it through or makes an echo of it; a holder still serves it.
+ * A pull never needed a carrier (a phone in the middle fetches by hash from whoever says HAVE), so the deadline costs
+ * reach to a DM's far end two or more hops away past a day; it is the DM's own, the window the mesh carries it in.
+ * Past its first lead-less cycles a cycle whose blind asks brought nothing backs off too ([Want.dead]).
  *
  * Any wait on a holder counts its grace from the first look that finds it no longer streaming to us: our copy may sit
  * behind that stream in the stack's buffer (#121), so a grace that ran during the stream would ask past it.
@@ -109,6 +123,9 @@ class BlobExchange(
     // and how long it waits for their answers. Off, every neighbour gets ADR 2026-10.f7gg's blind round. Answering is
     // never gated: [onHaveQuery] runs on every build.
     private val holderQuery: HolderQuery = HolderQuery(),
+    // Whether this build carries and keeps the pull budget and deadline (ADR 2026-10.2drc). Every build does; off, it plays
+    // the iOS port and the builds before #195 for `mesh/lab` — no fields sent, every ask refreshes, every echo pulls.
+    private val pullBudgets: Boolean = true,
     // What happened, for the owner's counters (`MeshMetrics.onBlobEvent`).
     private val onEvent: (BlobEvent) -> Unit = {},
     // Where an ask's grace is timed (ADR 2026-10.f7gg): the mesh session's scope, read at each arm. Null (no
@@ -210,6 +227,11 @@ class BlobExchange(
      * A want of our own sets it, whichever way: the latest one wins, so the user's tap (false) lifts a hold at once. An
      * [asker]'s sets it only on a want it creates — a neighbour's ask never widens or narrows a fetch of our own.
      * [approved] is the user's tap: the want is plain from then on, whatever a later want read before the tap says.
+     *
+     * A want of our own (no [asker]) has [PULL_BUDGET]. Its deadline is [until] when [untilKnown] — the caller read every
+     * row naming the hash, so a null there is "no deadline" — or when [until] names one; otherwise it keeps the one the
+     * re-arm set ([wantAll]). An [asker]'s carries the budget its ask allows ([budgetOf] of [pull]) and the ask's [until]
+     * (#195).
      */
     suspend fun want(
         hash: String,
@@ -218,29 +240,59 @@ class BlobExchange(
         asker: String? = null,
         fastOnly: Boolean = false,
         approved: Boolean = false,
+        pull: Int? = null,
+        until: Long? = null,
+        untilKnown: Boolean = false,
     ) {
         // The tap sticks to a want whose bytes are on the way too: if that copy is cut, the next step asks plain.
         if (approved) synchronized(lock) { fetching[hash]?.let { setFastOnly(it.also { w -> w.approved = true }, false, now()) } }
         if (onTheWayOrHeld(hash)) return
-        recordWant(hash, now(), author, via, asker, fastOnly, approved)
+        val budget = if (asker == null) PULL_BUDGET else budgetOf(pull)
+        val reach =
+            Reach(
+                budget,
+                until.takeIf { pullBudgets },
+                rederived = untilKnown && asker == null,
+                fieldless =
+                    asker != null && pull == null,
+            )
+        recordWant(hash, now(), author, via, asker, fastOnly, approved, reach)
         step(hash, linkedNow())
         flushQueries()
     }
 
     /**
      * [want] for each of [wanted] (hash → author), stepped together so their queries share one frame per neighbour;
-     * those in [fastOnly] are wanted fast-only, every other plain (ADR 2026-10.js2p). The database re-arm
-     * (`MeshManager.rewantMissingBlobs`) runs at every link-up, ahead of [reask], and is what re-derives the flag.
+     * those in [fastOnly] are wanted fast-only, every other plain (ADR 2026-10.js2p), and those in [until] are pulled
+     * through only until then ([Want.until], `PullThroughGate`, #195). The database re-arm
+     * (`MeshManager.rewantMissingBlobs`) runs at every link-up, ahead of [reask], and is what re-derives both.
      */
     suspend fun wantAll(
         wanted: List<Pair<String, String?>>,
         fastOnly: Set<String> = emptySet(),
+        until: Map<String, Long> = emptyMap(),
     ) {
         if (wanted.isEmpty()) return
         val linked = linkedNow()
         for ((hash, author) in wanted) {
             if (onTheWayOrHeld(hash)) continue
-            recordWant(hash, now(), author, via = null, asker = null, fastOnly = hash in fastOnly)
+            recordWant(
+                hash,
+                now(),
+                author,
+                via = null,
+                asker = null,
+                fastOnly = hash in fastOnly,
+                reach =
+                    Reach(
+                        PULL_BUDGET,
+                        until[hash]
+                            .takeIf {
+                                pullBudgets
+                            },
+                        rederived = true,
+                    ),
+            )
             step(hash, linked)
         }
         flushQueries()
@@ -289,6 +341,8 @@ class BlobExchange(
             fetching.values.forEach { want ->
                 want.pullers.removeAll(ids)
                 want.blindAsked.removeAll(ids)
+                // A newcomer that lacks it is asked to pull it through at once, once per link-up, in this cycle (#195).
+                want.freshLinks += ids
                 want.pulled.removeAll(ids)
                 want.pullRechecks.keys.removeAll(ids)
                 want.failed.removeAll(ids)
@@ -309,7 +363,12 @@ class BlobExchange(
     suspend fun unlinked(nodeIds: Collection<String>) {
         if (nodeIds.isEmpty()) return
         val ids = nodeIds.toSet()
-        val affected = synchronized(lock) { fetching.filterValues { it.fetch?.peer in ids }.keys.toList() }
+        val affected =
+            synchronized(lock) {
+                // A link-up that went again pulls nobody later: the newcomer is one only while its link stands.
+                fetching.values.forEach { it.freshLinks.removeAll(ids) }
+                fetching.filterValues { it.fetch?.peer in ids }.keys.toList()
+            }
         if (affected.isEmpty()) return
         val linked = linkedNow()
         affected.forEach { step(it, linked) }
@@ -358,7 +417,7 @@ class BlobExchange(
         val kept = partials.length(hash)
         val plan = synchronized(lock) { fetching[hash]?.let { decideMarking(it, linked, kept) }?.also { queue(hash, it) } } ?: return
         if (plan.asks.isNotEmpty()) {
-            val req = blobRequest(selfId(), hash, plan.fastOnly)
+            val req = blobRequest(selfId(), hash, plan.fastOnly, plan.pull, plan.until)
             for (ask in plan.asks) {
                 // A holder serving a large attachment arms the Wi-Fi Aware link itself; only the larger node id of a
                 // pair initiates, so our half of the mark is what brings it up when that is us.
@@ -399,7 +458,7 @@ class BlobExchange(
         kept: Long,
         t: Long,
     ): Plan {
-        val p = Plan(fastOnly = w.fastOnly)
+        val p = Plan(fastOnly = w.fastOnly, pull = w.budget, until = w.until)
         // A fast-only want sees only the neighbours whose copy would ride Wi-Fi Aware (ADR 2026-10.js2p).
         val eligible = if (w.fastOnly) linked.filter { it.route != BulkRoute.None } else linked
         // Ahead of the fetch's wait, so an ask outstanding on another holder never consumes the edge.
@@ -811,6 +870,8 @@ class BlobExchange(
     ): Boolean {
         // A capable neighbour that answered said where it stands; one still silent here is past its wait.
         val answered = capable.mapTo(HashSet()) { it.id }.filterTo(HashSet()) { it in w.answers }
+        // A blind ask carries the want's budget and deadline like any other (#195): to a neighbour that lacks the blob it
+        // is a pull, and one with no budget left or past its deadline is a fetch only.
         val blind = live.filter { it.id !in answered && it.id !in w.blindAsked && !(it.streaming && it.id in w.askedAt) }
         if (blind.isEmpty()) return false
         if (!w.blindWidened) {
@@ -842,6 +903,11 @@ class BlobExchange(
      * pull it through — the hop the frame came from first, every one of them from the next empty cycle on, or at once
      * when the hop is not among them. Either is queried again shortly ([recheckAt]), and the next cycle (the tick's)
      * queries everyone again.
+     *
+     * Nobody is asked ([withholdPull]) when the want has no budget left ([Want.budget]) or is past its deadline
+     * ([Want.until], #195). The cycle is dead all the same, and backs off; the wait for a FETCHING neighbour's recheck
+     * stands. A neighbour that linked in this cycle is pulled at once, mid-cycle, by any want that may pull
+     * ([pullNewcomers]).
      */
     private fun pullThrough(
         w: Want,
@@ -851,22 +917,95 @@ class BlobExchange(
     ) {
         val fetching = capable.any { w.answers[it.id]?.state == BlobHasItem.FETCHING }
         val lacking = capable.filter { c -> w.answers[c.id]?.state.let { it != null && it !in HELD && it != BlobHasItem.FETCHING } }
-        if (!fetching && w.pulled.isEmpty() && lacking.isNotEmpty()) {
-            val hop = lacking.firstOrNull { it.id == w.via }
-            val to = if (hop != null && w.emptyCycles == 0) listOf(hop) else lacking
-            if (w.pulledAt == null) w.pulledAt = t // the cycle's first pull: its rechecks run out inside the cycle
-            to.forEach {
-                w.pulled += it.id
-                w.askedAt[it.id] = t
-                p.ask(it.peer, arm = armsFastOnly(w, it), line = "pull")
-            }
-            p.why = if (to.size == 1 && to[0] === hop) "via hop" else "wide"
-            p.events += BlobEvent.PullThrough
-        }
+        if (!fetching) pullOrWithhold(w, lacking, t, p)
         capable.mapNotNull { recheckAt(w, it.id) }.minOrNull()?.let { p.waitFor((it - t).coerceAtLeast(1)) }
         // No timer for the next cycle: the 60 s tick ([reask]) or a link-up opens it, every hash in one step and its
         // queries in one frame per neighbour. A timer per hash came due a few ms apart and sent one-hash queries that
         // tripped the holder's budget (the bluetooth-reviewer's finding).
+    }
+
+    /**
+     * [pullThrough] with no neighbour fetching the blob: every one of [lacking] asked to pull it through, once a cycle
+     * when the want may; else the newcomers among them ([pullNewcomers]); else the pull withheld and said so.
+     */
+    private fun pullOrWithhold(
+        w: Want,
+        lacking: List<Candidate>,
+        t: Long,
+        p: Plan,
+    ) {
+        val due = w.pulled.isEmpty() && lacking.isNotEmpty()
+        val withheld = w.pullWithheldWhy(t, pullBudgets)
+        when {
+            withheld != null -> if (due) withholdPull(w, lacking, withheld, p)
+            due -> askToPull(w, lacking, t, p)
+            else -> pullNewcomers(w, lacking, t, p)
+        }
+    }
+
+    /**
+     * [pullThrough]'s pull of the neighbours among [lacking] that linked in this cycle and are not pulled in it
+     * ([Want.freshLinks], #195) — at once, so a want deep in its backoff does not leave a newcomer for hours. Once per
+     * link-up; a link that went since, or a cycle that closed, pulls nobody later. Whatever it asks spends a hop of the
+     * want's budget, so a newcomer's ask back can never keep the want alive.
+     */
+    private fun pullNewcomers(
+        w: Want,
+        lacking: List<Candidate>,
+        t: Long,
+        p: Plan,
+    ) {
+        val fresh = lacking.filter { it.id in w.freshLinks && it.id !in w.pulled }
+        if (fresh.isNotEmpty()) askToPull(w, fresh, t, p, newcomers = true)
+    }
+
+    /**
+     * [pullThrough]'s asks: the hop the frame came from alone in the first empty cycle, else every one of [lacking].
+     * [newcomers] asks are [pullNewcomers]': they leave the cycle's schedule as it was.
+     */
+    private fun askToPull(
+        w: Want,
+        lacking: List<Candidate>,
+        t: Long,
+        p: Plan,
+        newcomers: Boolean = false,
+    ) {
+        val hop = lacking.firstOrNull { it.id == w.via }
+        val to = if (hop != null && w.emptyCycles == 0 && !newcomers) listOf(hop) else lacking
+        // The cycle's first pull: its rechecks run out inside the cycle. A newcomer's pull leaves the cycle where it was.
+        if (w.pulledAt == null && !newcomers) w.pulledAt = t
+        to.forEach {
+            w.pulled += it.id
+            w.freshLinks -= it.id
+            w.askedAt[it.id] = t
+            p.ask(it.peer, arm = armsFastOnly(w, it), line = "pull")
+        }
+        p.why =
+            if (newcomers) {
+                "newcomer"
+            } else if (to.size == 1 && to[0] === hop) {
+                "via hop"
+            } else {
+                "wide"
+            }
+        p.events += BlobEvent.PullThrough
+    }
+
+    /**
+     * [pullThrough] when [w] may not ask [lacking] to pull its blob through (#195): nobody is asked, and the cycle, in
+     * which every neighbour said it lacks the blob, is dead and backs off as one that pulled would. Counted and logged
+     * once a cycle — never as `blob pull`, the line the trials count pulls by.
+     */
+    private fun withholdPull(
+        w: Want,
+        lacking: List<Candidate>,
+        why: String,
+        p: Plan,
+    ) {
+        if (w.pullWithheld) return
+        w.pullWithheld = true
+        p.events += BlobEvent.PullWithheld
+        log("blob no-pull ${w.hash8}… → nobody of ${lacking.joinToString { it.id }} ($why)")
     }
 
     /**
@@ -991,8 +1130,10 @@ class BlobExchange(
                 "pull" -> "blob pull $h → $to (${plan.why})"
                 else -> "blob fetch $h → $to (${plan.why}), grace ${plan.wake} ms${if (plan.asks.first().arm) ", armed" else ""}"
             }
-        // Appended, never woven in: the trials grep the lines above as they stand (`first (…)`, `widened`).
-        return if (plan.fastOnly) "$line [fast-only]" else line
+        // Appended, never woven in: the trials grep the lines above as they stand (`first (…)`, `widened`). The budget
+        // and the deadline every ask carries (#195) go last.
+        val reach = " [pull ${plan.pull}${plan.until?.let { ", until $it" } ?: ""}]"
+        return (if (plan.fastOnly) "$line [fast-only]" else line) + reach
     }
 
     /**
@@ -1251,12 +1392,22 @@ class BlobExchange(
         me: String,
         hash: String,
         fastOnly: Boolean,
+        pull: Int,
+        until: Long?,
     ): WireEnvelope {
         // A cut transfer's kept prefix makes the ask a resume: a holder that knows the field streams only the rest,
         // and one that doesn't sends the whole file, which lands as it always has (#116).
         val offset = partials.length(hash).takeIf { it > 0 }
-        // Absent unless set, so a plain ask is the bytes it always was (ADR 2026-10.js2p).
-        val content = BlobReqContent(hash, offset, fastOnly = true.takeIf { fastOnly })
+        // Absent unless set, so a plain ask is the bytes it always was (ADR 2026-10.js2p). The budget and the deadline
+        // ride every ask (#195): to a neighbour that lacks the blob, an ask is a pull, whatever made it.
+        val content =
+            BlobReqContent(
+                hash,
+                offset,
+                fastOnly = true.takeIf { fastOnly },
+                pull = pull.takeIf { pullBudgets },
+                until = until.takeIf { pullBudgets },
+            )
         return unsignedPointToPoint(FrameType.BLOB_REQ, newRequestId(), me, WireCodec.encodePayload(content))
     }
 
@@ -1298,13 +1449,19 @@ class BlobExchange(
      * A [fastOnly] ask (ADR 2026-10.js2p) is served only over Wi-Fi Aware: refused at once when the asker is neither
      * linked nor reachable on it, never parked behind a Bluetooth feed, and handed to the transport marked so it is
      * never sent over Bluetooth. Not holding it, we pull it through fast-only too.
+     *
+     * Not holding it, we want it with one hop less of the ask's [pull] budget ([budgetOf]: an older build's ask, with
+     * none, is a fetch only) and its [until] (#195). An ask with no budget left, or past its deadline, makes no want
+     * at all: it is served if we hold the blob, and that is all.
      */
     suspend fun onRequest(
         hash: String,
         fromNodeId: String,
         offset: Long? = null,
         fastOnly: Boolean = false,
-    ) = serveOrWant(hash, fromNodeId, offset, mayPark = true, fastOnly = fastOnly)
+        pull: Int? = null,
+        until: Long? = null,
+    ) = serveOrWant(hash, fromNodeId, offset, mayPark = true, fastOnly = fastOnly, pull = pull, until = until)
 
     /** [onRequest], where [mayPark] false serves at once whatever else is being fed (a park that waited its longest). */
     private suspend fun serveOrWant(
@@ -1313,6 +1470,8 @@ class BlobExchange(
         offset: Long?,
         mayPark: Boolean,
         fastOnly: Boolean = false,
+        pull: Int? = null,
+        until: Long? = null,
     ) {
         val peer = Peer(fromNodeId)
         // Nothing reaches it over Wi-Fi Aware: refuse before the store is read, and stamp no memo, so a SENDING answer
@@ -1335,7 +1494,11 @@ class BlobExchange(
             // memo: don't ship a second. Parked behind another copy's feed: served when that one ends.
             if (transport.fileInFlightTo(fromNodeId, hash)) return
             // A fast-only copy never rides a Bluetooth budget, so it never waits behind a Bluetooth feed either.
-            if (mayPark && !fastOnly && parkBehindFeed(hash, fromNodeId, offset, file.length() - from, addressees(hash))) return
+            if (mayPark && !fastOnly &&
+                parkBehindFeed(hash, fromNodeId, Reached(offset, pull, until), file.length() - from, addressees(hash))
+            ) {
+                return
+            }
             if (servedRecently(hash, fromNodeId)) return
             // A fast-only copy the transport gives up on after accepting it (no Wi-Fi Aware link inside its grace) goes
             // nowhere: forget it as a refused send is forgotten.
@@ -1346,8 +1509,34 @@ class BlobExchange(
             }
             return
         }
-        want(hash, asker = fromNodeId, fastOnly = fastOnly)
+        echoFor(hash, fromNodeId, fastOnly, pull, until)
     }
+
+    /** [serveOrWant] for a blob we lack: want it for [asker], unless its ask allows no echo here (#195). */
+    private suspend fun echoFor(
+        hash: String,
+        asker: String,
+        fastOnly: Boolean,
+        pull: Int?,
+        until: Long?,
+    ) {
+        val refused = echoRefused(pull, until)
+        if (refused == null) return want(hash, asker = asker, fastOnly = fastOnly, pull = pull, until = until)
+        onEvent(BlobEvent.EchoDeclined)
+        log("blob no-echo ${hash.take(LOG_HASH_CHARS)}… for $asker ($refused)")
+    }
+
+    /** Why an ask with [pull] and [until] makes no want here, or null when it does (#195). */
+    private fun echoRefused(
+        pull: Int?,
+        until: Long?,
+    ): String? =
+        when {
+            !pullBudgets -> null
+            budgetOf(pull) < 0 -> "fetch only"
+            until != null && now() >= until -> "past its deadline"
+            else -> null
+        }
 
     /**
      * Parks [asker]'s ask for [hash] when its copy of [bytes] would ride a shared-budget Bluetooth link and waits behind
@@ -1359,7 +1548,7 @@ class BlobExchange(
     private fun parkBehindFeed(
         hash: String,
         asker: String,
-        offset: Long?,
+        ask: Reached,
         bytes: Long,
         to: Set<String>?,
     ): Boolean {
@@ -1370,7 +1559,7 @@ class BlobExchange(
                 val asks = parked.getOrPut(hash) { LinkedHashMap() }
                 val t = now()
                 val was = asks[asker]
-                (was == null).also { asks[asker] = ParkedAsk(offset, bytes, was?.since ?: t, t, was?.until ?: 0L) }
+                (was == null).also { asks[asker] = ParkedAsk(ask, bytes, was?.since ?: t, t, was?.until ?: 0L) }
             }
         if (fresh) {
             log("blob park ${hash.take(LOG_HASH_CHARS)}… for $asker behind a feed${if (isCarrier(asker, to)) " (carrier)" else ""}")
@@ -1530,7 +1719,8 @@ class BlobExchange(
             // The feed-end edge and the poll can both read this ask: only the pass that takes it serves it.
             if (!waitsBehindFeed(hash, asker, ask.bytes, to) && takeParked(hash, asker)) {
                 log("blob unpark ${hash.take(LOG_HASH_CHARS)}… → $asker (waited ${t - ask.since} ms)")
-                serveOrWant(hash, asker, ask.offset, mayPark = false)
+                // Its budget and deadline with it: served, unless the blob went meanwhile, when it echoes as it asked.
+                serveOrWant(hash, asker, ask.ask.offset, mayPark = false, pull = ask.ask.pull, until = ask.ask.until)
             }
         }
         // Only the loop lets itself go: an edge's pass ending empty leaves a running loop to find that at its next poll.
@@ -1687,15 +1877,19 @@ class BlobExchange(
     /** Drops fetches whose last-want time has aged past the TTL — a never-arriving blob is reclaimed and
      *  re-armed from the database on the next tick. The cap, not this, is the security bound. Returns the
      *  number reclaimed. */
-    fun sweepExpired(): Int =
+    fun sweepExpired(): Int = sweepExpiredHashes().size
+
+    /** [sweepExpired], naming the hashes it reclaimed: `mesh/lab` counts a want's generations by them (#195). */
+    internal fun sweepExpiredHashes(): Set<String> =
         synchronized(lock) {
             val cutoff = now() - fetchTtlMs
-            val iterator = fetching.values.iterator()
-            var removed = 0
+            val iterator = fetching.entries.iterator()
+            val removed = HashSet<String>()
             while (iterator.hasNext()) {
-                if (iterator.next().wantedAt < cutoff) {
+                val (hash, want) = iterator.next()
+                if (want.wantedAt < cutoff) {
                     iterator.remove()
-                    removed++
+                    removed += hash
                 }
             }
             removed
@@ -1712,6 +1906,7 @@ class BlobExchange(
         asker: String?,
         fastOnly: Boolean,
         approved: Boolean = false,
+        reach: Reach = Reach(PULL_BUDGET, null),
     ) = synchronized(lock) {
         val want = fetching[hash]
         if (want == null) {
@@ -1719,20 +1914,61 @@ class BlobExchange(
                 Want(hash, nowMs, author, via, asker).also {
                     it.approved = approved
                     it.fastOnly = fastOnly && !approved
+                    it.budget = reach.budget
+                    it.until = reach.until
                 }
         } else {
-            want.wantedAt = nowMs // mutated in place, so insertion order (the eviction order) is kept
             // Our own want says what we will take now (ADR 2026-10.js2p); a neighbour's ask leaves our fetch as it is.
             // The tap is sticky: a want that read its rows before the tap and lands after it never re-holds the fetch.
             if (approved) want.approved = true
-            if (asker == null) setFastOnly(want, fastOnly && !want.approved, nowMs)
+            if (asker == null) {
+                setFastOnly(want, fastOnly && !want.approved, nowMs)
+                // Our own want is a root, re-derived every time (#195): the whole budget, and the rows' deadline. A caller
+                // that read every row naming the hash — the re-arm, a delivery, the tap ([Reach.rederived]) — sets it, none
+                // included; one that did not (a carried frame, an avatar, a group photo) keeps it unless it names one, or a
+                // DM delivered past its window would echo for hours.
+                want.wantedAt = nowMs // mutated in place, so insertion order (the eviction order) is kept
+                want.budget = PULL_BUDGET
+                if (reach.rederived || reach.until != null) want.until = reach.until
+            }
             if (want.author == null) want.author = author
             if (want.via == null) want.via = via
-            asker?.let {
-                // It lacks the bytes: not this cycle. Its ask may be what opens the next one, so open it first — opened
-                // after, it would forget the mark and query the asker back, and a dead blob's pulls would ping-pong.
-                if (want.cycleDue(nowMs)) openCycle(want, nowMs)
-                want.pullers += it
+            asker?.let { noteAsker(want, it, reach, nowMs) }
+        }
+    }
+
+    /**
+     * [recordWant]'s bookkeeping for [asker], a neighbour that asked us at [t] to pull [w]'s blob through, with the budget
+     * and deadline its ask allows us ([reach]). Under [lock].
+     *
+     * The ask keeps the want alive only when it carries at least the want's own budget (#195): only a root mints budget,
+     * and every hop spends one, so an echo's ask back, a newcomer's, or one from a link that keeps re-forming can never
+     * keep a want alive once the want's own source stops. One that carries more raises it, and its deadline with it (no
+     * deadline is the widest). The asker is a puller for this cycle either way.
+     */
+    private fun noteAsker(
+        w: Want,
+        asker: String,
+        reach: Reach,
+        t: Long,
+    ) {
+        // It lacks the bytes: not this cycle. Its ask may be what opens the next one, so open it first — opened after, it
+        // would forget the mark and query the asker back, and a dead blob's pulls would ping-pong.
+        if (w.cycleDue(t)) openCycle(w, t)
+        w.pullers += asker
+        // A build that predates the budget (the iOS port today) refreshes on any ask and echoes without bound: an ask of
+        // its, with no field, may make a want here but never keep one alive, so each of ours lives one TTL at most
+        // against it (the blobs-reviewer's mixed-fleet finding). The loop itself ends only with the iOS companion.
+        if (pullBudgets && (reach.fieldless || reach.budget < w.budget)) return
+        w.wantedAt = t
+        when {
+            reach.budget > w.budget -> {
+                w.budget = reach.budget
+                w.until = reach.until
+            }
+
+            w.until != null -> {
+                w.until = reach.until?.let { maxOf(it, w.until!!) }
             }
         }
     }
@@ -1751,9 +1987,19 @@ class BlobExchange(
         val lifted = w.fastOnly && !fastOnly
         w.fastOnly = fastOnly
         if (!lifted) return
-        w.deadCycles = 0
+        w.endDeadStreak()
         if (w.fetch == null) w.openCycle(t, natural = false)
     }
+
+    /** The hashes wanted now, whoever wanted them — for `mesh/lab`, which asserts a want is gone (#195). */
+    internal fun wantedHashes(): Set<String> = synchronized(lock) { fetching.keys.toSet() }
+
+    /**
+     * The budget a want made for an ask that allowed [pull] has: one hop less, an ask no newer than this build's own
+     * [PULL_BUDGET] counted at that, and an ask with no field — an older build's, the iOS port's today — counted as 1, a
+     * fetch only (#195). Negative when the ask allowed none: such an ask makes no want.
+     */
+    private fun budgetOf(pull: Int?): Int = if (pullBudgets) minOf(pull ?: 1, PULL_BUDGET) - 1 else PULL_BUDGET
 
     /** Oldest-wanted-first snapshot of the fetching hashes, copied under the lock so callers iterate safely. */
     private fun snapshotFetching(): List<String> = synchronized(lock) { fetching.keys.toList() }
@@ -1853,7 +2099,7 @@ class BlobExchange(
         t: Long,
     ) {
         w.openCycle(t, natural = true)
-        if (w.deadCycles > 0) log("blob cycle ${w.hash8}… after ${w.deadCycles} dead, next if dead in ${w.cycleGap(dead = true)} ms")
+        if (w.deadCycles > 0) log("blob cycle ${w.hash8}… after ${w.deadCycles} dead, next if dead in ${w.cycleGap(t, dead = true)} ms")
     }
 
     /**
@@ -1884,7 +2130,9 @@ class BlobExchange(
      * A blob we lack and how far its fetch has got (ADR 2026-10.6e5t). A *cycle* queries every capable neighbour once
      * ([queried], [answers]); one ask at a time is outstanding ([fetch]); a holder that brought nothing is [failed] for
      * the cycle. The neighbours nobody can query get ADR 2026-10.f7gg's round ([blindAsked], [blindWidened]). A cycle
-     * ends no sooner than [cycleGap], and only with no ask outstanding. Mutated under [lock] only.
+     * ends no sooner than [cycleGap], and only with no ask outstanding. Whether it pulls through is bounded by its frame's
+     * deadline ([until]) and by the hops its budget still allows ([budget], #195).
+     * Mutated under [lock] only.
      */
     private class Want(
         hash: String,
@@ -1914,8 +2162,37 @@ class BlobExchange(
         var cycleSawLead = false
         var emptyCycles = 0
 
-        // Dead cycles in a row before this one ([dead]): each doubles the wait for the next ([cycleGap]).
+        // Dead cycles in a row before this one ([dead]): each doubles the wait for the next ([cycleGap]). When the
+        // streak began, and how many dead cycles it has opened since it passed [LONG_DEAD_MS] (#195).
         var deadCycles = 0
+        var deadSince: Long? = null
+        var longDeadCycles = 0
+
+        // How many phones deeper this want may ask to pull its blob, counting the one asked ([PULL_BUDGET] for our own,
+        // one less than the ask allowed for an echo), and until when, on the frame's clock: null for no deadline (#195).
+        // And whether this cycle already counted and logged a pull it did not make.
+        // 0 until whatever records the want says otherwise: a site that forgets mints no root (a refused splice's want
+        // re-made after a sweep, which the next re-arm turns back into one within a tick if a row names the hash).
+        var budget = 0
+        var until: Long? = null
+        var pullWithheld = false
+
+        // Neighbours that linked in this cycle and have not been pulled since: pulled once at once ([pullNewcomers]).
+        val freshLinks = HashSet<String>()
+
+        /**
+         * Why this want asks nobody to pull its blob through at [t], or null when it may (#195). With [budgets] off (the
+         * iOS port's rules, `mesh/lab` only) no budget holds a pull back.
+         */
+        fun pullWithheldWhy(
+            t: Long,
+            budgets: Boolean,
+        ): String? =
+            when {
+                until?.let { t >= it } == true -> "past its deadline"
+                budget < 1 && budgets -> "fetch only"
+                else -> null
+            }
 
         // Neighbours we are pulling it for: they lack it, so this cycle neither queries nor asks them.
         val pullers = HashSet<String>().apply { puller?.let(::add) }
@@ -1965,20 +2242,46 @@ class BlobExchange(
         /**
          * Whether this cycle is dead: every neighbour asked said it lacks the blob — at least one answered, none said it
          * holds or is fetching it, and nobody was asked blind (that one may hold it: ADR 2026-10.f7gg's round, and every
-         * cycle with querying off, keeps its pace). A fast-only cycle that asked anyone is dead too, its blob still
-         * wanted at its end: its holders answer HAVE every cycle but are only reachable, and a link that will not come up
-         * would otherwise cost a query, an armed ask and a data-path attempt on each side every 45 s until the tap (ADR
-         * 2026-10.js2p's review). It backs off like any dead cycle, and a Wi-Fi Aware link coming up re-asks that holder alone
-         * ([fastLinkSeen]), resetting nothing.
+         * cycle with querying off, keeps its pace). Only for the first [PULL_RECHECK_DEAD_CYCLES] cycles without a lead,
+         * though: past them a cycle whose blind asks brought nothing is dead too, and backs off with the rest (#195). A
+         * blind ask is still made every cycle it opens — an iPhone holder can only be found that way — but an iPhone in
+         * reach no longer keeps a blob nobody holds at the 45 s pace for good.
+         *
+         * A fast-only cycle that asked anyone is dead too, its blob still wanted at its end: its holders answer HAVE every
+         * cycle but are only reachable, and a link that will not come up would otherwise cost a query, an armed ask and a
+         * data-path attempt on each side every 45 s until the tap (ADR 2026-10.js2p's review). It backs off like any dead
+         * cycle, and a Wi-Fi Aware link coming up re-asks that holder alone ([fastLinkSeen]), resetting nothing.
          */
-        fun dead(): Boolean = (fastOnly && fastAsked) || (!cycleSawLead && answers.isNotEmpty() && blindAsked.isEmpty())
+        fun dead(): Boolean {
+            if (fastOnly && fastAsked) return true
+            val blindSpent = blindAsked.isEmpty() || emptyCycles >= PULL_RECHECK_DEAD_CYCLES
+            return !cycleSawLead && (answers.isNotEmpty() || blindAsked.isNotEmpty()) && blindSpent
+        }
 
         /**
-         * How long this cycle stands before the next opens: [CYCLE_MS], doubled for each dead cycle in a row before
-         * this one while this one is dead too, at most [MAX_BACKOFF_SHIFT] times (45 s, 90 s, 3 min, then 6 min). The
-         * second cycle, which widens the pull-through, keeps its pace.
+         * How long this cycle stands before the next opens at [t]: [CYCLE_MS], doubled for each dead cycle in a row
+         * before this one while this one is dead too, at most [MAX_BACKOFF_SHIFT] times (45 s, 90 s, 3 min, then 6 min).
+         * The second cycle, which widens the pull-through, keeps its pace. A streak dead for [LONG_DEAD_MS] doubles on
+         * with each further dead cycle, to [MAX_LONG_BACKOFF_SHIFT] (12, 24, 48, 96 min, then about 3.2 h): a blob nobody
+         * has held for a day costs a query a few times a day, not ten an hour (#195). A neighbour that links is still
+         * queried at once, and any lead ends the streak. Not a fast-only want: its dead cycle is a Wi-Fi Aware link that
+         * did not come up, not a blob nobody holds, and it keeps the 6 min ceiling ADR 2026-10.js2p set.
          */
-        fun cycleGap(dead: Boolean = dead()): Long = if (dead) CYCLE_MS shl minOf(deadCycles, MAX_BACKOFF_SHIFT) else CYCLE_MS
+        fun cycleGap(
+            t: Long,
+            dead: Boolean = dead(),
+        ): Long {
+            if (!dead) return CYCLE_MS
+            val extra = if (!fastOnly && deadSince?.let { t - it >= LONG_DEAD_MS } == true) longDeadCycles else 0
+            return CYCLE_MS shl minOf(minOf(deadCycles, MAX_BACKOFF_SHIFT) + extra, MAX_LONG_BACKOFF_SHIFT)
+        }
+
+        /** A lead, a lifted fast-only hold or a cycle that was not dead: the backoff starts over. */
+        fun endDeadStreak() {
+            deadCycles = 0
+            deadSince = null
+            longDeadCycles = 0
+        }
 
         /**
          * Whether the next cycle may open at [t]: no ask outstanding, and [cycleGap] since the cycle opened — or since its
@@ -1986,7 +2289,7 @@ class BlobExchange(
          * recheck open the next cycle 10 s on and pull again; counted from the pull, its rechecks run out first. Only the
          * first pull counts, so a link that keeps flapping (a newcomer is pulled again) cannot hold a cycle open.
          */
-        fun cycleDue(t: Long): Boolean = fetch == null && t - maxOf(cycleAt, pulledAt ?: cycleAt) >= cycleGap()
+        fun cycleDue(t: Long): Boolean = fetch == null && t - maxOf(cycleAt, pulledAt ?: cycleAt) >= cycleGap(t)
 
         /**
          * A neighbour said it holds the blob or is fetching it. A backed-off cycle starts over from [t], its answers kept:
@@ -1995,7 +2298,7 @@ class BlobExchange(
         fun sawLead(t: Long) {
             // Not for a fast-only want: its holders answer HAVE every cycle while the link they need never comes up.
             if (!cycleSawLead && deadCycles > 0 && !fastOnly) {
-                deadCycles = 0
+                endDeadStreak()
                 cycleAt = t
             }
             cycleSawLead = true
@@ -2006,13 +2309,22 @@ class BlobExchange(
             natural: Boolean,
         ) {
             if (natural) {
-                deadCycles = if (dead()) deadCycles + 1 else 0
+                if (dead()) {
+                    // The streak's start is the first dead cycle's; past a day of it, each one more doubles on (#195).
+                    if (deadCycles == 0) deadSince = cycleAt
+                    if (deadSince?.let { t - it >= LONG_DEAD_MS } == true) longDeadCycles++
+                    deadCycles++
+                } else {
+                    endDeadStreak()
+                }
                 emptyCycles = if (cycleSawLead) 0 else emptyCycles + 1
             }
             cycleAt = t
             fetch = null // a natural close has none; a forced one (a refused splice) starts its ask over
             cycleSawLead = false
             fastAsked = false
+            pullWithheld = false
+            freshLinks.clear() // a link-up pulls in its own cycle or not at all
             pullers.clear()
             queried.clear()
             answers.clear()
@@ -2057,6 +2369,24 @@ class BlobExchange(
         var confirmAt: Long? = null
     }
 
+    /** What an ask said beyond its hash: the prefix it named, and its budget and deadline as it carried them (#195). */
+    private class Reached(
+        val offset: Long?,
+        val pull: Int?,
+        val until: Long?,
+    )
+
+    /** The budget and deadline a want is recorded with ([recordWant], #195). */
+    private class Reach(
+        val budget: Int,
+        val until: Long?,
+        // A want whose caller read every row naming the hash (the re-arm, a delivery, the tap): its deadline replaces
+        // the want's, null included.
+        val rederived: Boolean = false,
+        // An ask with no `pull` field: it makes a want when none exists, and keeps none alive.
+        val fieldless: Boolean = false,
+    )
+
     /** A query on its way: to whom, when, and which hashes it named. */
     private class SentQuery(
         val peer: String,
@@ -2066,7 +2396,8 @@ class BlobExchange(
 
     /** An ask parked behind another copy's feed ([parked]): the prefix it named, when it was parked, and when it last asked. */
     private class ParkedAsk(
-        val offset: Long?,
+        // What the ask said: the prefix it named, and its budget and deadline (#195).
+        val ask: Reached,
         // The copy's length (the rest past [offset]): how long it would take decides whom a parked pass serves first.
         val bytes: Long,
         val since: Long,
@@ -2103,6 +2434,9 @@ class BlobExchange(
      */
     private class Plan(
         val fastOnly: Boolean = false,
+        // The want's budget and deadline as the step read them, which every ask it sends carries (#195).
+        val pull: Int = PULL_BUDGET,
+        val until: Long? = null,
     ) {
         val query = mutableListOf<String>()
         val asks = mutableListOf<Ask>()
@@ -2183,6 +2517,13 @@ class BlobExchange(
         // a Wi-Fi Aware route to its asker (ADR 2026-10.js2p).
         FastOnlyHeld,
         FastOnlyRefused,
+
+        // An ask for a blob we lack that made no want here: it allowed no budget, or was past its deadline (#195).
+        EchoDeclined,
+
+        // A cycle that would have asked its NONE neighbours to pull the blob through and asked nobody: the frame naming
+        // it is past its custody window, or the want is only a neighbour's pull, echoed past its first cycles (#195).
+        PullWithheld,
     }
 
     companion object {
@@ -2220,6 +2561,12 @@ class BlobExchange(
 
         // How many times a dead cycle in a row doubles the wait for the next (Want.cycleGap): 6 min at most.
         private const val MAX_BACKOFF_SHIFT = 3
+
+        // A dead streak this old doubles on past MAX_BACKOFF_SHIFT, to this many doublings at most: about 3.2 h (#195).
+        // A DM's frame is carried a day (ForwardRepository.DEFAULT_TTL_MS); past that a blob nobody in reach held all
+        // day is one nobody is bringing.
+        const val LONG_DEAD_MS = 24 * 60 * 60_000L
+        const val MAX_LONG_BACKOFF_SHIFT = 8
 
         // How many times a holder whose grace ran out is queried again before the next holder is asked.
         const val MAX_CONFIRMS = 2
@@ -2277,7 +2624,13 @@ class BlobExchange(
 
         // A never-arriving fetch ages out of [fetching] after this (hygiene; the cap is the bound). Generous
         // so a slow-but-live transfer isn't reclaimed, since blobs can be large.
-        private const val FETCH_TTL_MS = 30 * 60_000L
+        const val FETCH_TTL_MS = 30 * 60_000L
+
+        // How many phones deep a pull-through goes past our own neighbours, counting the first (#195). A want of ours asks
+        // with this; each phone that lacks the blob wants it with one less and passes that on, and at 0 only queries
+        // and fetches. 3 reaches a holder four links away — a DM's author behind the hop the frame came from and two more
+        // phones that carry nothing for it — and bounds the echoes one root can make to its first three rings.
+        const val PULL_BUDGET = 3
 
         // What a served blob is called when our own store names no type for it. Matches MeshBlobStore.fileFor,
         // which materializes the temp file under the same fallback.

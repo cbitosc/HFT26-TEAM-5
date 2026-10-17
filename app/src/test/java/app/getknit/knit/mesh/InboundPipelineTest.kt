@@ -15,6 +15,7 @@ import app.getknit.knit.data.PeerRepository
 import app.getknit.knit.data.ReactionRepository
 import app.getknit.knit.data.VoiceAudio
 import app.getknit.knit.data.adts
+import app.getknit.knit.data.forward.ForwardRepository
 import app.getknit.knit.data.group.GroupEntity
 import app.getknit.knit.data.group.GroupMembersStore
 import app.getknit.knit.data.group.toGroupInfo
@@ -214,7 +215,7 @@ class InboundPipelineTest {
 
         override suspend fun liveIds(now: Long): List<String> = frames.keys.toList()
 
-        override suspend fun attachmentsNeedingFetch(): Map<String, String> = emptyMap()
+        override suspend fun attachmentsNeedingFetch(now: Long): Map<String, String> = emptyMap()
 
         override suspend fun recipientOf(id: String): String? = frames[id]?.envelope?.recipientId
 
@@ -2339,7 +2340,7 @@ class InboundPipelineTest {
             assertEquals("decided the moment it is heard", "photoB", rig.groupMap[group.id]?.photoHash)
             assertEquals(100L, rig.groupMap[group.id]?.photoUpdatedAt)
             assertNull("not shown until its bytes arrive", rig.groupMap[group.id]?.photoShownHash)
-            coVerify { rig.blobExchange.want("photoB", any(), any(), any()) }
+            coVerify { rig.blobExchange.want("photoB", any(), any(), any(), until = null, untilKnown = any()) }
 
             // The pulled blob lands → the group shows it now that it still decides on it.
             rig.pipeline.onObtained("photoB")
@@ -2375,7 +2376,7 @@ class InboundPipelineTest {
             coVerify(exactly = 0) { rig.blobs.deleteIfUnreferenced("photoC") }
 
             rig.deliver(alice, rig.groupUpdate(alice, group, sentAt = 8L))
-            coVerify(exactly = 1) { rig.blobExchange.want("photoC", any(), any(), any()) }
+            coVerify(exactly = 1) { rig.blobExchange.want("photoC", any(), any(), any(), until = null, untilKnown = any()) }
         }
 
     /**
@@ -2459,7 +2460,7 @@ class InboundPipelineTest {
             val same = rig.group(members = members, createdBy = alice.nodeId, id = "g-p", photoHash = "new", photoUpdatedAt = 9L)
             rig.deliver(alice, rig.groupUpdate(alice, same, sentAt = 12L))
 
-            coVerify { rig.blobExchange.want("new", alice.nodeId, null, null) }
+            coVerify { rig.blobExchange.want("new", alice.nodeId, null, null, until = null, untilKnown = any()) }
             assertEquals("old", rig.groupMap["g-p"]?.photoShownHash)
             assertEquals(0, rig.msgMap.values.count { it.kind == MessageEntity.KIND_GROUP_PHOTO })
 
@@ -2562,10 +2563,10 @@ class InboundPipelineTest {
             // Passed the have-it gate (has=false) and the budget gate (bytes=0) → pulled, asked of its author first.
             coVerify { rig.blobStore.has("att1") }
             coVerify { rig.blobs.carrierOnlyBlobBytes() }
-            coVerify { rig.blobExchange.want("att1", alice.nodeId, null, null) }
+            coVerify { rig.blobExchange.want("att1", alice.nodeId, null, null, until = null, untilKnown = any()) }
 
             rig.pipeline.onCarriedFrame(rig.attachmentChat(alice, id = "a9", attachmentHash = "att9"), via = "carrier")
-            coVerify { rig.blobExchange.want("att9", alice.nodeId, "carrier", null) }
+            coVerify { rig.blobExchange.want("att9", alice.nodeId, "carrier", null, until = null, untilKnown = any()) }
         }
 
     /** #136: the first ask goes to the likeliest holder alone — the author, and the hop the frame came from ranks too. */
@@ -2580,8 +2581,17 @@ class InboundPipelineTest {
             rig.deliver(alice, rig.attachmentChat(alice, id = "r1", attachmentHash = "room-pic", mime = "image/jpeg"), from = "carrier")
             rig.deliver(alice, rig.sealedFileDm(alice, id = "d1", attachmentHash = "dm-doc", fileName = "plan.pdf"), from = "carrier")
 
-            coVerify { rig.blobExchange.want("room-pic", alice.nodeId, "carrier", null) }
-            coVerify { rig.blobExchange.want("dm-doc", alice.nodeId, "carrier", null) }
+            coVerify { rig.blobExchange.want("room-pic", alice.nodeId, "carrier", null, until = null, untilKnown = any()) }
+            coVerify {
+                rig.blobExchange.want(
+                    "dm-doc",
+                    alice.nodeId,
+                    "carrier",
+                    null,
+                    until = 5L + ForwardRepository.DEFAULT_TTL_MS,
+                    untilKnown = true,
+                )
+            }
         }
 
     /**
@@ -2610,12 +2620,26 @@ class InboundPipelineTest {
             rig.deliver(alice, rig.sealedFileDm(alice, id = "d3", attachmentHash = "unsized", fileName = "c.pdf"), from = "c")
             rig.deliver(alice, rig.attachmentChat(alice, id = "r1", attachmentHash = "room-pic", mime = "image/jpeg"), from = "c")
 
-            coVerify(exactly = 0) { rig.blobExchange.want("big", any(), any(), any(), false) }
-            coVerify { rig.blobExchange.want("big", alice.nodeId, "c", null, true) }
+            coVerify(exactly = 0) {
+                rig.blobExchange.want("big", any(), any(), any(), false, approved = any(), pull = any(), until = any(), untilKnown = any())
+            }
+            coVerify { rig.blobExchange.want("big", alice.nodeId, "c", null, true, until = more(0L), untilKnown = any()) }
             // Judged small, so plain — which lifts the fast-only want custody made before the frame was opened.
-            coVerify { rig.blobExchange.want("small", alice.nodeId, "c", null, false) }
-            coVerify { rig.blobExchange.want("unsized", alice.nodeId, "c", null, false) }
-            coVerify(exactly = 0) { rig.blobExchange.want("room-pic", any(), any(), any(), true) }
+            coVerify { rig.blobExchange.want("small", alice.nodeId, "c", null, false, until = any(), untilKnown = any()) }
+            coVerify { rig.blobExchange.want("unsized", alice.nodeId, "c", null, false, until = any(), untilKnown = any()) }
+            coVerify(exactly = 0) {
+                rig.blobExchange.want(
+                    "room-pic",
+                    any(),
+                    any(),
+                    any(),
+                    true,
+                    approved = any(),
+                    pull = any(),
+                    until = any(),
+                    untilKnown = any(),
+                )
+            }
         }
 
     /**
@@ -2654,7 +2678,7 @@ class InboundPipelineTest {
             rig.deliver(alice, roomPost("r2", "pic", "image/jpeg", VideoInfo(30_000L, 480, 854, poster)), from = "c")
             rig.deliver(alice, roomPost("r3", "odd", "video/mp4", VideoInfo(30_000L, 0, 854, poster)), from = "c")
 
-            coVerify { rig.blobExchange.want("clip", alice.nodeId, "c", null, true) }
+            coVerify { rig.blobExchange.want("clip", alice.nodeId, "c", null, true, until = null, untilKnown = any()) }
             val row = checkNotNull(rig.msgMap["r1"])
             assertEquals(3_000_000L, row.attachmentSize)
             assertEquals(VideoInfo(30_000L, 480, 854, poster), row.videoInfo())
@@ -2753,8 +2777,10 @@ class InboundPipelineTest {
             val inflated = rig.sealedFileDm(alice, id = "d1", attachmentHash = "shared", fileName = "x.zip", attachmentSize = 9_000_000L)
             rig.deliver(alice, inflated, from = "c")
 
-            coVerify(exactly = 0) { rig.blobExchange.want("shared", any(), any(), any(), true, any()) }
-            coVerify { rig.blobExchange.want("shared", alice.nodeId, "c", null, false) }
+            coVerify(
+                exactly = 0,
+            ) { rig.blobExchange.want("shared", any(), any(), any(), true, any(), pull = any(), until = any(), untilKnown = any()) }
+            coVerify { rig.blobExchange.want("shared", alice.nodeId, "c", null, false, until = any(), untilKnown = any()) }
         }
 
     /** A row arriving after the user tapped its attachment comes in tapped, and its want is plain (ADR 2026-10.js2p). */
@@ -2785,7 +2811,9 @@ class InboundPipelineTest {
             )
 
             assertTrue("the new row comes in tapped", rig.msgMap.getValue("d2").attachmentFetchApproved)
-            coVerify(exactly = 0) { rig.blobExchange.want("big", any(), any(), any(), true, any()) }
+            coVerify(
+                exactly = 0,
+            ) { rig.blobExchange.want("big", any(), any(), any(), true, any(), pull = any(), until = any(), untilKnown = any()) }
         }
 
     @Test
@@ -2802,8 +2830,10 @@ class InboundPipelineTest {
                 from = "c",
             )
 
-            coVerify(exactly = 0) { rig.blobExchange.want("big", any(), any(), any(), true) }
-            coVerify { rig.blobExchange.want("big", alice.nodeId, "c", null, false) }
+            coVerify(exactly = 0) {
+                rig.blobExchange.want("big", any(), any(), any(), true, approved = any(), pull = any(), until = any(), untilKnown = any())
+            }
+            coVerify { rig.blobExchange.want("big", alice.nodeId, "c", null, false, until = more(0L), untilKnown = any()) }
         }
 
     @Test
@@ -2832,9 +2862,11 @@ class InboundPipelineTest {
             rig.pipeline.onCarriedFrame(dm("d2", "carols", "carol"))
             rig.pipeline.onCarriedFrame(rig.attachmentChat(alice, id = "r1", attachmentHash = "room-pic"))
             // Not opened yet, its size sealed: left to the delivery right behind, not wanted here at all.
-            coVerify(exactly = 0) { rig.blobExchange.want("ours-unopened", any(), any(), any(), any(), any()) }
-            coVerify { rig.blobExchange.want("carols", alice.nodeId, null, null, false) }
-            coVerify { rig.blobExchange.want("room-pic", alice.nodeId, null, null, false) }
+            coVerify(
+                exactly = 0,
+            ) { rig.blobExchange.want("ours-unopened", any(), any(), any(), any(), any(), pull = any(), until = any(), untilKnown = any()) }
+            coVerify { rig.blobExchange.want("carols", alice.nodeId, null, null, false, until = more(0L), untilKnown = any()) }
+            coVerify { rig.blobExchange.want("room-pic", alice.nodeId, null, null, false, until = null, untilKnown = any()) }
 
             // A re-served DM we already stored: no delivery follows, so its row judges it — here, tapped.
             rig.msgMap["d3"] =
@@ -2850,11 +2882,11 @@ class InboundPipelineTest {
                     attachmentFetchApproved = true,
                 )
             rig.pipeline.onCarriedFrame(dm("d3", "ours-tapped", rig.self.nodeId))
-            coVerify { rig.blobExchange.want("ours-tapped", alice.nodeId, null, null, false) }
+            coVerify { rig.blobExchange.want("ours-tapped", alice.nodeId, null, null, false, until = any(), untilKnown = any()) }
 
             rig.settings.bluetoothDownloadLimitBytes.value = null
             rig.pipeline.onCarriedFrame(dm("d4", "ours-no-limit", rig.self.nodeId))
-            coVerify { rig.blobExchange.want("ours-no-limit", alice.nodeId, null, null, false) }
+            coVerify { rig.blobExchange.want("ours-no-limit", alice.nodeId, null, null, false, until = any(), untilKnown = any()) }
         }
 
     /**
@@ -2884,10 +2916,22 @@ class InboundPipelineTest {
             rig.pipeline.onCarriedFrame(roomPost("r1", "big-clip", 3_000_000L), via = "c")
             rig.pipeline.onCarriedFrame(roomPost("r2", "small-clip", 400_000L), via = "c")
             rig.pipeline.onCarriedFrame(roomPost("r3", "undeclared", null), via = "c")
-            coVerify { rig.blobExchange.want("big-clip", alice.nodeId, "c", null, true) }
-            coVerify(exactly = 0) { rig.blobExchange.want("big-clip", any(), any(), any(), false) }
-            coVerify { rig.blobExchange.want("small-clip", alice.nodeId, "c", null, false) }
-            coVerify { rig.blobExchange.want("undeclared", alice.nodeId, "c", null, false) }
+            coVerify { rig.blobExchange.want("big-clip", alice.nodeId, "c", null, true, until = null, untilKnown = any()) }
+            coVerify(exactly = 0) {
+                rig.blobExchange.want(
+                    "big-clip",
+                    any(),
+                    any(),
+                    any(),
+                    false,
+                    approved = any(),
+                    pull = any(),
+                    until = any(),
+                    untilKnown = any(),
+                )
+            }
+            coVerify { rig.blobExchange.want("small-clip", alice.nodeId, "c", null, false, until = null, untilKnown = any()) }
+            coVerify { rig.blobExchange.want("undeclared", alice.nodeId, "c", null, false, until = null, untilKnown = any()) }
 
             // The user already tapped the hash on another row: the post comes in tapped, and its fetch is plain.
             rig.msgMap["r0"] =
@@ -2902,11 +2946,11 @@ class InboundPipelineTest {
                     attachmentFetchApproved = true,
                 )
             rig.pipeline.onCarriedFrame(roomPost("r4", "tapped-clip", 3_000_000L), via = "c")
-            coVerify { rig.blobExchange.want("tapped-clip", alice.nodeId, "c", null, false) }
+            coVerify { rig.blobExchange.want("tapped-clip", alice.nodeId, "c", null, false, until = null, untilKnown = any()) }
 
             rig.settings.bluetoothDownloadLimitBytes.value = null // "Never ask"
             rig.pipeline.onCarriedFrame(roomPost("r5", "never-clip", 3_000_000L), via = "c")
-            coVerify { rig.blobExchange.want("never-clip", alice.nodeId, "c", null, false) }
+            coVerify { rig.blobExchange.want("never-clip", alice.nodeId, "c", null, false, until = null, untilKnown = any()) }
         }
 
     /** ADR 2026-10.g24x: a DM's linked recipient is fetching its picture now, so a carrier holds its own pull back. */
@@ -2937,13 +2981,34 @@ class InboundPipelineTest {
             rig.pipeline.onCarriedFrame(dm("d2", "for-absent-carol", "carol"))
             rig.pipeline.onCarriedFrame(rig.attachmentChat(alice, id = "r1", attachmentHash = "room-pic"))
 
-            coVerify(exactly = 0) { rig.blobExchange.want("for-linked-bob", any(), any(), any()) }
-            coVerify { rig.blobExchange.want("for-absent-carol", alice.nodeId, null, null) }
-            coVerify { rig.blobExchange.want("room-pic", alice.nodeId, null, null) }
+            coVerify(exactly = 0) {
+                rig.blobExchange.want(
+                    "for-linked-bob",
+                    any(),
+                    any(),
+                    any(),
+                    fastOnly = any(),
+                    approved = any(),
+                    pull = any(),
+                    until = any(),
+                    untilKnown = any(),
+                )
+            }
+            coVerify {
+                rig.blobExchange.want(
+                    "for-absent-carol",
+                    alice.nodeId,
+                    null,
+                    null,
+                    until = 5L + ForwardRepository.DEFAULT_TTL_MS,
+                    untilKnown = false,
+                )
+            }
+            coVerify { rig.blobExchange.want("room-pic", alice.nodeId, null, null, until = null, untilKnown = any()) }
 
             rig.transport.disconnect(bob)
             rig.pipeline.onCarriedFrame(dm("d3", "for-gone-bob", "bob"))
-            coVerify { rig.blobExchange.want("for-gone-bob", alice.nodeId, null, null) }
+            coVerify { rig.blobExchange.want("for-gone-bob", alice.nodeId, null, null, until = any(), untilKnown = any()) }
         }
 
     @Test
@@ -3209,7 +3274,19 @@ class InboundPipelineTest {
 
             rig.deliver(alice, rig.attachmentChat(alice, id = "v1", attachmentHash = "room-note", mime = VoiceAudio.MIME))
 
-            coVerify(exactly = 0) { rig.blobExchange.want("room-note", any(), any(), any()) }
+            coVerify(exactly = 0) {
+                rig.blobExchange.want(
+                    "room-note",
+                    any(),
+                    any(),
+                    any(),
+                    fastOnly = any(),
+                    approved = any(),
+                    pull = any(),
+                    until = any(),
+                    untilKnown = any(),
+                )
+            }
             coVerify(exactly = 1) { rig.messages.setVoiceMeta("room-note", VoiceAudio.durationMs(note)!!, null) }
         }
 
@@ -3342,7 +3419,19 @@ class InboundPipelineTest {
             assertEquals("room-hash", row.attachmentHash)
             assertEquals("image/jpeg", row.attachmentMime)
             assertNull(row.attachmentKey)
-            coVerify(exactly = 0) { rig.blobExchange.want("room-hash", any(), any(), any()) } // held already: nothing asked of the mesh
+            coVerify(exactly = 0) {
+                rig.blobExchange.want(
+                    "room-hash",
+                    any(),
+                    any(),
+                    any(),
+                    fastOnly = any(),
+                    approved = any(),
+                    pull = any(),
+                    until = any(),
+                    untilKnown = any(),
+                )
+            } // held already: nothing asked of the mesh
             coVerify { rig.messages.attachmentKeyWantingPlain("room-hash") }
         }
 
@@ -4714,7 +4803,19 @@ class InboundPipelineTest {
             rig.deliver(alice, rig.profile(alice, avatarHash = "av3", sentAt = 5L))
 
             assertNull("a held but refused avatar stays off the row", rig.peerMap[alice.nodeId]?.avatarHash)
-            coVerify(exactly = 0) { rig.blobExchange.want("av3", any(), any(), any()) }
+            coVerify(exactly = 0) {
+                rig.blobExchange.want(
+                    "av3",
+                    any(),
+                    any(),
+                    any(),
+                    fastOnly = any(),
+                    approved = any(),
+                    pull = any(),
+                    until = any(),
+                    untilKnown = any(),
+                )
+            }
 
             rig.settings.contentFilteringEnabled.value = false
             rig.deliver(alice, rig.profile(alice, avatarHash = "av3", sentAt = 6L))
@@ -4746,7 +4847,19 @@ class InboundPipelineTest {
 
             assertEquals("Ann", rig.peerMap[alice.nodeId]?.name)
             assertNull("a held but refused avatar stays off the row", rig.peerMap[alice.nodeId]?.avatarHash)
-            coVerify(exactly = 0) { rig.blobExchange.want("av4", any(), any(), any()) }
+            coVerify(exactly = 0) {
+                rig.blobExchange.want(
+                    "av4",
+                    any(),
+                    any(),
+                    any(),
+                    fastOnly = any(),
+                    approved = any(),
+                    pull = any(),
+                    until = any(),
+                    untilKnown = any(),
+                )
+            }
 
             rig.settings.contentFilteringEnabled.value = false
             rig.deliver(

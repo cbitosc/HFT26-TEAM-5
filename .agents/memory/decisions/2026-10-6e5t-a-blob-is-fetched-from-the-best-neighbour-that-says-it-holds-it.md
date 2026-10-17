@@ -234,3 +234,11 @@ the answers, as it already did for a holder on a live Wi-Fi Aware link: a trace 
 after the author answered in 124 ms. And `onHaveQuery` answers SENDING for an ask the holder has parked behind
 another Bluetooth copy of the same blob, so the asker waits on it as it would on any copy already on the way. Both
 are ADR 2026-10.g24x's.
+
+## Amendment 2026-10-17 — a pull-through carries a hop budget and a deadline (#195)
+
+Step 4's pull-through, and the backoff of a cycle that asked blind, are amended by ADR 2026-10.2drc. Every `blobreq`
+now carries how many phones deep it may still pull (`BlobReqContent.pull`) and until when (`BlobReqContent.until`, a
+DM's custody window). A neighbour that lacks the blob wants it with a hop less, and an ask keeps a want alive only when
+it carries at least the want's own budget, so echoes can no longer keep each other or their root alive. Read that ADR
+for the rules, the costs and the iOS companion owed.

@@ -640,6 +640,14 @@ doc). **Don't start a deferred item without explicit direction.**
   link-down step (a want whose fetch peer left waits for the tick or a link-up). The iOS port owes the responder (and then its own asker) as a companion change. Partial fetch is designed
   for, not built: `PARTIAL` + `held` reserved in the answer, and it needs `BlobReqContent.end`, a `.part` serve and a
   `FileHeaderWire` partial marker. Querying unlinked Wi-Fi Aware peers over the message plane is deferred too.
+- **Giving up on an attachment nobody can bring** (#195, ADR 2026-10.2drc). A received attachment whose bytes never
+  arrive stays wanted for as long as its row lives. Since #195 a DM's row past its frame's custody window asks nobody
+  to pull it through, and a want dead for a day is queried a few times a day, so the cost is bounded. The want itself never ends. Ending it means a verdict on the row (a column and its migration), a bubble that
+  says the picture was lost, and a rule for bytes that turn up later: deferred until a user asks for it.
+- **The pull budget on iOS** (ADR 2026-10.2drc). The iOS port asks with no `pull` / `until` and echoes without bound.
+  Its companion owes the two fields, the absent-is-1 and `pull = 0` rules, a hop less on its echoes, the refresh rule,
+  the deadline and the two vectors. Until then an iPhone and one of Android's fetch-only wants keep each other going
+  with no root; Android caps its own half at one TTL per want (`PullBudgetLabTest`'s iOS-rules case).
 - **Frame compaction: what round 2 (ADR 060, the `0x05` transcoder) left** — round 1 (ADR 059, crypto v3)
   and round 2 (ADR 060: a schema-aware re-encoding of `signed` the receiver rebuilds byte-exact before
   verifying) both landed 2026-08-29; measured after: signed v3 ✓✓ tick **221 B, one packet at 228/231/255**,

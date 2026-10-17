@@ -424,6 +424,13 @@ class FrameTranscoderTest {
                 "dirty-tail-id" to envelope(FrameType.RECEIPT, receipt, id = "AAAAAAAAAAAAAAAAAAAAAB"),
                 "uppercase-node" to envelope(FrameType.RECEIPT, receipt, senderId = nodeId(2).uppercase()),
                 "uppercase-hash" to envelope(FrameType.BLOB_REQ, WireCodec.encodePayload(BlobReqContent(hash.uppercase()))),
+                // Keys schema 1 does not know ride as text plus the raw value: an ask's resume, fast-only, budget and
+                // deadline (#195) come back byte-exact.
+                "blobreq-pull-until" to
+                    envelope(
+                        FrameType.BLOB_REQ,
+                        WireCodec.encodePayload(BlobReqContent(hash, offset = 4096, fastOnly = true, pull = 3, until = 1_800_000_000_000)),
+                    ),
                 "small-sentAt" to envelope(FrameType.RECEIPT, receipt, sentAt = 100L),
                 "huge-sentAt" to envelope(FrameType.RECEIPT, receipt, sentAt = (1L shl 48) + 1),
                 "odd-pubkey-and-tag" to

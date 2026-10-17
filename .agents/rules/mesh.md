@@ -218,8 +218,14 @@ free). Two invariants that are easy to break:
   memo; its HAVE is the serve predicate read through `BlobStore.servable` (never `fileFor`, which writes plaintext),
   its SENDING is `fileInFlightTo` or a *peek* at the memo, and its reads run link → `storing` → store. Neighbours
   that cannot answer keep ADR 2026-10.f7gg's round, never made one-by-one; a grace counts from the first look that
-  finds the holder no longer streaming to us. Only a *dead* cycle backs off (every neighbour asked said NONE, nobody
-  asked blind): one that asked anyone blind keeps f7gg's pace, as does a build with `-PblobQuery=false`. The
+  finds the holder no longer streaming to us. Only a *dead* cycle backs off: every neighbour asked said NONE, or —
+  from the third cycle in a row without a lead, in every build, `-PblobQuery=false` included — its blind asks brought
+  nothing (#195); a blind ask is still made in every cycle that opens. **A pull-through carries a hop budget and a
+  deadline** (ADR 2026-10.2drc): every `blobreq` says how deep it may still pull (`pull`, `PULL_BUDGET` from a want of
+  our own, one less from each echo, absent read as a fetch only) and until when (`until`, a DM's custody window). An
+  ask keeps a want alive only when it carries at least the want's own budget — never a local rule that guesses root
+  from echo — and past the deadline nobody pulls or makes an echo. Any want that may pull asks a newcomer that lacks the
+  blob at once, in the cycle it linked in. The
   puller's ask opens a due cycle before it marks the puller. A state the reader does not know is never HAVE —
   `PARTIAL` is reserved, and its serve will need a request-side gate (`BlobReqContent.end`), never the bit alone.
   Both types are unsigned and point-to-point: `FrameType.isUnsignedPointToPoint` keeps them out of presence

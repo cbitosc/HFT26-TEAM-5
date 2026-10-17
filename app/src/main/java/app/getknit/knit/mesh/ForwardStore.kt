@@ -91,16 +91,17 @@ interface ForwardStore {
      * Content hashes referenced by a carried chat frame whose blob we don't yet hold — the carrier's side of
      * the "still-missing blobs" set. Re-requested on startup / neighbor-join so a carrier keeps pulling the
      * image it is custodying until it (or the frame's TTL) resolves. Each maps to the author of the earliest frame
-     * naming it, whom the re-armed want asks first (ADR 2026-10.f7gg).
+     * naming it, whom the re-armed want asks first (ADR 2026-10.f7gg). Live frames only at [now]: one past its TTL is
+     * carried by nobody, so nothing re-arms a pull for it (#195).
      */
-    suspend fun attachmentsNeedingFetch(): Map<String, String>
+    suspend fun attachmentsNeedingFetch(now: Long): Map<String, String>
 
     /**
      * Every carried frame naming an attachment whose blob we don't yet hold, one entry per frame: whom it is for and
      * when we took it into custody. What [CarrierPullPolicy] reads to hold a pull back while the recipient is linked
      * (ADR 2026-10.g24x). The default holds nothing back, for the fakes; the Room implementation reads the rows.
      */
-    suspend fun carriedAttachments(): List<CarriedAttachment> = emptyList()
+    suspend fun carriedAttachments(now: Long): List<CarriedAttachment> = emptyList()
 
     /** The carried frame [id]'s cleartext recipient, or null if not held. */
     suspend fun recipientOf(id: String): String?
@@ -152,4 +153,6 @@ data class CarriedAttachment(
     val member: Boolean = false,
     val roster: Set<String>? = null,
     val declaredSize: Long? = null,
+    // The frame's own `sentAt`: a DM's carrier pulls it through until a custody window past it (#195, ADR 2026-10.2drc).
+    val sentAt: Long? = null,
 )

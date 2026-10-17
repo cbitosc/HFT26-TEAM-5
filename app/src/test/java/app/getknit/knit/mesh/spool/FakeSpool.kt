@@ -740,7 +740,7 @@ class FakeCustody(
 
     override suspend fun sweepExpired(now: Long): Int = 0
 
-    override suspend fun attachmentsNeedingFetch(): Map<String, String> = emptyMap()
+    override suspend fun attachmentsNeedingFetch(now: Long): Map<String, String> = emptyMap()
 }
 
 /**

@@ -486,6 +486,18 @@ class WireSerializationTest {
         assertEquals(OlderBlobReq("h"), WireCodec.decodePayload<OlderBlobReq>(WireCodec.encodePayload(fast)))
     }
 
+    @Test
+    fun aPullBudgetAndDeadlineRoundTripAndAPlainAskIsTheBytesItAlwaysWas() {
+        // #195, ADR 2026-10.2drc: both fields additive — absent unless set; an older reader skips them.
+        val ask = BlobReqContent("h", offset = 4096, fastOnly = true, pull = 3, until = 1_800_000_000_000)
+        assertEquals(ask, WireCodec.decodePayload<BlobReqContent>(WireCodec.encodePayload(ask)))
+        assertArrayEquals(WireCodec.encodePayload(OlderBlobReq("h")), WireCodec.encodePayload(BlobReqContent("h")))
+        val older = WireCodec.decodePayload<BlobReqContent>(WireCodec.encodePayload(OlderBlobReq("h")))
+        assertNull("an older build's ask carries no budget: the receiver reads it as a fetch only", older?.pull)
+        assertNull(older?.until)
+        assertEquals(OlderBlobReq("h"), WireCodec.decodePayload<OlderBlobReq>(WireCodec.encodePayload(ask)))
+    }
+
     /** `BlobReqContent` as builds before ADR 2026-10.wtyc encoded it: the hash alone. */
     @Serializable
     private data class OlderBlobReq(

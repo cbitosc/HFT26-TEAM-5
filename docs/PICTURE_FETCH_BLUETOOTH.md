@@ -256,6 +256,19 @@ way — by custody's want, which runs ahead of the delivery's, and by the tick's
 row names yet, both judged by the size the post declares. A post that declares none (an older build, the iOS port) is
 never held.
 
+**A pull-through carries a hop budget and a deadline** (#195, ADR 2026-10.2drc). When no neighbour holds the blob, the
+want asks the ones that lack it to pull it through, and each of them wants it in turn. Every ask says how many phones
+deep it may still go: 3 from a want of our own, one less from each phone that echoes it, and at 0 a phone only queries
+and fetches. So a holder four links away is still reached, and the echoes of one want stay within three rings. An ask
+keeps a want alive only when it carries at least as much budget as the want itself, so echoes cannot keep each other
+alive, or their root once it stops. Every ask also carries a deadline: for a DM's picture, the DM's custody window, the
+24 h in which the mesh carries the DM itself. Past it nobody pulls the picture through or wants it for someone else. A
+pull never needed a carrier, so the cost is a far end two or more hops away, reached again once the two ends link
+directly. An older build's ask, and an iPhone's today, carry neither field: here they only ever make a fetch, and never
+keep one alive. The iPhone itself still echoes without bound until its port carries the fields. Past two
+cycles without a lead, a cycle that asked an iPhone blind and brought nothing backs off too. A want dead for a day backs
+off from 6 min into hours, unless it is fast-only.
+
 ## How fast a link is fed
 
 The pace of a Bluetooth file is per link, read before every chunk (`BluetoothMeshTransport.paceFor`):

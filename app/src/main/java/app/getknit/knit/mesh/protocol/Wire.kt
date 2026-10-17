@@ -365,12 +365,22 @@ data class ReactionContent(
  * fetch of an attachment declared over their limit, so a holder serves it over a live Wi-Fi Aware link, or one it
  * raises for it, and otherwise not at all — never over Bluetooth. Null for every other ask, and omitted from the CBOR
  * then, so a plain ask stays byte-identical. A holder that predates the field skips it and serves as it always has.
+ *
+ * [pull] is how many phones deep this ask may still pull the blob through, the receiver counted (#195, ADR
+ * 2026-10.2drc): a receiver that lacks the blob wants it with `pull − 1` and asks its own neighbours with that, and at
+ * 0 only queries and fetches; asked with 0 it serves the blob if it holds it and makes no want. An asker sends its
+ * want's budget, `BlobExchange.PULL_BUDGET` for a want of its own. Absent reads as 1 — a fetch only, never a pull
+ * further — which is what an older build's ask and the iOS port's today get. [until] is the asker's root's deadline for
+ * pulling through, epoch ms on the frame's own clock (a DM's `sentAt` plus custody's TTL): past it nobody pulls the blob
+ * through or wants it for someone else. Null for no deadline. Both are omitted when null; an older reader skips them.
  */
 @Serializable
 data class BlobReqContent(
     val hash: String,
     val offset: Long? = null,
     val fastOnly: Boolean? = null,
+    val pull: Int? = null,
+    val until: Long? = null,
 )
 
 /**
