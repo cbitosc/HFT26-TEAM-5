@@ -1,7 +1,10 @@
 package app.getknit.knit.mesh.spool
 
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -166,6 +169,8 @@ class FreeTicketRefresherTest {
             free = store,
             accounts = accounts,
             nonces = { ByteArray(AccountStamp.NONCE_BYTES) { (it + nonceSeed++).toByte() } },
+            // On the test's own dispatcher, so virtual time drives the loop's whole round.
+            mine = { day, nonce, bits -> AccountStamp.mine(day, nonce, bits, 1L shl 20) },
         )
 
     private fun issued(
@@ -314,6 +319,36 @@ class FreeTicketRefresherTest {
             now += TicketRefresher.WANT_TTL_MS + 1
             assertNull(r.runOnce())
             assertTrue(swap.asks.isEmpty())
+        }
+
+    @OptIn(ExperimentalCoroutinesApi::class) // advanceTimeBy, runCurrent
+    @Test
+    fun aWantThatLandsWhileARoundRunsIsNotLost() =
+        runTest {
+            // Two relays, `alpha` looked at first. While the round swaps `lab`'s free key, an upload locks on `alpha`,
+            // already passed over. Its want must start the next round at once, not wait out the 15 min sleep: a wake
+            // nobody was collecting for when it came would be dropped (mesh-lab-reviewer, 2026-10-17).
+            val alpha = "alpha.example.org"
+            urls.value = setOf(URL, "wss://$alpha/spool/v1")
+            allowFree()
+            store.setFreeIssuer(alpha, FREE_ISSUER)
+            store.setFreeConsent(alpha, true)
+            store.putKey(HOST, freeKey)
+            lateinit var r: TicketRefresher
+            swap.next = {
+                r.uploadWanted("wss://$alpha/spool/v1")
+                issued()
+            }
+            accounts.params = { AccountAnswer.Params(alpha, BITS, DAY) }
+            accounts.created += AccountAnswer.Created(OTHER_KEY, alpha)
+            r = refresher()
+            r.uploadWanted(URL)
+            r.start(backgroundScope)
+            advanceTimeBy(60_000L)
+            runCurrent()
+            assertEquals(listOf(FREE_ISSUER to alpha), accounts.gets)
+            assertEquals(HeldKey(FREE_ISSUER, OTHER_KEY, free = true), store.held.value[alpha])
+            r.stop()
         }
 
     // ── the account exchange (C-7.6-35, C-7.6-36) ──────────────────────────────────────────────────────

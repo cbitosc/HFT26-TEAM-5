@@ -4,15 +4,14 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
@@ -193,7 +192,10 @@ class TicketRefresher(
     // Relay host name → when an upload there was last locked for want of a ticket (epoch millis).
     private val waiting = ConcurrentHashMap<String, Long>()
 
-    private val wanted = MutableSharedFlow<Unit>(extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+    // Bumped by every [uploadWanted]: a level, not an edge. The loop reads it before a round and wakes at once when it
+    // moved, so a want that lands while a round runs, or before the wait subscribes, is never dropped — a `SharedFlow`
+    // with no collector at that moment would drop it, and the upload would wait out [maxSleepMs].
+    private val wants = MutableStateFlow(0L)
 
     private val _asking = MutableStateFlow<Set<String>>(emptySet())
 
@@ -208,7 +210,7 @@ class TicketRefresher(
         val host = SpoolUrl.hostname(url) ?: return
         val fresh = waiting.put(host, clock()) == null
         if (fresh) log("$host: an upload waits for a ticket")
-        wanted.tryEmit(Unit)
+        wants.update { it + 1 }
     }
 
     /** Whether an upload is waiting at [host] right now, as the bridge reports it. */
@@ -230,9 +232,10 @@ class TicketRefresher(
         job =
             session.launch {
                 while (isActive) {
+                    val seen = wants.value
                     val next = runOnce()
                     val wait = if (next == null) maxSleepMs else (next - clock()).coerceIn(0L, maxSleepMs)
-                    withTimeoutOrNull(wait) { wakes().first() }
+                    withTimeoutOrNull(wait) { merge(wakes(), wants.filter { it != seen }.map { }).first() }
                 }
             }
     }
@@ -491,7 +494,6 @@ class TicketRefresher(
             tickets.changes.drop(1).map { },
             urls.distinctUntilChanged().drop(1).map { },
             urls.map { it.isNotEmpty() }.distinctUntilChanged().flatMapLatest { armed -> if (armed) routeChanges else emptyFlow() },
-            wanted,
             (free?.freeConsent ?: flowOf(emptyMap())).drop(1).map { },
         )
 
