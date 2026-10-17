@@ -5547,6 +5547,53 @@ class InboundPipelineTest {
             )
         }
 
+    /**
+     * The field's shape (2026-10-16, ADR 2026-10.9wvr): a session we initiated more than 48 h ago, so the era gate's
+     * escape is open, whose epochs have churned past the 16-row cap. A restart's custody re-serve brings frames the
+     * peer sealed against epochs we retired long since, behind one it has sealed against after. They are doomed like a
+     * pre-era tail and must neither buy a reset nor sit in the distinct-id LRU; an EPOCH_GONE on an epoch at or above
+     * the lowest we hold (a hole) is still the split-era case and still counts.
+     */
+    @Test
+    fun anEpochGoneOnAnEpochWeRetiredBehindThePeersAckIsNeverEvidence() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.initiateEraAt(alice, System.currentTimeMillis() - 49 * HOUR_MS)
+            // A long-lived session: confirmed, Alice's newest seal against us on our epoch 20, epochs 12..20 kept.
+            val session =
+                checkNotNull(
+                    rig.ratchetStore.session(alice.nodeId),
+                ).copy(confirmed = true, initEphPub = null, highestPeAcked = 20)
+            rig.db.ratchetDao().deleteLocalEpochs(alice.nodeId, listOf(1))
+            (12..20).forEach { epoch ->
+                val pair = RatchetCrypto.generateKeyPair()
+                rig.ratchetStore.commitSend(session, RatchetEngine.LocalEpoch(epoch, pair.priv, pair.pub, createdAt = epoch.toLong()))
+            }
+            rig.db.ratchetDao().deleteLocalEpochs(alice.nodeId, listOf(15))
+            val before = rig.resetsSent()
+            val author = V2Author(alice, rig)
+
+            // An epoch of Alice's we hold no chain for, based on the epoch named: the open reaches the fresh derivation
+            // and finds no base key.
+            fun basedOn(
+                id: String,
+                pe: Int,
+            ) = author.dm(id, "x", sentAt = System.currentTimeMillis() - 51 * HOUR_MS) { h ->
+                RatchetHeader(se = h.se + 1, ek = h.ek, pe = pe, n = h.n, init = null, flags = h.flags)
+            }
+
+            (1..3).forEach { rig.deliver(alice, basedOn("retired-$it", pe = 5)) }
+            assertEquals(3L, rig.drops(DropReason.RATCHET_EPOCH_GONE))
+            assertEquals("ciphertext on a key retention already took is doomed, not divergence", before, rig.resetsSent())
+
+            // Two holes: had the doomed three entered the LRU, these would make five distinct and fire.
+            (1..2).forEach { rig.deliver(alice, basedOn("hole-$it", pe = 15)) }
+            assertEquals("the doomed frames never took a slot in the distinct-id LRU", before, rig.resetsSent())
+            rig.deliver(alice, basedOn("hole-3", pe = 15))
+            assertEquals("a missing epoch we should still hold is the split-era case", before + 1, rig.resetsSent())
+        }
+
     @Test
     fun oneFrameReservedFromCustodyNeverRequestsAResetHoweverOftenItArrives() =
         runTest {

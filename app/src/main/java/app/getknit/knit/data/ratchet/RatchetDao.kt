@@ -51,6 +51,11 @@ interface RatchetDao {
     @Query("SELECT * FROM ratchet_local_epochs WHERE peerId = :peerId ORDER BY createdAt DESC, epoch DESC")
     suspend fun localEpochsNewestFirst(peerId: String): List<RatchetLocalEpochEntity>
 
+    // The lowest NUMBER held, deliberately not the oldest by mint time: a dead era's surviving rows (ADR 027)
+    // only pull it down, which keeps the retired-base gate on the side of counting (ADR 2026-10.9wvr).
+    @Query("SELECT MIN(epoch) FROM ratchet_local_epochs WHERE peerId = :peerId")
+    suspend fun lowestLocalEpoch(peerId: String): Int?
+
     @Query("DELETE FROM ratchet_local_epochs WHERE peerId = :peerId AND epoch IN (:epochs)")
     suspend fun deleteLocalEpochs(
         peerId: String,

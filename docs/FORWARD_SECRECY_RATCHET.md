@@ -298,7 +298,9 @@ skipped-key path absorbs.
   Inbound replacements are additionally rate-limited (1/peer/h, the facade's `allowReplacement` gate).
 - **Reset request.** Trigger: ≥3 distinct undecryptable-v2 frame ids from a pinned peer
   (`RATCHET_NO_SESSION`/`RATCHET_EPOCH_GONE`/`RATCHET_AEAD_FAIL`, ADR 023), each from the era it would
-  abandon (ADR 024/026), rate-limited to one per 6 h (persisted). The request is an ordinary v2 DM carrying a fresh init, `flags = RESET`, and
+  abandon (ADR 024/026) and, for `RATCHET_EPOCH_GONE`, not sealed against an epoch of ours that
+  retention retired behind the peer's own progress — `pe ≥ 1`, below the lowest local epoch number
+  still held and below `highestPeAcked` (ADR 2026-10.9wvr) — rate-limited to one per 6 h (persisted). The request is an ordinary v2 DM carrying a fresh init, `flags = RESET`, and
   `MessageContent.ctl = CTL_SESSION_RESET` — deliberately *not* a new frame type, which v1 relays
   would refuse to custody (`isCustodial` is a fixed list); as a chat frame it floods, custodies,
   and reaches an offline peer. The receiver (frame-signed, newer `init.at`) adopts per the

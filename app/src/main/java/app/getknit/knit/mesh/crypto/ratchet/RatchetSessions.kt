@@ -289,8 +289,8 @@ class RatchetSessions(
      *
      * The distinct-id rule bounds one stuck frame, not a stuck *era*: a re-served backlog is many distinct
      * ids and walks straight through it. Callers must therefore gate on liveness first — see
-     * `InboundPipeline.isLiveEvidence` — so frames that were unreadable before they arrived never reach
-     * this counter at all.
+     * `InboundPipeline.isLiveEvidence`, and [retiredBase] for an `EPOCH_GONE` — so frames that were
+     * unreadable before they arrived never reach this counter at all.
      */
     suspend fun noteUndecryptable(
         peerId: String,
@@ -537,6 +537,30 @@ class RatchetSessions(
      */
     suspend fun sessionFor(peerId: String): RatchetEngine.SessionState? = locked { store.session(peerId) }
 
+    /**
+     * Whether a frame from [peerId] that failed as [RatchetEngine.OpenOutcome.Failed.EPOCH_GONE] was sealed against
+     * a local epoch [pe] this phone retired *behind the peer's own progress* — null when it may still be evidence.
+     * One locked read of the session and the surviving epoch numbers, judged by [isRetiredBase]; the caller gates the
+     * reset heuristic on it ahead of [noteUndecryptable], the way it gates a pre-era frame (ADR 2026-10.9wvr). No
+     * session is never retired: there is nothing to protect, and a reset is the only answer to a peer we cannot read.
+     */
+    suspend fun retiredBase(
+        peerId: String,
+        pe: Int,
+    ): RetiredBase? =
+        locked {
+            val session = store.session(peerId) ?: return@locked null
+            val lowest = store.lowestLocalEpoch(peerId) ?: return@locked null
+            if (isRetiredBase(pe, session.highestPeAcked, lowest)) RetiredBase(pe, lowest, session.highestPeAcked) else null
+        }
+
+    /** What [retiredBase] judged on, for the gate's log line: the frame's base, our lowest surviving epoch, the peer's newest. */
+    class RetiredBase(
+        val pe: Int,
+        val lowestRetained: Int,
+        val highestPeAcked: Int,
+    )
+
     /** Debug-bridge ground truth for `EPOCH_GONE`: which of our epoch privs for [peerId] actually survive. */
     suspend fun debugLocalEpochs(peerId: String): List<Pair<Int, Long>> = locked { store.debugLocalEpochs(peerId) }
 
@@ -618,6 +642,35 @@ class RatchetSessions(
          * disabling the heuristic outright — see ADR 026.
          */
         const val STRANDED_TAIL_MS = 48 * 60 * 60_000L
+
+        /**
+         * The retired-base rule (ADR 2026-10.9wvr): an `EPOCH_GONE` whose header names our local epoch [pe] is doomed
+         * ciphertext, never evidence that the session is broken, when both hold:
+         *
+         * - **[pe] is below [lowestRetained]**, the lowest epoch number we still hold for the peer. The key is gone by
+         *   retention and nothing brings it back; a reset strands the frame just the same. A [pe] at or above it that
+         *   is missing (a hole), or past our newest, is not ours to explain away — the split-era case the heuristic
+         *   exists for — and still counts. The lowest *number*, not the oldest mint: after our own reset restarts the
+         *   numbering, a dead era's surviving high rows sit beside the live era's low ones, and the minimum only drops,
+         *   which narrows this rule rather than widening it.
+         * - **[pe] is below [highestPeAcked]**, the newest of our epochs the peer has sealed a frame against that we
+         *   opened under the active root (recorded only on a fresh derivation, ADR 2026-09.pz9g). The peer's DH base
+         *   for us only moves forward within our numbering, so a frame on an older one was sealed before the peer had
+         *   moved on — its past, not its present — and the channel has demonstrably worked since. This is what keeps a
+         *   peer still *based* on an epoch the 16-row cap evicted (one that never heard our newer ones) counting: there
+         *   [pe] equals its newest seal against us, never less. Our own reset zeroes the ack with the fresh
+         *   initiation, so the rule stays shut until the peer seals under the new root.
+         *
+         * `pe = 0` is never retired here. It names our signed prekey (the init's `pkid`), whose retention is time-based
+         * — current plus four weekly — not acked, so a missing one may be a peer still pinned to a rotated prekey that
+         * will keep sealing inits we cannot open: a live failure only a reset or our profile cures. Both numbers are
+         * this phone's own (our epoch counter, echoed back), so no clock and no other device's counter enters.
+         */
+        fun isRetiredBase(
+            pe: Int,
+            highestPeAcked: Int,
+            lowestRetained: Int,
+        ): Boolean = pe >= 1 && pe < lowestRetained && pe < highestPeAcked
 
         /** Inbound session-replacement floor per peer (in-memory). */
         const val REPLACEMENT_MIN_INTERVAL_MS = 60 * 60_000L

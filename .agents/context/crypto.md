@@ -58,6 +58,18 @@ LoRa plane (2026-09.ggq4).
   session age the gate opens), and fires at most once per 6 h. `DUPLICATE` and `BAD_HEADER` never trigger:
   a consumed index proves the frame already opened, and a burst of duplicates is almost always a re-send cadence
   bug (053's tick). A reset repairs the channel, never the backlog.
+- **When touching `RatchetSessions.retiredBase` / `isRetiredBase`, `RatchetStore.lowestLocalEpoch`, or the
+  `EPOCH_GONE` half of `maybeRequestReset`:** READ ADR 2026-10.9wvr, then ADR 027. An `EPOCH_GONE` whose `pe` is
+  below the lowest local epoch number we hold **and** below `highestPeAcked` is doomed and never reaches
+  `noteUndecryptable`: the key went to retention behind an epoch the peer has sealed against since. A hole, a `pe`
+  past our newest and `pe = 0` (the signed prekey, time-retained, #174) still count; the lowest *number* (a dead era's
+  rows only lower it) and our own reset zeroing the ack keep the rule on the side of counting. Our own numbers only,
+  no clock. Regression: `RatchetSessionsRetiredBaseTest`, `InboundPipelineTest`'s retired-epoch case,
+  `SessionLabTest.framesSealedAgainstAnEpochTheCapRetiredNeverReset…` (responder and initiator). Accepted cost: a DM
+  late behind live traffic on a cap-retired base is no longer recovered by a reset's re-seal; the cap retiring young
+  epochs is the open follow-up (#180). Residue: past the 48 h escape a skewed, over-48 h custody tail failing any
+  other way (`AEAD_FAIL`, `NO_SESSION`, `EPOCH_GONE` above our newest) can still re-root once per 6 h — ADR 026 is
+  owed an amendment (#179).
 - **When touching `RatchetDao.localEpochsNewestFirst` / `insertLocalEpoch`, the ratchet sweep, `PREV_ROOT_TTL_MS`,
   `MAX_EPOCH_*`, or a retention cap in `RatchetRepository` / `GroupRatchetRepository`:** READ ADR 027 and FSR §10 /
   GFS §10. Retention orders by mint time, never by epoch number (a reset restarts numbering at 1), and a re-minted

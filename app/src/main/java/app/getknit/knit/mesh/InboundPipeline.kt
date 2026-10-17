@@ -1837,7 +1837,7 @@ class InboundPipeline(
             // same id — which the router would otherwise dedup for ten minutes, since the copy custody just
             // served us is what put the id in its set. Let that one copy through.
             reopenFrame(env.id)
-            maybeRequestReset(env, me, now)
+            maybeRequestReset(env, me, now, epochGoneBase = r?.pe?.takeIf { reason == DropReason.RATCHET_EPOCH_GONE })
         }
     }
 
@@ -1846,11 +1846,20 @@ class InboundPipeline(
      * undecryptable frames, ≥6 h since the last request). The request is an ordinary v2 DM — fresh
      * X3DH init in the header, `ctl = CTL_SESSION_RESET` inside the ciphertext — deliberately NOT a
      * new frame type, so pre-ratchet relays custody it like any chat and it reaches an offline peer.
+     *
+     * [epochGoneBase] is the header's `pe` when the frame failed as `EPOCH_GONE`, else null. A frame sealed against
+     * one of our epochs that retention already retired, behind an epoch the peer has since sealed against, is
+     * doomed the way a pre-era frame is ([RatchetSessions.isRetiredBase], ADR 2026-10.9wvr) and is gated in the same
+     * place, ahead of the distinct-id LRU. The field case (2026-10-16): after a restart a neighbour re-served its
+     * custody, and three peers' in-era frames sealed against epochs the 16-row cap had long retired passed the 48 h
+     * escape of [isLiveEvidence] and re-rooted three healthy sessions in nine seconds — the one whose peer was out of
+     * range stayed unconfirmed, and with it off the relay's scope table.
      */
     private suspend fun maybeRequestReset(
         env: RelayEnvelope,
         me: String,
         now: Long,
+        epochGoneBase: Int? = null,
     ) {
         val session = ratchet.sessionFor(env.senderId)
         if (session != null && !isLiveEvidence(env, session, now)) {
@@ -1862,6 +1871,15 @@ class InboundPipeline(
                 "reset gate: ${env.id} from ${env.senderId} pre-era " +
                     "sentAt=${env.sentAt} establishedAt=${session.establishedAt} " +
                     "weAreInitiator=${session.weAreInitiator}",
+            )
+            return
+        }
+        val retired = epochGoneBase?.let { ratchet.retiredBase(env.senderId, it) }
+        if (retired != null) {
+            Log.d(
+                TAG,
+                "reset gate: ${env.id} from ${env.senderId} retired epoch " +
+                    "pe=${retired.pe} lowestRetained=${retired.lowestRetained} highestPeAcked=${retired.highestPeAcked}",
             )
             return
         }

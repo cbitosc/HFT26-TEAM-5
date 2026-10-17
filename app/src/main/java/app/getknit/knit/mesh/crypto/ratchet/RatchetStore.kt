@@ -27,6 +27,13 @@ interface RatchetStore {
     ): ByteArray?
 
     /**
+     * The lowest epoch number among our surviving local epoch privs for [peerId], or null when none survive.
+     * The lowest *number*, not the oldest mint: a dead era's rows can only lower it, which is the safe side for
+     * its one reader, the retired-base gate ([RatchetSessions.retiredBase], ADR 2026-10.9wvr).
+     */
+    suspend fun lowestLocalEpoch(peerId: String): Int?
+
+    /**
      * Every stored receive chain for [peerId]'s [epoch], whatever root derived it: a reset restarts the peer's
      * numbering, so eras can share a number, and the engine matches each row to its root by
      * [RatchetEngine.RecvEpoch.rootTag] (ADR 2026-10.gcrd).

@@ -1,5 +1,8 @@
 package app.getknit.knit.mesh.lab
 
+import app.getknit.knit.data.ratchet.RatchetRepository
+import app.getknit.knit.mesh.DropReason
+import app.getknit.knit.mesh.protocol.ChatContent
 import app.getknit.knit.mesh.protocol.FrameType
 import app.getknit.knit.mesh.protocol.WireCodec
 import app.getknit.knit.mesh.protocol.WireEnvelope
@@ -311,6 +314,90 @@ class SessionLabTest {
         }
 
     /**
+     * ADR 2026-10.9wvr, the field's shape of 2026-10-16. Alice reacts three times a day after the pair last spoke; the
+     * three are the first frames of a fresh epoch of hers, based on Bob's newest, and the pipe loses every copy of
+     * them until the end. Bob's epoch has aged out too, so the pair talks on through epochs that never touch that one,
+     * until Bob's 16-row cap retires the epoch the three were sealed against. Bob restarts (the sweep runs, the seen
+     * set goes) and Alice's custody re-serves the three: each fails as EPOCH_GONE on a key retention took, in the era
+     * Bob still holds, behind epochs Alice has sealed against since. Before the rule, three distinct ids re-rooted a
+     * session that was working.
+     *
+     * [bobInitiates] picks the era gate's half Bob judges them on. As responder it is exact; as initiator (the field
+     * phone's side) it compares Alice's `sentAt` with Bob's own era stamp under the five-minute skew bound. Both pass
+     * these in-era frames as live, which is the point: the 48 h escape only widened the field's case, the rule this
+     * pins is the one that narrows it. (The escape itself cannot be driven here: the pipeline reads the wall clock,
+     * not the lab calendar, and a jump past 48 h before a restart reaps receive state — lab-lint's own rule.)
+     */
+    private suspend fun framesSealedAgainstARetiredEpoch(bobInitiates: Boolean) {
+        val alice = lab.node("alice").apply { setDisplayName("Alice") }
+        val bob = lab.node("bob").apply { setDisplayName("Bob") }
+        lab.link(alice, bob)
+        lab.awaitAcquainted(alice, bob)
+        val (first, second) = if (bobInitiates) bob to alice else alice to bob
+        assertTrue(first.sendDm(second, "hello"))
+        lab.await(1) { second.decrypted(second.dmWith(first)).count { it.second == "hello" } }
+        assertTrue(second.sendDm(first, "hi"))
+        lab.assertConverged(listOf(alice, bob), atLeast = 2) { it.dmWith(if (it === alice) bob else alice) }
+        assertEquals("precondition: bob's half of the era gate", bobInitiates, checkNotNull(bob.session(alice)).weAreInitiator)
+        val target = bob.ownMessageId(bob.dmWith(alice), if (bobInitiates) "hello" else "hi")
+
+        // A day apart: Alice's epoch ages out, so her next seal opens a fresh one — based on Bob's newest, which he
+        // will never see a frame of — and Bob's ages out too, so his next opens one that never touches it.
+        lab.unlink(alice, bob)
+        lab.clock.advance(A_DAY_AND_A_MINUTE_MS)
+        val epochBefore = checkNotNull(alice.session(bob)).sendEpoch
+        listOf("\uD83D\uDC4D", "\u2764\uFE0F", "\uD83D\uDE02").forEach { alice.react(alice.dmWith(bob), target, it) }
+        val sealed = checkNotNull(alice.db.ratchetDao().session(bob.nodeId))
+        val doomedEpoch = sealed.sendEpoch
+        val base = sealed.sendEpochBaseEpoch
+        assertEquals("precondition: the reactions opened a fresh epoch of Alice's", epochBefore + 1, doomedEpoch)
+
+        lab.link(alice, bob) { alice.transport.lossy(bob.transport) { it.sealedInEpoch(alice.nodeId, doomedEpoch) } }
+        assertTrue(bob.sendDm(alice, "a day later"))
+        lab.await(1) { alice.decrypted(alice.dmWith(bob)).count { it.second == "a day later" } }
+        var turn = 0
+        while (checkNotNull(bob.session(alice)).sendEpoch < base + RatchetRepository.MAX_LOCAL_EPOCHS) {
+            val fromAlice = "alice, turn $turn"
+            assertTrue(alice.sendDm(bob, fromAlice))
+            lab.await(1) { bob.decrypted(bob.dmWith(alice)).count { it.second == fromAlice } }
+            val fromBob = "bob, turn $turn"
+            assertTrue(bob.sendDm(alice, fromBob))
+            lab.await(1) { alice.decrypted(alice.dmWith(bob)).count { it.second == fromBob } }
+            turn++
+            assertTrue("bob's epochs never climbed past the cap", turn <= MAX_CAP_TURNS)
+        }
+        lab.await(1) { if (bob.missingAcks(bob.dmWith(alice), listOf(alice, bob)).isEmpty()) 1 else 0 }
+        assertTrue("no copy of the three reached bob", alice.transport.lost.any { it.sealedInEpoch(alice.nodeId, doomedEpoch) })
+
+        bob.restart()
+        // The boot sweep runs in a job the restart does not wait for: await the cap's work, not the boot.
+        lab.await(1) { if (checkNotNull(bob.session(alice)).localEpochs.all { it.first > base }) 1 else 0 }
+        val held = checkNotNull(bob.session(alice))
+        assertTrue("precondition: alice has sealed past epoch $base", held.highestPeAcked > base)
+        lab.link(alice, bob) { alice.transport.lossy(bob.transport) }
+        lab.await(3) { bob.drops(DropReason.RATCHET_EPOCH_GONE).toInt() }
+
+        alice.react(alice.dmWith(bob), target, "\uD83C\uDF89")
+        lab.assertConverged(listOf(alice, bob), atLeast = 3 + 2 * turn) { it.dmWith(if (it === alice) bob else alice) }
+        val after = checkNotNull(bob.session(alice))
+        assertEquals("bob never reset", 0L, after.lastResetSentAt)
+        assertEquals("the same root on bob", held.rootHash, after.rootHash)
+        assertTrue("and still confirmed", after.confirmed)
+    }
+
+    @Test
+    fun framesSealedAgainstAnEpochTheCapRetiredNeverResetAWorkingSession() =
+        runBlocking {
+            framesSealedAgainstARetiredEpoch(bobInitiates = false)
+        }
+
+    @Test
+    fun framesSealedAgainstAnEpochTheCapRetiredNeverResetTheInitiatorsSession() =
+        runBlocking {
+            framesSealedAgainstARetiredEpoch(bobInitiates = true)
+        }
+
+    /**
      * §7: Bob holds the group (the roster rode the first frame) but never got the seed. After three frames
      * he cannot open he asks Alice for the key, Alice re-seals the current seed to him, and the three land.
      */
@@ -386,6 +473,20 @@ class SessionLabTest {
             lab.assertConverged(listOf(alice, bob), atLeast = 2) { groupId }
         }
 
+    /** A chat frame from [nodeId] sealed in its DM send epoch [epoch]. */
+    private fun WireEnvelope.sealedInEpoch(
+        nodeId: String,
+        epoch: Int,
+    ): Boolean {
+        val env = WireCodec.decodeEnvelope(signed) ?: return false
+        if (env.type != FrameType.CHAT || env.senderId != nodeId) return false
+        return WireCodec
+            .decodePayload<ChatContent>(env.payload)
+            ?.enc
+            ?.r
+            ?.se == epoch
+    }
+
     private fun WireEnvelope.isGroupFrame(): Boolean = WireCodec.decodeEnvelope(signed)?.group != null
 
     private fun WireEnvelope.isChatFrom(nodeId: String): Boolean =
@@ -397,5 +498,9 @@ class SessionLabTest {
     private companion object {
         /** A turnaround moves each side's epoch by one, so this bounds the climb past a handful of old-era epochs. */
         const val MAX_TURNS = 12
+
+        /** The turnarounds that take one side's epochs past the 16-row cap, and a margin. */
+        const val MAX_CAP_TURNS = 20
+        const val A_DAY_AND_A_MINUTE_MS = 24 * 60 * 60_000L + 60_000L
     }
 }

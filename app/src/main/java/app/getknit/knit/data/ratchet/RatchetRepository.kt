@@ -28,6 +28,8 @@ class RatchetRepository(
         epoch: Int,
     ): ByteArray? = dao.localEpochPriv(peerId, epoch)
 
+    override suspend fun lowestLocalEpoch(peerId: String): Int? = dao.lowestLocalEpoch(peerId)
+
     override suspend fun recvEpochs(
         peerId: String,
         epoch: Int,

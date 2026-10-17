@@ -57,6 +57,9 @@ document:
   background, until you switched away and back. It now searches harder whenever Knit is on screen.
 - If someone restored Knit from a backup before a file you sent them arrived, it could reach them as a picture
   that never opened, with no file name. It now arrives as a file they can open or save.
+- After Knit restarted, old messages passed on by a nearby phone could make it reset the encryption of a chat
+  that was working fine, and a contact out of range then dropped off your internet relays until you met. Those
+  messages no longer cause a reset.
 
 ## [2.9.0](https://github.com/getknit/knit/releases/tag/v2.9.0) — 2026-10-12T23:11:38Z
 

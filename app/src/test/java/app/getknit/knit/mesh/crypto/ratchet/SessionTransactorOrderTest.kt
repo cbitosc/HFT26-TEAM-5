@@ -135,6 +135,75 @@ class SessionTransactorOrderTest {
         override suspend fun sweep(now: Long) = guard("sweep")
     }
 
+    /** The DM store under the same guard: the reads [RatchetSessions.retiredBase] makes on the decrypt-failure path. */
+    private inner class GuardedRatchetStore : RatchetStore {
+        private suspend fun guard(what: String) {
+            check(currentCoroutineContext()[InTransaction] != null) { "$what touched the store with no enclosing transaction" }
+            synchronized(order) { order.add(what) }
+            yield()
+        }
+
+        override suspend fun session(peerId: String): RatchetEngine.SessionState {
+            guard("session")
+            return RatchetEngine.SessionState(
+                peerId = peerId,
+                confirmed = true,
+                weAreInitiator = true,
+                root = ByteArray(32),
+                establishedAt = 1L,
+                highestPeAcked = 20,
+            )
+        }
+
+        override suspend fun sessionPeerIds(): List<String> = emptyList()
+
+        override suspend fun upsertSession(state: RatchetEngine.SessionState) = guard("upsertSession")
+
+        override suspend fun localEpochPriv(
+            peerId: String,
+            epoch: Int,
+        ): ByteArray? = null
+
+        override suspend fun lowestLocalEpoch(peerId: String): Int {
+            guard("lowestLocalEpoch")
+            return 12
+        }
+
+        override suspend fun recvEpochs(
+            peerId: String,
+            epoch: Int,
+        ): List<RatchetEngine.RecvEpoch> = emptyList()
+
+        override suspend fun skippedKeys(
+            peerId: String,
+            epoch: Int,
+            idx: Int,
+        ): List<RatchetEngine.SkippedKey> = emptyList()
+
+        override suspend fun applyOpen(
+            peerId: String,
+            delta: RatchetEngine.OpenDelta,
+            headerSe: Int,
+            headerN: Int,
+        ) = guard("applyOpen")
+
+        override suspend fun commitSend(
+            state: RatchetEngine.SessionState,
+            newLocalEpoch: RatchetEngine.LocalEpoch?,
+        ) = guard("commitSend")
+
+        override suspend fun purgePeerRecvState(peerId: String) = guard("purgePeerRecvState")
+
+        override suspend fun deletePeer(peerId: String) = guard("deletePeer")
+
+        override suspend fun sweep(now: Long) = guard("sweep")
+    }
+
+    private fun dmSessions(mutex: Mutex) =
+        RatchetSessions(store = GuardedRatchetStore(), dhIdentityPriv = {
+            ByteArray(32)
+        }, spkPrivFor = { null }, mutex = mutex, transact = transactor)
+
     private fun sessions(mutex: Mutex = Mutex()) = GroupRatchetSessions(store = GuardedStore(), mutex = mutex, transact = transactor)
 
     @Test
@@ -181,6 +250,9 @@ class SessionTransactorOrderTest {
                 val decryptSide =
                     async {
                         transactor.transact {
+                            // Hold the connection while the other side runs, so an inverted order meets it holding
+                            // the mutex and deadlocks here instead of slipping in after this side is done.
+                            yield()
                             mutex.withLock { yield() } // stands in for commitOpen's locked body
                         }
                     }
@@ -188,5 +260,30 @@ class SessionTransactorOrderTest {
                 decryptSide.await()
                 sealSide.await()
             }
+        }
+
+    @Test
+    fun `retiredBase reads the session and the epochs inside one transaction, beside the decrypt order`() =
+        runTest {
+            // ADR 2026-10.9wvr: the gate runs on the decrypt-failure path, while another frame's commit may hold the
+            // transaction and the mutex. Its two reads go through `locked()`, so it queues behind them, never inverts.
+            val mutex = Mutex()
+            val s = dmSessions(mutex)
+            withTimeout(10_000) {
+                // The connection is held across a yield, as in the seal-order case: an inverted `locked()` deadlocks.
+                val decryptSide =
+                    async {
+                        transactor.transact {
+                            yield()
+                            mutex.withLock { yield() }
+                        }
+                    }
+                val gate = async { s.retiredBase("aaaa", pe = 5) }
+                decryptSide.await()
+                assertEquals(12, gate.await()?.lowestRetained)
+            }
+            // The guard refused any store read outside a transaction; both reads happened under one.
+            assertTrue(order.contains("session") && order.contains("lowestLocalEpoch"))
+            assertEquals("one transaction each side", 2, order.count { it == "tx" })
         }
 }
