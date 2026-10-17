@@ -223,7 +223,7 @@ here.
 | ID           | Requirement |
 |--------------|-------------|
 | **C-7.6-27** | While the Internet plane runs, a client holding a key for a relay asks that key's issuer for a ticket: when a customer key arrives; for a customer key, whenever that relay's held ticket is missing, not presentable (`SpoolTicketPolicy.presentable`), or less than 6 h from its `exp` on the phone's clock; and, for any key, at once when an upload of its own is locked `missing` or `expired` on a connection to that relay whose `entGates` has bit 1 (C-7.6-24), within C-7.6-28's backoff and park. A free key (C-7.6-37) asks only for such a waiting upload: it is never renewed on a schedule, the 6 h margin does not apply to it, and a held free ticket is presented until its `exp`. After a 200 a client asks no sooner than 1 h later, whatever its key, so neither an account whose `exp` is capped at its end nor a ticket refused on import or at `ent` can make it loop. With the plane off it asks nothing. |
-| **C-7.6-28** | A 200 imports the ticket under the host rule. For a customer key, a 401 parks the key until a different one arrives, and a 403 records the end and retries daily; a 403 `ended` also lets the client make a free account at its next locked upload (C-7.6-35), which then takes the key's place. A free key answered 401 or 403 is forgotten (C-7.6-37). Anything else, a 503 included, backs off from 1 min to 1 h. |
+| **C-7.6-28** | A 200 imports the ticket under the host rule. For a customer key, a 401 parks the key until a different one arrives, and a 403 records the end and retries daily; a 403 `ended` also lets the client make a free account at its next locked upload (C-7.6-35), which then takes the key's place. A free key answered 401 or 403 is forgotten (C-7.6-37), and one answered 503 with `retry-after` waits that long. Anything else, a 503 without `retry-after` included, backs off from 1 min to 1 h. |
 | **C-7.6-29** | A customer key goes only to the issuer origin it arrived with, only in the `Authorization` header, only over `https://` (`http://` in a debug build). It is stored beside the relay's `?k=` token, under the protection ADR 2026-09.66cw gives that token, and never minted into an invite. Removing the relay forgets its key, issuer and ticket. |
 
 > **The key swap (C-7.6-27 to C-7.6-29).** A ticket is a day's grant, so something has to fetch the next one. An
@@ -241,6 +241,10 @@ here.
 > **Why a waiting upload asks.** Without it a phone with a key asks only on its schedule, so a photo sent in the hour
 > a ticket lapsed, or before the first one arrived, waits for the next scheduled ask. A locked upload is held and
 > re-sent when uploads reopen, so asking then is what gets it there.
+>
+> **Why a free key's 503 waits for `retry-after`.** The issuer sends it only when the day's cap is reached, and sets it
+> to the next UTC midnight: no ticket comes before then, so asking every hour would only add load. A client that
+> predates the header backs off as C-7.6-28 says, which costs nothing but the asks.
 >
 > **Why the 1 h floor holds for every key.** A 200 brings a ticket good for about a day, so no honest ask comes
 > within the hour after one. A ticket that is never held (its `aud` is not the relay's host) or is refused at `ent`
@@ -262,11 +266,11 @@ Every answer is JSON with `cache-control: no-store`, and every body is at most 1
 | `GET <issuer>/api/v1/account?aud=<host>` | 200 `{ aud, bits, day }` | The stamp's difficulty in bits, and today's UTC day, `⌊unix s / 86400⌋` |
 | | 503 `{ error: "unavailable" }` | That audience has no free tier turned on, or is unknown |
 | `POST <issuer>/api/v1/account`, body `{ aud, day, nonce, n }` | 201 `{ key, aud }` | A new free account. `key` is `kak1_…`, the same format as a customer key |
-| | 400 `{ error: "bad-stamp", bits, day }` | The stamp is short of `bits`, stale, spent or malformed, or the body is |
-| | 429 `{ error: "rate-limited" }`, `retry-after` in seconds | The address has made its day's accounts |
-| | 503 `{ error: "unavailable" }`, `retry-after` optional | The audience's free tier is off or unknown, or the day's cap is reached |
+| | 400 `{ error: "bad-stamp", bits, day }` | For an audience whose free tier is on: the stamp is short of `bits`, stale, spent or malformed, or the rest of the body is |
+| | 429 `{ error: "rate-limited" }`, `retry-after` in seconds | The address has made its day's accounts for that audience; the count is per address and per audience |
+| | 503 `{ error: "unavailable" }` | The audience's free tier is off or unknown, or the day's cap is reached (then with `retry-after`, to the next UTC midnight). So is a body with no readable `aud`: another content type, over 1 KiB, not JSON, or `aud` missing or malformed — with no audience there are no `bits` for a 400 |
 | `POST <issuer>/api/v1/ticket`, `Bearer <free key>` | 200, 401, 403 | As for a customer key. The ticket carries `fl` 2 and the audience's `ab` and `am`; `endsAt` is the account's rolling end, which each swap moves forward, at most once a day. An account unused that long ends: 403 `ended` |
-| | 503 `{ error: "unavailable" }` | Free accounts only: the audience's free tier is off, or the day's cap is reached and this account has not been ticketed today. A customer account is never answered 503 for either |
+| | 503 `{ error: "unavailable" }` | Free accounts only: the audience's free tier is off, or the day's cap is reached and this account has not been ticketed today (then with `retry-after`, to the next UTC midnight). A customer account is never answered 503 for either |
 
 `nonce` is 16 random bytes in unpadded base64url, and `n` a non-negative integer below 2^53. The stamp:
 
@@ -275,6 +279,10 @@ h      = SHA-256("knit/issuer/v1/account" ‖ u64be(day) ‖ nonce ‖ u64be(n))
 valid  ⇔ leadingZeroBits(h) ≥ bits, counted as SPOOL_PROTOCOL.md §8 counts them,
          day is today or yesterday (UTC) at the issuer, and (day, nonce) is spent once
 ```
+
+The issuer checks a `POST` in this order: the audience (503); the stamp's form, day and bits (400); then, in one
+transaction, the day's cap (503), the spent stamp (400) and the address (429). A refusal spends neither the stamp nor
+the address's count.
 
 | ID           | Requirement |
 |--------------|-------------|
