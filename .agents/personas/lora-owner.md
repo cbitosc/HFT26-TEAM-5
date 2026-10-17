@@ -124,7 +124,7 @@ monitor outside the ledger's), and make the change additive on the wire (`docs/W
 Run what covers the change, JDK 21, with a timeout, one Gradle invocation at a time:
 
 ```bash
-timeout 900 ./gradlew :app:testDebugUnitTest -q --tests 'app.getknit.knit.mesh.lora.*' \
+scripts/gradle-turn.sh timeout 900 ./gradlew :app:testDebugUnitTest -q --tests 'app.getknit.knit.mesh.lora.*' \
   --tests '<each test class outside mesh/lora that names a touched class>'
 ```
 
@@ -163,9 +163,9 @@ Your report is all the caller sees, so make it complete without your transcript.
   will probe first.
 - **Checks:** `<classes> — X passed, Y failed; ktlint/detekt: clean | <findings>`.
 - **Owed by the caller:** `lora-reviewer` (always), `bluetooth-reviewer` if `meshtastic/` changed, `mesh-lab-reviewer`
-  if `mesh/lab/` changed, a changelog line if the change is user-visible, and `device trial: <stimulus, phones and
-  boards, oracle log line or …debug.LORA counter, pass condition>` (or `none` only for a change with no behaviour on
-  air, on a timer or on screen).
+  if `mesh/lab/` changed, `unit-test-reviewer` if a test outside it changed, a changelog line if the change is
+  user-visible, and `device trial: <stimulus, phones and boards, oracle log line or …debug.LORA counter, pass
+  condition>` (or `none` only for a change with no behaviour on air, on a timer or on screen).
 - **Open questions**, if any.
 
 No preamble, no praise, no restating the brief.

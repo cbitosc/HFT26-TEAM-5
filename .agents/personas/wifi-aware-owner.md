@@ -132,7 +132,7 @@ episode, not only a cooldown.
 Run what covers the change, JDK 21, with a timeout, one Gradle invocation at a time:
 
 ```bash
-timeout 900 ./gradlew :app:testDebugUnitTest -q --tests '<each test class that names a touched class>'
+scripts/gradle-turn.sh timeout 900 ./gradlew :app:testDebugUnitTest -q --tests '<each test class that names a touched class>'
 ```
 
 Find those classes with `grep -rlw '<TouchedClass>' app/src/test --include='*Test.kt'` (the policies' tests live
@@ -167,9 +167,10 @@ Your report is all the caller sees, so make it complete without your transcript.
 - **Platform assumptions:** each new or changed assumption about the framework or firmware, with its source. These
   are what the reviewer will probe first.
 - **Checks:** `<classes> — X passed, Y failed; ktlint/detekt: clean | <findings>`.
-- **Owed by the caller:** `wifi-aware-reviewer` (always), `mesh-lab-reviewer` if `mesh/lab/` changed, a changelog
-  line if the change is user-visible, and `device trial: <stimulus, phones, oracle log line or metric, pass
-  condition>` (or `none` only for a change with no behaviour on air or on a timer).
+- **Owed by the caller:** `wifi-aware-reviewer` (always), `mesh-lab-reviewer` if `mesh/lab/` changed,
+  `unit-test-reviewer` if a test outside it changed, a changelog line if the change is user-visible, and `device
+  trial: <stimulus, phones, oracle log line or metric, pass condition>` (or `none` only for a change with no behaviour
+  on air or on a timer).
 - **Open questions**, if any.
 
 No preamble, no praise, no restating the brief.

@@ -803,6 +803,43 @@ if (labChaosShards > 0) {
     }
 }
 
+// Unit-test stress shards (scripts/unit-stress.sh, the unit-test-reviewer's run). `-Pknit.unitStressShards=<k>` registers
+// k copies of testDebugUnitTest filtered by `knit.unitStressTests` (comma-separated `--tests` patterns), each running the
+// selected classes once in its own JVM. With the configuration cache on they run side by side, so every copy competes
+// for the cores the way a loaded CI runner's work does, and each writes build/test-results/unitStressShard<i>/ — never
+// testDebugUnitTest's own results, which a sibling reviewer's run may be writing at the same time. Never up to date.
+val unitStressShards =
+    providers
+        .gradleProperty("knit.unitStressShards")
+        .map(String::toInt)
+        .orElse(0)
+        .get()
+if (unitStressShards > 0) {
+    val patterns =
+        providers
+            .gradleProperty("knit.unitStressTests")
+            .get()
+            .split(',')
+            .map(String::trim)
+            .filter(String::isNotEmpty)
+    for (i in 0 until unitStressShards) {
+        tasks.register<Test>("unitStressShard$i") {
+            description = "Selected unit tests, copy $i of $unitStressShards running side by side (scripts/unit-stress.sh)."
+            group = "verification"
+            val base = tasks.named<Test>("testDebugUnitTest").get()
+            testClassesDirs = base.testClassesDirs
+            classpath = base.classpath
+            javaLauncher.set(base.javaLauncher)
+            jvmArgs(base.jvmArgs)
+            maxHeapSize = base.maxHeapSize
+            systemProperties(base.systemProperties)
+            useJUnit()
+            filter { patterns.forEach(::includeTestsMatching) }
+            outputs.upToDateWhen { false }
+        }
+    }
+}
+
 // `room3`, not `room`: the Room 3 Gradle plugin (id "androidx.room3") registers its extension under that
 // name. Same DSL, same output layout.
 room3 {

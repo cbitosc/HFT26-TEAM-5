@@ -13,6 +13,15 @@ Why the tooling is wired this way (detekt/ktlint/Kover Gradle plugins): `context
 - Run `./gradlew :app:assembleDebug` to validate a build; `./gradlew :app:compileDebugKotlin` for a fast
   main-sources compile check.
 
+## Never overlap Gradle runs in one worktree
+
+Two `testDebugUnitTest` runs in one checkout rewrite each other's `app/build/test-results/testDebugUnitTest/binary/`,
+and the first dies with `NoSuchFileException` though every test passed; two compiles of a moved tree write the same
+intermediates. Chain your own runs in one command, never one in the background and one in the foreground. Anything
+that may run beside another Gradle user — a reviewer or owner persona, `lab-chaos.sh`, `unit-stress.sh` — goes through
+`scripts/gradle-turn.sh <command>`, a per-worktree `flock` in the git dir (re-entrant, so a script holding it can nest),
+so the reviewers the Stop hook spawns at once read in parallel and take turns at Gradle.
+
 ## ktlint autocorrects; detekt doesn't
 
 Both run as `Stop` hooks (`./gradlew ktlintCheck` / `./gradlew detekt`) alongside `./gradlew lint`.

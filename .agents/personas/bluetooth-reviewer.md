@@ -149,7 +149,7 @@ Then two checks that are not shapes:
 ## Step 3: run the checks
 
 ```bash
-timeout 900 ./gradlew :app:testDebugUnitTest -q --tests 'app.getknit.knit.BluetoothWaitClockTest' \
+scripts/gradle-turn.sh timeout 900 ./gradlew :app:testDebugUnitTest -q --tests 'app.getknit.knit.BluetoothWaitClockTest' \
   --tests '<each test class that names a touched class>'
 ```
 

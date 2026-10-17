@@ -147,6 +147,8 @@ cmd=(./gradlew "${tasks[@]}" --continue --console=plain "-Pknit.labChaos=$seed" 
 if [[ -n "$quota" ]]; then
   cmd=(systemd-run --user --scope -q -p "CPUQuota=${quota}%" taskset -c 0 "${cmd[@]}" --no-daemon)
 fi
+# Take turns with any other Gradle run in this worktree (a sibling reviewer's), see scripts/gradle-turn.sh.
+cmd=(scripts/gradle-turn.sh "${cmd[@]}")
 
 echo "lab-chaos: seeds $seed..$((seed + runs - 1)) over $shards shard(s), ${patterns[*]}${quota:+, CPUQuota=$quota%}"
 set +e

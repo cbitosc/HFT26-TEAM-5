@@ -141,7 +141,7 @@ in scope, or you report it as owed.
 Run what covers the change, JDK 21, with a timeout, one Gradle invocation at a time:
 
 ```bash
-timeout 900 ./gradlew :app:testDebugUnitTest -q --tests '<each test class that names a touched class>'
+scripts/gradle-turn.sh timeout 900 ./gradlew :app:testDebugUnitTest -q --tests '<each test class that names a touched class>'
 ```
 
 Find those classes with `grep -rlw '<TouchedClass>' app/src/test --include='*Test.kt'`. The anchors are
@@ -182,9 +182,9 @@ Your report is all the caller sees, so make it complete without your transcript.
   restart, a replaced link and a silent neighbour do. These are what the reviewer will probe first.
 - **Checks:** `<classes> — X passed, Y failed; lab-chaos: <line or not run>; ktlint/detekt: clean | <findings>`.
 - **Owed by the caller:** `blobs-reviewer` (always), `bluetooth-reviewer` if a `FramedLink` line moved,
-  `mesh-lab-reviewer` if `mesh/lab/` changed, a changelog line if the change is user-visible, and
-  `trial: <lab scenario and chaos seeds, or the device recipe — stimulus, phones, oracle, pass condition>` (or
-  `none` only for a change no peer can observe).
+  `mesh-lab-reviewer` if `mesh/lab/` changed, `unit-test-reviewer` if a test outside it changed, a changelog line if
+  the change is user-visible, and `trial: <lab scenario and chaos seeds, or the device recipe — stimulus, phones,
+  oracle, pass condition>` (or `none` only for a change no peer can observe).
 - **Open questions**, if any.
 
 No preamble, no praise, no restating the brief.

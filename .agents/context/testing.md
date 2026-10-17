@@ -34,6 +34,106 @@
 > case of 2026-09-19 was `MeshServiceForegroundReclaimTest` raising `neighborCount` without an
 > `MlTextModerator`).
 
+## Unit tests that hold on a slow runner
+
+Every JVM test outside `mesh/lab/` (`app/src/test`, `wear/src/test`) is reviewed by the `unit-test-reviewer` persona
+against this catalogue, and a Stop hook asks for it. CI's GitLab runner is one vCPU and 2 GB (two
+`Dispatchers.Default` threads), GitHub's four vCPU, and both run the suite in one fork: an ordering a workstation
+always wins is lost there one run in thirty. Most of the incidents below never reproduced locally (`cd16429a`: 25
+green runs; `5626c3e5`: green for almost every draw), so a test is judged by reading it, and
+`scripts/unit-stress.sh --tests '<Class>'` (copies side by side in separate JVMs, `--quota` for one throttled core)
+is the second opinion, never the proof.
+
+**Flake shapes.** Each is a pair *observes → assumes*: what the test thread can see, and what it then acts as if
+had happened.
+
+1. **Late subscriber.** `.first()` / `collect` on a `SharedFlow` without replay, started after the act. Code that
+   resumes off a `withContext(IO)` emits on another thread and can beat it (`ChatViewModelTest`, `146a343e`).
+   Subscribe first: `async(UnconfinedTestDispatcher(testScheduler)) { flow.first() }`, or a `backgroundScope`
+   collector launched before the act.
+2. **A sibling not yet listening.** Awaiting one coroutine `start()` launched says nothing about its siblings. An
+   edit written before `watchProfileChanges` subscribed arrived as its initial value and `drop(1)` swallowed it
+   (`MeshManagerTest`, `cd16429a`). Gate on a readiness signal: `subscriptionCount` of a flow only that collector
+   reads.
+3. **One effect read as proof of the next.** A row, counter or state seen, then a later effect of the same work
+   (a mock call, a second write) assumed done: the session row was gone but `groups.forgetSelf` not yet called (CI
+   job 6252, `3031fe60`). Await the effect itself: `coVerify(timeout = AWAIT_MS)`, a poll on its own row. The
+   negative form is vacuous the same way: `coVerify(exactly = 0)` or "nothing was sent" read before the work could
+   have run passes whatever the code does; put a barrier first (a later positive effect of the same input).
+4. **A derived flow read before it re-derives.** An upstream `MutableStateFlow` written, then a `stateIn` /
+   `shareIn` projection or a collector-fed cache read at once (`PeerRepositoryTest`'s anchors, `8fdf8916`). Await
+   the derived value: `observe().first { … }`.
+5. **A passing state the worker may skip.** An intermediate edge (busy, a progress step, a queue length) that a
+   fast worker passes before the reader looks, or a slow one has not reached. A gone file was taken and skipped
+   before the enqueue's own report read the state, so the rising edge was never seen (`FramedLinkTest`, CI job
+   8771, `72684a86`). Hold the system in the state deterministically (there, a file larger than the pipe), assert,
+   then let it go.
+6. **Randomness or jitter at its default.** A rig that builds a component with a `random` / jitter seam left at the
+   default runs on a schedule that moves from run to run: the Trickle timer's OFFER landed inside a 4 s window on
+   the 2.4.0 tag (`LoraMeshTransportTest`, `5626c3e5`). Pin every such seam in the rig (`random = { 0 }`), seed any
+   `Random` the test draws its data from.
+7. **Real time as a sync point or a budget.** A `delay` / `Thread.sleep` before an assertion; a `withTimeout`
+   sized for a workstation; a production TTL shrunk so far that load expires it (`TransferManagerTest`'s 400 ms
+   offer TTL failed with every core pinned). Inject the clock (`clock: () -> Long`, `7ab3bdd7`) and run on virtual
+   time; where real threads are unavoidable, poll the condition under a bound sized for the one-vCPU runner
+   (`MeshManagerTest.AWAIT_MS`, 10 s), and make the timeout's failure carry evidence (`Side.trace`, `e4f93517`).
+8. **Host resources shared with other forks.** A fixed port, or one inside Linux's ephemeral range, collides with
+   another fork's outbound sockets (`c5f4c099`: `FakeDirectWifi.freeLoopbackPort`); `::1` is missing on some
+   runners (`f3138a6a`, `e4f93517`: `assumeTrue(FakeDirectWifi.ipv6LoopbackUsable())`); a path outside a
+   `TemporaryFolder`; the default `Locale` / `TimeZone`, which only the screenshot tasks pin.
+9. **A leak into the next class.** An exception in a scope `runTest` does not own (the manager's own
+   `SupervisorJob`, an app scope on `Dispatchers.Unconfined`) is caught by kotlinx-coroutines-test and fails the
+   *next* `runTest` class (the `UncaughtExceptionsBeforeTest` note above; a Koin definition the path resolves but the
+   module lacks). A scope cancelled but not joined before `db.close()` throws on the closed pool into whichever
+   class runs next (`LabNode.shutdown`, `a7a85f80`). `startKoin` without `stopKoin`, `Dispatchers.setMain` without
+   `resetMain`, `mockkObject` / `mockkStatic` without `unmockkAll`, a static or `object` written and not restored.
+10. **Virtual time the code never sees.** Code that hops to a hard-coded `Dispatchers.IO` / `Default` escapes the
+    test scheduler: `advanceUntilIdle()` does not wait for it and `advanceTimeBy` does not move its `delay`. Inject
+    the dispatcher, or treat it as real-thread code (shape 7). A collector that never ends goes in
+    `backgroundScope`, never `launch`. Under Robolectric the main looper is paused and `SystemClock` is its own
+    clock: a post runs only on `shadowOf(getMainLooper()).idle()`, and `SystemClock.elapsedRealtime()` stands still
+    while a real-time wait polls it.
+11. **A "deflake" that hides a race.** A widened timeout, a retry, a sleep, or an oracle relaxed to a sum or a `>=`
+    with no named interleaving. Twice the flake was production code: `TransferListener` set `soTimeout` outside
+    its `try` on a socket the winner had closed (`a7a85f80`), and a profile stamp was signed twice (ADR
+    2026-09.qztx). Fix the code and add a test that forces the interleaving through a seam that holds **each**
+    party until the other has arrived. A latch on the second arrival alone does nothing when the second never
+    arrives: `TransferListenerTest` as first committed held only the second listener at its injected clock, the
+    winner cancelled that listener's coroutine before it was dispatched, and the pre-fix code still passed 3 to 7
+    runs in 30 on one core (2026-10-17, the unit-test-reviewer's dry run).
+
+**Well conceived.** A test that cannot fail is worse than none, because it reads as coverage.
+
+- **It fails without the change, on every run.** A regression test goes red on the pre-fix code; walk it against
+  the old lines before trusting it. A test that drives real threads is red or green by the schedule, so one red run
+  clears nothing (30 of 30 red on free cores, 23 to 27 of 30 on one core, above): run it there many times on one core with
+  `scripts/unit-prefix.sh --class <Class>` (the tests as written now, the main code at `--base`, default `HEAD`, in a
+  throwaway worktree) and expect red on every run.
+- **Its assertions can fail.** Not inside a callback or `collect` that may never run, not under a `runCatching` or
+  a `catch (e: Exception)` that swallows the `AssertionError`, not in a coroutine on a scope the test does not
+  join, not a tautology (`size >= 0`, a value compared with itself).
+- **It tests the behaviour, not the mock.** No asserting a stub's own answer back; a `relaxed = true` mock that
+  answers `false` / empty can skip the very branch under test, so stub what the path reads; prefer the observable
+  outcome to a `verify` of the call sequence.
+- **Real collaborators where the bug lives.** SQL through `RoomDbTest` (real DAO SQL, finding #5), never a fake
+  DAO; the repo's fakes (`FakeLoopTransport`, `FakeKeystoreCipher`, `FakeDirectWifi`)
+  before a mock with behaviour scripted into it; what two nodes exchange through a `mesh/lab/` scenario ending in
+  `assertConverged`.
+- **The cheapest level that can see the bug.** Plain JVM over Robolectric where the code allows (each Robolectric
+  class costs a fork's metaspace and trips the Gradle 9.5 result race); a ViewModel test over a Compose one for
+  state. A host test proves nothing about an Android API level: the host JDK has `Character.isEmoji*`, Android has
+  it from API 36, and lint (`NewApi`) is the only net.
+- **Expected values from outside the code.** Not computed by the function under test; golden vectors written by
+  `KNIT_WRITE_VECTORS=1`, never by hand; a boundary from the production constant (`DEFAULT_TTL_MS + 1`), a literal
+  only where the number is itself the contract.
+- **The edge and its neighbour.** The case the change is about, and the one just inside it.
+- **One behaviour, named as the sentence it proves** (`aFileWhoseSourceIsGoneStillEndsItsFeedingEdge`), with a
+  comment for the why that is not in the name, and a failure message that carries the evidence.
+- **Skips are honest.** `@Ignore` names its issue; `assumeTrue` is for a host capability, never a condition the
+  code is supposed to meet.
+- **Seams are constructor parameters with a production default** (`clock`, `random`, `newPort`, a dispatcher),
+  not reflection or widened visibility.
+
 ## Mesh in a box (`app/src/test/…/mesh/lab/`)
 
 `MeshLab` runs **N complete, real Knit stacks in one JVM** — the real `MeshManager` (so the real

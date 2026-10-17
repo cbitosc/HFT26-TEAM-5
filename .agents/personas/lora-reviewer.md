@@ -144,7 +144,7 @@ Then two checks that are not shapes:
 ## Step 3: run the checks
 
 ```bash
-timeout 900 ./gradlew :app:testDebugUnitTest -q --tests 'app.getknit.knit.mesh.lora.*' \
+scripts/gradle-turn.sh timeout 900 ./gradlew :app:testDebugUnitTest -q --tests 'app.getknit.knit.mesh.lora.*' \
   --tests '<each test class outside mesh/lora that names a touched class>'
 ```
 

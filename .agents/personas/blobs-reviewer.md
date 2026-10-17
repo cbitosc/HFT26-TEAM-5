@@ -150,7 +150,7 @@ Then two checks that are not shapes:
 ## Step 3: run the checks
 
 ```bash
-timeout 900 ./gradlew :app:testDebugUnitTest -q --tests '<each test class that names a touched class>'
+scripts/gradle-turn.sh timeout 900 ./gradlew :app:testDebugUnitTest -q --tests '<each test class that names a touched class>'
 ```
 
 Find the test classes with `grep -rlw '<TouchedClass>' app/src/test --include='*Test.kt'`, and leave out every class

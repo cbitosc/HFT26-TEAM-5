@@ -498,6 +498,13 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   sweep (`--reuse`) while the tree has not moved, so sweep last, not between edits. A scenario the sweep names
   `slow` is sitting out a production timer: shorten it through `LabLimits`, never a longer await. Chaos mode is
   the "Chaos mode" bullet in `.agents/context/testing.md`.
+- **When creating or modifying a JVM unit test outside the mesh lab** — anything under `app/src/test/` but
+  `mesh/lab/`, or `wear/src/test/` (a test class, a rig, a fake): READ the "Unit tests that hold on a slow runner"
+  section of `.agents/context/testing.md` while you write it, then ADOPT (Claude Code: spawn) the `unit-test-reviewer`
+  persona in `.agents/personas/unit-test-reviewer.md` before calling the change done — every unit-test flake so far
+  passed review and local runs, and CI's one-vCPU runner found it. It walks each test for the catalogue's flake shapes
+  and for tests that cannot fail, and stress-runs the changed classes (`scripts/unit-stress.sh`). A Stop hook enforces
+  the review.
 - **When creating or modifying anything under `mesh/bluetooth/` (its `meshtastic/` and `wear/` included),
   `mesh/link/FramedLink.kt`, `mesh/power/ElapsedWait.kt` or `mesh/power/PowerState.kt` (`PowerPolicy`):** ADOPT (Claude Code:
   spawn) the `bluetooth-reviewer` persona in `.agents/personas/bluetooth-reviewer.md` before calling the change
