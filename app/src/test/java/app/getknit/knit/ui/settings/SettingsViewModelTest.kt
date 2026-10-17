@@ -75,7 +75,8 @@ class SettingsViewModelTest {
         Dispatchers.resetMain()
     }
 
-    private fun vm() = SettingsViewModel(settings, identity, relayFacts, loraFacts, ownIceFlow, mockk(relaxed = true), flowOf(LowPowerPosture.OFF))
+    private fun vm() =
+        SettingsViewModel(settings, identity, relayFacts, loraFacts, ownIceFlow, mockk(relaxed = true), flowOf(LowPowerPosture.OFF))
 
     /**
      * The load-bearing one. This ViewModel outlives a trip to the profile editor — Save there pops straight

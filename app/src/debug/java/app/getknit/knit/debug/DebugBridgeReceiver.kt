@@ -57,8 +57,8 @@ import app.getknit.knit.data.message.quoteSnippet
 import app.getknit.knit.data.peer.PeerEntity
 import app.getknit.knit.data.settings.BadgeStore
 import app.getknit.knit.data.settings.KnitBoardSetup
-import app.getknit.knit.data.settings.OwnIceStore
 import app.getknit.knit.data.settings.LowPowerSwitch
+import app.getknit.knit.data.settings.OwnIceStore
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.data.settings.TicketKeyStore
 import app.getknit.knit.data.webp.WebpTranscode
