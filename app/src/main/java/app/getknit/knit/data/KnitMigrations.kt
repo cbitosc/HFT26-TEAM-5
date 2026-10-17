@@ -592,10 +592,15 @@ object KnitMigrations {
     /**
      * v24 → v25: a short video's duration, upright size and inline poster on the message row (ADR 2026-10 short
      * videos). All nullable and null on every existing row: nothing before this build sent a video.
+     *
+     * Development builds of the calls branch numbered `peer_badges` v24 before main's v24 landed, so a phone that ran
+     * one is stamped 24 without main's column and index. Nothing released carried that schema; the step lays main's
+     * v24 down when it is missing rather than leave those phones unable to open their database.
      */
     val MIGRATION_24_25 =
         object : Migration(24, 25) {
             override suspend fun migrate(connection: SQLiteConnection) {
+                if (!connection.hasColumn("messages", "attachmentFetchApproved")) MIGRATION_23_24.migrate(connection)
                 connection.execSQL("ALTER TABLE `messages` ADD COLUMN `videoDurationMs` INTEGER")
                 connection.execSQL("ALTER TABLE `messages` ADD COLUMN `videoWidth` INTEGER")
                 connection.execSQL("ALTER TABLE `messages` ADD COLUMN `videoHeight` INTEGER")
@@ -608,16 +613,30 @@ object KnitMigrations {
      * v25 → v26: one `peer_badges` table — the supporter badges each peer's sealed profile last carried, verified when
      * shown (docs/SUPPORTER_BADGE.md, ADR 2026-10.r99s). Empty on arrival: each fills as that peer's next sealed profile
      * lands. Additive only; the SQL must stay byte-equivalent to what Room generates for `app/schemas/**/26.json`.
+     *
+     * Development builds of the calls branch numbered this table v25 before main's v25 landed, so a phone that ran one
+     * is stamped 25 with `peer_badges` and without main's video columns; the step lays those down when they are missing.
      */
     val MIGRATION_25_26 =
         object : Migration(25, 26) {
             override suspend fun migrate(connection: SQLiteConnection) {
+                if (!connection.hasColumn("messages", "videoDurationMs")) MIGRATION_24_25.migrate(connection)
                 connection.execSQL(
                     "CREATE TABLE IF NOT EXISTS `peer_badges` " +
                         "(`nodeId` TEXT NOT NULL, `position` INTEGER NOT NULL, `wrapper` BLOB NOT NULL, `r` BLOB NOT NULL, " +
                         "PRIMARY KEY(`nodeId`, `position`))",
                 )
             }
+        }
+
+    private fun SQLiteConnection.hasColumn(
+        table: String,
+        column: String,
+    ): Boolean =
+        prepare("PRAGMA table_info(`$table`)").use { info ->
+            var found = false
+            while (!found && info.step()) found = info.getText(1) == column
+            found
         }
 
     /** All migrations, applied by Room in order. */

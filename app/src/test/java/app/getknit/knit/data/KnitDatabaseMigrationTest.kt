@@ -926,12 +926,77 @@ class KnitDatabaseMigrationTest {
             }
         }
 
+    @Test
+    fun `migrate 24 to 26 lays main's v24 and v25 down on a calls-branch build that numbered peer_badges v24`() =
+        runTest {
+            // A phone that ran the calls branch before main's v24 landed: stamped 24, peer_badges present, no approval.
+            helper.createDatabase(23).use { c ->
+                c.execSQL(
+                    "INSERT INTO messages (id, senderId, conversationId, body, sentAt, received, receivedVia, mentions, " +
+                        "replyToHasAttachment, moderation, pendingKey, kind, originViaMqtt, originSigned, attachmentAnimated, " +
+                        "replyCheck, replyToFlagged, attachmentHash, attachmentSize) " +
+                        "VALUES ('f1','n1','peer-1','',2,0,0,'[]',0,0,0,0,0,0,0,0,0,'H1',2000000)",
+                )
+                c.execSQL(PEER_BADGES_SQL)
+                c.execSQL("INSERT INTO peer_badges (nodeId, position, wrapper, r) VALUES ('p1', 0, x'01', x'02')")
+                c.execSQL("PRAGMA user_version = 24")
+            }
+            helper
+                .runMigrationsAndValidate(26, listOf(KnitMigrations.MIGRATION_24_25, KnitMigrations.MIGRATION_25_26))
+                .use { c ->
+                    c.prepare("SELECT attachmentFetchApproved, videoDurationMs FROM messages WHERE id = 'f1'").use { s ->
+                        assertTrue(s.step())
+                        assertEquals(0L, s.getLong(0))
+                        assertTrue(s.isNull(1))
+                    }
+                    c.prepare("SELECT COUNT(*) FROM peer_badges").use { s ->
+                        assertTrue(s.step())
+                        assertEquals("the badges it already held are kept", 1L, s.getLong(0))
+                    }
+                }
+        }
+
+    @Test
+    fun `migrate 25 to 26 lays main's v25 down on a calls-branch build that numbered peer_badges v25`() =
+        runTest {
+            // A phone that ran the calls branch before main's v25 landed: stamped 25, peer_badges present, no video columns.
+            helper.createDatabase(24).use { c ->
+                c.execSQL(
+                    "INSERT INTO messages (id, senderId, conversationId, body, sentAt, received, receivedVia, mentions, " +
+                        "replyToHasAttachment, moderation, pendingKey, kind, originViaMqtt, originSigned, attachmentAnimated, " +
+                        "replyCheck, replyToFlagged, attachmentFetchApproved) " +
+                        "VALUES ('f1','n1','peer-1','',2,0,0,'[]',0,0,0,0,0,0,0,0,0,1)",
+                )
+                c.execSQL(PEER_BADGES_SQL)
+                c.execSQL("INSERT INTO peer_badges (nodeId, position, wrapper, r) VALUES ('p1', 0, x'01', x'02')")
+                c.execSQL("PRAGMA user_version = 25")
+            }
+            helper.runMigrationsAndValidate(26, listOf(KnitMigrations.MIGRATION_25_26)).use { c ->
+                c.prepare("SELECT attachmentFetchApproved, videoDurationMs, videoPosterFlagged FROM messages").use { s ->
+                    assertTrue(s.step())
+                    assertEquals(1L, s.getLong(0))
+                    assertTrue(s.isNull(1))
+                    assertEquals(0L, s.getLong(2))
+                }
+                c.prepare("SELECT COUNT(*) FROM peer_badges").use { s ->
+                    assertTrue(s.step())
+                    assertEquals("the badges it already held are kept", 1L, s.getLong(0))
+                }
+            }
+        }
+
     private companion object {
         /**
          * KnitDatabase `@Database(version = …)` — bump alongside the DB (its retention is CLASS, so the version
          * can't be read reflectively). A missing schemas/<db>/<version>.json fails the smoke test.
          */
         const val CURRENT_VERSION = 26
+
+        /** Room's `peer_badges` DDL, as a calls-branch dev build laid it down under an older version number. */
+        const val PEER_BADGES_SQL =
+            "CREATE TABLE IF NOT EXISTS `peer_badges` " +
+                "(`nodeId` TEXT NOT NULL, `position` INTEGER NOT NULL, `wrapper` BLOB NOT NULL, `r` BLOB NOT NULL, " +
+                "PRIMARY KEY(`nodeId`, `position`))"
 
         /** The v16 column list with an attachment — MIGRATION_16_17's test seeds rows through it. */
         const val INSERT_V16 =
