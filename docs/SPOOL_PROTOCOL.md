@@ -910,13 +910,12 @@ signalled by its presence: `commons` (§7.4), `moderation` (§7.5), `turn`, `ent
 |-------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | **B-7.2-1** | `version` is reserved and MUST NOT be emitted in v1. A hello mismatch is close `4002`, not a record. The code exists so a future record-level versioning use never has to recycle it. |
 | **B-7.2-2** | `conflict` is emitted only by `aput` (§7.3).                                                                                                                                          |
-| **B-7.2-8** | `ticket` is emitted only in answer to `ent`, or to a `turnreq` or `aput` that a ticket gate refused (§7.6). Its `msg` names the reason.                                              |
+| **B-7.2-8** | `ticket` is emitted only on a spool that takes entitlement tickets (§7.6, experimental): to an `ent`, and to a `turnreq` or an `aput` on a connection whose HELLO `entGates` gates that verb, always with the record's `q`. `msg` carries one word; `size`, an attachment larger than the uploader's ticket allows, and `budget`, the uploader's day spent, are two of `aput`'s. It is never a strike, and never the answer to a `sub`. |
 | **S-7.2-3** | A spool SHOULD send a fresh `digest` to a scope's subscribers whenever the live set changes beyond a single acked push: eviction pressure, TTL expiry, a watermark shed.              |
 | **C-7.2-4** | A client MUST NOT *rely* on unsolicited `digest`. It is best-effort fan-out like `event`; §9.1 on reconnect is the correctness anchor.                                                |
 | **S-7.2-5** | A `pull` beyond `maxPull` MUST be truncated to `maxPull`, never answered with an error. Ids beyond the cap appear in neither `blob`s nor `missing`.                                   |
 | **C-7.2-6** | A client that overshoots `maxPull` re-pulls the remainder.                                                                                                                            |
 | **S-7.2-7** | A duplicate `push` (blobId already live) MUST be acked `ok` with **no** `event` fan-out. The push row's fan-out applies to newly stored blobs only.                                   |
-| **B-7.2-8** | `ticket` is emitted only on a spool that takes entitlement tickets (experimental, `docs/VOICE_CALLS.md` §2.6): to an `ent`, and to a `turnreq` or an `aput` on a connection whose HELLO `entGates` gates that verb, always with the record's `q`. `msg` carries one word; `budget`, the uploader's day spent, is one of `aput`'s. It is never a strike, and never the answer to a `sub`. |
 
 > **Why S-7.2-7 is safe.** Content addressing makes the duplicate byte-identical, so subscribers
 > either
@@ -930,7 +929,7 @@ signalled by its presence: `commons` (§7.4), `moderation` (§7.5), `turn`, `ent
 | `ahas`   | s→c       | `t, q, scope, aid, total: Int, bits: bstr, dead: Bool`         | `total = 0` ⇒ never seen; `dead` ⇒ tombstoned (§6.5); `bits` is the presence bitmap — chunk *i* is bit *i mod 8*, **MSB-first**, of byte *i div 8* |
 | `aget`   | c→s       | `t, q, scope, aid, from: Int, n: Int` (≤ `maxAget`)            | Answered by `achunk`* then a bare `ok { q }`                                                                                                       |
 | `achunk` | s→c       | `t, scope, aid, idx: Int, total: Int, cid: bstr32, data: bstr` | One sealed chunk. Carries no `q`, exactly like `blob`                                                                                              |
-| `aput`   | c→s       | `t, q, scope, aid, idx, total, cid: bstr32, data: bstr, pow?`  | Store one sealed chunk. Refused `ticket` on a connection whose HELLO gates files (`docs/VOICE_CALLS.md` §2.6)                                      |
+| `aput`   | c→s       | `t, q, scope, aid, idx, total, cid: bstr32, data: bstr, pow?`  | Store one sealed chunk. Refused `ticket` on a connection whose HELLO gates files (§7.6)                                                            |
 
 | ID          | Requirement                                                                                                                                                 |
 |-------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -1135,7 +1134,7 @@ between it and the issuer the operator names: the spool sees only the ticket.
 | `ent`  | c→s       | `t, q: Long, tk: bstr, sig: bstr(64)`   | Present a ticket. Answered by `ok`, or by `err ticket` with `msg` |
 
 ```
-Ticket {                 // tk: the house CBOR (§2), every field but ab required, unknown keys ignored
+Ticket {                 // tk: the house CBOR (§2), every field but ab and am required, unknown keys ignored
     v:   1
     kid: bstr(8)         // SHA-256(raw Ed25519 public key)[0..8]
     aud: String          // the one spool it is good for
@@ -1145,11 +1144,18 @@ Ticket {                 // tk: the house CBOR (§2), every field but ab require
     fl:  uint            // bit 0: may ask for TURN; bit 1: may upload attachments;
                          // bit 3: may cast, and unlocks casts for the scope (§7.7). Bit 2 is reserved.
     ab:  uint?           // upload budget in bytes for this pseudonym's day; absent: the spool's own
+    am:  uint?           // largest attachment |A| in bytes this ticket may aput, in whole chunks;
+                         // absent: the spool's own
 }
 sig = Ed25519(issuer key, "knit/spool/v1/ticket" ‖ tk)
 ```
 
 The same bits name the gates in `entGates`: bit 0 gates `turnreq`, bit 1 gates `aput`, bit 3 gates `cast`.
+
+The keys are written in the order above, each optional one only when it is set, so a ticket's map has 7, 8 or 9
+entries. `am` is in bytes of `A`, the end-to-end sealed attachment that `total` counts (§4.5); an `am` below
+`aChunkBytes`, `0` included, admits no `aput` at all, and a negative one is `malformed`. It can only lower a limit: an
+attachment within it still meets the spool's own (S-6.5-3). Where `files` is not gated, a spool ignores it.
 
 | ID           | Requirement                                                                                                                                                                                                                                                                                                                                                                                       |
 |--------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -1161,13 +1167,16 @@ The same bits name the gates in `entGates`: bit 0 gates `turnreq`, bit 1 gates `
 | **S-7.6-18** | A spool MUST NOT log or persist a ticket or a pseudonym. Metrics MAY count acceptances and refusals by `msg`.                                                                                                                                                                                                                                                                                    |
 | **C-7.6-19** | A client that holds a ticket for a spool sends `ent` right after HELLO when the spool advertised `ent`, and again before the ticket expires. It MUST NOT retry a refused ticket on every round.                                                                                                                                                                                                  |
 | **C-7.6-21** | A client that holds a ticket for a spool SHOULD ask that spool for TURN on every call, whether or not the DM scope is subscribed there; this refines C-7.6-12.                                                                                                                                                                                                                                    |
-| **S-7.6-22** | On a connection whose HELLO carried `ent` with bit 1 in `entGates`, `aput` needs the uploading connection's own live ticket with bit 1 of `fl` and budget left, else `err ticket` with `q`, `scope` and a `msg` of `missing`, `expired`, `flags` or `budget`. Another subscriber's ticket never admits it. The budget is `min(ab, the spool's own)` bytes per pseudonym, charged only for chunks stored, at the size the spool charges them. A refusal is never a strike. |
+| **S-7.6-22** | On a connection whose HELLO carried `ent` with bit 1 in `entGates`, `aput` needs the uploading connection's own live ticket with bit 1 of `fl` and budget left, else `err ticket` with `q`, `scope` and a `msg` of `missing`, `expired`, `flags`, `size` or `budget`. Another subscriber's ticket never admits it. The budget is `min(ab, the spool's own)` bytes per pseudonym, charged only for chunks stored, at the size the spool charges them. A refusal is never a strike. |
+| **S-7.6-31** | On a connection whose HELLO carried `ent` with bit 1 in `entGates`, an `aput` whose `total` exceeds `⌊am / aChunkBytes⌋` under the uploading connection's ticket gets `err ticket` with `q`, `scope` and `msg` `size`. It is checked on every chunk, a re-sent one included, and is never a strike. Nothing is stored or charged. A spool answers `not_subscribed` and `malformed` first, then S-7.6-22's `missing`, `expired` or `flags`, then `size`, then `budget`. |
 | **S-7.6-23** | A ticket never gates `aget`: a member without one fetches every attachment a member with one stored.                                                                                                                                                                                                                                                                                             |
 | **C-7.6-24** | A client without a files ticket for a spool whose `entGates` has bit 1 does not offer to send attachments through it, and still fetches the ones it receives. After `budget` it does not upload there again under that ticket's pseudonym (`ps`).                                                                                                                                                |
+| **C-7.6-32** | A client holding a files ticket with `am` does not send through that spool an attachment whose `total` exceeds `⌊am / aChunkBytes⌋`. A `size` refusal says only that this attachment is too large for that relay: it locks no upload there and marks no pseudonym spent. |
 | **C-7.6-30** | A client reads each gate from its own bit of `entGates` (S-7.6-13): `turnreq` needs a ticket only under bit 0, `aput` only under bit 1, a cast only under bit 3. A gate the HELLO doesn't name needs no ticket, whatever the spool's `ent`.                                                                                                                                                     |
 
-C-7.6-27 to C-7.6-29 are reserved. They number the reference client's exchange with a ticket issuer,
-which is outside this protocol.
+C-7.6-27 to C-7.6-29, and C-7.6-33 onward, are reserved here. They number a client's exchange with a ticket
+issuer, which is outside this protocol and is specified in `docs/VOICE_CALLS.md` §2.6; a new requirement in this
+section takes the next number neither document uses.
 
 > **Why one ticket per connection.** The spool already ties a connection to every scope it subscribes,
 > so a ticket on each record would buy no unlinkability and cost a signature check per record. The
@@ -1187,6 +1196,21 @@ which is outside this protocol.
 > `ab × (⌈retention / 1 day⌉ + 1)` bytes, where retention is the scope's `ttlMs`: 3 × `ab` at the 48 h
 > default. An exact cap would need a stable account handle on every attachment, which would let the spool
 > link one holder's uploads across days. The storage watermark (S-6.4-5) still bounds the disk.
+>
+> **Why `am` is in bytes and rounds down.** `ab` and a spool's own attachment limits are bytes, and bytes outlive a
+> change of `aChunkBytes`. `am` is a cap, so a spool never admits more than `am` bytes of `A` under it, and an issuer
+> can name the value it means: at `am` = 262,144 the limit is 5 chunks, which holds an `A` of up to 245,760 B, a
+> plaintext of up to 245,732 B once §4.5's 12 B nonce and 16 B tag are added. Rounding up would admit a sixth
+> chunk. The spool's own `maxAttachBytes` rounds up because it answers another question, whether an attachment can
+> fit a scope at all (S-6.5-3).
+>
+> **Why `size` is checked on every chunk.** Chunks of one `aid` may arrive on different connections under different
+> tickets, because the store keys them by scope, `aid` and index alone. Every `aput` carries `total`, and it must
+> equal the held one, so the check costs a comparison.
+>
+> **Why `size` locks nothing.** `missing`, `expired` and `flags` say this phone may send no attachment there, and
+> `budget` that it may send no more today. `size` says only that this one is too large: a smaller one goes up, and
+> the ticket's TURN and casts are untouched.
 >
 > **No allocation or bandwidth claim.** A ticket carries none, because neither the spool nor the TURN
 > server could keep the promise per holder: coturn's quotas are one number for the whole server.
@@ -1606,6 +1630,9 @@ a relay.
   because media is UDP.
 - With entitlement tickets (§7.6), a **pseudonym per holder per day**, which lets the spool link that
   holder's connections across addresses within the day, and ties each gated upload to it.
+  Where one operator runs both the ticket issuer and the spool, the issuer can link each day's `ps` to an
+  account, so the two joined carry one phone's scopes across the era rotations of §3 that otherwise bound
+  them; only the operator's policy keeps the two apart.
 - With casts (§7.7), live and never on disk: that a DM scope is in a walkie-talkie session, which side
   talks when and for how long (about two casts a second per talking side), and both subscribers' IPs.
   Padding (C-7.7-12) and a constant-bitrate encoder keep a chunk's size from saying what was said; nothing
@@ -1669,7 +1696,7 @@ Deliberately open, additively reachable, in no particular order.
 | Client→spool `digest`                      | The record is direction-agnostic already                                                             |
 | `CAP_SPOOL` capability bit                 | Only if client UX ever needs a peer-support signal                                                   |
 | **Persisted partial attachment downloads** | §9.5 keeps them in memory, so a process death re-fetches                                             |
-| Blind-signed tickets                       | Would stop a spool linking one holder's connections within a day (§7.6, §10.1)                       |
+| Blind-signed tickets                       | Would stop a spool linking one holder's connections within a day, and an issuer linking a day's `ps` to an account (§7.6, §10.1). A later ticket `v: 2`: the client picks `ps` and the issuer blind-signs it. The public claims (`aud`, `exp`, `fl`, `ab`, `am`) need a partially blind scheme or a key per claim set |
 | Ticket-gated scope creation                | `fl` bit 2 is reserved for it. The reference deployment keeps creation open (knit-spool ADR 2026-10.x9gq) |
 
 ## 12. Constants [Both]
@@ -1720,6 +1747,7 @@ Deliberately open, additively reachable, in no particular order.
 | TURN credential lifetime                 | 5 min, at most 1 h                                      | §7.6 (S-7.6-8) — bounds when a credential can start relaying, not a call's length                                      |
 | suggested `turnreq` rate                 | 4 per connection per 10 min, burst 2                    | §7.6 (S-7.6-5) — and per IP                                                                                             |
 | default ticket upload budget             | 32 MiB per pseudonym per day                            | §7.6 (S-7.6-22) — the reference daemon's; a ticket's `ab` may lower it                                                  |
+| ticket `am`                              | absent: the spool's own per-attachment limit            | §7.6 (S-7.6-31) — rounded down to whole `aChunkBytes`; it can only lower a limit                                        |
 | casts                                    | off by default; suggested `rate` 4/s, burst 4×; `maxBytes` 2048; spool-wide 200/s, burst 4× | §7.7                                                                     |
 
 ## 13. Test vectors [Both]
@@ -2035,3 +2063,4 @@ the plane itself was unaffected either time, since a spool never decodes a frame
 | 2026-09-14 | **The relay invite link (§7.4 note, `docs/RELAY_INVITE.md`).** A non-normative pointer: the reference client mints and accepts the relay, its token and its commons secret as one `https://getknit.app/r#…` link, applied on one confirmation. Client-side only; the link never reaches a spool | None for spools. Daemons SHOULD print the link beside `knit-commons:v1:…`; no record, derivation or vector moved |
 | 2026-10-15 | **TURN credentials, entitlement tickets, STUN and casts (§7.6, §7.7; knit-spool ADR 2026-10.bxsg, knit-spool ADR 2026-10.h6pt, knit-spool ADR 2026-10.3wdy).** Four optional HELLO capabilities, each signalled by its presence: `turn` with `turnreq`/`turncred`, short-lived TURN REST credentials that name no scope; `ent`/`entGates` with an `ent` record presenting an Ed25519 ticket that gates `turnreq`, `aput` and `cast` per connection, and a TURN username suffix hashed from the ticket's daily pseudonym; `stun`, a credential-free STUN list; and `cast`, a sealed frame fanned out live to a scope's other subscribers and never stored, under its own seal (`sealv = 0x04`). New error code `ticket` (B-7.2-8); B-7.1-8 gains its one exception, a client record with no `q`. §10.1 bullets, §11 rows, §12 constants and §13 vectors appended | **Spools:** optional; a spool that enables none of them omits every field and is unaffected. **Clients:** tolerate-and-ignore until the client half lands; no existing record, derivation or vector moved |
 | 2026-10-16 | **Our own unanswered reset keeps its scopes (§3.1 C-3.1-4, C-3.1-5; ADR 2026-10.j67x).** While a member's own reset over a root it held is unanswered, it keeps the replaced root's scope (retiring) and derives the new root's, and it may seal that one reset — the `chat` flagged `FLAG_RESET` with the reset's init — into the retiring scope, the one named exception to C-3.1-3 (C-4.4-3 points to it); a reset of its own that is no longer the unanswered one goes into no DM scope; §10.1 names the timing edge the hand-over shows a spool. Before it the confirmed-only bound dropped both scopes for the wait, and a reset to a peer only a relay reached never arrived. All client-side | None for spools: the reset is an ordinary sealed v2 DM, admitted by §4.4 unchanged. Clients: no record, derivation or vector moved |
+| 2026-10-17 | **A ticket's size claim (§7.6: `am`, S-7.6-31, C-7.6-32).** A ticket gains an optional `am`, the largest attachment its holder may `aput`, in bytes of `A` rounded down to whole chunks. Where `files` is gated, a spool refuses a larger `aput` with `err ticket` `size` (S-7.6-22's word list, B-7.2-8): never a strike, nothing stored or charged. A client does not send one, and reads the refusal as too large for that relay, not as a lock. §10.1 names the issuer's link from `ps` to an account, §11's blind-ticket row says what a `v: 2` would need, and §12.2 gains the claim's default. In passing, B-7.2-8's two rows became one, and it and the §7.3 `aput` row point at §7.6. A client's exchange with an issuer, free accounts included, is `docs/VOICE_CALLS.md` §2.6 (C-7.6-27 amended, C-7.6-33 onward) | **Spools:** optional; a spool that does not read `am` ignores the key (B-2-2) and admits the upload as before, and only a connection whose ticket carries `am` can see `size`. **Clients:** read `size` as above; a ticket without `am` changes nothing. No existing record, derivation or vector moved |

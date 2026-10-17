@@ -199,102 +199,107 @@ the spool can tell a paying caller from anyone else without holding an account. 
 any client, paying or not, learn its own public address — without which a free phone offers only
 private addresses, and a paying peer's relay cannot permit it (coturn keys permissions on IP alone).
 
-| Record | Direction | Fields                                    | Semantics                                                         |
-|--------|-----------|-------------------------------------------|-------------------------------------------------------------------|
-| `ent`  | c→s       | `t, q: Long, tk: bytes, sig: bytes(64)`   | Present a ticket. Answered by `ok`, or by `err ticket` with `msg` |
+The `ent` record, the ticket's claims (`am` included), the spool's rules and the client's rules at the spool
+(S-7.6-13 to C-7.6-32) are normative in `docs/SPOOL_PROTOCOL.md` §7.6, and their vectors in its §13. This section
+no longer repeats them, so the two cannot drift. What it keeps is a client's exchange with the ticket issuer an
+operator names, which that protocol leaves out: the key swap (C-7.6-27 to C-7.6-29) and the free account (C-7.6-33
+onward), each specified for any client, not only the reference one. The free tier's values (what a free ticket's
+`ab` and `am` are, how many accounts a day, the stamp's difficulty) are the issuer operator's and are not stated
+here.
 
-```
-Ticket {                 // tk: the house CBOR, every field but ab required, unknown keys ignored
-    v:   1
-    kid: bytes(8)        // SHA-256(raw Ed25519 public key)[0..8]
-    aud: String          // the one spool it is good for
-    nbf: uint            // Unix seconds
-    exp: uint            // Unix seconds, exp - nbf <= 48 h
-    ps:  bytes(16)       // the holder's pseudonym for the day, opaque to the spool
-    fl:  uint            // bit 0: may ask for TURN; bit 1: may upload attachments; bit 3: may cast, and
-                         // unlocks casts for the scope (§2.7). Bit 2 is reserved.
-    ab:  uint?           // upload budget in bytes for this pseudonym's day; absent means the spool's own
-}
-sig = Ed25519(issuer key, "knit/spool/v1/ticket" ‖ tk)
-```
+> **How a client keeps C-7.6-24 and C-7.6-32.** It may upload on a connection whose gates lack bit 1, or that holds
+> an accepted ticket with bit 1, not past `exp` on its clock, whose `ps` it has not seen spent at that relay.
+> Before the `ent` answer it does not upload; with no presentable files ticket it is locked at once, so it sends
+> neither `aput` nor the `ahave` that would precede one, and the sender's attachment reads "Nearby only". A `budget`
+> refusal marks the (relay host, `ps`) pair spent in memory: the mark outlives a reconnect and a re-presented ticket
+> with that `ps`, and a ticket with another `ps` clears it. It is never a refusal verdict on the stored ticket, which
+> would stop that ticket's TURN and casts (knit-next ADR 2026-10.8t2y). Under a ticket with `am`, an attachment
+> whose `total = ⌈|A| / 49152⌉` exceeds `⌊am / 49152⌋` is never offered to that relay: it is too large there and
+> still goes nearby. `|A|` is the plaintext plus 28 B (§4.5's 12 B nonce and 16 B tag), or the plaintext alone for
+> a keyless one. A `size` refusal settles that one attachment the same way, and locks nothing.
 
-| ID           | Requirement                                                                                                                                                                                                                      |
-|--------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **S-7.6-13** | A spool configured with a ticket key advertises `ent: true` in HELLO; one that is not MUST omit it. Beside `ent` it sends `entGates: uint`, the `fl` bits it requires a ticket for; a client that sees `ent` without `entGates` reads it as 9 (bits 0 and 3). A spool that advertises STUN puts a non-empty `stun: [String]` of `stun:`/`stuns:` URIs in HELLO, with no credential. |
-| **S-7.6-14** | On `ent`, a spool MUST refuse with `err ticket` and a `msg` of `malformed`, `key`, `signature`, `audience`, `early` or `expired` unless `tk` decodes, `kid` names its key, `sig` verifies, `aud` is its own, and `nbf - 300 s <= now <= exp + 300 s`. |
-| **S-7.6-15** | An accepted ticket binds to the connection until it expires, and a later accepted `ent` replaces it. A refused `ent` MUST leave an earlier ticket in place, and is never a strike.                                               |
-| **S-7.6-16** | On a connection whose HELLO carried `ent` with bit 0 in `entGates`, `turnreq` needs a live ticket with bit 0 of `fl`, else `err ticket` with `msg` `missing`, `expired` or `flags`. With one, no subscription is needed. S-7.6-5's limits still apply.   |
-| **S-7.6-17** | A ticketed credential's suffix is `SHA-256("knit/spool/v1/turn-user" ‖ ps)[0..10]`, so every issue under one pseudonym shares it, and the TURN server's per-user quota counts the holder, not the credential.                |
-| **S-7.6-18** | A spool MUST NOT log or persist a ticket or a pseudonym. Metrics MAY count acceptances and refusals by `msg`.                                                                                                                     |
-| **C-7.6-19** | A client that holds a ticket for a spool sends `ent` right after HELLO when the spool advertised `ent`, and again before the ticket expires. It MUST NOT retry a refused ticket on every round.                                 |
-| **C-7.6-20** | A client SHOULD gather from every `stun` URI its connected spools advertise, on every call, whether or not it obtained a TURN credential.                                                                                       |
-| **C-7.6-21** | A client that holds a ticket for a spool SHOULD ask that spool for TURN on every call, whether or not the DM scope is subscribed there; this refines C-7.6-12.                                                                   |
-| **S-7.6-22** | On a connection whose HELLO carried `ent` with bit 1 in `entGates`, `aput` needs the uploading connection's own live ticket with bit 1 of `fl` and budget left, else `err ticket` with `q`, `scope` and a `msg` of `missing`, `expired`, `flags` or `budget`. Another subscriber's ticket never admits it. The budget is `min(ab, the spool's own)` bytes per pseudonym, charged only for chunks stored, at the size the spool charges them. A refusal is never a strike. |
-| **S-7.6-23** | A ticket never gates `aget`: a member without one fetches every attachment a member with one stored.                                                                                                                             |
-| **C-7.6-24** | A client without a files ticket for a spool whose `entGates` has bit 1 does not offer to send attachments through it, and still fetches the ones it receives. After `budget` it does not upload there again under that ticket's pseudonym (`ps`). |
-| **C-7.6-27** | While the Internet plane runs, a client holding a customer key for a relay asks its issuer for a ticket when the key arrives, and whenever that relay's held ticket is missing, not presentable (`SpoolTicketPolicy.presentable`), or less than 6 h from its `exp` on the phone's clock. After a 200 it asks no sooner than 1 h later, so an account whose `exp` is capped at its end can't make it loop. With the plane off it asks nothing. |
-| **C-7.6-28** | A 200 imports the ticket under the host rule; a 401 parks the key until a different one arrives; a 403 records the end and retries daily; anything else backs off from 1 min to 1 h. |
+#### The key swap
+
+| ID           | Requirement |
+|--------------|-------------|
+| **C-7.6-27** | While the Internet plane runs, a client holding a key for a relay asks that key's issuer for a ticket: when a customer key arrives; for a customer key, whenever that relay's held ticket is missing, not presentable (`SpoolTicketPolicy.presentable`), or less than 6 h from its `exp` on the phone's clock; and, for any key, at once when an upload of its own is locked `missing` or `expired` on a connection to that relay whose `entGates` has bit 1 (C-7.6-24), within C-7.6-28's backoff and park. A free key (C-7.6-37) asks only for such a waiting upload: it is never renewed on a schedule, the 6 h margin does not apply to it, and a held free ticket is presented until its `exp`. After a 200 a client asks no sooner than 1 h later, whatever its key, so neither an account whose `exp` is capped at its end nor a ticket refused on import or at `ent` can make it loop. With the plane off it asks nothing. |
+| **C-7.6-28** | A 200 imports the ticket under the host rule. For a customer key, a 401 parks the key until a different one arrives, and a 403 records the end and retries daily; a 403 `ended` also lets the client make a free account at its next locked upload (C-7.6-35), which then takes the key's place. A free key answered 401 or 403 is forgotten (C-7.6-37). Anything else, a 503 included, backs off from 1 min to 1 h. |
 | **C-7.6-29** | A customer key goes only to the issuer origin it arrived with, only in the `Authorization` header, only over `https://` (`http://` in a debug build). It is stored beside the relay's `?k=` token, under the protection ADR 2026-09.66cw gives that token, and never minted into an invite. Removing the relay forgets its key, issuer and ticket. |
-| **C-7.6-30** | A client reads each gate from its own bit of `entGates` (S-7.6-13): `turnreq` needs a ticket only under bit 0, `aput` only under bit 1, a cast only under bit 3. A gate the HELLO doesn't name needs no ticket, whatever the spool's `ent`. |
 
-> **Why one ticket per connection.** The spool already ties a connection to every scope it
-> subscribes, so a ticket on each record would buy no unlinkability and cost a signature check per
-> record. The pseudonym does let the spool link one holder's connections across addresses within a
-> day; blind-signed tickets are the later answer if that becomes a concern.
->
-> **Why the suffix is hashed.** coturn's `user-quota` counts the part of the username after the colon
-> (4.18.0, `get_real_username`), so a stable suffix per pseudonym is what makes a quota per customer
-> possible. Hashing it keeps the spool-side pseudonym out of the TURN server's logs verbatim.
->
-> **Why only the uploader's ticket admits an upload.** TURN and casts let one payer unlock a conversation,
-> because a call or a walkie that only one side can use is broken. Attachments are not: a free member
-> still receives every one. A rule under which sending works in some conversations and not others, for
-> reasons the sender cannot see, would need explaining in every client (knit-spool ADR 2026-10.h6pt).
->
-> **How a client keeps C-7.6-24.** It may upload on a connection whose gates lack bit 1, or that holds an
-> accepted ticket with bit 1, not past `exp` on its clock, whose `ps` it has not seen spent at that relay.
-> Before the `ent` answer it does not upload; with no presentable files ticket it is locked at once, so it
-> sends neither `aput` nor the `ahave` that would precede one, and the sender's attachment reads "Nearby
-> only". A `budget` refusal marks the (relay host, `ps`) pair spent in memory: the mark outlives a reconnect
-> and a re-presented ticket with that `ps`, and a ticket with another `ps` clears it. It is never a refusal
-> verdict on the stored ticket, which would stop that ticket's TURN and casts (knit-next ADR 2026-10.8t2y).
->
 > **The key swap (C-7.6-27 to C-7.6-29).** A ticket is a day's grant, so something has to fetch the next one. An
 > issuer's operator hands a customer a relay invite (`docs/RELAY_INVITE.md` §2) that carries, beside the relay, the
 > issuer's origin `i` and a customer key `k` (`kak1_…`). Accepting it holds the key for the relay's host name, and
 > the client trades it at `POST <i>/api/v1/ticket` with `Authorization: Bearer <k>` and no body (knit-spool-coordinator
 > ADR 2026-10.ukvm, as amended by knit-spool-coordinator ADR 2026-10.mrnm). The answers are 200
 > `{ ticket, aud, nbf, exp, flags: { turn, files, cast }, endsAt }`, 401
-> `{ error: "unknown-key" }` and 403 `{ error: "ended", endsAt }`, all `no-store`. The client acts on the claims
-> inside `ticket`, never the JSON copies, and puts it through the same import door as a pasted one, so a ticket
-> whose `aud` is not that relay's host is never held; the connection then presents it at once (C-7.6-19). A phone
-> never re-mints a key into an invite: it lends out the customer's own quota. Client: knit-next ADR 2026-10.3sk7.
+> `{ error: "unknown-key" }` and 403 `{ error: "ended", endsAt }`, all `no-store`; a free account's swap may also
+> answer 503 (below). The client acts on the claims inside `ticket`, never the JSON copies, and puts it through the
+> same import door as a pasted one, so a ticket whose `aud` is not that relay's host is never held; the connection
+> then presents it at once (C-7.6-19). A phone never re-mints a key into an invite: it lends out the customer's own
+> quota. Client: knit-next ADR 2026-10.3sk7.
 >
-> **Why STUN rides HELLO.** A free phone that is the *caller* gathers before any answer arrives, so a
-> STUN URI carried in the paying peer's signaling would come too late. coturn answers STUN without a
-> credential, so advertising it costs the operator nothing a TURN allocation would.
+> **Why a waiting upload asks.** Without it a phone with a key asks only on its schedule, so a photo sent in the hour
+> a ticket lapsed, or before the first one arrived, waits for the next scheduled ask. A locked upload is held and
+> re-sent when uploads reopen, so asking then is what gets it there.
+>
+> **Why the 1 h floor holds for every key.** A 200 brings a ticket good for about a day, so no honest ask comes
+> within the hour after one. A ticket that is never held (its `aud` is not the relay's host) or is refused at `ent`
+> (a clock far off) leaves the upload locked, and without the floor the phone would ask again at once, every time.
 
-**Test vector.** Key pair RFC 8032 §7.1 TEST 1; `aud = "lab.example"`, `nbf = 1800000000`,
-`exp = 1800086400`, `ps = 00 01 … 0f`, `fl = 1`; the `ent` with `q = 7`:
+#### Free accounts
+
+A phone with no key can still send small files through a relay whose `entGates` has bit 1, if the client knows a
+**free issuer** for that relay. It makes an anonymous **free account** there, paid for with a proof-of-work stamp,
+and swaps its key for tickets exactly as a customer key is swapped. A free account's ticket grants files only
+(`fl` 2), with the issuer's own `ab` and `am` for that audience, so what a free phone may send is bounded by those
+claims and by the spool (S-7.6-22, S-7.6-31). The issuer keeps no per-request log, and keeps an address only as a
+daily-keyed hash in its per-address counter, dropped each day.
+
+Every answer is JSON with `cache-control: no-store`, and every body is at most 1 KiB:
+
+| Request | Answer | Meaning |
+|---------|--------|---------|
+| `GET <issuer>/api/v1/account?aud=<host>` | 200 `{ aud, bits, day }` | The stamp's difficulty in bits, and today's UTC day, `⌊unix s / 86400⌋` |
+| | 503 `{ error: "unavailable" }` | That audience has no free tier turned on, or is unknown |
+| `POST <issuer>/api/v1/account`, body `{ aud, day, nonce, n }` | 201 `{ key, aud }` | A new free account. `key` is `kak1_…`, the same format as a customer key |
+| | 400 `{ error: "bad-stamp", bits, day }` | The stamp is short of `bits`, stale, spent or malformed, or the body is |
+| | 429 `{ error: "rate-limited" }`, `retry-after` in seconds | The address has made its day's accounts |
+| | 503 `{ error: "unavailable" }`, `retry-after` optional | The audience's free tier is off or unknown, or the day's cap is reached |
+| `POST <issuer>/api/v1/ticket`, `Bearer <free key>` | 200, 401, 403 | As for a customer key. The ticket carries `fl` 2 and the audience's `ab` and `am`; `endsAt` is the account's rolling end, which each swap moves forward, at most once a day. An account unused that long ends: 403 `ended` |
+| | 503 `{ error: "unavailable" }` | Free accounts only: the audience's free tier is off, or the day's cap is reached and this account has not been ticketed today. A customer account is never answered 503 for either |
+
+`nonce` is 16 random bytes in unpadded base64url, and `n` a non-negative integer below 2^53. The stamp:
 
 ```
-kid = 21fe31dfa154a261
-tk  = a7617601636b69644821fe31dfa154a261636175646b6c61622e6578616d706c65636e62661a6b49d200
-      636578701a6b4b238062707350000102030405060708090a0b0c0d0e0f62666c01
-sig = c0740d14d5f46f2771721c593fa34a6e926b39182955cc6f8fb15365dddcf229
-      da2cb33bdf6f23881cf4b153eedc4238e143fa53ef1a834961040bb55818b809
+h      = SHA-256("knit/issuer/v1/account" ‖ u64be(day) ‖ nonce ‖ u64be(n))   // label: ASCII, no terminator
+valid  ⇔ leadingZeroBits(h) ≥ bits, counted as SPOOL_PROTOCOL.md §8 counts them,
+         day is today or yesterday (UTC) at the issuer, and (day, nonce) is spent once
 ```
 
-The same fixture with `fl = 3` (TURN and files) and `ab = 134217728`, and a HELLO with `ent` and
-`entGates = 11` (TURN, files and cast):
+| ID           | Requirement |
+|--------------|-------------|
+| **C-7.6-33** | A client makes a free account for a relay only at a free issuer origin it is configured with for that relay's host name, under C-7.6-29's origin rule. It never takes one from a spool, a peer or an invite: an invite's `i` comes with a customer key and is that key's issuer. The reference client knows one, `https://anywhere.getknit.app` for its seeded `lax.spool.getknit.app`; its debug build may set one for any host. |
+| **C-7.6-34** | Before its first account request to an issuer, a client tells the person, once, that the phone will contact that host, named, about once a day it sends files through the relay, and asks the issuer nothing unless they allow it. They may decline, and may turn it off later; turning it off forgets the free key. |
+| **C-7.6-35** | A client with no key for a relay, or with a customer key last answered 403 `ended`, where C-7.6-33 gives it a free issuer and C-7.6-34 the person's leave, makes a free account when an upload of its own is locked `missing` or `expired` on a connection to that relay whose `entGates` has bit 1, and at no other time. It `GET`s the parameters for the relay's host name, mines a stamp, `POST`s it, holds the 201's key, and swaps it for a ticket at once (C-7.6-27). An answer whose `aud` is not that host name is not acted on. With the plane off, or with no route, it waits; a phone that comes online with an upload still locked asks then. |
+| **C-7.6-36** | A client mines with the `day` and `bits` of the 200 it just got, never its own clock's day, and a fresh `nonce` for each account request, counting `n` up from 0. A 400 `bad-stamp` is re-mined once, with the `bits` and `day` it carries; a second one backs off as a 503 does. |
+| **C-7.6-37** | A free key is held in the relay host's one key slot, marked free. A customer key that arrives for that host replaces it. It goes only to the issuer origin that made it, under C-7.6-29's other rules, and never rides a backup. Answered 401 or 403, it is forgotten with its state, and a new account is made at the next locked upload, no sooner than the next UTC day. |
+| **C-7.6-38** | On the account route, a 429 waits `retry-after` seconds, and a 503 waits `retry-after`, or without one 1 h, doubling to 24 h. Anything else, a failed request included, backs off as a 503 does. |
 
-```
-tk            = a8617601636b69644821fe31dfa154a261636175646b6c61622e6578616d706c65636e62661a6b49d200
-                636578701a6b4b238062707350000102030405060708090a0b0c0d0e0f62666c036261621a08000000
-sig           = 1942b4b07f1ef10f7e4061e822d909876b2e5a1597469c5aa70c87c5909dbc9c
-                c24dc7703dfcb8a33ea190b19e4b9a9f460319f9ec2d11d17e787afe551b5d0a
-helloEntGates = a461746568656c6c6f61760163656e74f568656e7447617465730b
-```
+> **Why a free key asks only for a waiting upload.** The issuer's daily cap counts the accounts it tickets in a day.
+> A free phone that renewed on a schedule would count every day, whether or not it sent anything, and turn away the
+> people who do. Asking only for a waiting upload makes the cap count the day's free senders, not free users, and
+> the issuer hears from a free phone only on a day it sends something through that relay.
+>
+> **Why a stamp.** The account route is unauthenticated, so creating many accounts is the attack, and that is where
+> it is paid for: a few seconds of hashing on a phone, beside the issuer's per-address limit and its daily cap. It
+> is a speed bump, not a wall. It reuses §8's hashcash family under its own label, and binds the issuer's day, so a
+> stamp cannot be mined ahead or spent twice.
+>
+> **Why the notice.** The relay's own consent covers the relay. A free account makes the phone contact a second host
+> the person did not name, which links one day's pseudonym to an account (`docs/SPOOL_PROTOCOL.md` §10.1), so it
+> asks first.
+>
+> **Why a free key is not backed up.** It is anonymous and cheap to make again. A restored phone makes its own.
 
 ### 2.7 Casts: a walkie's chunks through a spool (experimental)
 
