@@ -4285,7 +4285,7 @@ private fun MessageInput(
                     when (action) {
                         SendAction.Sending -> stringResource(R.string.chat_sending)
                         SendAction.Send -> stringResource(R.string.action_send)
-                        SendAction.Attach -> stringResource(R.string.action_attach_photo)
+                        SendAction.Attach -> stringResource(R.string.action_attach_media)
                     }
                 // The byte counter belongs to the button it constrains, not to the thread: it says what the
                 // *send* will carry, so it rides directly over the send button rather than across the width of
