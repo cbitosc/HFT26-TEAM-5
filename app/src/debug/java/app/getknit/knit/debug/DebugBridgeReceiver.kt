@@ -1433,6 +1433,10 @@ class DebugBridgeReceiver :
             // Ask before large Bluetooth downloads (ADR 2026-10.js2p): fast-only holds, refusals and dropped copies.
             .put("blobFastOnlyHeld", snap.files.blobFastOnlyHeld)
             .put("blobFastOnlyRefused", snap.files.blobFastOnlyRefused)
+            // A DM photo's recipient asked whether it holds the bytes, and said so (ADR 2026-10.vy27).
+            .put("blobProofQueriesSent", snap.files.blobProofQueriesSent)
+            .put("blobProofAnswersTaken", snap.files.blobProofAnswersTaken)
+            .put("blobProofsHeld", snap.files.blobProofsHeld)
             .put("fastOnlyDropped", snap.files.fastOnlyDropped)
             .put("carrierPullsDeferred", snap.files.carrierPullsDeferred)
             .put("dmSealedV2", snap.seals.dmSealedV2)
@@ -1507,6 +1511,8 @@ class DebugBridgeReceiver :
             // The two-island photo trial reads as `spoolAttachDeferred` climbing while the devices are
             // together and `spoolAttachPushed` starting within a heal round of separating them.
             .put("spoolAttachDeferred", snap.spool.spoolAttachDeferred)
+            // A DM photo its recipient provably holds: settled for good, never uploaded (ADR 2026-10.vy27).
+            .put("spoolAttachProved", snap.spool.spoolAttachProved)
             .put("loraSent", snap.lora.loraSent)
             .put("loraFragSent", snap.lora.loraFragSent)
             .put("loraTranscoded", snap.lora.loraTranscoded)

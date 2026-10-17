@@ -33,8 +33,9 @@ import kotlin.random.Random
  * The Internet plane between real stacks — the real `ScopeSync` on every node over one in-process
  * [FakeSpool], which is the shape of the device trials the spool work still owes (ADR 064): two islands
  * sharing a group through one relay and a departure rotating its scope, a receive-only peer deriving the
- * same DM scope (ADR 032), a photo the radio already carried not being uploaded until the peers part
- * (ADR 021), a planted blob quarantined without breaking convergence (spec §9.3), two card holders meeting
+ * same DM scope (ADR 032), a photo whose ack the radio carried not being uploaded until the peers part
+ * (ADR 021; one its recipient provably holds is `PhotoProofLabTest`'s), a planted blob quarantined without
+ * breaking convergence (spec §9.3), two card holders meeting
  * at the pair scope with no radio (ADR 042), a relay that drops every socket, and a sealed profile update
  * crossing the relay (ADR 020), and a relay that takes files only from ticket holders (knit-spool ADR 2026-10.h6pt).
  * Slow by nature: the scope table derives on its inputs' events (a confirmed
@@ -181,8 +182,13 @@ class InternetPlaneLabTest {
         }
 
     /**
-     * ADR 021's owed trial, and the regression for issue #46. A photo the radios carried needs no second
-     * copy at a relay, so the bytes wait while Bob is in range and go up once he leaves.
+     * ADR 021's owed trial, and the regression for issue #46, now for the case the deferral is left with: the radio
+     * carried the message and its ack, but not the bytes. An ack says the frame arrived, never the bytes (ADR 021),
+     * so it is not the proof that settles a photo for good (ADR 2026-10.vy27): the bytes wait while Bob is in range
+     * and go up once he leaves. Alice's files to Bob are parked on the link, so Bob holds none of them — his answer to
+     * her holder query says he is still fetching — and the relay is how he finally gets the picture. Bob is off the
+     * relay while the message crosses, so his ack can only come back over the radio: a relay ack would leave nothing
+     * but the send's 60 s grace (wall time) holding the upload, which is ADR 2026-09.xmte's case and not this one.
      *
      * The whole round is decided on its first pass, which is what #46 was about: `ScopeSync.onCustodyChanged`
      * wakes the worker the moment the frame is custodied — the send itself — and that round's
@@ -192,9 +198,6 @@ class InternetPlaneLabTest {
      * already at the relay. `ACK_GRACE_MS` separates the two: for a minute after the send an attachment on
      * a message we authored holds on the sighting alone, by which time the real ack has landed and the
      * ordinary rule takes over — so there is no round in which these bytes are pushable.
-     *
-     * Bob still gets the picture, over the radio link via `BlobExchange`; that is what `assertConverged`'s
-     * attachment oracle checks, and what makes the relay copy redundant in the first place.
      */
     @Test
     fun aPhotoTheRadioCarriedIsNotUploadedUntilThePeersPart() =
@@ -206,9 +209,19 @@ class InternetPlaneLabTest {
             lab.link(alice, bob)
             lab.awaitAcquainted(alice, bob)
 
+            // The message and its ack cross the radio, the only path Bob has for now; the bytes do not.
+            lab.leaveRelay(bob)
+            alice.transport.holdFiles(bob.transport)
             val picture = Random(21).nextBytes(4_096)
             assertTrue(alice.sendImage(picture, "in range", to = bob))
-            lab.assertConverged(listOf(alice, bob), atLeast = 3) { alice.dmThreadWith(bob)(it) }
+            val sentId = alice.ownMessageId(alice.dmWith(bob), "in range")
+            val hash = checkNotNull(alice.attachmentHash(alice.dmWith(bob), sentId))
+            assertTrue(
+                "bob's ack never came back over the radio",
+                lab.tryAwait(1, timeoutMs = MeshLab.SPOOL_AWAIT_MS) {
+                    if (alice.receivedVia(alice.dmWith(bob), sentId) == DeliveryPlane.Nearby) 1 else 0
+                },
+            )
             assertTrue(
                 "the upload was never deferred",
                 lab.tryAwait(1, timeoutMs = MeshLab.SPOOL_AWAIT_MS) {
@@ -218,15 +231,15 @@ class InternetPlaneLabTest {
                         .toInt()
                 },
             )
-            // Neither end, not just the sender: Bob holds these bytes because a radio handed them to him, so
-            // his own push would be the second copy this gate exists to prevent.
-            val sentId = alice.ownMessageId(alice.dmWith(bob), "in range")
             assertTrue(
-                "chunks went up while bob was in range: ${spool.chunksPut}; " +
-                    "alice pushed=${alice.metrics.spool().spoolAttachPushed} bob pushed=${bob.metrics.spool().spoolAttachPushed} " +
-                    "bob's row came via ${bob.receivedVia(bob.dmWith(alice), sentId)}\n${lab.report(listOf(alice, bob))}",
+                "chunks went up while bob was in range: ${spool.chunksPut}\n${lab.report(listOf(alice, bob))}",
                 spool.chunksPut.isEmpty(),
             )
+            assertEquals("an ack is not proof of bytes", 0L, alice.metrics.spool().spoolAttachProved)
+            assertFalse("bob holds bytes the link never landed", bob.blobs.exists(hash))
+            // Back on the relay, still in range: his receipt's relay copy is a duplicate (the radio's mark stands), and
+            // nothing at the relay is his to fetch yet.
+            lab.rejoinRelay(bob)
 
             // `lastSeen` is a stamp, not a live read, so unlinking alone leaves Bob deferrable for the rest
             // of the sighting window — the lapse is the reversing half and it is measured on the calendar.
@@ -238,6 +251,10 @@ class InternetPlaneLabTest {
                 "the upload never happened after they parted",
                 lab.tryAwait(1, timeoutMs = MeshLab.SPOOL_AWAIT_MS) { spool.chunksPut.size },
             )
+            // Bob gets the picture over the relay: the oracle's attachment half checks both ends hold it.
+            lab.assertConverged(listOf(alice, bob), atLeast = 3, timeoutMs = MeshLab.SPOOL_AWAIT_MS) {
+                alice.dmThreadWith(bob)(it)
+            }
         }
 
     /**
@@ -279,7 +296,9 @@ class InternetPlaneLabTest {
             assertTrue(
                 "bob never judged the bytes\n${lab.report(listOf(alice, bob))}",
                 lab.tryAwait(1, timeoutMs = MeshLab.SPOOL_AWAIT_MS) {
-                    bob.metrics.snapshot().let { (it.spool.spoolAttachDeferred + it.spool.spoolAttachPushed).toInt() }
+                    bob.metrics.snapshot().let {
+                        (it.spool.spoolAttachDeferred + it.spool.spoolAttachPushed + it.spool.spoolAttachProved).toInt()
+                    }
                 },
             )
             assertTrue(

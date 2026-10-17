@@ -98,6 +98,9 @@ class BlobHolderQueryTest {
 
         // While set, this node leaves queries unanswered: an answer that comes in late is the test's to deliver.
         @Volatile var mute = false
+
+        // Every (hash, peer) a proof query's answer said is held ([BlobExchange.confirmHeld]).
+        val holds = CopyOnWriteArrayList<Pair<String, String>>()
         val exchange =
             BlobExchange(
                 transport = transport,
@@ -110,6 +113,7 @@ class BlobHolderQueryTest {
                 onEvent = { events += it },
                 timers = { timers },
                 addressees = { to },
+                onPeerHolds = { hash, peer -> holds += hash to peer },
             )
 
         // Every blob frame this node received: type, sender, payload.
@@ -2286,6 +2290,167 @@ class BlobHolderQueryTest {
 
             assertTrue("b sent the bad tail: the from-0 ask goes elsewhere", b.asksFrom(hash).isEmpty())
             assertEquals(listOf("a"), c.asksFrom(hash))
+            assertTrue(a.store.has(hash))
+        }
+
+    // --- Proof of a hold (ADR 2026-10.vy27): confirmHeld's query and the answer only onPeerHolds takes ---
+
+    /** The id of the latest holder query [to] received from [from]. */
+    private fun lastQueryId(
+        to: Node,
+        from: String,
+    ): String =
+        to.heard
+            .last { it.first == FrameType.BLOB_HAVE && it.second == from }
+            .third.id
+
+    private fun has(
+        hash: String,
+        state: Int,
+        re: String?,
+    ) = BlobHasContent(listOf(BlobHasItem(hash, state, if (state == BlobHasItem.NONE) null else 2_000L)), 0, re)
+
+    @Test
+    fun aProofQueryGoesOnlyToALinkedCapableNeighbourAndNotAgainInsideItsFloor() =
+        runTest(UnconfinedTestDispatcher()) {
+            val a = Node("a", backgroundScope)
+            val b = Node("b", backgroundScope)
+            val c = Node("c", backgroundScope, answers = false)
+            a.transport.connect(b.transport)
+            a.transport.connect(c.transport)
+            val hash = a.store.seed(picture())
+            b.store.blobs[hash] = a.store.blobs.getValue(hash)
+
+            a.exchange.confirmHeld(hash, "b")
+            a.exchange.confirmHeld(hash, "c")
+            a.exchange.confirmHeld(hash, "d")
+
+            assertEquals("one query to the linked, capable neighbour", listOf(listOf(hash)), b.queriesFrom("a"))
+            assertTrue("none to a neighbour whose link lacks the bit", c.queriesFrom("a").isEmpty())
+            assertEquals("and none for one not linked at all", 1, a.events.count { it == BlobExchange.BlobEvent.ProofQuerySent })
+            assertEquals(listOf(hash to "b"), a.holds)
+
+            a.now = BlobExchange.PROOF_FLOOR_MS - 1
+            a.exchange.confirmHeld(hash, "b")
+            assertEquals("inside the floor: no second query", 1, b.queriesFrom("a").size)
+            a.now = BlobExchange.PROOF_FLOOR_MS
+            a.exchange.confirmHeld(hash, "b")
+            assertEquals("at the floor: the next round asks again", 2, b.queriesFrom("a").size)
+            a.exchange.linked(listOf("b"))
+            a.exchange.confirmHeld(hash, "b")
+            assertEquals("a link raised again is queried at once", 3, b.queriesFrom("a").size)
+
+            assertTrue("a proof query asks for nothing", b.asksFrom(hash).isEmpty() && a.transport.filesSent.isEmpty())
+            assertTrue("and stamps no serve memo: a fresh ask is served", b.transport.filesSent.isEmpty())
+            b.exchange.onRequest(hash, "a")
+            assertEquals(1, b.transport.filesSent.size)
+            assertEquals(3, a.events.count { it == BlobExchange.BlobEvent.ProofQuerySent })
+            assertEquals("never counted as a want's query", 0, a.events.count { it == BlobExchange.BlobEvent.QuerySent })
+        }
+
+    @Test
+    fun haveAndSendingProveAHoldAndFetchingAndNoneDoNot() =
+        runTest(UnconfinedTestDispatcher()) {
+            val a = Node("a", backgroundScope)
+            val b = Node("b", backgroundScope)
+            a.transport.connect(b.transport)
+            val have = b.store.seed(picture(1_000))
+            val sending = b.store.seed(picture(1_200))
+            val fetching = sha256Hex(picture(1_300))
+            val none = sha256Hex(picture(1_400))
+            b.transport.inFlight += "a" to sending
+            b.transport.arriving += fetching
+
+            a.exchange.confirmHeld(listOf(have, sending, fetching, none), "b")
+
+            assertEquals("one frame for the round's hashes", listOf(listOf(have, sending, fetching, none)), b.queriesFrom("a"))
+            assertEquals(listOf(have to "b", sending to "b"), a.holds)
+            assertEquals(1, a.events.count { it == BlobExchange.BlobEvent.ProofAnswerTaken })
+            assertEquals(2, a.events.count { it == BlobExchange.BlobEvent.ProofHeld })
+            assertTrue(
+                "a proof's answer is neither a want's answer nor ignored",
+                a.events.none { it == BlobExchange.BlobEvent.AnswerTaken || it == BlobExchange.BlobEvent.AnswerIgnored },
+            )
+        }
+
+    @Test
+    fun onlyTheQueriedPeersShortRangeAnswerForAHashItsQueryAskedProvesAHoldOnce() =
+        runTest(UnconfinedTestDispatcher()) {
+            val a = Node("a", backgroundScope)
+            val b = Node("b", backgroundScope)
+            a.transport.connect(b.transport)
+            b.mute = true
+            val hash = sha256Hex(picture())
+            val other = sha256Hex(picture(3_000))
+            a.exchange.confirmHeld(hash, "b")
+            val id = lastQueryId(b, "a")
+
+            a.exchange.onHaveAnswer(has(hash, BlobHasItem.HAVE, id), "c")
+            a.exchange.onHaveAnswer(has(hash, BlobHasItem.HAVE, "not-ours"), "b")
+            a.exchange.onHaveAnswer(has(hash, BlobHasItem.HAVE, null), "b")
+            a.exchange.onHaveAnswer(has(other, BlobHasItem.HAVE, id), "b")
+            a.exchange.onHaveAnswer(has(hash, BlobHasItem.HAVE, id), "b", shortRange = false)
+            assertTrue("another peer, another query, no query, another hash, a long-range plane: none proves it", a.holds.isEmpty())
+            assertEquals(5, a.events.count { it == BlobExchange.BlobEvent.AnswerIgnored })
+
+            a.exchange.onHaveAnswer(has(hash, BlobHasItem.HAVE, id), "b")
+            a.exchange.onHaveAnswer(has(hash, BlobHasItem.HAVE, id), "b")
+            assertEquals("the query's own answer does, once", listOf(hash to "b"), a.holds)
+        }
+
+    @Test
+    fun aWantsAnswerIsNoProofAndAProofsAnswerStepsNoWant() =
+        runTest(UnconfinedTestDispatcher()) {
+            val a = Node("a", backgroundScope)
+            val b = Node("b", backgroundScope)
+            a.transport.connect(b.transport)
+            val hash = b.store.seed(picture())
+            b.mute = true
+            a.exchange.want(hash)
+            val wantQuery = lastQueryId(b, "a")
+            a.exchange.confirmHeld(hash, "b")
+            val proofQuery = lastQueryId(b, "a")
+            assertTrue(wantQuery != proofQuery)
+
+            a.exchange.onHaveAnswer(has(hash, BlobHasItem.HAVE, proofQuery), "b")
+            assertEquals(listOf(hash to "b"), a.holds)
+            assertTrue("the proof's HAVE asks nobody", b.asksFrom(hash).isEmpty())
+
+            a.exchange.onHaveAnswer(has(hash, BlobHasItem.HAVE, wantQuery), "b")
+            assertEquals("the want's HAVE asks the holder, as it always has", listOf("a"), b.asksFrom(hash))
+            assertEquals("and proves nothing", 1, a.holds.size)
+            assertTrue(a.store.has(hash))
+        }
+
+    @Test
+    fun theProofBooksAreBounded() =
+        runTest(UnconfinedTestDispatcher()) {
+            val a = Node("a", backgroundScope)
+            val b = Node("b", backgroundScope)
+            a.transport.connect(b.transport)
+            b.mute = true
+            val hashes = (0 until 300).map { sha256Hex(byteArrayOf((it shr 8).toByte(), it.toByte())) }
+            hashes.forEach { a.exchange.confirmHeld(it, "b") }
+            assertEquals(300, b.queriesFrom("a").size)
+
+            a.exchange.confirmHeld(hashes.last(), "b")
+            assertEquals("the newest stamp stands", 300, b.queriesFrom("a").size)
+            a.exchange.confirmHeld(hashes.first(), "b")
+            assertEquals("the eldest was evicted: asked again inside its floor", 301, b.queriesFrom("a").size)
+        }
+
+    @Test
+    fun onReceivedSaysWhetherTheStoreTookTheBytes() =
+        runTest(UnconfinedTestDispatcher()) {
+            val a = Node("a", backgroundScope)
+            val bytes = picture()
+            val hash = sha256Hex(bytes)
+            val dir = Files.createTempDirectory("hq-rx").toFile()
+            val bad = File(dir, "bad").apply { writeBytes(picture(1_999)) }
+            val good = File(dir, "good").apply { writeBytes(bytes) }
+
+            assertEquals("bytes that fail their hash are refused", false, a.exchange.onReceived(hash, "image/jpeg", bad.absolutePath))
+            assertEquals(true, a.exchange.onReceived(hash, "image/jpeg", good.absolutePath))
             assertTrue(a.store.has(hash))
         }
 

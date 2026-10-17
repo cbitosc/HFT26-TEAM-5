@@ -93,3 +93,11 @@ asks for the blob before the sealed content is opened), and the frame comes off 
 delivers it (the row then says `Internet`). The evidence is now read where it occurs —
 `AttachmentDeferPolicy.noteRadioArrival`, from the transport's file channel, *before* the bytes are stored —
 and the row's plane is consulted after it.
+
+*Amendment (2026-10-17, ADR 2026-10.vy27).* "The gate is a deferral, never a veto" now has one exception, and it is
+the one this ADR's own argument leaves room for. A veto on the ack was wrong because the ack is not the bytes; a veto
+on the bytes is not. Per recipient and per attachment hash, proof that the recipient holds the bytes, learnt over a
+short-range radio — its own hash-checked radio arrival, or its answer to the holder query over a live link — settles
+a DM photo for good: it never goes up, not when the peers part and not at last call. The proof persists
+(`attachment_holders`), so a restart does not undo it. A delivery ack is still not proof, groups still never take one,
+and without it everything above stands.

@@ -604,7 +604,8 @@ private fun MetricsSection(metrics: MeshMetrics.Snapshot) {
             }
             // Attachments (spec §9.5) get their own rows: they are counted in chunks out and whole
             // images in, which is the difference between "an upload is progressing" and "a photo arrived".
-            if (metrics.spool.spoolAttachPushed > 0 || metrics.spool.spoolAttachPulled > 0 || metrics.spool.spoolAttachDeferred > 0) {
+            val attachments = with(metrics.spool) { listOf(spoolAttachPushed, spoolAttachPulled, spoolAttachDeferred, spoolAttachProved) }
+            if (attachments.any { it > 0 }) {
                 MetricRow(stringResource(R.string.diagnostics_metric_spool_attach_pushed), metrics.spool.spoolAttachPushed.toString())
                 MetricRow(stringResource(R.string.diagnostics_metric_spool_attach_pulled), metrics.spool.spoolAttachPulled.toString())
                 // Deferrals are the difference between "the relay isn't carrying this photo" and "the
@@ -613,6 +614,13 @@ private fun MetricsSection(metrics: MeshMetrics.Snapshot) {
                     MetricRow(
                         stringResource(R.string.diagnostics_metric_spool_attach_deferred),
                         metrics.spool.spoolAttachDeferred.toString(),
+                    )
+                }
+                // A DM photo its recipient provably holds is never uploaded (ADR 2026-10.vy27): the row says so on purpose.
+                if (metrics.spool.spoolAttachProved > 0) {
+                    MetricRow(
+                        stringResource(R.string.diagnostics_metric_spool_attach_proved),
+                        metrics.spool.spoolAttachProved.toString(),
                     )
                 }
             }

@@ -4,6 +4,8 @@ import android.content.Context
 import androidx.room3.Database
 import androidx.room3.Room
 import androidx.room3.RoomDatabase
+import app.getknit.knit.data.blob.AttachmentHolderDao
+import app.getknit.knit.data.blob.AttachmentHolderEntity
 import app.getknit.knit.data.blob.BlobDao
 import app.getknit.knit.data.blob.BlobEntity
 import app.getknit.knit.data.blob.BlobVerdictDao
@@ -54,7 +56,7 @@ import net.zetetic.database.sqlcipher.driver.SQLCipherDriver
  * The `@Database` version, as a top-level constant so the annotation and [KnitDatabase.SCHEMA_VERSION] read
  * one number (an annotation argument cannot name the class's own companion).
  */
-internal const val KNIT_DB_SCHEMA_VERSION = 26
+internal const val KNIT_DB_SCHEMA_VERSION = 27
 
 @Database(
     entities = [
@@ -68,6 +70,7 @@ internal const val KNIT_DB_SCHEMA_VERSION = 26
         MessageFtsEntity::class, CommonsEntity::class, CommonsOutboxEntity::class,
         CommonsMemberEntity::class, MetPeerEntity::class, SavedFileEntity::class,
         PeerProfileEntity::class, GroupMemberClockEntity::class, PeerBadgeEntity::class,
+        AttachmentHolderEntity::class,
     ],
     // v1: frozen launch baseline. The pre-1.0 alpha schema churn (the old destructive v2…v22 bumps that
     //     rode the wire/crypto breaks) is collapsed; docs/WIRE_COMPAT.md keeps the historical break record.
@@ -216,6 +219,11 @@ internal const val KNIT_DB_SCHEMA_VERSION = 26
     //     when shown (docs/SUPPORTER_BADGE.md, ADR 2026-10.r99s). A table rather than columns on `peers`, and written
     //     only by the sealed profile path, so a cleartext profile never reverts them. Rows go with their pin and ride a
     //     backup like `peers`. Empty on arrival; migrated by KnitMigrations.MIGRATION_25_26.
+    // v27: one `attachment_holders` table — per (attachment hash, holder) proof, learnt over a short-range radio, that
+    //     a DM photo's recipient holds its bytes: the recipient's own radio arrival, or the peer's answer to a holder
+    //     query. A DM photo so proved never goes up to a spool (docs/SPOOL_PROTOCOL.md C-9.5-8, ADR 2026-10.vy27). No
+    //     wire change. Rows go with their blob and ride a backup like `blobs`. Empty on arrival; migrated by
+    //     KnitMigrations.MIGRATION_26_27.
     version = KNIT_DB_SCHEMA_VERSION,
     // Export the schema JSON to app/schemas/ (location set by the androidx.room Gradle plugin's
     // room { schemaDirectory(...) } in app/build.gradle.kts). Keeps the schema diffable in review and feeds
@@ -253,6 +261,8 @@ abstract class KnitDatabase : RoomDatabase() {
     abstract fun metPeerDao(): MetPeerDao
 
     abstract fun savedFileDao(): SavedFileDao
+
+    abstract fun attachmentHolderDao(): AttachmentHolderDao
 
     companion object {
         /** The schema version the annotation above declares, for code that must compare against it. */

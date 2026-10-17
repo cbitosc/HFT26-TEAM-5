@@ -21,7 +21,7 @@ Adjacent routing that stays where its owner is, because another subsystem owns i
   `.agents/context/wifi-aware.md`.
 - **The LoRa backfill and bridge custody window** (ADRs 044, 054, 2026-09.rre4, zkma, y8pu): `.agents/context/lora.md`
   — a board carries a frame and never a blob.
-- **The spool's attachment class and its deferral** (ADRs 021, 2026-09.xmte, p7j8, e8yw; the accounting of ADR 062):
+- **The spool's attachment class and its deferral** (ADRs 021, 2026-09.xmte, p7j8, e8yw, 2026-10.vy27; the accounting of ADR 062):
   the spool bullet in `AGENTS.md` and `docs/SPOOL_PROTOCOL.md` §4.5 / §9.5. `AttachmentDeferPolicy.noteRadioArrival`
   is fed from `MeshManager.watchIncomingFiles` ahead of the store write, and must stay ahead of it.
 - **Receive-side screening** — `MeshBlobStore.ingest`, `BlobStore.storing`, a held-but-refused avatar (#109): the
@@ -51,6 +51,15 @@ Adjacent routing that stays where its owner is, because another subsystem owns i
   Aware linked, then reachable, then the source hop) and widens to everyone only after its grace, because every holder
   serves a fresh ask; there is no negative answer on the wire, so never make it one-at-a-time without one. A link-up
   clears its newcomer's asks (`BlobExchange.linked`), since an ask can die with a link. Lab: `BlobFirstAskLabTest`.
+- **Before touching the proof query — `BlobExchange.confirmHeld` / `onPeerHolds` / `PROOF_FLOOR_MS`, the proof branch
+  of `onHaveAnswer` (its `shortRange`), `onReceived`'s result, `MeshManager.askHolder` or what writes
+  `attachment_holders` (`BlobRepository.recordHolder`):** READ ADR 2026-10.vy27 (amending ADR 021). A DM photo's
+  sender asks its linked recipient with the ordinary holder query whether it holds a photo of ours; a short-range
+  `HAVE`/`SENDING` answering that query is the proof that keeps the photo off every spool for good. Proof queries
+  never touch a want, and a want's answer never proves; the recipient's own proof is written only after
+  `onReceived` reports the store took the bytes, never on the arrival memo. Lab:
+  `PhotoProofLabTest.aPhotoItsRecipientHoldsNeverGoesUpEvenAfterThePeersPart`; unit: `BlobHolderQueryTest`'s
+  proof cases.
 - **Before touching the holder query — `BlobExchange.onHaveQuery` / `onHaveAnswer` / `decide` / `wantAll`,
   `FrameType.BLOB_HAVE` / `BLOB_HAS` / `isUnsignedPointToPoint`, `BlobHaveContent` / `BlobHasContent`,
   `Protocol.CAP_BLOB_HAVE`, `BlobStore.servable`, `MeshTransport.feedingLoad` / `slowLinkTo`, or

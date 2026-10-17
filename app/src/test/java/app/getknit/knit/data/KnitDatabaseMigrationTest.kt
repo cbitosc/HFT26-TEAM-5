@@ -985,12 +985,30 @@ class KnitDatabaseMigrationTest {
             }
         }
 
+    @Test
+    fun `migrate 26 to 27 adds an empty attachment_holders table and keeps every blob`() =
+        runTest {
+            helper.createDatabase(26).use { c ->
+                c.execSQL("INSERT INTO blobs (hash, mime, bytes) VALUES ('h1', 'image/jpeg', x'01')")
+            }
+            helper.runMigrationsAndValidate(27, listOf(KnitMigrations.MIGRATION_26_27)).use { c ->
+                c.prepare("SELECT COUNT(*) FROM blobs").use { s ->
+                    assertTrue(s.step())
+                    assertEquals(1L, s.getLong(0))
+                }
+                c.prepare("SELECT COUNT(*) FROM attachment_holders").use { s ->
+                    assertTrue(s.step())
+                    assertEquals("a photo proves itself on its next round, or uploads as before", 0L, s.getLong(0))
+                }
+            }
+        }
+
     private companion object {
         /**
          * KnitDatabase `@Database(version = …)` — bump alongside the DB (its retention is CLASS, so the version
          * can't be read reflectively). A missing schemas/<db>/<version>.json fails the smoke test.
          */
-        const val CURRENT_VERSION = 26
+        const val CURRENT_VERSION = 27
 
         /** Room's `peer_badges` DDL, as a calls-branch dev build laid it down under an older version number. */
         const val PEER_BADGES_SQL =

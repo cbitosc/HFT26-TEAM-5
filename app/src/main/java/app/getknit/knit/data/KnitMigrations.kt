@@ -629,6 +629,24 @@ object KnitMigrations {
             }
         }
 
+    /**
+     * v26 → v27: one `attachment_holders` table — per (attachment hash, holder) proof, learnt over a short-range radio,
+     * that a DM photo's recipient holds its bytes, so the photo never goes up to a spool (docs/SPOOL_PROTOCOL.md
+     * C-9.5-8, ADR 2026-10.vy27). Empty on arrival: a photo already in custody proves itself on its next round, or
+     * uploads as it would have. Additive only; the SQL must stay byte-equivalent to what Room generates for
+     * `app/schemas/**/27.json`.
+     */
+    val MIGRATION_26_27 =
+        object : Migration(26, 27) {
+            override suspend fun migrate(connection: SQLiteConnection) {
+                connection.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `attachment_holders` " +
+                        "(`hash` TEXT NOT NULL, `holderId` TEXT NOT NULL, `plane` INTEGER NOT NULL, `provedAt` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`hash`, `holderId`))",
+                )
+            }
+        }
+
     private fun SQLiteConnection.hasColumn(
         table: String,
         column: String,
@@ -667,5 +685,6 @@ object KnitMigrations {
             MIGRATION_23_24,
             MIGRATION_24_25,
             MIGRATION_25_26,
+            MIGRATION_26_27,
         )
 }

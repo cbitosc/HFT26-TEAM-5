@@ -102,6 +102,7 @@ object FieldCounters {
                 put("spoolAttachPushed", spoolAttachPushed)
                 put("spoolAttachPulled", spoolAttachPulled)
                 put("spoolAttachDeferred", spoolAttachDeferred)
+                put("spoolAttachProved", spoolAttachProved)
             }
             with(s.lora) {
                 put("loraSent", loraSent)

@@ -93,6 +93,7 @@ import app.getknit.knit.mesh.spool.FreeKeyJournal
 import app.getknit.knit.mesh.spool.GroupRootPolicy
 import app.getknit.knit.mesh.spool.GroupRootStore
 import app.getknit.knit.mesh.spool.GroupScopeRoots
+import app.getknit.knit.mesh.spool.HolderAskBatch
 import app.getknit.knit.mesh.spool.PairScopeRoots
 import app.getknit.knit.mesh.spool.ScopeBlobs
 import app.getknit.knit.mesh.spool.ScopeRegistry
@@ -335,6 +336,10 @@ class MeshManager(
             onEvent = metrics::onBlobEvent,
             timers = { sessionScope },
             addressees = ::addresseesOf,
+            // The recipient of a DM photo of ours said, over a live short-range link, that it holds the bytes: the proof
+            // that keeps the photo off every spool for good (ADR 2026-10.vy27). The exchange takes only a short-range
+            // answer to its own query, so the plane is a radio's.
+            onPeerHolds = { hash, peer -> blobs.recordHolder(hash, peer, DeliveryPlane.Nearby, clock()) },
             log = { Log.d(TAG, it) },
         )
 
@@ -598,6 +603,16 @@ class MeshManager(
     private var router = newRouter(scope)
 
     /**
+     * The §9.5 rounds' holder queries for a DM photo of ours, sent as one frame per peer per window (ADR 2026-10.vy27).
+     * On the session, which a stop cancels: the batch survives a cancelled flush and goes out with the next.
+     */
+    private val holderAsks =
+        HolderAskBatch(
+            scope = { sessionScope },
+            send = { peer, hashes -> blobExchange.confirmHeld(hashes, peer) },
+        )
+
+    /**
      * §9.5's push-half deferral: an attachment a short-range radio already carried between us and this
      * DM's peer stays off the Internet while that peer is still on the presence plane — and, for
      * [AttachmentDeferPolicy.ACK_GRACE_MS] after a send of ours, one whose ack simply hasn't had time to
@@ -617,6 +632,12 @@ class MeshManager(
             // The grace's subject: for a minute after a send, a missing ack means the receipt is still in
             // flight rather than that the radios failed. Only a message we authored is waiting on one.
             authoredHere = { aHash -> messages.attachmentAuthoredHere(aHash, identity.nodeId()) },
+            // The bytes themselves, which never lapse: the recipient's own radio arrival (written below, once the
+            // store took them) or its answer to our holder query. A DM photo so proved never goes up (ADR 2026-10.vy27).
+            heldByRecipient = { aHash, peerId -> blobs.heldInPair(aHash, identity.nodeId(), peerId) },
+            // Asked over a live short-range link only, and floored per (hash, peer) by the exchange; the answer lands
+            // in the same table through `onPeerHolds`, never in this round. Batched per peer ([holderAsks]).
+            askHolder = { aHash, peerId -> holderAsks.ask(aHash, peerId) },
             custodyTtlMs = ForwardRepository.DEFAULT_TTL_MS,
             clock = clock,
         )
@@ -711,6 +732,7 @@ class MeshManager(
                 // while we lacked them asks again on its own tick and is served then (ADR 2026-09.4tx5).
                 onAttachmentObtained = { hash -> pipeline.onObtained(hash) },
                 deferAttachment = attachmentDefer::defer,
+                provedAttachment = attachmentDefer::proved,
                 deliver = { wire, env, from -> router.handleInbound(wire, env, from) },
                 metrics = metrics,
                 clock = clock,
@@ -3050,7 +3072,11 @@ class MeshManager(
                             // the evidence the row's plane only stands in for — a heal round that finds these
                             // bytes in hand must never find them unexplained, whatever order the row lands in.
                             attachmentDefer.noteRadioArrival(file.key)
-                            blobExchange.onReceived(file.key, file.mime, file.path, file.resumedFrom, from = file.fromNodeId)
+                            val stored = blobExchange.onReceived(file.key, file.mime, file.path, file.resumedFrom, from = file.fromNodeId)
+                            // Hash-checked and held now, so the memo above becomes proof that outlives the process: this
+                            // phone, the photo's recipient, holds bytes a radio gave it, and never uploads them (ADR
+                            // 2026-10.vy27). After the store, never before — the memo is a deferral, this is for good.
+                            if (stored) blobs.recordHolder(file.key, identity.nodeId(), DeliveryPlane.Nearby, clock())
                         }
                     }
                 },

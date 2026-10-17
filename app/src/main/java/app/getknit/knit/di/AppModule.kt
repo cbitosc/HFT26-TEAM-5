@@ -266,6 +266,7 @@ val appModule =
         single { get<KnitDatabase>().commonsDao() }
         single { get<KnitDatabase>().metPeerDao() }
         single { get<KnitDatabase>().savedFileDao() }
+        single { get<KnitDatabase>().attachmentHolderDao() }
         single { MessageRepository(get()) }
         // Judges an inbound reply's quote against the original it names (ADR 2026-10.gpa3), labelling a rebuilt
         // quote in the reader's own strings; one backlog batch is one write transaction.
@@ -319,7 +320,7 @@ val appModule =
         single { MessageReceiptRepository(get(), get(), get()) }
         // BlobRepository: blobDao, messageDao, peerDao, settings, blobVerdictDao, groupDao, forwardDao, db,
         // savedFileDao.
-        single { BlobRepository(get(), get(), get(), get(), get(), get(), get(), get(), get()) }
+        single { BlobRepository(get(), get(), get(), get(), get(), get(), get(), get(), get(), get()) }
         single { GroupRepository(get(), get(), get(), get(), get()) }
         // Store-and-forward custody for DMs, backed by the encrypted forward_store table. Takes the shared
         // StoreDigest (from meshModule) so every carry-store mutation keeps the cue-plane content digest in sync,

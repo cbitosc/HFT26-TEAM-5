@@ -335,6 +335,7 @@ class InboundPipeline(
     private suspend fun handleBlobFrame(
         env: RelayEnvelope,
         fromNodeId: String,
+        plane: DeliveryPlane,
     ) {
         when {
             env.type == FrameType.BLOB_REQ -> {
@@ -366,7 +367,8 @@ class InboundPipeline(
             }
 
             else -> {
-                decodeCounted<BlobHasContent>(env.payload)?.let { blobExchange.onHaveAnswer(it, fromNodeId) }
+                // Only an answer that came in on a phone-to-phone link proves a hold (ADR 2026-10.vy27).
+                decodeCounted<BlobHasContent>(env.payload)?.let { blobExchange.onHaveAnswer(it, fromNodeId, plane.shortRange) }
             }
         }
     }
@@ -393,9 +395,10 @@ class InboundPipeline(
         fromNodeId: String,
         kind: TransportKind,
     ) {
-        // The one thing the source's *plane* is read for: a delivery receipt records which plane it reached
-        // us on, so the ✓✓ can say how the message got there (MessageEntity.receivedVia). It rides the
-        // receipt paths only — carry, relay and convergence stay plane-blind, as ADR 019 requires.
+        // What the source's *plane* is read for: a delivery receipt records which plane it reached us on, so the
+        // ✓✓ can say how the message got there (MessageEntity.receivedVia), and a holder's answer to a proof query
+        // proves a hold only over a short-range link (ADR 2026-10.vy27). Carry, relay and convergence stay
+        // plane-blind, as ADR 019 requires.
         val plane = planeOf(fromNodeId, kind)
         when (env.type) {
             FrameType.CHAT -> {
@@ -423,7 +426,7 @@ class InboundPipeline(
             }
 
             FrameType.BLOB_REQ, FrameType.BLOB_HAVE, FrameType.BLOB_HAS, FrameType.BLOB_PROGRESS, FrameType.BLOB_CANCEL -> {
-                handleBlobFrame(env, fromNodeId)
+                handleBlobFrame(env, fromNodeId, plane)
             }
 
             FrameType.KEY_REQ -> {

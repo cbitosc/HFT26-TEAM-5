@@ -3,6 +3,7 @@ package app.getknit.knit.mesh.spool
 import app.getknit.knit.data.message.DeliveryPlane
 import app.getknit.knit.mesh.crypto.scope.ScopeCrypto
 import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -36,11 +37,21 @@ class AttachmentDeferPolicyTest {
     // nothing else: a photo bob sent us is not waiting on an ack of ours, so it never needs the grace.
     private var authored = true
 
+    // The persisted proof that bob holds the bytes, by the plane it was learnt over — the `attachment_holders` table,
+    // which outlives any one policy (a "restart" is a new policy over the same map). The production lambda is
+    // `AttachmentHolderDao.heldInPair`, whose SQL is covered in `AttachmentHolderDaoTest`.
+    private val proofs = mutableMapOf<Pair<String, String>, DeliveryPlane>()
+
+    // The holder queries the policy asked for, as (hash, peer).
+    private val asked = mutableListOf<Pair<String, String>>()
+
     private fun policy() =
         AttachmentDeferPolicy(
             reachable = { reachable },
             carriedByRadio = { _, _ -> ackPlane?.shortRange == true },
             authoredHere = { authored },
+            heldByRecipient = { hash, peer -> proofs[hash to peer]?.shortRange == true },
+            askHolder = { hash, peer -> asked += hash to peer },
             custodyTtlMs = custodyTtlMs,
             clock = { clock },
         )
@@ -298,5 +309,72 @@ class AttachmentDeferPolicyTest {
             ackPlane = null
             reachable = emptySet()
             assertFalse(policy().defer(dmScope(), ref()))
+        }
+
+    // --- proof that the recipient holds the bytes (ADR 2026-10.vy27) ---
+
+    @Test
+    fun `proof that the recipient holds the bytes settles the photo for good, across a restart`() =
+        runTest {
+            assertFalse("no proof yet", policy().proved(dmScope(), settled()))
+            proofs[aHash to bob] = DeliveryPlane.Nearby
+
+            // A fresh process: no sighting, the peers long parted, the frame at last call. None of it reopens the push.
+            reachable = emptySet()
+            clock = start + custodyTtlMs - AttachmentDeferPolicy.LAST_CALL_MS
+            val restarted = policy()
+            assertTrue(restarted.proved(dmScope(), ref()))
+            assertFalse("the deferral itself has lapsed; the proof is what holds it", restarted.defer(dmScope(), ref()))
+        }
+
+    @Test
+    fun `an ack alone defers and then uploads once the peers part`() =
+        runTest {
+            val p = policy()
+            assertFalse("a delivery ack is not proof of bytes", p.proved(dmScope(), settled()))
+            assertTrue(p.defer(dmScope(), settled()))
+
+            reachable = emptySet()
+            clock += AttachmentDeferPolicy.RADIO_WINDOW_MS + 1
+            assertFalse(p.proved(dmScope(), settled()))
+            assertFalse("the reversing half lapsed: upload", p.defer(dmScope(), settled()))
+        }
+
+    @Test
+    fun `a group never takes a proof, so it always uploads`() =
+        runTest {
+            proofs[aHash to bob] = DeliveryPlane.Nearby
+            assertFalse(policy().proved(groupScope(), ref()))
+            assertFalse(policy().defer(groupScope(), ref()))
+        }
+
+    @Test
+    fun `LoRa is never proof`() =
+        runTest {
+            proofs[aHash to bob] = DeliveryPlane.LoRa
+            ackPlane = DeliveryPlane.LoRa
+            assertFalse("a board carries no blob", policy().proved(dmScope(), settled()))
+            assertFalse(policy().defer(dmScope(), settled()))
+        }
+
+    @Test
+    fun `a send of ours asks its peer for the proof while the peer is in sight, and nothing else asks`() =
+        runTest {
+            policy().defer(dmScope(), settled())
+            assertEquals("asked whatever the round decides", listOf(aHash to bob), asked)
+
+            asked.clear()
+            authored = false
+            policy().defer(dmScope(), settled())
+            assertTrue("the peer's own send: its proof is our radio arrival, not its answer", asked.isEmpty())
+
+            authored = true
+            reachable = emptySet()
+            policy().defer(dmScope(), settled())
+            assertTrue("no sighting, nobody to ask", asked.isEmpty())
+
+            reachable = setOf(bob)
+            policy().defer(groupScope(), settled())
+            assertTrue("a group never asks", asked.isEmpty())
         }
 }

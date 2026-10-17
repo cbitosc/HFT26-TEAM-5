@@ -42,6 +42,9 @@ document:
   longer uses up your airtime.
 - With content filtering on, a reply to a hidden message is now hidden too, as is a reply whose quote the
   filter would hide. Tap it to read it, as with any hidden message.
+- A photo in a private chat no longer goes up to your internet relay once it has reached the other phone over
+  Bluetooth or Wi-Fi Aware, even after you part, which saves mobile data. Photos in group chats still upload
+  as before.
 
 ### Fixed
 

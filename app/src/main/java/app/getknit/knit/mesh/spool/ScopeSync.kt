@@ -265,6 +265,10 @@ class ScopeSync(
     // Internet this round (§9.5). A deferral, never a veto — see [AttachmentDeferPolicy]. The default
     // never defers, which is the pre-gate behaviour every existing test asserts.
     private val deferAttachment: suspend (Scope, ScopeAttachments.Ref) -> Boolean = { _, _ -> false },
+    // Whether a DM attachment we hold is one its recipient provably holds, over a short-range radio, so it never
+    // crosses the Internet at all (§9.5, C-9.5-6's exception; [AttachmentDeferPolicy.proved], ADR 2026-10.vy27). The
+    // default proves nothing, which is the pre-proof behaviour every existing test asserts.
+    private val provedAttachment: suspend (Scope, ScopeAttachments.Ref) -> Boolean = { _, _ -> false },
     // The commons half (§7.4): the joined rooms' own posts and their member roster. Null switches it off —
     // no commons scope is ever derived without it, so the frame plane is unaffected.
     private val commons: CommonsStore? = null,
@@ -632,6 +636,12 @@ class ScopeSync(
 
         /** The radios still carry it (§9.5's push-half deferral): owed a look once that lapses. */
         DEFERRED(1),
+
+        /**
+         * Ours, in a DM whose recipient provably holds the bytes over a short-range radio (C-9.5-6's exception, ADR
+         * 2026-10.vy27): settled, owed nothing, and never pushed — a timed recheck only proves it again.
+         */
+        PROVED(0),
 
         /**
          * Ours to push, on a connection that may not take this phone's uploads (C-7.6-24): settled, owed nothing, and
@@ -1862,6 +1872,9 @@ class ScopeSync(
          * - **Refused** (#109): a photo our own screening refused and dropped is not fetched back only to be
          *   dropped again (the radios skip it the same way). Settled like a fetched one, so it leaves the scan
          *   window until the timed recheck asks again.
+         * - **Proved**: an attachment we hold whose DM recipient provably holds the bytes (C-9.5-6's exception): no
+         *   `ahave`, no `aput`, settled for good — the peers parting changes nothing, so it goes ahead of the gates that
+         *   might otherwise owe it a later look.
          * - **Locked** (C-7.6-24): ours to push, on a connection that may not take this phone's uploads ([uploadsOn]):
          *   no `ahave`, no `aput`, and no retry — settled until a files ticket is accepted here. Fetching is never
          *   locked, so an attachment we lack goes on to the round trip as before.
@@ -1881,6 +1894,12 @@ class ScopeSync(
                     metrics.onSpoolAttachmentRefused()
                     settleAttachment(scope, ref.aHash)
                     LocalPass.REFUSED
+                }
+
+                mine && provedAttachment(scope, ref) -> {
+                    metrics.onSpoolAttachmentProved()
+                    settleAttachment(scope, ref.aHash)
+                    LocalPass.PROVED
                 }
 
                 mine && uploadsOn(conn) != SpoolUploads.Open && settleLocked(conn, scope, ref.aHash) -> {

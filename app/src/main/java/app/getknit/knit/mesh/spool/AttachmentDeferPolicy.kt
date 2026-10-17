@@ -68,6 +68,16 @@ import java.util.concurrent.ConcurrentHashMap
  * "fixed" into a deferral without a data-path signal to justify it. A peer's avatar *pulled* over a radio
  * is the one case the arrival memo reaches, and it is harmless: the owner's own copy never arrived
  * anywhere, so the owner pushes it regardless, and in a DM scope there is nobody else to serve.
+ *
+ * **Proof that the recipient holds the bytes is not a deferral: it settles the photo for good** ([proved], ADR
+ * 2026-10.vy27, spec C-9.5-6's exception). Everything above is a delay because every signal it reads either expires
+ * or stands in for the bytes — an ack says the frame arrived, never that the bytes did. [heldByRecipient] is the bytes
+ * themselves, read per (hash, recipient) from a store that survives a restart: on the recipient, its own radio
+ * arrival once the store took the bytes; on the sender, the recipient's answer to a holder query over a live
+ * short-range link, which it gives only for hash-checked bytes it would serve. In a DM there is nobody else a spool
+ * copy could reach, so such a photo never goes up — not when the peers part, not at last call. [askHolder] is how
+ * the sender comes by its proof: asked each round in which an attachment of ours meets a fresh sighting, so the
+ * question goes out while the peer can still answer it, and a no — or no answer — leaves the rule above in charge.
  */
 class AttachmentDeferPolicy(
     // Node ids on the presence plane right now, sampled per call — the smoothed `reachable` set, not the
@@ -77,10 +87,15 @@ class AttachmentDeferPolicy(
     // our own send acked over one, or their send that arrived over one (`MessageEntity.receivedVia`,
     // first-evidence-wins in both readings).
     private val carriedByRadio: suspend (aHash: String, peerId: String) -> Boolean,
-    // Whether WE authored any message naming this attachment, acked or not — the grace's subject, and
-    // nothing else. Only consulted inside [ackGraceMs], and only after [carriedByRadio] said no, so the
-    // settled case still costs one read.
+    // Whether WE authored any message naming this attachment, acked or not — the grace's subject, and whom
+    // [askHolder] is for. Read once per round that finds the peer in sight; nothing else consults it.
     private val authoredHere: suspend (aHash: String) -> Boolean,
+    // Whether the scope's recipient provably holds this attachment's bytes, learnt over a short-range radio and kept
+    // across a restart (`AttachmentHolderDao.heldInPair`): the one permanent reading, and the one that settles.
+    private val heldByRecipient: suspend (aHash: String, peerId: String) -> Boolean = { _, _ -> false },
+    // Asks the peer whether it holds this attachment of ours (a holder query over a live short-range link, rate-floored
+    // by the asker); a yes lands in [heldByRecipient]'s store. Fire-and-forget: the round never waits on the answer.
+    private val askHolder: suspend (aHash: String, peerId: String) -> Unit = { _, _ -> },
     // The mesh custody TTL (`ForwardRepository.DEFAULT_TTL_MS`), injected rather than imported so this
     // layer keeps no dependency on the data layer. Bounds [lastCallMs] below.
     private val custodyTtlMs: Long,
@@ -114,6 +129,19 @@ class AttachmentDeferPolicy(
     private fun arrivedOverRadio(aHash: String): Boolean = synchronized(radioArrivals) { aHash in radioArrivals }
 
     /**
+     * Whether [ref]'s bytes need never go to a spool for [scope]: a DM or pair scope whose recipient provably holds
+     * them ([heldByRecipient]). Asked before [defer] and, unlike it, never lapses — no sighting, no last call — because
+     * it reads the bytes, not a stand-in for them. A group scope never has one: no member's holding speaks for another.
+     */
+    suspend fun proved(
+        scope: Scope,
+        ref: ScopeAttachments.Ref,
+    ): Boolean {
+        val peerId = scope.peerId ?: return false
+        return heldByRecipient(ref.aHash, peerId)
+    }
+
+    /**
      * Whether [ref]'s bytes should be held back from this round's push for [scope]. False — push, today's
      * behaviour — for everything the rules below don't positively cover.
      *
@@ -135,13 +163,17 @@ class AttachmentDeferPolicy(
         if (ref.sentAt + custodyTtlMs - now <= lastCallMs) return false
         val seen = lastSeen[peerId] ?: return false
         if (now - seen > windowMs) return false
+        // The peer is in sight, so this is the round to ask it for the proof that would settle a send of ours for
+        // good ([proved]). Asked whatever this round decides: the answer only ever stops an upload not yet made.
+        val ours = authoredHere(ref.aHash)
+        if (ours) askHolder(ref.aHash, peerId)
         // The direct evidence first: no read, and it is what the row's plane stands in for.
         if (arrivedOverRadio(ref.aHash) || carriedByRadio(ref.aHash, peerId)) return true
         // Too early to tell. A frame this young cannot have been acked yet — the receipt is a round trip
         // away, and the round asking us here is the one the send itself woke — so a missing ack is not
         // evidence the radios failed. Bounded by the frame's own age, so it re-opens with no new local
         // activity, and it covers only a send of ours: nothing else is waiting on an ack at all.
-        return now - ref.sentAt < ackGraceMs && authoredHere(ref.aHash)
+        return now - ref.sentAt < ackGraceMs && ours
     }
 
     /** Stamps everyone currently reachable and forgets whoever can no longer justify a deferral. */

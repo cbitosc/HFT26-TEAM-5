@@ -20,6 +20,7 @@ object BackupTables {
         listOf(
             "blobs",
             "blob_verdicts",
+            "attachment_holders",
             "peers",
             "peer_profiles",
             "peer_badges",

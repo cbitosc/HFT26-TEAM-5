@@ -1,12 +1,14 @@
 package app.getknit.knit.data
 
 import androidx.room3.withWriteTransaction
+import app.getknit.knit.data.blob.AttachmentHolderDao
 import app.getknit.knit.data.blob.BlobDao
 import app.getknit.knit.data.blob.BlobEntity
 import app.getknit.knit.data.blob.BlobVerdictDao
 import app.getknit.knit.data.blob.SavedFileDao
 import app.getknit.knit.data.forward.ForwardDao
 import app.getknit.knit.data.group.GroupDao
+import app.getknit.knit.data.message.DeliveryPlane
 import app.getknit.knit.data.message.MessageDao
 import app.getknit.knit.data.peer.PeerDao
 import app.getknit.knit.data.settings.SettingsStore
@@ -23,7 +25,8 @@ import kotlinx.coroutines.flow.map
  * classifier, caching verdicts) lives in [app.getknit.knit.moderation.ImageScreeningService]; this class
  * only owns the [verdicts] DAO for verdict-row GC so it can stay atomic with the blob delete, and the
  * [savedFiles] DAO for the same reason: where a received file was saved is a fact about the blob, and goes
- * when it does (ADR 2026-09.7ad3).
+ * when it does (ADR 2026-09.7ad3) — as is the [holders] proof that a DM photo's recipient holds it (ADR
+ * 2026-10.vy27).
  */
 class BlobRepository(
     private val blobs: BlobDao,
@@ -35,6 +38,7 @@ class BlobRepository(
     private val forward: ForwardDao,
     private val db: KnitDatabase,
     private val savedFiles: SavedFileDao,
+    private val holders: AttachmentHolderDao,
 ) {
     suspend fun insert(
         hash: String,
@@ -60,6 +64,30 @@ class BlobRepository(
 
     /** Forgets [hash]'s saved copy — it was moved or deleted, or the grant to it is gone. */
     suspend fun forgetSavedCopy(hash: String) = savedFiles.delete(hash)
+
+    /**
+     * Records proof, learnt over [plane] at [at] (our clock), that [holderId] holds the bytes of [hash] (ADR
+     * 2026-10.vy27). Only a short-range radio is proof — a board carries no blob, and the Internet is what the proof
+     * saves — so any other plane writes nothing. The first proof stands.
+     */
+    suspend fun recordHolder(
+        hash: String,
+        holderId: String,
+        plane: DeliveryPlane,
+        at: Long,
+    ) {
+        if (plane.shortRange) holders.record(hash, holderId, plane.code, at)
+    }
+
+    /**
+     * Whether the DM between [me] and [peer] holds proof that its recipient has [hash]'s bytes, from whichever end
+     * this node is (`AttachmentHolderDao.heldInPair`): the spool never needs the photo then.
+     */
+    suspend fun heldInPair(
+        hash: String,
+        me: String,
+        peer: String,
+    ): Boolean = holders.heldInPair(hash, me, peer, DeliveryPlane.shortRangeCodes)
 
     /**
      * Hash → byte length for the stored blobs among [hashes]; a hash not held is absent. The chat observes
@@ -108,6 +136,7 @@ class BlobRepository(
             blobs.delete(hash)
             verdicts.delete(hash)
             savedFiles.delete(hash)
+            holders.delete(hash)
         }
     }
 
@@ -148,6 +177,7 @@ class BlobRepository(
                 blobs.delete(it)
                 verdicts.delete(it)
                 savedFiles.delete(it)
+                holders.delete(it)
             }
         }
     }

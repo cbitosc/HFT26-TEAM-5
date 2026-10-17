@@ -1171,6 +1171,7 @@ class LabNode internal constructor(
                 db.forwardDao(),
                 db,
                 db.savedFileDao(),
+                db.attachmentHolderDao(),
             )
         val groupRatchetStore = GroupRatchetRepository(db.groupRatchetDao())
         val groupRoots = GroupRootRepository(db.groupRootDao())

@@ -6,6 +6,7 @@ import app.getknit.knit.data.blob.BlobVerdictEntity
 import app.getknit.knit.data.forward.ForwardEntity
 import app.getknit.knit.data.group.GroupEntity
 import app.getknit.knit.data.group.GroupMembersStore
+import app.getknit.knit.data.message.DeliveryPlane
 import app.getknit.knit.data.message.MessageEntity
 import app.getknit.knit.data.peer.PeerEntity
 import app.getknit.knit.data.settings.SettingsStore
@@ -41,6 +42,7 @@ class BlobRepositoryTest : RoomDbTest() {
             forward = db.forwardDao(),
             db = db,
             savedFiles = db.savedFileDao(),
+            holders = db.attachmentHolderDao(),
         )
 
     private fun ownAvatar(hash: String?) {
@@ -56,12 +58,20 @@ class BlobRepositoryTest : RoomDbTest() {
             blob("h1")
             db.blobVerdictDao().upsert(BlobVerdictEntity("h1", flagged = true, score = 0.9f))
             db.savedFileDao().upsert("h1", "content://docs/document/report.pdf", 1L)
+            db.attachmentHolderDao().record("h1", "peer", DeliveryPlane.Nearby.code, 1L)
 
             repo().deleteIfUnreferenced("h1")
 
             assertFalse(db.blobDao().exists("h1"))
             assertNull(db.blobVerdictDao().find("h1"))
             assertNull("where it was saved goes with the blob (ADR 2026-09.7ad3)", db.savedFileDao().uriFor("h1"))
+            // The first proof stands, so a LoRa one lands only if the Nearby row went with the blob.
+            db.attachmentHolderDao().record("h1", "peer", DeliveryPlane.LoRa.code, 2L)
+            db.messageDao().upsert(MessageEntity(id = "m1", senderId = "me", body = "", sentAt = 1L, attachmentHash = "h1"))
+            assertFalse(
+                "the proof its recipient holds it goes with the blob (ADR 2026-10.vy27)",
+                db.attachmentHolderDao().heldInPair("h1", "me", "peer", DeliveryPlane.shortRangeCodes),
+            )
         }
 
     @Test

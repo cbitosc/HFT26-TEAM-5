@@ -35,6 +35,7 @@ class AttachmentIdentitiesTest : RoomDbTest() {
             forward = db.forwardDao(),
             db = db,
             savedFiles = db.savedFileDao(),
+            holders = db.attachmentHolderDao(),
         )
     }
     private val identities by lazy { AttachmentIdentities(messages, blobs) }

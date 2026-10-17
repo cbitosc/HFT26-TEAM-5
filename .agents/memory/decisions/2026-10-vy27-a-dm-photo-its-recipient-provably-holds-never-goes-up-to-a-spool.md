@@ -1,0 +1,106 @@
+---
+id: "2026-10.vy27"
+slug: a-dm-photo-its-recipient-provably-holds-never-goes-up-to-a-spool
+title: "A DM photo its recipient provably holds never goes up to a spool"
+date: 2026-10-17
+topics: [spool, attachments]
+---
+
+# ADR 2026-10.vy27 — A DM photo its recipient provably holds never goes up to a spool
+
+Status: Accepted (2026-10-17; `AttachmentDeferPolicy.proved`, `ScopeSync`'s `LocalPass.PROVED`,
+`AttachmentHolderEntity` / `AttachmentHolderDao` (DB v27), `BlobExchange.confirmHeld` / `onPeerHolds`,
+`MeshMetrics.spoolAttachProved`. Amends ADR 021. No wire change: the holder query is ADR 2026-10.6e5t's, asked of a
+hash we hold. Spec: `docs/SPOOL_PROTOCOL.md` C-9.5-6, C-9.5-8, §9.5's reference-client paragraph, §10.1)
+
+The maintainer's rule of 2026-10-17: any file sent should try the radios first, and a DM photo a live-linked
+recipient got "shouldn't even go up to the spool". ADR 021's gate could not say that. It is a deferral by
+construction: every signal it reads either lapses (the sighting) or stands in for the bytes (the ack, the row's
+plane, the arrival memo), so it holds a photo back while the peers are together and uploads it the round after they
+part. A pair that walks away from a café after swapping photos over Bluetooth still sent every one of them to the
+relay, fifteen minutes late. The bytes were already where they needed to be; the upload served nobody, because a DM
+scope has exactly two members and both held them.
+
+**What was missing is a fact about the bytes, not a better stand-in for them.** ADR 021 rules out the obvious
+candidate, and the reason still holds: a delivery ack says the frame arrived, never the bytes, because an attachment
+travels by a separate demand-driven pull and "acked but never fetched" is a real state. Gating on the ack for good
+would strand exactly the photo the spool exists to rescue. So the proof here is the bytes themselves, per recipient
+and per attachment hash, learnt over a short-range radio, and only that:
+
+- **On the recipient** it is its own radio arrival (ADR 2026-09.e8yw), once the store has taken the bytes — after
+  the hash check, not before. `MeshManager.watchIncomingFiles` writes it when `BlobExchange.onReceived` reports the
+  store took them. The in-memory `noteRadioArrival` stays ahead of the store as e8yw requires; the two differ in that
+  the memo is a deferral and this record is for good, so it must not be written for bytes that then fail their hash.
+- **On the sender** it is the recipient's own statement, over a live short-range link, that it holds the bytes.
+  `BlobExchange` could not tell a complete, hash-checked serve of a blob to a peer from a partial one: the serve memo
+  is stamped at enqueue, the link's feed end and `blobprog`'s `held` are byte counts, and the only hash check on the
+  path is the receiver's store. So the sender asks. ADR 2026-10.6e5t's holder query already exists, already reaches
+  every capable neighbour, and its responder answers `HAVE` or `SENDING` only for bytes `BlobStore.servable` holds —
+  screened and hash-checked. Asking it about a hash we hold rather than want is legal under 6e5t (a query serves,
+  pulls and stamps nothing), so no frame, field or responder rule changes; the iOS port's responder answers the
+  same way, so an iPhone recipient can give the proof too. The policy asks in each round where a send of ours meets
+  a fresh sighting (`AttachmentDeferPolicy.askHolder`). `HolderAskBatch` gathers a round's asks for 200 ms and sends
+  one frame per peer, because the responder's per-asker budget is 16 frames at a burst and our own want queries
+  share it; the exchange floors each (hash, peer) at `BlobExchange.PROOF_FLOOR_MS` (10 s, under the 15 s re-look of
+  a deferred attachment so every round asks once), sends only to a linked neighbour whose link carries
+  `CAP_BLOB_HAVE`, and keeps its proof queries apart from its want queries, so neither answer can reach the other's
+  path. A `HAVE` or `SENDING` over a short-range plane, answering that very query, writes the record
+  (`onPeerHolds`). A no, no answer, or an answer over LoRa leaves ADR 021's rule in charge.
+
+Both land in one table, `attachment_holders` (hash, holder, plane, provedAt), and one query reads it from either end:
+`AttachmentHolderDao.heldInPair` matches a holder that is the peer on a message of ours, or ourselves on a message of
+the peer's. The message is required, which is what keeps avatars and group pictures uploading as they always did
+(they write no message row), and the holder is required, which is what keeps a photo forwarded under the same sealed
+identity to a third person (ADR 2026-10.mptm) needing that person's own proof — the "one hash names one authored row"
+shortcut ADR 2026-09.xmte leaned on no longer holds since mptm, so the key is per holder. `ScopeSync.passLocally`
+asks `proved` ahead of the files gate and the deferral and settles the attachment: no `ahave`, no `aput`, no retry
+owed. It does not lapse when the peers part and it does not end at last call: C-9.5-7 protects a push that is still
+owed, and none is.
+
+**Why it persists.** A deferral is in memory because losing it only means deferring less. A proof that is lost means
+uploading the very photo it was kept to spare, and a phone restarts far more often than a photo leaves custody (24 h).
+So it is a Room table (DB v27, `KnitMigrations.MIGRATION_26_27`), pruned with the blob in `BlobRepository`'s GC, and
+carried in a backup like `blobs`: a restore is a move, and the peer still holds what it held.
+
+**The alternatives a reader reaches for first.** A completion report from the receiver — a final `blobprog`, or an
+unsolicited `blobhas` once the hash checks — is a new meaning for an existing frame, and it goes to whoever served
+the file, which on a multi-hop pull is a carrier, not the author. The author asking the recipient directly needs no
+new meaning and reaches the one party whose holding matters. Proving the serve on the sender alone (the link fed every
+byte) is not hash-checked and says nothing of a copy that then failed the receiver's check. And holding a photo back
+while a proof query is outstanding would add latency to every send whose peer cannot answer; the order is to change
+nothing without proof.
+
+## What it costs
+
+On the wire, one small `blobhave` per deferred photo of ours per round (15 s) while its recipient is linked and the
+spool plane is on — none at all with the plane off, since the question is asked only from a spool round. On disk, one
+short row per proved photo. At a spool, an upload that never happens tells it less than a late one: no size and no
+time for that attachment. The absence is a weaker hint of its own — a DM scope whose frames grow with no matching
+upload may have had its members together when they were sent — which §10.1 now prices beside ADR 021's timing signal.
+Frames stay unconditional (C-9.5-9), so neither hint generalises.
+
+**A known limit, accepted for this change.** The sender's proof is the recipient's word, and the word is unsigned:
+`blobhas` carries no signature and a link's HELLO is not authenticated. A device on a link that claims the
+recipient's node id, in the sender's radio range when the photo is sent, can answer `HAVE` and keep the photo off the
+spool. Nothing leaks, but the photo then has no relay copy: the frame still goes up, so the recipient knows the photo
+exists, and it gets the bytes only when the two next meet over a radio — and never, if they don't. Closing it takes a
+signed answer, an additive wire change on both ports under `docs/WIRE_COMPAT.md`, and is out of scope here; spec
+§10.4 records it. The recipient's own proof is unaffected: it is the bytes, hash-checked. A recipient that pulled
+the photo off a spool also answers `HAVE`; that is harmless here, since the spool then holds it already.
+
+What it does not cover: groups (no per-member receipt matrix, ADR 021 bound 3; one member holding a photo says nothing
+of another), frames, and a photo whose peer is not nearby, which uploads at once as before because its frame goes to
+the spool. A photo whose recipient's answer comes back only after the peers parted, or never (a build without
+`CAP_BLOB_HAVE`, a link that dropped), uploads after the sighting window exactly as ADR 021 says. And the
+sender's push in a round where the evidence is missing but the peer is linked still goes ahead; the proof only ever
+stops an upload not yet made.
+
+**The trap** is the order on the recipient: the record goes after the store write, the memo before it. Swap them and a
+copy that fails its hash becomes a permanent "never upload". `AttachmentDeferPolicyTest` pins the rule (proof across a
+restart, an ack alone, groups, LoRa, who asks), `AttachmentHolderDaoTest` the SQL from both ends, `ScopeSyncTest` the
+settle, `KnitDatabaseMigrationTest` the step, `HolderAskBatchTest` the batching (a flush a stop cancels must not
+switch the asking off), and the lab the end-to-end shape: with proof the photo never goes up, even after the peers
+part and the sender restarts (`PhotoProofLabTest`); with only the ack it goes up after they part, as before
+(`InternetPlaneLabTest.aPhotoTheRadioCarriedIsNotUploadedUntilThePeersPart`). `spoolAttachProved`
+counts every pass that settles on a proof, in Diagnostics and the `SPOOL` bridge, so a skipped upload never reads like a
+broken one.

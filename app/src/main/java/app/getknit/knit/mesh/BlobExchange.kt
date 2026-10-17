@@ -92,6 +92,10 @@ import kotlin.coroutines.cancellation.CancellationException
  * again. The flag is the latest local want's ([want], [wantAll]) — the database re-arm re-derives it every tick, and the
  * user's tap re-wants it plain, which steps at once — never a memo of its own.
  *
+ * **Proof of a hold (ADR 2026-10.vy27).** A DM photo its recipient holds never goes up to a spool, and the sender's proof
+ * is that recipient's own HAVE: [confirmHeld] sends it the same holder query, and the answer to it reaches [onPeerHolds]
+ * and nothing else. It asks, serves, wants and stamps nothing.
+ *
  * A transfer a link drop cut off resumes rather than restarts (work item #116, ADR 2026-10.wtyc): the link keeps
  * the prefix in [PartialBlobs], every ask names its length as the `blobreq` offset, a holder streams only the
  * rest ([onRequest]), and a spliced file that fails its hash check drops the prefix and asks from byte 0
@@ -137,6 +141,9 @@ class BlobExchange(
     private val addressees: suspend (hash: String) -> Set<String>? = { null },
     // Injected logger (the class stays Android-free): DI passes android.util.Log; tests default silent.
     private val log: (String) -> Unit = {},
+    // [peer] said, over a short-range link and in answer to a proof query of ours ([confirmHeld]), that it holds [hash]
+    // whole: the sender's end of the spool deferral's proof (docs/SPOOL_PROTOCOL.md §9.5, ADR 2026-10.vy27).
+    private val onPeerHolds: suspend (hash: String, peer: String) -> Unit = { _, _ -> },
 ) {
     /**
      * Whether this node queries capable neighbours before it asks ([enabled]), how long it waits for their answers, and
@@ -210,6 +217,21 @@ class BlobExchange(
 
     // The loop that serves [parked] asks as feeds end; null or done when nothing is parked. Guarded by [lock].
     private var parkPoll: Job? = null
+
+    // "hash|peer" -> when a proof query naming it last went to that peer ([confirmHeld]): the floor that keeps a caller's
+    // every round from costing a frame. Forgotten when the peer links again. Capped, pruned at the floor. Guarded by [lock].
+    private val proofAsked =
+        object : LinkedHashMap<String, Long>(16, 0.75f, false) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Long>): Boolean = size > MAX_PROOF_QUERIES
+        }
+
+    // Proof queries sent, by envelope id: whom, when, and the hashes not yet answered. Apart from [sentQueries], so a
+    // proof's answer never steps a want and a want's answer never counts as a proof. Capped, pruned at a cycle's age.
+    // Guarded by [lock].
+    private val proofQueries =
+        object : LinkedHashMap<String, ProofQuery>(16, 0.75f, false) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, ProofQuery>): Boolean = size > MAX_PROOF_QUERIES
+        }
 
     /**
      * Asks for [hash] unless we already hold it or its bytes are streaming in or landing on a link or going into the
@@ -338,6 +360,8 @@ class BlobExchange(
         val ids = nodeIds.toSet()
         synchronized(lock) {
             answerRtt.keys.removeAll(ids)
+            // A proof query sent on the old link may have died with it: the next confirmHeld queries the new one at once.
+            proofAsked.keys.removeAll { it.substringAfterLast('|') in ids }
             fetching.values.forEach { want ->
                 want.pullers.removeAll(ids)
                 want.blindAsked.removeAll(ids)
@@ -1309,11 +1333,20 @@ class BlobExchange(
      * [from] answered a query of ours ([FrameType.BLOB_HAS]). Only a hash we still want, from a neighbour queried for it
      * this cycle, and named by the query the answer names, counts; an answer to a query older than the latest one sent
      * that neighbour for it is stale. Every hash answered takes its next step at once, so a late answer still counts.
+     *
+     * An answer to a proof query ([confirmHeld]) is that query's alone: it steps no want ([takeProof]). [shortRange] is
+     * whether it came in on a phone-to-phone link (not LoRa, not a spool); only such an answer proves a hold.
      */
     suspend fun onHaveAnswer(
         content: BlobHasContent,
         from: String,
+        shortRange: Boolean = true,
     ) {
+        val proof = synchronized(lock) { takeProof(content, from, shortRange) }
+        if (proof != null) {
+            onProofAnswer(proof, content, from)
+            return
+        }
         val t = now()
         val (touched, latency) = synchronized(lock) { recordAnswers(content, from, t) }
         if (touched.isEmpty()) {
@@ -1328,6 +1361,123 @@ class BlobExchange(
         flushQueries()
         // Counted once the answer's steps have run, so a count read means what they decided has been sent too.
         onEvent(BlobEvent.AnswerTaken)
+    }
+
+    /**
+     * Asks [peer] whether it holds [hash] — [confirmHeld] for one.
+     */
+    suspend fun confirmHeld(
+        hash: String,
+        peer: String,
+    ) = confirmHeld(listOf(hash), peer)
+
+    /**
+     * Asks [peer] whether it holds [hashes], whole: the sender's end of the proof that a DM's recipient has a photo's
+     * bytes, so the photo need not go up to a spool (docs/SPOOL_PROTOCOL.md §9.5, ADR 2026-10.vy27). A plain holder query
+     * ([FrameType.BLOB_HAVE], ADR 2026-10.6e5t), whose HAVE is the responder's serve predicate ([BlobStore.servable]):
+     * bytes that were hash-checked and screened before they were held. What we enqueued, the link's feed end and a
+     * `blobprog`'s `held` are byte counts and prove nothing of the kind; a message ack less still.
+     *
+     * Sent only to a live short-range link — a neighbour ([MeshTransport.neighbors]; a board's set is always empty) whose
+     * link carries [Protocol.CAP_BLOB_HAVE] — and at most once per (hash, peer) per [PROOF_FLOOR_MS], just under the
+     * caller's re-ask cadence, so calling it every deferred round costs one frame a round per peer at most; pass a round's hashes
+     * for one peer together and they share it. A proof query is not an ask, and not a want's query: it creates or steps
+     * no want, stamps no serve memo, parks nothing, and its answer goes to [onPeerHolds] alone ([onHaveAnswer]). No
+     * answer is no proof — a neighbour without the bit or a silent one leaves the caller's own deadline to decide.
+     */
+    suspend fun confirmHeld(
+        hashes: Collection<String>,
+        peer: String,
+    ) {
+        val link = transport.neighbors.value.firstOrNull { it.nodeId == peer } ?: return
+        if (link.capabilities and Protocol.CAP_BLOB_HAVE == 0L) return
+        val t = now()
+        // Chosen and stamped under one lock, so two rounds racing never send the same proof query twice.
+        val batches =
+            synchronized(lock) {
+                proofAsked.entries.removeAll { t - it.value >= PROOF_FLOOR_MS }
+                proofQueries.entries.removeAll { t - it.value.at >= CYCLE_MS }
+                hashes
+                    .asSequence()
+                    .filter { it.isNotEmpty() && it.length <= MAX_HASH_CHARS }
+                    .distinct()
+                    .filter { "$it|$peer" !in proofAsked }
+                    .toList()
+                    .chunked(MAX_QUERY_HASHES)
+                    .map { chunk ->
+                        val id = newRequestId()
+                        proofQueries[id] = ProofQuery(peer, t, chunk.toMutableSet())
+                        chunk.forEach { proofAsked["$it|$peer"] = t }
+                        id to chunk
+                    }
+            }
+        if (batches.isEmpty()) return
+        val me = selfId()
+        for ((id, chunk) in batches) {
+            try {
+                transport.send(holderQueryFrame(me, id, chunk), Peer(peer))
+                onEvent(BlobEvent.ProofQuerySent)
+                log("blob proof → $peer ${chunk.size} hashes #${id.take(LOG_ID_CHARS)} [${chunk.joinToString { it.take(LOG_HASH_CHARS) }}]")
+            } catch (e: CancellationException) {
+                throw e
+            } catch (
+                @Suppress("TooGenericExceptionCaught") e: Exception, // a proof query never throws into its caller's round
+            ) {
+                // Nothing went out: the next round may ask again at once.
+                synchronized(lock) {
+                    proofQueries.remove(id)
+                    chunk.forEach { proofAsked.remove("$it|$peer") }
+                }
+                log("blob proof → $peer failed: ${e.javaClass.simpleName}")
+            }
+        }
+    }
+
+    /**
+     * The items of [content] that answer a proof query of ours ([confirmHeld]), each taken off that query so it counts once;
+     * null when its `re` names no proof query (a want's answer, [recordAnswers]). Empty when it names one but proves
+     * nothing: another peer's answer to it, one that came in on no short-range link, or hashes that query did not ask or
+     * that were answered already. Under [lock].
+     */
+    private fun takeProof(
+        content: BlobHasContent,
+        from: String,
+        shortRange: Boolean,
+    ): List<BlobHasItem>? {
+        val re = content.re ?: return null
+        val q = proofQueries[re] ?: return null
+        if (q.peer != from || !shortRange) return emptyList()
+        val taken = content.items.take(MAX_QUERY_HASHES).filter { q.open.remove(it.hash) }
+        if (q.open.isEmpty()) proofQueries.remove(re)
+        return taken
+    }
+
+    /** [from]'s answer to a proof query: each hash it says it holds whole (HAVE, or SENDING us a copy of it) is proved. */
+    private suspend fun onProofAnswer(
+        items: List<BlobHasItem>,
+        content: BlobHasContent,
+        from: String,
+    ) {
+        if (items.isEmpty()) {
+            onEvent(BlobEvent.AnswerIgnored)
+            return
+        }
+        onEvent(BlobEvent.ProofAnswerTaken)
+        val idPart = content.re?.let { " #${it.take(LOG_ID_CHARS)}" } ?: ""
+        log("blob proof ← $from$idPart: ${items.joinToString { itemLabel(it) }}")
+        // An unknown state is never HAVE (ADR 2026-10.6e5t); FETCHING is bytes still on their way in, unchecked.
+        for (item in items.filter { it.state in HELD }) {
+            try {
+                onPeerHolds(item.hash, from)
+                onEvent(BlobEvent.ProofHeld)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (
+                @Suppress("TooGenericExceptionCaught") e: Exception, // one hash's hook never costs the others theirs
+            ) {
+                log("blob proof ${item.hash.take(LOG_HASH_CHARS)}… ← $from: hook failed: ${e.javaClass.simpleName}")
+            }
+        }
     }
 
     /** [onHaveAnswer]'s bookkeeping, under [lock]: the items that count, and how long their query took to answer. */
@@ -1821,6 +1971,9 @@ class BlobExchange(
      * when the link spliced it onto a prefix we kept (#116). [from] is the neighbour whose link delivered it: once the
      * store has answered, the file is taken off that link's arriving ones ([MeshTransport.fileTaken]) — held now, or
      * refused, and a refused splice's own landing must not keep its from-0 ask quiet.
+     *
+     * True when the store took the bytes — checked against [hash] and held — and false when it refused them: the
+     * recipient's end of the spool deferral's proof (ADR 2026-10.vy27) is a true here, never the file's arrival alone.
      */
     suspend fun onReceived(
         hash: String,
@@ -1828,14 +1981,14 @@ class BlobExchange(
         srcPath: String,
         resumedFrom: Long = 0,
         from: String? = null,
-    ) {
+    ): Boolean {
         val stored = store.saveIncoming(hash, mime, srcPath)
         if (stored == null) {
             from?.let { transport.fileTaken(it, hash) }
             // A whole file that fails its hash is the holder's bytes alone: a kept prefix stays, and the tick asks
             // again as it always has. A spliced one may have failed on the prefix.
             if (resumedFrom > 0) reaskFromZero(hash, from)
-            return
+            return false
         }
         partials.drop(hash) // nothing left to resume
         // The want goes before the file leaves the link's landing ones: a step in between would find the blob held and
@@ -1844,6 +1997,7 @@ class BlobExchange(
         from?.let { transport.fileTaken(it, hash) }
         want?.let { withdrawAsks(hash, it, from) }
         onObtained(hash, stored.absolutePath)
+        return true
     }
 
     /**
@@ -2394,6 +2548,13 @@ class BlobExchange(
         val hashes: Set<String>,
     )
 
+    /** A proof query on its way ([confirmHeld]): to whom, when, and the hashes it named that no answer has taken yet. */
+    private class ProofQuery(
+        val peer: String,
+        val at: Long,
+        val open: MutableSet<String>,
+    )
+
     /** An ask parked behind another copy's feed ([parked]): the prefix it named, when it was parked, and when it last asked. */
     private class ParkedAsk(
         // What the ask said: the prefix it named, and its budget and deadline (#195).
@@ -2524,6 +2685,11 @@ class BlobExchange(
         // A cycle that would have asked its NONE neighbours to pull the blob through and asked nobody: the frame naming
         // it is past its custody window, or the want is only a neighbour's pull, echoed past its first cycles (#195).
         PullWithheld,
+
+        // A proof query sent ([confirmHeld]), an answer to one taken, and a hash it proved held (ADR 2026-10.vy27).
+        ProofQuerySent,
+        ProofAnswerTaken,
+        ProofHeld,
     }
 
     companion object {
@@ -2580,6 +2746,14 @@ class BlobExchange(
         private const val ANSWER_REFILL_MS = 1_000L
         private const val MAX_ANSWER_BUCKETS = 64
         private const val MAX_SENT_QUERIES = 256
+
+        // How long a proof query for one (hash, peer) stands before [confirmHeld] sends another. Under the cadence its
+        // caller re-asks a deferred attachment at (`ScopeSync.ATTACHMENT_RETRY_MS`, 15 s), so a round that comes a little
+        // early still asks, and a caller that calls more often than that still costs a frame per 10 s at most.
+        const val PROOF_FLOOR_MS = 10_000L
+
+        // Cap on the proof-query books ([proofAsked], [proofQueries]): the caller's deferred attachments, with room.
+        private const val MAX_PROOF_QUERIES = 256
 
         // How much of a hash, and of a query id, a log line names.
         private const val LOG_HASH_CHARS = 8

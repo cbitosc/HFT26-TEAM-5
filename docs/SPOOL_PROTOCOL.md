@@ -6,7 +6,7 @@
 |--------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | Protocol version   | 1                                                                                                                                                                       |
 | Status             | Normative. Implemented and shipping (see Appendix A)                                                                                                                    |
-| This revision      | 2026-10-15                                                                                                                                                              |
+| This revision      | 2026-10-17                                                                                                                                                              |
 | Decision record    | ADR 019 (+ M4/M5/M6 amendments, ADR 020, ADR 021, ADR 042, ADR 062); §7.6–§7.7: knit-spool ADR 2026-10.bxsg, knit-spool ADR 2026-10.h6pt, knit-spool ADR 2026-10.3wdy                                                                                                              |
 | Client reference   | `mesh/crypto/scope/` (`ScopeCrypto`, `SpoolPow`), `mesh/spool/` (`SpoolRecords`, `ScopeFrames`, `ScopeAttachments`, `GroupRootPolicy`, `ScopeRegistry`, `ScopeSync`)    |
 | Spool reference    | [`knit-spool`](https://github.com/getknit/knit-spool) (AGPL-3.0, separate repository) + its conformance suite                                                           |
@@ -1486,9 +1486,9 @@ a relay.
 | ID          | Requirement                                                                                                                                                                          |
 |-------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | **C-9.5-5** | A member MAY defer the push half for an attachment while it holds positive evidence that the mesh is already carrying those bytes.                                                   |
-| **C-9.5-6** | A deferral is a delay, never a refusal. It MUST re-open on its own when the evidence lapses, without waiting for new local activity.                                                 |
+| **C-9.5-6** | A deferral is a delay, never a refusal. It MUST re-open on its own when the evidence lapses, without waiting for new local activity, except that a member holding per-recipient proof that the recipient holds the bytes (C-9.5-8) MAY skip the push half for that attachment for good. |
 | **C-9.5-7** | A deferral MUST end while the referencing frame can still drive a push, since want and have are derived from custody and an attachment stops being nameable once its frame ages out. |
-| **C-9.5-8** | The evidence MUST be per-recipient, and it MUST be able to expire. A permanent signal such as a delivery ack cannot satisfy C-9.5-6 on its own.                                      |
+| **C-9.5-8** | The evidence MUST be per-recipient, and it MUST be able to expire. A permanent signal such as a delivery ack cannot satisfy C-9.5-6 on its own. The one evidence that need not expire is **proof of bytes**: that the recipient holds the attachment's bytes, learnt over a short-range radio that carries them — either the bytes reaching the recipient over one, or the recipient's own statement over one, after its hash check, that it holds them. A delivery ack, a sighting, a frame-only plane and anything in a group scope are never proof of bytes. |
 | **C-9.5-9** | This option covers attachments only. Frames MUST NOT be deferred on any such signal.                                                                                                 |
 
 > **Why C-9.5-8.** A frame can be acked while its bytes were never fetched, because an attachment
@@ -1500,7 +1500,8 @@ a relay.
 > holds it", and deferring on it would silently strand whoever was not reached. The reference client
 > therefore defers on DM scopes only, and pushes unconditionally for carried frames (not this pair's
 > message at all)
-> and for avatars and group photos (no message row, so no per-recipient signal exists).
+> and for avatars and group photos (no message row, so no per-recipient signal exists). Proof of bytes is
+> confined to DM scopes for the same reason: one member holding a photo says nothing about another.
 >
 > **Why C-9.5-9.** Gating frames would make the scope digest a function of local mesh state, and it
 > would
@@ -1533,11 +1534,21 @@ a relay.
 > terms still expire on their own, so C-9.5-6 holds and the hold is seconds rather than the whole
 > sighting window.
 >
-> **Observability.** Nothing here is visible at a spool beyond a later `aput`, so a deferring member
-> and
-> an eager one are the same client to the same server, and conformance is unaffected. It does
-> sharpen
-> §10's timing signal, priced there.
+> **Proof of bytes, also non-normative.** The reference client keeps a permanent record per (attachment,
+> holder) that the holder has the bytes. The recipient writes itself once bytes that came off BLE or Wi-Fi
+> Aware pass its hash check and are stored. The author writes the recipient once the recipient, asked over a
+> live short-range link with the mesh's holder query, answers that it holds them; it answers so only for
+> hash-checked bytes it would serve, and the author asks only in rounds where the peer is in sight. Either end
+> of a DM that finds the record for its pair settles the attachment: no `ahave`, no `aput`, not after the peers
+> part and not at last call (C-9.5-7 guards a push that is still owed, and none is). Without the record, the
+> deferral above stands unchanged. The record survives a restart, so a fresh process does not upload what it
+> already proved. A delivery ack never writes it: the ack says the frame arrived, and the bytes travel by a
+> separate pull. The author's half rests on an unsigned answer over an unauthenticated link, a limit §10.4
+> prices.
+>
+> **Observability.** Nothing here is visible at a spool beyond a later `aput`, or none at all, so a
+> deferring member and an eager one are the same client to the same server, and conformance is
+> unaffected. It does sharpen §10's timing signal, priced there.
 
 ### 9.6 The accounted set
 
@@ -1615,14 +1626,14 @@ a relay.
   to each new one, stays alive for as long as the member keeps resetting. Not capped: the peer may still be
   on that root, and the reset floors (`docs/FORWARD_SECRECY_RATCHET.md` §7, §10) bound the chain.
 - Where a member defers the §9.5 push half, a **proximity** signal on top of that: an upload that
-  only
-  happens once the radios stopped carrying the bytes tells a spool roughly when a conversation's
-  members
-  were apart. Frames stay unconditional (C-9.5-9) precisely so this does not generalise. It is
-  scoped to
-  the object class that already leaks a size and a time, and it buys not shipping a second copy of
-  every
-  photo that already crossed a radio link. A member that never defers gives up nothing here.
+  only happens once the radios stopped carrying the bytes tells a spool roughly when a conversation's
+  members were apart. Where a member skips the push half for good on proof of bytes (C-9.5-8), the
+  photo never goes up, which tells a spool less than a late upload does: no size and no time for that
+  attachment. Its absence is a weaker hint of its own: a DM scope whose frames grow with no matching
+  upload may have had its members together when they were sent. Frames stay unconditional (C-9.5-9)
+  precisely so neither generalises. Both are scoped to the object class that already leaks a size and
+  a time, and they buy not shipping a second copy of every photo that already crossed a radio link. A
+  member that never defers gives up nothing here.
 - With TURN (§7.6), that an IP asked for a credential at a given time, but not which scope it is calling
   from. **The TURN server** sees both endpoint IPs of a relayed call, its duration and its byte counts,
   never its content. **Joined**, as one operator can join them, this sharpens the IP edge above: "these k
@@ -1677,6 +1688,15 @@ unguessable
 KDF outputs, and multi-homing plus rotation bound the damage. A TOFU scope-auth extension is
 registered
 in §11.
+
+The reference client's proof of bytes (§9.5, C-9.5-8) trusts the recipient's own answer to the mesh's
+holder query, which is unsigned, over a radio link whose HELLO is not authenticated. A device on a link
+that claims the recipient's node id, in the author's radio range when a photo is sent, can answer that
+it holds the photo and so keep it off every spool. Nothing leaks: the frame still goes up, so the
+recipient knows the photo exists. But the photo has no relay copy, so it reaches the recipient only the
+next time the two meet over a radio, and never if they don't. Closing it takes a signed answer, an
+additive change to the mesh wire on both ports, which this revision does not make. The recipient's own
+proof is unaffected: it is the bytes, hash-checked.
 
 ## 11. Extension register [Both]
 
@@ -2030,7 +2050,7 @@ wire.
 | §9.6 accounted set                              | Shipped, per-connection lifetime only — a process restart re-pulls the band once (C-9.6-4 permits it)                                       | `ScopeSync`                                                      |
 | §9.4 C-9.4-3 direct push                        | Shipped — one frame class today, a room post's `relay = false` delivery tick at its ride deadline (ADR 2026-09.y5f3)                        | `ScopeSync.pushDirect`                                           |
 | §9.5 attachment fetch and refill                | Shipped, minus persisted partial downloads (§11)                                                                                           | `ScopeSync`, `ScopeAttachments`                                  |
-| §9.5 push-half deferral                         | Shipped, DM scopes only                                                                                                                    | `AttachmentDeferPolicy`                                          |
+| §9.5 push-half deferral                         | Shipped, DM scopes only; a DM photo its recipient provably holds is never pushed (C-9.5-8's proof of bytes, ADR 2026-10.vy27)              | `AttachmentDeferPolicy`, `AttachmentHolderDao`                   |
 | §10 Tor for the IP edge                         | Deferred                                                                                                                                   | §11                                                              |
 
 The plane is **off by default** and gated behind a one-time consent disclosure. With it off, or with
@@ -2071,3 +2091,4 @@ the plane itself was unaffected either time, since a spool never decodes a frame
 | 2026-10-15 | **TURN credentials, entitlement tickets, STUN and casts (§7.6, §7.7; knit-spool ADR 2026-10.bxsg, knit-spool ADR 2026-10.h6pt, knit-spool ADR 2026-10.3wdy).** Four optional HELLO capabilities, each signalled by its presence: `turn` with `turnreq`/`turncred`, short-lived TURN REST credentials that name no scope; `ent`/`entGates` with an `ent` record presenting an Ed25519 ticket that gates `turnreq`, `aput` and `cast` per connection, and a TURN username suffix hashed from the ticket's daily pseudonym; `stun`, a credential-free STUN list; and `cast`, a sealed frame fanned out live to a scope's other subscribers and never stored, under its own seal (`sealv = 0x04`). New error code `ticket` (B-7.2-8); B-7.1-8 gains its one exception, a client record with no `q`. §10.1 bullets, §11 rows, §12 constants and §13 vectors appended | **Spools:** optional; a spool that enables none of them omits every field and is unaffected. **Clients:** tolerate-and-ignore until the client half lands; no existing record, derivation or vector moved |
 | 2026-10-16 | **Our own unanswered reset keeps its scopes (§3.1 C-3.1-4, C-3.1-5; ADR 2026-10.j67x).** While a member's own reset over a root it held is unanswered, it keeps the replaced root's scope (retiring) and derives the new root's, and it may seal that one reset — the `chat` flagged `FLAG_RESET` with the reset's init — into the retiring scope, the one named exception to C-3.1-3 (C-4.4-3 points to it); a reset of its own that is no longer the unanswered one goes into no DM scope; §10.1 names the timing edge the hand-over shows a spool. Before it the confirmed-only bound dropped both scopes for the wait, and a reset to a peer only a relay reached never arrived. All client-side | None for spools: the reset is an ordinary sealed v2 DM, admitted by §4.4 unchanged. Clients: no record, derivation or vector moved |
 | 2026-10-17 | **A ticket's size claim (§7.6: `am`, S-7.6-31, C-7.6-32; knit-next ADR 2026-10.s3ep, knit-spool-coordinator ADR 2026-10.3aqb).** A ticket gains an optional `am`, the largest attachment its holder may `aput`, in bytes of `A` rounded down to whole chunks. Where `files` is gated, a spool refuses a larger `aput` with `err ticket` `size` (S-7.6-22's word list, B-7.2-8): never a strike, nothing stored or charged. A client does not send one, and reads the refusal as too large for that relay, not as a lock. §10.1 names the issuer's link from `ps` to an account, §11's blind-ticket row says what a `v: 2` would need, and §12.2 gains the claim's default. In passing, B-7.2-8's two rows became one, and it and the §7.3 `aput` row point at §7.6. A client's exchange with an issuer, free accounts included, is `docs/VOICE_CALLS.md` §2.6 (C-7.6-27 amended, C-7.6-33 onward) | **Spools:** optional; a spool that does not read `am` ignores the key (B-2-2) and admits the upload as before, and only a connection whose ticket carries `am` can see `size`. **Clients:** read `size` as above; a ticket without `am` changes nothing. No existing record, derivation or vector moved; §13 gains `tkFilesAm` and `sigFilesAm` |
+| 2026-10-17 | **Proof of bytes skips a DM photo's upload for good (§9.5 C-9.5-6, C-9.5-8, §10.1; ADR 2026-10.vy27).** C-9.5-6 gains one exception: a member holding per-recipient proof that the recipient holds the bytes MAY skip the push half for that attachment for good. C-9.5-8 names that proof — the bytes reaching the recipient over a short-range radio, or its own statement over one, after its hash check, that it holds them — and says what never is: an ack, a sighting, a frame-only plane, a group scope. A new non-normative reference-client paragraph describes the record and the holder query behind it; §10.1 prices the hint an upload that never happens gives, and §10.4 the unsigned answer the author's half trusts. C-9.5-9 is unchanged: frames are never deferred | None for spools. Clients: a member that uploads less, which no spool can tell apart; no record, derivation or vector moved |

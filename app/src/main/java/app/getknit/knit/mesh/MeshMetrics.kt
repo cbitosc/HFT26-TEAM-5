@@ -307,6 +307,7 @@ class MeshMetrics {
     private val spoolAttachPushed = AtomicLong()
     private val spoolAttachPulled = AtomicLong()
     private val spoolAttachDeferred = AtomicLong()
+    private val spoolAttachProved = AtomicLong()
     private val spoolAttachRefused = AtomicLong()
     private val spoolAttachLocked = AtomicLong()
     private val loraSent = AtomicLong()
@@ -930,6 +931,15 @@ class MeshMetrics {
     }
 
     /**
+     * A DM photo we hold was settled for good without asking a spool, because its recipient provably holds the bytes
+     * over a short-range radio (`AttachmentDeferPolicy.proved`, ADR 2026-10.vy27). Counted per round that passes it, like
+     * a deferral, so an upload that never happens on purpose never reads like a broken one.
+     */
+    fun onSpoolAttachmentProved() {
+        spoolAttachProved.incrementAndGet()
+    }
+
+    /**
      * An attachment of ours was settled without asking a spool because that connection takes none of this phone's
      * uploads (C-7.6-24: a files gate and no files ticket here, or the ticket's day spent). Counted for the same
      * reason as a deferral: a locked upload and a broken one look alike otherwise.
@@ -1318,6 +1328,9 @@ class MeshMetrics {
             blobFastOnlyRefused = blob(BlobExchange.BlobEvent.FastOnlyRefused),
             blobPullsWithheld = blob(BlobExchange.BlobEvent.PullWithheld),
             blobEchoesDeclined = blob(BlobExchange.BlobEvent.EchoDeclined),
+            blobProofQueriesSent = blob(BlobExchange.BlobEvent.ProofQuerySent),
+            blobProofAnswersTaken = blob(BlobExchange.BlobEvent.ProofAnswerTaken),
+            blobProofsHeld = blob(BlobExchange.BlobEvent.ProofHeld),
             fastOnlyDropped = fastOnlyDropped.get(),
         )
 
@@ -1388,6 +1401,7 @@ class MeshMetrics {
             spoolAttachPushed = spoolAttachPushed.get(),
             spoolAttachPulled = spoolAttachPulled.get(),
             spoolAttachDeferred = spoolAttachDeferred.get(),
+            spoolAttachProved = spoolAttachProved.get(),
             spoolAttachRefused = spoolAttachRefused.get(),
             spoolAttachLocked = spoolAttachLocked.get(),
         )
@@ -1566,6 +1580,11 @@ class MeshMetrics {
             // copy the composite gave up on rather than hand to Bluetooth.
             val blobFastOnlyHeld: Long = 0,
             val blobFastOnlyRefused: Long = 0,
+            // The proof that a DM photo's recipient holds its bytes (ADR 2026-10.vy27): holder queries sent for a
+            // photo of ours, answers to them taken, and the hashes they proved held.
+            val blobProofQueriesSent: Long = 0,
+            val blobProofAnswersTaken: Long = 0,
+            val blobProofsHeld: Long = 0,
             val fastOnlyDropped: Long = 0,
             // #195: a cycle that asked nobody to pull a blob through — past its deadline, or with no budget left — and
             // an ask for a blob this phone lacks that made no want here, for the same two reasons.
@@ -1638,6 +1657,7 @@ class MeshMetrics {
             val spoolAttachPushed: Long = 0,
             val spoolAttachPulled: Long = 0,
             val spoolAttachDeferred: Long = 0,
+            val spoolAttachProved: Long = 0,
             val spoolAttachRefused: Long = 0,
             val spoolAttachLocked: Long = 0,
         )

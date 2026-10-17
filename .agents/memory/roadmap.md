@@ -513,6 +513,12 @@ doc). **Don't start a deferred item without explicit direction.**
   deferral scenario is un-ignored and is the acceptance test. Still owed: the same two-island trial on
   hardware — send a photo co-located (expect the deferred counter climbing and no `aput`), separate the
   devices, expect the upload within one 60 s heal round of the sighting lapsing.
+  **A DM photo its recipient provably holds never goes up, BUILT 2026-10-17** (ADR 2026-10.vy27, spec C-9.5-6's
+  exception and C-9.5-8's proof of bytes, DB v27 `attachment_holders`): the recipient's own hash-checked radio
+  arrival, or its `blobhave` answer to the sender over a live short-range link, settles the photo for good — no
+  upload after the peers part or at last call. An ack alone still only defers. Counted as `spoolAttachProved`. That
+  supersedes the trial above: co-located, expect `spoolAttachProved` and no `aput` even after separating; with
+  Bluetooth off during the send, expect the upload at once.
 
 - **Sealed profile updates SHIPPED 2026-08-16** (ADR 020, was never a roadmap item — the gap surfaced in
   field testing after M5): `CTL_PROFILE = 8` carries name/status/avatar to established contacts inside v2

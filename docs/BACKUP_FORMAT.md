@@ -86,11 +86,14 @@ A reader refuses a format version or a KDF id it does not know before it touches
 are exactly what the app would create) filled from the live one under a read snapshot, table by table,
 inside SQLite (`DatabaseExport`). The mesh keeps running: the live database's write lock is never taken.
 
-Carried (`BackupTables.CARRIED`): `blobs`, `blob_verdicts`, `peers`, `peer_profiles`, `met_peers`, `groups`,
-`group_member_clocks`, `group_roots`, `commons`, `commons_members`, `commons_outbox`, `messages`, `reactions`,
-`message_receipts`, `drafts`. Rebuilt on arrival: `messages_fts` (the triggers fill it as the rows land).
+Carried (`BackupTables.CARRIED`): `blobs`, `blob_verdicts`, `attachment_holders`, `peers`, `peer_profiles`,
+`peer_badges`, `met_peers`, `groups`, `group_member_clocks`, `group_roots`, `commons`, `commons_members`,
+`commons_outbox`, `messages`, `reactions`, `message_receipts`, `drafts`. Rebuilt on arrival: `messages_fts` (the triggers fill it as the rows land).
 `peer_profiles` is the signed profile frame each pin came from, public by construction; carried so a restored
 phone can still prove the key of every peer whose frames it will carry again (ADR 2026-09.g64k).
+`attachment_holders` is the proof that a DM photo's recipient holds its bytes; carried because a restore is a move
+and the peer still holds them, so the restored phone does not upload to a spool what was already proved (ADR
+2026-10.vy27).
 
 **Never carried** (`BackupTables.TRANSIENT`), on purpose — they exist in the copy, empty:
 

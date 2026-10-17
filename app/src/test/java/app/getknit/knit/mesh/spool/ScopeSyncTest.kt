@@ -95,6 +95,7 @@ class ScopeSyncTest {
         groups: List<GroupScopeRoots> = emptyList(),
         blobs: FakeBlobs = FakeBlobs(),
         deferAttachment: suspend (Scope, ScopeAttachments.Ref) -> Boolean = { _, _ -> false },
+        provedAttachment: suspend (Scope, ScopeAttachments.Ref) -> Boolean = { _, _ -> false },
         // The confirmed-session roots (a DM scope per entry) and the intro driver's pair-scope inputs
         // (spec §3.5), both read live so a test can move a peer between them mid-run.
         roots: () -> List<ScopeRoots> = { listOf(ScopeRoots(peer, pairwiseRoot)) },
@@ -145,6 +146,7 @@ class ScopeSyncTest {
                 blobs = blobs,
                 onAttachmentObtained = { obtained.add(it) },
                 deferAttachment = deferAttachment,
+                provedAttachment = provedAttachment,
                 onPresenceChanged = presence,
                 metrics = metrics,
                 clock = clock,
@@ -3120,6 +3122,39 @@ class ScopeSyncTest {
 
             val aid = aidHex(alice, bob, aHash)
             assertEquals(ScopeAttachments.chunkCount(bytes.size), spool.chunkCount(scopeHex(alice, bob), aid))
+            sender.sync.stop()
+        }
+
+    @Test
+    fun `an attachment its recipient provably holds is never uploaded, asked about or deferred`() =
+        runTest {
+            val spool = FakeSpool()
+            val (aHash, bytes) = image()
+            // Deferral says push (the peers parted): the proof still holds it, for good (ADR 2026-10.vy27).
+            val sender =
+                member(
+                    spool,
+                    alice,
+                    bob,
+                    blobs = FakeBlobs(aHash to bytes),
+                    deferAttachment = { _, _ -> false },
+                    provedAttachment = { _, ref -> ref.aHash == aHash },
+                )
+            sender.custody.store(
+                dmFrame("m1", from = alice, to = bob, sentAt = now, attachmentHash = aHash),
+                ForwardStore.ORIGIN_SELF,
+                now,
+            )
+
+            sender.sync.start(backgroundScope)
+            pump(rounds = 12)
+
+            assertEquals(emptyList<String>(), spool.chunksPut)
+            assertEquals("settled before the `ahave`: no round trip", emptyList<String>(), spool.presenceAsks)
+            assertEquals(0, sender.metrics.spool().spoolAttachPushed)
+            assertEquals("settled, not deferred", 0L, sender.metrics.spool().spoolAttachDeferred)
+            assertEquals("counted once, then settled: no retry", 1L, sender.metrics.spool().spoolAttachProved)
+            assertEquals("the frame goes up regardless (C-9.5-9)", 1, sender.metrics.spool().spoolPushed)
             sender.sync.stop()
         }
 
