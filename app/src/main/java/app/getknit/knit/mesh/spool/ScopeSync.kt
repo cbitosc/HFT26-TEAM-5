@@ -390,6 +390,9 @@ class ScopeSync(
         val host = session ?: return
         val wanted = urls().toSet()
         workers.keys.filterNot { it in wanted }.forEach { workers.remove(it)?.stop() }
+        // A removed worker's stop() cancels its session before the teardown's republish, and with the relays
+        // switched off no round is left to run one: withdraw the cover the removed spools gave here (#196).
+        republishPresence()
         if (wanted.isEmpty()) {
             scopes = emptyList()
             return

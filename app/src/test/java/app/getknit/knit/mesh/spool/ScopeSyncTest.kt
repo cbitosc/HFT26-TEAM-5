@@ -101,6 +101,8 @@ class ScopeSyncTest {
         dialer: SpoolDialer = spool,
         // The present-set callback (ADR 2026-09.y5f3); the default drops it, as every earlier test did.
         presence: (Set<String>) -> Unit = {},
+        // The configured relay list, read live so a test can switch the relays off mid-run.
+        urls: () -> List<String> = { listOf(url) },
     ): Member {
         val metrics = MeshMetrics()
         val delivered = mutableListOf<RelayEnvelope>()
@@ -117,7 +119,7 @@ class ScopeSyncTest {
                 dialer = dialer,
                 store = custody,
                 selfId = { self },
-                urls = { listOf(url) },
+                urls = urls,
                 canCarry = carryGate,
                 // Stands in for MeshRouter.handleInbound: deliver, then capture into custody exactly as
                 // InboundPipeline.onDeliver does, so the next heal round folds the frame into our digest.
@@ -423,6 +425,32 @@ class ScopeSyncTest {
             pump(70) // past the worker's 60 s tick, which is what lets a stamp lapse
             assertEquals("and the cover is withdrawn when the window closes", emptySet<String>(), seen.last())
             assertEquals(emptySet<String>(), receiver.sync.presentPeers(t))
+            sender.sync.stop()
+            receiver.sync.stop()
+        }
+
+    @Test
+    fun `switching the relays off withdraws every peer they covered`() =
+        runTest {
+            // #196: the switch-off empties the relay list, and the reconcile that removes the workers is the
+            // last thing to run on this plane — a removed worker's stop() never reaches its session's
+            // teardown. Without a republish there the LoRa plane keeps the old cover and never airs a DM.
+            val spool = FakeSpool()
+            val seen = mutableListOf<Set<String>>()
+            var relays = listOf(url)
+            val sender = member(spool, alice, bob)
+            val receiver = member(spool, bob, alice, presence = { seen += it }, urls = { relays })
+            sender.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
+            receiver.sync.start(backgroundScope)
+            sender.sync.start(backgroundScope)
+            pump()
+            assertEquals("alice's fresh frame puts her on the plane", setOf(alice), seen.lastOrNull())
+
+            relays = emptyList()
+            receiver.sync.onScopeTableChanged()
+            pump()
+            assertEquals("the receiver's workers are gone", emptyList<SpoolStatus>(), receiver.sync.status())
+            assertEquals("and so is the cover they gave", emptySet<String>(), seen.last())
             sender.sync.stop()
             receiver.sync.stop()
         }

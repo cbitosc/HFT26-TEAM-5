@@ -68,6 +68,8 @@ document:
 - After someone restored Knit from a backup, messages you had sent them in the ten minutes before could miss
   them for good if another phone was passing your messages along. Knit now sends those messages a second time
   a few minutes later.
+- After you switched your internet relays off, a message to someone only your LoRa board could reach wasn't
+  sent until Knit restarted, and stayed at one check mark. It now goes out over the board right away.
 - After a group member restored Knit from a backup, some of their older group messages could fail to open on
   your phone for good. Messages from before and after the restore now both open.
 - A modified copy of Knit nearby could make yours close when you wrote to it, or stop your phone noticing new

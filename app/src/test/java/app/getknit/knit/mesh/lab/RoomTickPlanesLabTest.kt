@@ -111,6 +111,44 @@ class RoomTickPlanesLabTest {
         }
 
     @Test
+    fun aDmGoesOnTheAirOnceTheRelaysAreSwitchedOff() =
+        runBlocking {
+            // #196: the relays' master switch off left the last present set published, so the board went on
+            // treating the peer as covered by the Internet and never aired a DM to it. Both phones leave, as in
+            // the field (the other phone reachable only over LoRa); each one's own cover must lapse.
+            val air = FakeMeshtasticAir()
+            val spool = FakeSpool()
+            // A DM that arrived over the board is ticked through DmAckCoalescer's 45 s hold (ADR 054); the oracle
+            // waits for that tick, so the pair holds it for a second instead.
+            val limits = LabLimits(dmAckHoldMs = 1_000L)
+            val alice = lab.node("alice", limits, air = air, spool = spool).apply { setDisplayName("Alice") }
+            val bob = lab.node("bob", limits, air = air, spool = spool).apply { setDisplayName("Bob") }
+            lab.meetOnTheRelay(alice, bob, air)
+            for (node in listOf(alice, bob)) {
+                assertTrue("${node.name}'s board never took the relay's cover", lab.tryAwait(1) { node.internetCovered() })
+            }
+
+            lab.leaveRelay(alice)
+            lab.leaveRelay(bob)
+            for (node in listOf(alice, bob)) {
+                assertTrue("${node.name}'s board kept the cover of a relay it left", lab.tryAwait(1) { 1 - node.internetCovered() })
+            }
+            val skippedBefore = alice.metrics.lora().loraSkippedInternet
+
+            assertTrue(alice.sendDm(bob, "over the board now"))
+            val dm = alice.ownMessageId(alice.dmWith(bob), "over the board now")
+            lab.await(1) { bob.decrypted(bob.dmWith(alice)).count { it.first == dm } }
+            assertEquals("the DM went on the air", DeliveryPlane.LoRa, bob.receivedVia(bob.dmWith(alice), dm))
+            assertEquals("and its receipt came back the same way", DeliveryPlane.LoRa, lab.awaitReceipt(alice, dm, bob))
+            assertEquals("nothing was kept off the board for a relay", skippedBefore, alice.metrics.lora().loraSkippedInternet)
+
+            lab.assertConverged(listOf(alice, bob), atLeast = 5) { it.dmWith(if (it === alice) bob else alice) }
+        }
+
+    /** How many peers [this] node's board counts as covered by the Internet: 1 or 0 here, a `tryAwait` count. */
+    private fun LabNode.internetCovered(): Int = checkNotNull(lora) { "$name has no board" }.status.value.internetCovered
+
+    @Test
     fun aRoomTickWithNoRideIsPushedStraightToTheSpoolWhenItsAuthorIsThere() =
         runBlocking {
             val air = FakeMeshtasticAir()
