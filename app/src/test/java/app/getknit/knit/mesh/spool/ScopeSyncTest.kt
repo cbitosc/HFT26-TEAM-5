@@ -17,6 +17,7 @@ import com.google.crypto.tink.subtle.X25519
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
@@ -112,6 +113,8 @@ class ScopeSyncTest {
         liveUrls: () -> List<String> = { urls },
         tickets: SpoolTickets? = null,
         log: (String) -> Unit = {},
+        // The refresher's wake for an upload locked for want of a ticket (C-7.6-27 amended).
+        onUploadWanted: (String) -> Unit = {},
     ): Member {
         val metrics = MeshMetrics()
         val delivered = mutableListOf<RelayEnvelope>()
@@ -147,6 +150,7 @@ class ScopeSyncTest {
                 clock = clock,
                 jitter = { 0L },
                 tickets = tickets,
+                onUploadWanted = onUploadWanted,
                 log = log,
             )
         return Member(custody, sync, metrics, delivered, blobs, obtained, wires)
@@ -2563,6 +2567,230 @@ class ScopeSyncTest {
             assertEquals(3, spool.chunkCount(scopeHex(alice, bob), aidHex(alice, bob, aHash)))
             phone.sync.stop()
         }
+
+    @Test
+    fun `an attachment over the ticket's am is never uploaded there, and a smaller one is`() =
+        runTest {
+            // am = 49 152 B: one chunk (C-7.6-32). A 100 000 B photo is three; a 30 000 B one fits.
+            val spool = FakeSpool(ent = true, entGates = SpoolTicket.FL_FILES)
+            val (big, bigBytes) = image()
+            val (small, smallBytes) = image(size = 30_000)
+            val tickets = filesTickets(SpoolTicketsTest.ticket(fl = SpoolTicket.FL_FILES, am = 49_152))
+            val phone =
+                member(spool, alice, bob, blobs = FakeBlobs(big to bigBytes, small to smallBytes), urls = listOf(filesUrl), tickets = tickets)
+            phone.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now, attachmentHash = big), ForwardStore.ORIGIN_SELF, now)
+            phone.custody.store(dmFrame("m2", from = alice, to = bob, sentAt = now, attachmentHash = small), ForwardStore.ORIGIN_SELF, now)
+            phone.sync.start(backgroundScope)
+            pump(rounds = 16)
+            val status = phone.sync.status().single()
+            assertEquals(SpoolUploads.Open, status.uploads)
+            assertEquals(1, status.uploadLimitChunks)
+            // The big one: not an `aput`, nor the `ahave` before one. The small one went up whole.
+            val bigAid = aidHex(alice, bob, big)
+            assertTrue(spool.aputs.none { it.startsWith(bigAid) })
+            assertFalse(bigAid in spool.presenceAsks)
+            assertEquals(1, spool.chunkCount(scopeHex(alice, bob), aidHex(alice, bob, small)))
+            assertTrue("nothing was refused: nothing too large was tried", spool.aputRefusals.isEmpty())
+            // Settled: the re-look never asks about it again.
+            pump(rounds = 40)
+            assertFalse(bigAid in spool.presenceAsks)
+            phone.sync.stop()
+        }
+
+    @Test
+    fun `a size refusal settles that attachment without locking uploads or spending the ticket`() =
+        runTest {
+            val spool = FakeSpool(ent = true, entGates = SpoolTicket.FL_FILES).apply { refuseSizeOver = 1 }
+            val (big, bigBytes) = image()
+            val (small, smallBytes) = image(size = 30_000)
+            val ticket = SpoolTicketsTest.ticket(fl = SpoolTicket.FL_FILES)
+            val phone =
+                member(
+                    spool,
+                    alice,
+                    bob,
+                    blobs = FakeBlobs(big to bigBytes, small to smallBytes),
+                    urls = listOf(filesUrl),
+                    tickets = filesTickets(ticket),
+                )
+            phone.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now, attachmentHash = big), ForwardStore.ORIGIN_SELF, now)
+            phone.sync.start(backgroundScope)
+            pump(rounds = 16)
+            assertEquals(listOf("size"), spool.aputRefusals)
+            // Not a lock and not a spent day: uploads stay open, and nothing was charged.
+            assertEquals(SpoolUploads.Open, phone.sync.status().single().uploads)
+            assertEquals(0L, spool.uploadCharged(ticket))
+            val tried = spool.aputs.size
+            pump(rounds = 40)
+            assertEquals("the refused attachment is not tried again", tried, spool.aputs.size)
+            // The next attachment goes up under the same ticket.
+            phone.custody.store(dmFrame("m2", from = alice, to = bob, sentAt = now, attachmentHash = small), ForwardStore.ORIGIN_SELF, now)
+            pump(rounds = 16)
+            assertEquals(1, spool.chunkCount(scopeHex(alice, bob), aidHex(alice, bob, small)))
+            assertEquals(listOf("size"), spool.aputRefusals)
+            phone.sync.stop()
+        }
+
+    @Test
+    fun `an upload locked for want of a ticket wakes the refresher, and one waiting on its answer does not`() =
+        runTest {
+            val wanted = mutableListOf<String>()
+            val (aHash, bytes) = image()
+            // No ticket: locked `missing`, a reason to ask now.
+            val bare = FakeSpool(ent = true, entGates = SpoolTicket.FL_FILES)
+            val phone = member(bare, alice, bob, blobs = FakeBlobs(aHash to bytes), urls = listOf(filesUrl), onUploadWanted = { wanted += it })
+            phone.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now, attachmentHash = aHash), ForwardStore.ORIGIN_SELF, now)
+            phone.sync.start(backgroundScope)
+            pump(rounds = 16)
+            assertTrue(wanted.isNotEmpty())
+            assertTrue(wanted.all { it == filesUrl })
+            phone.sync.stop()
+
+            // A ticket on its way (`pending`) is no reason to ask for another.
+            val slow = FakeSpool(ent = true, entGates = SpoolTicket.FL_FILES).apply { holdEnts = true }
+            val waiting = mutableListOf<String>()
+            val other =
+                member(
+                    slow,
+                    alice,
+                    bob,
+                    blobs = FakeBlobs(aHash to bytes),
+                    urls = listOf(filesUrl),
+                    tickets = filesTickets(SpoolTicketsTest.ticket(fl = SpoolTicket.FL_FILES)),
+                    onUploadWanted = { waiting += it },
+                )
+            other.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now, attachmentHash = aHash), ForwardStore.ORIGIN_SELF, now)
+            other.sync.start(backgroundScope)
+            pump(rounds = 16)
+            assertEquals(SpoolUploads.Locked(SpoolUploads.PENDING), other.sync.status().single().uploads)
+            assertTrue(waiting.isEmpty())
+            other.sync.stop()
+        }
+
+    @Test
+    fun `a free phone's locked upload fetches a free ticket and goes up, after a reconnect too`() =
+        runTest {
+            // The whole loop on JVM: the plane's wake, the refresher's free account and swap (scripted issuer), the
+            // import, the plane presenting the ticket, the upload. The socket drops while the ticket is fetched.
+            val spool = FakeSpool(ent = true, entGates = SpoolTicket.FL_FILES)
+            val (aHash, bytes) = image(size = 30_000)
+            val journal = SpoolTicketsTest.MemoryJournal()
+            val tickets = SpoolTickets(journal) { now }
+            val keys = TicketRefresherTest.MemoryKeyJournal(journal)
+            val host = SpoolUrl.hostname(filesUrl)!!
+            val free = MemoryFree(keys).apply { issuers.value = mapOf(host to "https://free.example"); consent.value = mapOf(host to true) }
+            val swap =
+                object : TicketIssuer {
+                    var asks = 0
+
+                    override suspend fun swap(
+                        origin: String,
+                        key: String,
+                    ): IssuerAnswer {
+                        asks++
+                        val ticket = SpoolTicketsTest.ticket(aud = host, nbf = now / 1_000, exp = now / 1_000 + 90_000, fl = SpoolTicket.FL_FILES, am = 262_144)
+                        return IssuerAnswer.Issued(ticket.text, now + 30 * 86_400_000L)
+                    }
+                }
+            val accounts =
+                object : AccountIssuer {
+                    override suspend fun accountParams(
+                        origin: String,
+                        aud: String,
+                    ) = AccountAnswer.Params(aud, 4, 20_000)
+
+                    override suspend fun createAccount(
+                        origin: String,
+                        aud: String,
+                        day: Long,
+                        nonce: ByteArray,
+                        n: Long,
+                    ) = AccountAnswer.Created("kak1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", aud)
+                }
+            val refresher =
+                TicketRefresher(
+                    keys = keys,
+                    tickets = tickets,
+                    issuer = swap,
+                    urls = MutableStateFlow(setOf(filesUrl)),
+                    clock = { now },
+                    free = free,
+                    accounts = accounts,
+                )
+            val phone =
+                member(
+                    spool,
+                    alice,
+                    bob,
+                    blobs = FakeBlobs(aHash to bytes),
+                    urls = listOf(filesUrl),
+                    tickets = tickets,
+                    onUploadWanted = refresher::uploadWanted,
+                )
+            phone.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now, attachmentHash = aHash), ForwardStore.ORIGIN_SELF, now)
+            phone.sync.start(backgroundScope)
+            pump(rounds = 16)
+            assertEquals(SpoolUploads.Locked(SpoolUploads.MISSING), phone.sync.status().single().uploads)
+            assertTrue(refresher.isWaiting(host))
+            assertTrue(spool.aputs.isEmpty())
+
+            // Offline while the ticket is fetched: the socket goes, the refresher makes the account and swaps its key.
+            spool.dropSockets()
+            refresher.runOnce()
+            assertEquals(1, swap.asks)
+            assertTrue(keys.held.value.getValue(host).free)
+            assertFalse(refresher.isWaiting(host))
+            // Back online: the new connection presents the ticket, and the waiting photo goes up whole.
+            pump(rounds = 30)
+            assertEquals(SpoolUploads.Open, phone.sync.status().single().uploads)
+            assertEquals(1, spool.chunkCount(scopeHex(alice, bob), aidHex(alice, bob, aHash)))
+            // Nothing more waits, so the free key asks nothing more, however long the session runs.
+            refresher.runOnce()
+            assertEquals(1, swap.asks)
+            phone.sync.stop()
+        }
+
+    /** The free half of the key store in memory, beside [TicketRefresherTest.MemoryKeyJournal]'s one slot per host. */
+    private class MemoryFree(
+        private val keys: TicketRefresherTest.MemoryKeyJournal,
+    ) : FreeKeyJournal {
+        val issuers = MutableStateFlow<Map<String, String>>(emptyMap())
+        val consent = MutableStateFlow<Map<String, Boolean>>(emptyMap())
+        val states = MutableStateFlow<Map<String, FreeState>>(emptyMap())
+        override val freeIssuers: Flow<Map<String, String>> = issuers
+        override val freeConsent: Flow<Map<String, Boolean>> = consent
+        override val freeStates: Flow<Map<String, FreeState>> = states
+
+        override suspend fun setFreeIssuer(
+            host: String,
+            origin: String?,
+        ) {
+            issuers.value = if (origin == null) issuers.value - host else issuers.value + (host to origin)
+        }
+
+        override suspend fun setFreeConsent(
+            host: String,
+            allowed: Boolean?,
+        ) {
+            consent.value = if (allowed == null) consent.value - host else consent.value + (host to allowed)
+        }
+
+        override suspend fun putFreeState(
+            host: String,
+            state: FreeState,
+        ) {
+            states.value += host to state
+        }
+
+        override suspend fun forgetFreeKey(
+            host: String,
+            key: HeldKey,
+            notBefore: Long,
+        ) {
+            if (keys.held.value[host] == key) keys.forgetHost(host)
+            states.value += host to FreeState(notBefore = notBefore)
+        }
+    }
 
     @Test
     fun `a free phone on a spool that gates only files still asks it for turn`() =

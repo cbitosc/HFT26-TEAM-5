@@ -165,6 +165,73 @@ class OkHttpTicketIssuerTest {
         assertFalse(answer.toString().contains(KEY.removePrefix(CustomerKey.PREFIX).take(12)))
     }
 
+    // ── the free account's route (docs/VOICE_CALLS.md §2.6; knit-spool-coordinator feat/free-tickets @ 5883035) ──
+
+    @Test
+    fun theParametersAreAGetForTheAudienceWithNoKey() {
+        server.enqueue(json(200, """{"aud":"lab.lax.spool.getknit.app","bits":22,"day":20743}"""))
+        val answer = runBlocking { issuer.accountParams(origin, "lab.lax.spool.getknit.app") }
+        assertEquals(AccountAnswer.Params("lab.lax.spool.getknit.app", 22, 20_743), answer)
+        val request = server.takeRequest()
+        assertEquals("GET", request.method)
+        assertEquals("/api/v1/account?aud=lab.lax.spool.getknit.app", request.target)
+        assertNull(request.headers["Authorization"])
+    }
+
+    @Test
+    fun anAccountIsAPostOfTheStampWithNoKey() {
+        server.enqueue(json(201, """{"key":"$KEY","aud":"lab.lax.spool.getknit.app"}"""))
+        val nonce = ByteArray(16) { it.toByte() }
+        val answer = runBlocking { issuer.createAccount(origin, "lab.lax.spool.getknit.app", 20_743, nonce, 174_854) }
+        assertEquals(KEY, (answer as AccountAnswer.Created).key)
+        val request = server.takeRequest()
+        assertEquals("POST", request.method)
+        assertEquals("/api/v1/account", request.target)
+        assertNull(request.headers["Authorization"])
+        assertTrue(request.headers["Content-Type"]!!.startsWith("application/json"))
+        assertEquals(
+            """{"aud":"lab.lax.spool.getknit.app","day":20743,"nonce":"AAECAwQFBgcICQoLDA0ODw","n":174854}""",
+            request.body!!.utf8(),
+        )
+    }
+
+    @Test
+    fun everyRefusalOfTheAccountRouteIsRead() {
+        server.enqueue(json(400, """{"error":"bad-stamp","bits":22,"day":20743}"""))
+        server.enqueue(json(429, """{"error":"rate-limited"}""", "retry-after" to "3600"))
+        // The cap: retry-after to the next UTC midnight. A tier that is off sends none.
+        server.enqueue(json(503, """{"error":"unavailable"}""", "retry-after" to "41000"))
+        server.enqueue(json(503, """{"error":"unavailable"}"""))
+        val nonce = ByteArray(16)
+        val post = { runBlocking { issuer.createAccount(origin, "lab.example", 20_743, nonce, 1) } }
+        assertEquals(AccountAnswer.BadStamp(22, 20_743), post())
+        assertEquals(AccountAnswer.RateLimited(3_600_000), post())
+        assertEquals(AccountAnswer.Unavailable(41_000_000), post())
+        assertEquals(AccountAnswer.Unavailable(null), post())
+    }
+
+    @Test
+    fun aFreeKeysSwapReadsTheCapsRetryAfter() {
+        server.enqueue(json(503, """{"error":"unavailable"}""", "retry-after" to "41000"))
+        assertEquals(IssuerAnswer.Unavailable(41_000_000), swap())
+    }
+
+    @Test
+    fun theAccountRouteFollowsNoRedirectAndKeepsTheCleartextRule() {
+        server.enqueue(
+            MockResponse
+                .Builder()
+                .code(307)
+                .addHeader("Location", "$origin/elsewhere")
+                .build(),
+        )
+        assertEquals(AccountAnswer.NoAnswer("http 307"), runBlocking { issuer.accountParams(origin, "lab.example") })
+        assertEquals(1, server.requestCount)
+        val release = OkHttpTicketIssuer(clientFor = { OkHttpTicketIssuer.baseClient() }, allowCleartext = false)
+        assertEquals(AccountAnswer.NoAnswer("refused origin"), runBlocking { release.accountParams(origin, "lab.example") })
+        assertEquals(1, server.requestCount)
+    }
+
     private companion object {
         const val KEY = "kak1_FBsiKTA3PkVMU1phaG92fYSLkpmgp661vMPK0djf5u0"
 

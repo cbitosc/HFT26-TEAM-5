@@ -374,6 +374,14 @@ class FakeSpool(
     /** Every APUT this spool was sent, stored or refused, as "aidHex:index" — proves a client never tried. */
     val aputs: MutableList<String> = Collections.synchronizedList(mutableListOf())
 
+    /**
+     * Refuses `size` to every `aput` whose `total` is over this many chunks, under the files gate, whatever this
+     * connection's ticket says — the spool reading an `am` the client did not see (a chunk of the same `aid` charged on
+     * another connection, S-7.6-31's "every chunk"). Null leaves only the ticket's own `am`.
+     */
+    @Volatile
+    var refuseSizeOver: Int? = null
+
     /** The `msg` of every `err ticket` an APUT got under the files gate. */
     val aputRefusals: MutableList<String> = Collections.synchronizedList(mutableListOf())
 
@@ -807,8 +815,8 @@ class FakeSpool(
         }
 
         /**
-         * The daemon's `filesAdmitted` (S-7.6-22): where `files` is gated, only this connection's own live files ticket
-         * admits an upload, while its pseudonym has room for the chunk's charge. A refusal is `err ticket` with the
+         * The daemon's `filesAdmitted` (S-7.6-22, S-7.6-31): where `files` is gated, only this connection's own live files
+         * ticket admits an upload, of an attachment within its `am`, while its pseudonym has room for the chunk's charge. A refusal is `err ticket` with the
          * record's `q` and `scope`, recorded, and stores nothing. Returns the pseudonym to charge, or null to stop.
          */
         private fun filesAdmitted(aput: SpoolAput): String? {
@@ -820,6 +828,12 @@ class FakeSpool(
                     held == null || ps == null -> "missing"
 
                     held.fl and SpoolTicket.FL_FILES == 0L -> "flags"
+
+                    // S-7.6-31, after the ticket words and before the budget: the whole attachment's `total` against
+                    // `⌊am / aChunkBytes⌋`, on every chunk, a re-sent one included. Nothing stored or charged.
+                    held.am?.let { aput.total > it / ScopeCrypto.ATTACH_CHUNK_BYTES } == true -> "size"
+
+                    refuseSizeOver?.let { aput.total > it } == true -> "size"
 
                     (uploadBudgets[ps] ?: 0L) +
                         chunkCharge(

@@ -212,6 +212,9 @@ class SpoolTicketsTest {
         val exp: Long,
         val ps: ByteArray,
         val fl: Long,
+        // Written only when set (the codec drops a null default), in the key order the spool's encoder uses.
+        val ab: Long? = null,
+        val am: Long? = null,
     )
 
     @Serializable
@@ -262,6 +265,8 @@ class SpoolTicketsTest {
             sigByte: Byte = 1,
             // Shifts every byte of `ps`: a different pseudonym, as the next day's ticket or another account's carries.
             psSeed: Int = 0,
+            ab: Long? = null,
+            am: Long? = null,
         ): HeldTicket {
             val tk =
                 SpoolCodec.encode(
@@ -276,6 +281,8 @@ class SpoolTicketsTest {
                                 (it + psSeed).toByte()
                             },
                         fl = fl,
+                        ab = ab,
+                        am = am,
                     ),
                 )
             return HeldTicket.parse(text(tk, ByteArray(64) { sigByte }))!!

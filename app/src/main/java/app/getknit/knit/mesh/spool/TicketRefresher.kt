@@ -37,7 +37,8 @@ import java.util.concurrent.ConcurrentHashMap
  *   capped at its end cannot loop (nor a 200 whose ticket was never held), and [ENDED_RETRY_MS] after a 403, since
  *   `account extend` can revive it.
  * - `unknown-key` is never asked again; only a different key ([TicketKeyJournal.putKey]) resets the state.
- * - No verdict backs off from [FIRST_BACKOFF_MS], doubling, to at most [MAX_BACKOFF_MS], keeping the last verdict.
+ * - No verdict backs off from [FIRST_BACKOFF_MS], doubling, to at most [MAX_BACKOFF_MS], keeping the last verdict; a
+ *   503 that names a `retry-after` (a free key on a capped day) waits at least that long.
  * - A free key ([HeldKey.free], C-7.6-27 amended) is asked only while an upload waits and no ticket is presentable
  *   ([freeDueAt]): never on the margin, but still never before [KeyState.notBefore], so the floor after a 200 stops a
  *   ticket refused on import or at `ent` from looping.
@@ -110,6 +111,12 @@ object TicketRefreshPolicy {
 
             is IssuerAnswer.NoVerdict -> {
                 noVerdict(prior, now)
+            }
+
+            // A capped day (C-7.6-28): no ticket before the issuer's `retry-after`, so no ask before it either; without
+            // one, the ordinary backoff.
+            is IssuerAnswer.Unavailable -> {
+                noVerdict(prior, now).let { next -> answer.retryAfterMs?.let { next.copy(notBefore = maxOf(next.notBefore, now + it)) } ?: next }
             }
         }
 
@@ -487,6 +494,7 @@ class TicketRefresher(
             IssuerAnswer.UnknownKey -> KeyAnswer.UNKNOWN_KEY.word
             is IssuerAnswer.Ended -> "${KeyAnswer.ENDED.word} (endsAt ${answer.endsAt})"
             is IssuerAnswer.NoVerdict -> "no verdict (${answer.reason})"
+            is IssuerAnswer.Unavailable -> "unavailable (retry after ${answer.retryAfterMs} ms)"
         }
 
     companion object {

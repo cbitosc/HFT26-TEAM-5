@@ -42,9 +42,11 @@ class SpoolTicketRecordsTest {
         assertEquals(1_800_086_400L, ticket.exp)
         assertEquals(SpoolTicket.FL_TURN, ticket.fl)
         // `ps` (00 01 … 0f) is skipped by the codec, so no rendering of the claims can carry it.
-        assertEquals("SpoolTicket(aud=lab.example, nbf=1800000000, exp=1800086400, fl=1, ab=null)", ticket.toString())
-        // A ticket without `ab` decodes with none: the spool's own budget applies.
+        assertEquals("SpoolTicket(aud=lab.example, nbf=1800000000, exp=1800086400, fl=1, ab=null, am=null)", ticket.toString())
+        // A ticket without `ab` or `am` decodes with neither: the spool's own budget and limit apply.
         assertNull(ticket.ab)
+        assertNull(ticket.am)
+        assertNull(ticket.maxChunks)
 
         val hello = SpoolCodec.decode<SpoolHello>(HELLO.fromHex())!!
         assertEquals(true, hello.ent)

@@ -45,6 +45,15 @@ sealed interface IssuerAnswer {
     ) : IssuerAnswer
 
     /**
+     * 503 `unavailable`, which only a free key meets (docs/VOICE_CALLS.md §2.6): its audience's free tier is off, or the
+     * day's cap is reached and it has not been ticketed today — then with [retryAfterMs], to the next UTC midnight. No
+     * verdict on the key.
+     */
+    data class Unavailable(
+        val retryAfterMs: Long?,
+    ) : IssuerAnswer
+
+    /**
      * Anything else — no route, a timeout, another status, a redirect, a body that does not parse: no verdict on the
      * key. [reason] is a short word for the log (`offline`, `timeout`, `http 502`, `unparseable`…), never the body.
      */
@@ -54,13 +63,14 @@ sealed interface IssuerAnswer {
 
     companion object {
         /**
-         * Reads a response: [status] and the (capped) [body] bytes. Pure, so the JVM tests pin the coordinator's three
-         * answers through it. A 401 or a 403 counts only with its own `error` word, since a proxy or a firewall in front
-         * of the issuer answers those statuses too and they say nothing about the key.
+         * Reads a response: [status], the (capped) [body] bytes and a numeric `retry-after` in seconds. Pure, so the JVM
+         * tests pin the coordinator's answers through it. A 401, 403 or 503 counts only with its own `error` word, since a
+         * proxy or a firewall in front of the issuer answers those statuses too and they say nothing about the key.
          */
         fun read(
             status: Int,
             body: ByteArray,
+            retryAfterS: Long? = null,
         ): IssuerAnswer {
             val parsed = runCatching { json.decodeFromString<Answer>(body.decodeToString()) }.getOrNull()
             return when {
@@ -68,6 +78,7 @@ sealed interface IssuerAnswer {
                 status == HTTP_OK -> issued(parsed)
                 status == HTTP_UNAUTHORIZED && parsed.error == UNKNOWN_KEY -> UnknownKey
                 status == HTTP_FORBIDDEN && parsed.error == ENDED -> Ended(parsed.endsAt?.let(::instant))
+                status == HTTP_UNAVAILABLE && parsed.error == UNAVAILABLE -> Unavailable(retryAfterS?.takeIf { it >= 0 }?.times(MS_PER_S))
                 else -> NoVerdict("http $status")
             }
         }
@@ -88,8 +99,11 @@ sealed interface IssuerAnswer {
         const val HTTP_OK = 200
         const val HTTP_UNAUTHORIZED = 401
         const val HTTP_FORBIDDEN = 403
+        const val HTTP_UNAVAILABLE = 503
         private const val UNKNOWN_KEY = "unknown-key"
         private const val ENDED = "ended"
+        private const val UNAVAILABLE = "unavailable"
+        private const val MS_PER_S = 1_000L
 
         private val json = Json { ignoreUnknownKeys = true }
     }

@@ -52,8 +52,8 @@ class OkHttpTicketIssuer(
         origin: String,
         key: String,
     ): IssuerAnswer =
-        post(origin, IssuerOrigin.ticketUrl(origin), key, ByteArray(0).toRequestBody(null), IssuerAnswer::NoVerdict) { code, body ->
-            IssuerAnswer.read(code, body)
+        call(origin, IssuerOrigin.ticketUrl(origin), key, ByteArray(0).toRequestBody(null), IssuerAnswer::NoVerdict) { code, body, retryAfter ->
+            IssuerAnswer.read(code, body, retryAfter)
         }
 
     /**

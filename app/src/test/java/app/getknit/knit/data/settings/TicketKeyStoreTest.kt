@@ -97,11 +97,84 @@ class TicketKeyStoreTest {
             )
         }
 
+    // ── the free half (docs/VOICE_CALLS.md C-7.6-33 to C-7.6-38) ─────────────────────────────────────────
+
+    private val free = HeldKey(FREE_ISSUER, OTHER_KEY, free = true)
+
+    @Test
+    fun aFreeKeyHasTheHostsOneSlotAndACustomerKeyReplacesIt() =
+        runTest {
+            val (keys, _) = stores()
+            keys.putKey(HOST, free)
+            assertEquals(free, keys.keys.first()[HOST])
+            keys.putKeyState(HOST, free, KeyState(KeyAnswer.OK))
+            // A customer key from an invite takes the slot, with a fresh state.
+            keys.putKey(HOST, HeldKey(ISSUER, KEY))
+            assertEquals(HeldKey(ISSUER, KEY), keys.keys.first()[HOST])
+            assertNull(keys.keyStates.first()[HOST])
+            // And a free account made after the customer's ended takes it back.
+            keys.putKey(HOST, free)
+            assertEquals(free, keys.keys.first()[HOST])
+        }
+
+    @Test
+    fun aFreeKeyNeverRidesABackupAndACustomerKeyStillDoes() {
+        // C-7.6-37: every free-half key is backup-transient; the customer key's slot is not.
+        assertTrue(SettingsKeys.TRANSIENT_PREFIXES.any { SettingsKeys.spoolFreeKeyKey(HOST).name.startsWith(it) })
+        assertTrue(SettingsKeys.TRANSIENT_PREFIXES.any { SettingsKeys.spoolFreeStateKey(HOST).name.startsWith(it) })
+        assertTrue(SettingsKeys.TRANSIENT_PREFIXES.any { SettingsKeys.spoolFreeConsentKey(HOST).name.startsWith(it) })
+        assertFalse(SettingsKeys.TRANSIENT_PREFIXES.any { SettingsKeys.spoolKeyKey(HOST).name.startsWith(it) })
+    }
+
+    @Test
+    fun decliningForgetsAFreeKeyAndItsTicketButNeverACustomersKey() =
+        runTest {
+            val (keys, settings) = stores()
+            val tickets = SpoolTickets(settings)
+            keys.putKey(HOST, free)
+            tickets.import("wss://$HOST/spool/v1", SpoolTicketsTest.TEXT)
+            keys.setFreeConsent(HOST, false)
+            assertNull(keys.keys.first()[HOST])
+            assertNull(tickets.view("wss://$HOST/spool/v1"))
+            assertEquals(false, keys.freeConsent.first()[HOST])
+            keys.putKey(HOST, HeldKey(ISSUER, KEY))
+            keys.setFreeConsent(HOST, false)
+            assertEquals(HeldKey(ISSUER, KEY), keys.keys.first()[HOST])
+            keys.setFreeConsent(HOST, null)
+            assertNull(keys.freeConsent.first()[HOST])
+        }
+
+    @Test
+    fun aForgottenFreeKeyLeavesTheNextAccountsFloorAndOnlyIfItIsStillHeld() =
+        runTest {
+            val (keys, _) = stores()
+            keys.putKey(HOST, free)
+            keys.forgetFreeKey(HOST, HeldKey(FREE_ISSUER, KEY, free = true), notBefore = 5)
+            assertEquals(free, keys.keys.first()[HOST])
+            keys.forgetFreeKey(HOST, free, notBefore = 9)
+            assertNull(keys.keys.first()[HOST])
+            assertEquals(9L, keys.freeStates.first()[HOST]?.notBefore)
+        }
+
+    @Test
+    fun theSeededIssuersAndADebugOneAreRead() =
+        runTest {
+            val dataStore = PreferenceDataStoreFactory.create(scope = backgroundScope) { File(tmp.root, "free.preferences_pb") }
+            val keys = TicketKeyStore(dataStore, mapOf(HOST to FREE_ISSUER))
+            assertEquals(mapOf(HOST to FREE_ISSUER), keys.freeIssuers.first())
+            keys.setFreeIssuer("other.example", "http://10.0.2.2:3000")
+            keys.setFreeIssuer(HOST, "https://bench.example")
+            assertEquals(mapOf(HOST to "https://bench.example", "other.example" to "http://10.0.2.2:3000"), keys.freeIssuers.first())
+            keys.setFreeIssuer(HOST, null)
+            assertEquals(FREE_ISSUER, keys.freeIssuers.first()[HOST])
+        }
+
     private companion object {
         // The vector ticket's audience, so the forget test can hold a real ticket for the host.
         const val HOST = "lab.example"
         const val ISSUER = "https://anywhere.example.org"
         const val KEY = "kak1_FBsiKTA3PkVMU1phaG92fYSLkpmgp661vMPK0djf5u0"
         const val OTHER_KEY = "kak1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        const val FREE_ISSUER = "https://free.example.org"
     }
 }
