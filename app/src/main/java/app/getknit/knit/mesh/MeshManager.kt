@@ -230,6 +230,10 @@ class MeshManager(
     // How long a blob round's first ask has before every other neighbour is asked ([BlobExchange.FIRST_ASK_GRACE_MS],
     // ADR 2026-10.f7gg). Injectable for `mesh/lab`, whose scenarios must not hang an assertion on a wall-clock race.
     private val firstAskGraceMs: Long = BlobExchange.FIRST_ASK_GRACE_MS,
+    // How long a send of ours with nothing else to defer on holds for its proof round
+    // ([AttachmentDeferPolicy.PROOF_WAIT_MS], ADR 2026-10.vy27). Injectable for `mesh/lab`, whose wall-clock hold a stall
+    // must not outlast.
+    proofWaitMs: Long = AttachmentDeferPolicy.PROOF_WAIT_MS,
     // Whether this build queries neighbours for a blob's holders before it asks (ADR 2026-10.6e5t;
     // `BuildConfig.BLOB_QUERY`, on in every build by default), and how long it waits for their answers.
     // Off, every neighbour gets ADR 2026-10.f7gg's blind round; answering a query is never gated.
@@ -638,8 +642,14 @@ class MeshManager(
             // Asked over a live short-range link only, and floored per (hash, peer) by the exchange; the answer lands
             // in the same table through `onPeerHolds`, never in this round. Batched per peer ([holderAsks]).
             askHolder = { aHash, peerId -> holderAsks.ask(aHash, peerId) },
+            // The same test `BlobExchange.confirmHeld` sends on — a live short-range link whose peer answers the holder
+            // query (LoRa's set is always empty) — so a pass holds its proof round only when the question really went out.
+            canAskHolder = { peerId ->
+                transport.neighbors.value.any { it.nodeId == peerId && it.capabilities and Protocol.CAP_BLOB_HAVE != 0L }
+            },
             custodyTtlMs = ForwardRepository.DEFAULT_TTL_MS,
             clock = clock,
+            proofWaitMs = proofWaitMs,
         )
 
     private val spoolTickets = SpoolTickets(settings, clock)

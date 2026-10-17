@@ -78,6 +78,14 @@ import java.util.concurrent.ConcurrentHashMap
  * copy could reach, so such a photo never goes up — not when the peers part, not at last call. [askHolder] is how
  * the sender comes by its proof: asked each round in which an attachment of ours meets a fresh sighting, so the
  * question goes out while the peer can still answer it, and a no — or no answer — leaves the rule above in charge.
+ *
+ * **One proof round before a push.** The ask and the push it might spare are decided in the same pass, so a send of
+ * ours with no evidence left to defer on — its receipt came back over a spool, and the grace has run out — would go
+ * up in the very pass that asked, with the answer a round behind it. Where the peer is on a live short-range link
+ * that answers the holder query ([canAskHolder]), such a pass holds instead, for at most [proofWaitMs] from the
+ * first time it did: a yes settles the photo on the next pass, and a no or silence lets it push on the first pass
+ * after the wait. Shorter than the spool's re-look of a deferred attachment, so that is the very next one: a delay of
+ * one round, never a refusal. A peer not linked, or one that never answers, changes nothing.
  */
 class AttachmentDeferPolicy(
     // Node ids on the presence plane right now, sampled per call — the smoothed `reachable` set, not the
@@ -96,6 +104,9 @@ class AttachmentDeferPolicy(
     // Asks the peer whether it holds this attachment of ours (a holder query over a live short-range link, rate-floored
     // by the asker); a yes lands in [heldByRecipient]'s store. Fire-and-forget: the round never waits on the answer.
     private val askHolder: suspend (aHash: String, peerId: String) -> Unit = { _, _ -> },
+    // Whether [askHolder] can reach the peer right now: a live short-range link whose peer answers the holder query.
+    // Only then does a send of ours hold one proof round before it pushes.
+    private val canAskHolder: (peerId: String) -> Boolean = { false },
     // The mesh custody TTL (`ForwardRepository.DEFAULT_TTL_MS`), injected rather than imported so this
     // layer keeps no dependency on the data layer. Bounds [lastCallMs] below.
     private val custodyTtlMs: Long,
@@ -104,6 +115,7 @@ class AttachmentDeferPolicy(
     private val lastCallMs: Long = LAST_CALL_MS,
     private val ackGraceMs: Long = ACK_GRACE_MS,
     private val maxRadioArrivals: Int = MAX_RADIO_ARRIVALS,
+    private val proofWaitMs: Long = PROOF_WAIT_MS,
 ) {
     // nodeId -> when we last saw it on the presence plane. In memory by design: the plane persists
     // nothing (ADR 019), and losing this on restart only means deferring less. Bounded by construction —
@@ -127,6 +139,20 @@ class AttachmentDeferPolicy(
     }
 
     private fun arrivedOverRadio(aHash: String): Boolean = synchronized(radioArrivals) { aHash in radioArrivals }
+
+    // "hash|peer" -> when a pass first held that send of ours for its proof round. In memory: losing it only costs one
+    // more round's hold. Capped oldest-first; an entry outlives its round harmlessly, since the photo is settled by then.
+    private val proofWaits =
+        object : LinkedHashMap<String, Long>(INITIAL_CAPACITY, LOAD_FACTOR, false) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Long>): Boolean = size > MAX_PROOF_WAITS
+        }
+
+    /** Whether this pass is still inside the proof round for [aHash] to [peerId], which the first such pass opens. */
+    private fun inProofRound(
+        aHash: String,
+        peerId: String,
+        now: Long,
+    ): Boolean = synchronized(proofWaits) { now - proofWaits.getOrPut("$aHash|$peerId") { now } < proofWaitMs }
 
     /**
      * Whether [ref]'s bytes need never go to a spool for [scope]: a DM or pair scope whose recipient provably holds
@@ -164,7 +190,7 @@ class AttachmentDeferPolicy(
         val seen = lastSeen[peerId] ?: return false
         if (now - seen > windowMs) return false
         // The peer is in sight, so this is the round to ask it for the proof that would settle a send of ours for
-        // good ([proved]). Asked whatever this round decides: the answer only ever stops an upload not yet made.
+        // good ([proved]). Asked whatever this round decides.
         val ours = authoredHere(ref.aHash)
         if (ours) askHolder(ref.aHash, peerId)
         // The direct evidence first: no read, and it is what the row's plane stands in for.
@@ -173,7 +199,10 @@ class AttachmentDeferPolicy(
         // away, and the round asking us here is the one the send itself woke — so a missing ack is not
         // evidence the radios failed. Bounded by the frame's own age, so it re-opens with no new local
         // activity, and it covers only a send of ours: nothing else is waiting on an ack at all.
-        return now - ref.sentAt < ackGraceMs && ours
+        if (now - ref.sentAt < ackGraceMs && ours) return true
+        // Nothing left to defer on, but the question this pass just asked has an answer coming over a live link: hold
+        // one proof round rather than push ahead of it (ADR 2026-10.vy27's revision 2). Bounded by [proofWaitMs].
+        return ours && canAskHolder(peerId) && inProofRound(ref.aHash, peerId, now)
     }
 
     /** Stamps everyone currently reachable and forgets whoever can no longer justify a deferral. */
@@ -209,6 +238,17 @@ class AttachmentDeferPolicy(
          * that time at the very most; past the cap the oldest is forgotten and its bytes simply push.
          */
         const val MAX_RADIO_ARRIVALS = 256
+
+        /**
+         * How long a send of ours with nothing else to defer on holds for its proof round: the holder query's answer
+         * over a live link comes back in a second or two, and this is the proof floor's scale (`BlobExchange`'s 10 s).
+         * Under the spool's 15 s re-look of a deferred attachment (`ScopeSync.ATTACHMENT_RETRY_MS`), so a no or
+         * silence pushes on the very next pass: one round, never a refusal (C-9.5-6).
+         */
+        const val PROOF_WAIT_MS = 10_000L
+
+        /** How many proof rounds are remembered; an evicted one only means one more round's hold. */
+        const val MAX_PROOF_WAITS = 256
         private const val INITIAL_CAPACITY = 64
         private const val LOAD_FACTOR = 0.75f
     }

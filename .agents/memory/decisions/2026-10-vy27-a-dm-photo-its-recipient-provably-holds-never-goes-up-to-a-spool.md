@@ -10,7 +10,7 @@ topics: [spool, attachments]
 
 Status: Accepted (2026-10-17; `AttachmentDeferPolicy.proved`, `ScopeSync`'s `LocalPass.PROVED`,
 `AttachmentHolderEntity` / `AttachmentHolderDao` (DB v27), `BlobExchange.confirmHeld` / `onPeerHolds`,
-`MeshMetrics.spoolAttachProved`. Amends ADR 021. No wire change: the holder query is ADR 2026-10.6e5t's, asked of a
+`MeshMetrics.spoolAttachProved`, `AttachmentDeferPolicy.PROOF_WAIT_MS` (revision 2). Amends ADR 021. No wire change: the holder query is ADR 2026-10.6e5t's, asked of a
 hash we hold. Spec: `docs/SPOOL_PROTOCOL.md` C-9.5-6, C-9.5-8, §9.5's reference-client paragraph, §10.1)
 
 The maintainer's rule of 2026-10-17: any file sent should try the radios first, and a DM photo a live-linked
@@ -91,9 +91,30 @@ the photo off a spool also answers `HAVE`; that is harmless here, since the spoo
 What it does not cover: groups (no per-member receipt matrix, ADR 021 bound 3; one member holding a photo says nothing
 of another), frames, and a photo whose peer is not nearby, which uploads at once as before because its frame goes to
 the spool. A photo whose recipient's answer comes back only after the peers parted, or never (a build without
-`CAP_BLOB_HAVE`, a link that dropped), uploads after the sighting window exactly as ADR 021 says. And the
-sender's push in a round where the evidence is missing but the peer is linked still goes ahead; the proof only ever
-stops an upload not yet made.
+`CAP_BLOB_HAVE`, a link that dropped), uploads after the sighting window exactly as ADR 021 says, or, with nothing
+to defer on, after one proof round (below).
+
+## Revision 2: one proof round before a push
+
+The device trial (Pixel 3 → Moto G, 2026-10-17) found the gap the first version left open. A photo sent while the
+only relay took no attachments had its receipt come back over that relay, so the sender held no radio ack for it.
+When a relay that takes attachments connected, the grace was long gone and the pass had nothing to defer on. It asked
+the recipient for proof and pushed in the same pass, and the recipient's `HAVE` landed one round later. The proof had
+been one round trip away over a live link.
+
+So a send of ours that has nothing else to defer on now holds one proof round when its peer is on a live short-range
+link that answers the holder query (`canAskHolder`, the same test `confirmHeld` sends on).
+`AttachmentDeferPolicy.PROOF_WAIT_MS` (10 s, the proof floor's scale) bounds the hold from the first pass that held,
+in memory per (hash, peer). The answer over a link comes in a second or two. A yes settles the photo on the next
+pass. A no or silence lets it push on the first pass after the wait. The wait is shorter than the spool's 15 s
+re-look of a deferred attachment, so that is the very next pass: a delay of one round, never a refusal, as C-9.5-6
+requires. A no does not end the wait early. At the spool's pass granularity it makes no difference, and it would take
+the exchange a second callback for nothing. A peer that is not linked, or that does not answer, changes nothing, and
+neither does a photo that is not ours: the recipient's proof is its own arrival, not an answer. The hold is counted
+as a deferral (`spoolAttachDeferred`). `AttachmentDeferPolicyTest`'s three revision-2 cases pin the rule.
+`PhotoProofLabTest.aPhotoWhoseReceiptCameOverTheRelayWaitsOneProofRoundAndNeverGoesUp` replays the slipped photo: a
+frames-only relay, the receipt pinned to it, then attachment support past the grace. The hold runs on wall time, so
+the lab widens it to 30 s (`LabLimits.proofWaitMs`) rather than let a stalled node outlast it.
 
 **The trap** is the order on the recipient: the record goes after the store write, the memo before it. Swap them and a
 copy that fails its hash becomes a permanent "never upload". `AttachmentDeferPolicyTest` pins the rule (proof across a

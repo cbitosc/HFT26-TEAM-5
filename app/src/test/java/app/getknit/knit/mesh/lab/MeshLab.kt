@@ -820,6 +820,14 @@ class MeshLab {
         const val FIRST_ASK_GRACE_MS = 20_000L
 
         /**
+         * The lab's proof round ([app.getknit.knit.mesh.spool.AttachmentDeferPolicy.PROOF_WAIT_MS], ADR 2026-10.vy27).
+         * The hold runs on wall time, and a scenario that asserts nothing went up must not race a slow runner's stall;
+         * the happy path settles on the next re-look once the answer is in, so a longer bound costs it nothing. A
+         * scenario that means to push past the round advances the clock this far.
+         */
+        const val PROOF_WAIT_MS = 30_000L
+
+        /**
          * How long a held pipe's feed reads as live before it counts as stalled (`FeedMeter.STALL_MS` is 15 s on a
          * phone; ADR 2026-10.nsr7), shortened: a holder parks every other asker behind a live feed for as long as it
          * lasts, and a scenario that holds one peer's files would otherwise stall the rest. A scenario about parking
@@ -891,6 +899,11 @@ data class LabLimits(
     val rideHoldMs: Long = MeshLab.RIDE_HOLD_MS,
     /** How long a blob round's first ask has before every other neighbour is asked ([MeshLab.FIRST_ASK_GRACE_MS]). */
     val firstAskGraceMs: Long = MeshLab.FIRST_ASK_GRACE_MS,
+    /**
+     * How long a send of ours with nothing else to defer on holds for its proof round ([MeshLab.PROOF_WAIT_MS]; ADR
+     * 2026-10.vy27): on the wall clock, so longer than production's, which a stalled node could outlast.
+     */
+    val proofWaitMs: Long = MeshLab.PROOF_WAIT_MS,
     /**
      * How long a held pipe's feed reads as live before it stalls ([MeshLab.FEED_STALL_MS]; ADR 2026-10.nsr7): a parked
      * ask waits that long behind it. Short by default: a held pipe is a feed that never ends, and only a scenario about
@@ -1291,6 +1304,7 @@ class LabNode internal constructor(
                 spoolTickMs = limits.spoolTickMs,
                 spoolAttachmentRetryMs = limits.spoolAttachmentRetryMs,
                 firstAskGraceMs = limits.firstAskGraceMs,
+                proofWaitMs = limits.proofWaitMs,
                 blobHolderQuery =
                     BlobExchange.HolderQuery(
                         enabled = limits.blobQuery,

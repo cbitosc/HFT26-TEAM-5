@@ -45,6 +45,9 @@ class AttachmentDeferPolicyTest {
     // The holder queries the policy asked for, as (hash, peer).
     private val asked = mutableListOf<Pair<String, String>>()
 
+    // Whether bob is on a live short-range link that answers the holder query — the proof round's condition.
+    private var linked = false
+
     private fun policy() =
         AttachmentDeferPolicy(
             reachable = { reachable },
@@ -52,6 +55,7 @@ class AttachmentDeferPolicyTest {
             authoredHere = { authored },
             heldByRecipient = { hash, peer -> proofs[hash to peer]?.shortRange == true },
             askHolder = { hash, peer -> asked += hash to peer },
+            canAskHolder = { linked },
             custodyTtlMs = custodyTtlMs,
             clock = { clock },
         )
@@ -376,5 +380,50 @@ class AttachmentDeferPolicyTest {
             reachable = setOf(bob)
             policy().defer(groupScope(), settled())
             assertTrue("a group never asks", asked.isEmpty())
+        }
+
+    // --- one proof round before a push (ADR 2026-10.vy27, revision 2) ---
+
+    @Test
+    fun `a send with nothing to defer on holds one proof round for a linked peer that answers, and a yes settles it`() =
+        runTest {
+            // The device run's slipped photo: its receipt came back over the relay, and the grace is long gone.
+            ackPlane = DeliveryPlane.Internet
+            linked = true
+            val p = policy()
+            assertTrue("asked, so held for the answer", p.defer(dmScope(), settled()))
+            assertEquals(listOf(aHash to bob), asked)
+
+            proofs[aHash to bob] = DeliveryPlane.Nearby // bob's HAVE, a second later
+            assertTrue("settled for good on the next pass", p.proved(dmScope(), settled()))
+        }
+
+    @Test
+    fun `a no or silence pushes on the first pass after the proof round`() =
+        runTest {
+            ackPlane = DeliveryPlane.Internet
+            linked = true
+            val p = policy()
+            assertTrue(p.defer(dmScope(), settled()))
+            clock += AttachmentDeferPolicy.PROOF_WAIT_MS - 1
+            assertTrue("still inside the round", p.defer(dmScope(), settled()))
+            clock += 1
+            assertFalse("the round is over: push", p.defer(dmScope(), settled()))
+            assertFalse(p.proved(dmScope(), settled()))
+        }
+
+    @Test
+    fun `a peer not linked or not answering the holder query, or a photo not ours, pushes as before`() =
+        runTest {
+            ackPlane = DeliveryPlane.Internet
+            linked = false
+            assertFalse("no live link that answers: today's rule", policy().defer(dmScope(), settled()))
+
+            linked = true
+            authored = false
+            assertFalse("the peer's own send waits on no answer of ours", policy().defer(dmScope(), settled()))
+
+            authored = true
+            assertFalse("a group never holds", policy().defer(groupScope(), settled()))
         }
 }

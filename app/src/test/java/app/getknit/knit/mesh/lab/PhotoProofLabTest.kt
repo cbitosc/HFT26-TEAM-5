@@ -107,4 +107,58 @@ class PhotoProofLabTest {
                 spool.chunksPut.isEmpty(),
             )
         }
+
+    /**
+     * The device run's slipped photo (ADR 2026-10.vy27, revision 2). Alice's photo goes out while the relay carries
+     * frames only, as the public one does, and Bob's receipt reaches her over that relay first: his frames to her are
+     * parked on the link until it has, so her row says Internet and there is no radio ack to defer on. Bob still gets the
+     * bytes over the radio. Then the relay grows attachment support, past the send's grace. Alice's first pass on the
+     * photo has nothing left to defer on and, before revision 2, pushed in the very pass that asked Bob for proof, the
+     * answer a round behind it. Now it holds that one round ([AttachmentDeferPolicy.PROOF_WAIT_MS]) while Bob, who holds
+     * the bytes, answers, and the photo never goes up.
+     */
+    @Test
+    fun aPhotoWhoseReceiptCameOverTheRelayWaitsOneProofRoundAndNeverGoesUp() =
+        runBlocking {
+            val spool = FakeSpool(attachments = false) // frames only, until the photo has crossed the radio
+            val alice = lab.node("alice", rounds, spool = spool).apply { setDisplayName("Alice") }
+            val bob = lab.node("bob", rounds, spool = spool).apply { setDisplayName("Bob") }
+            lab.meetOnTheRelay(alice, bob)
+            lab.link(alice, bob)
+            lab.awaitAcquainted(alice, bob)
+
+            bob.transport.hold(alice.transport)
+            val picture = Random(195).nextBytes(4_096)
+            assertTrue(alice.sendImage(picture, "receipt over the relay", to = bob))
+            val sentId = alice.ownMessageId(alice.dmWith(bob), "receipt over the relay")
+            assertTrue(
+                "bob's receipt never came back over the relay",
+                lab.tryAwait(1, timeoutMs = MeshLab.SPOOL_AWAIT_MS) {
+                    if (alice.receivedVia(alice.dmWith(bob), sentId) == DeliveryPlane.Internet) 1 else 0
+                },
+            )
+            // His asks for the bytes were parked with the rest; released, they cross the radio and he holds the photo.
+            bob.transport.release(alice.transport)
+            lab.assertConverged(listOf(alice, bob), atLeast = 3) { alice.dmThreadWith(bob)(it) }
+
+            // The grace runs out with no relay that takes the photo, so no pass has asked anything yet.
+            lab.clock.advance(AttachmentDeferPolicy.ACK_GRACE_MS + 1)
+            spool.attachments = true // read per dial
+            spool.dropSockets()
+            alice.heal()
+            bob.heal()
+            assertTrue(
+                "alice never settled the photo on proof\n${lab.report(listOf(alice, bob))}",
+                lab.tryAwait(1, timeoutMs = MeshLab.SPOOL_AWAIT_MS) { alice.proved() },
+            )
+            assertTrue(
+                "alice's first pass did not hold for the proof round",
+                alice.metrics.spool().spoolAttachDeferred >= 1,
+            )
+            assertTrue(
+                "the photo went up ahead of bob's answer: ${spool.chunksPut}; " +
+                    "alice pushed=${alice.metrics.spool().spoolAttachPushed} bob pushed=${bob.metrics.spool().spoolAttachPushed}",
+                spool.chunksPut.isEmpty(),
+            )
+        }
 }
