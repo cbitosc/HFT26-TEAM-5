@@ -60,8 +60,12 @@ while (($#)); do
   esac
 done
 ((${#patterns[@]})) || patterns=("app.getknit.knit.mesh.lab.*")
-for p in "${patterns[@]}"; do
+for i in "${!patterns[@]}"; do
+  p=${patterns[i]}
   [[ "$p" != *,* ]] || { echo "lab-chaos: a --tests pattern cannot hold a comma: $p" >&2; exit 2; }
+  # Every scenario lives in the lab's package: a bare `Class` or `Class.method` is spelled out in full, so the stamp
+  # and a later `--reuse` compare one spelling (an owner's `PullBudgetLabTest` once missed a reviewer's qualified ask).
+  [[ "$p" =~ ^[A-Z] ]] && patterns[i]="app.getknit.knit.mesh.lab.$p"
 done
 
 # What the sweep's verdict depends on: HEAD plus every uncommitted byte the test JVM compiles or reads.
