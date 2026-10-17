@@ -548,6 +548,12 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   skill (`scripts/bridge.sh`, the send→verify loop, which oracle answers what); per-action reference in
   `.agents/context/debug-bridge.md`. A new bridge action goes in the receiver's `when`, the debug manifest's
   filter, that file and the skill's index.
+- **When delegating to an owner persona, spawning a reviewer persona, or relaying a reviewer's findings:** obey
+  `.agents/rules/review-rounds.md`. The subsystem reviewer reviews the plan before the owner writes (the design
+  pass). Subsystem reviewers go before test reviewers, and the Stop hook asks for them in that order. Every finding is
+  Blocking or Non-blocking, and only a blocking one opens another round. After a stamp, a re-review is a follow-up
+  pass over the delta the gate writes. Two rounds in a row that each bring a new blocking finding mean the design goes
+  back to the maintainer.
 - **Before an architectural choice:** CONSULT `.agents/memory/decisions.md` — a generated router table
   over one-file-per-decision ADRs in `.agents/memory/decisions/`; open the files whose row matches, don't
   work from the titles. For what's deliberately deferred, CHECK `.agents/memory/roadmap.md`.
@@ -565,14 +571,15 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   so cloners get them without any global install.
 - SPAWN a reviewer persona from `.agents/personas/` when its routing bullet above says so; each hunts one class of
   defect from a catalogue of the ones this repo already shipped and fixed, and never edits. A new reviewer is a
-  persona, its symlink in `.claude/agents/`, a line in `.claude/hooks/review-gate.conf` (the paths its Stop hook
-  gate watches) and a routing bullet here.
-- DELEGATE implementation in a subsystem to its owner persona from `.agents/personas/` when its routing bullet
-  says so (today `bluetooth-owner`, `wifi-aware-owner`, `lora-owner`, `crypto-owner` and `blobs-owner`). An owner
-  writes and tests code inside its scope, never commits, and reports what its subsystem's reviewer then checks — the
-  reviewer is never the agent that wrote the change. A new owner is a persona and its reviewer, their symlinks in
-  `.claude/agents/`, a `.agents/context/<subsystem>.md` both read (the subsystem's routing, moved out of this
-  file), a review-gate line and one routing bullet here.
+  persona, its symlink in `.claude/agents/`, a line in `.claude/hooks/review-gate.conf` (its stage and the paths
+  its Stop hook gate watches) and a routing bullet here.
+- DELEGATE implementation in a subsystem to its owner persona from `.agents/personas/` when its routing bullet says
+  so (today `bluetooth-owner`, `wifi-aware-owner`, `lora-owner`, `crypto-owner` and `blobs-owner`), after its
+  reviewer's design pass on the brief (`.agents/rules/review-rounds.md`). An owner writes and tests code inside its
+  scope, never commits, and reports what its subsystem's reviewer then checks — the reviewer is never the agent that
+  wrote the change. A new owner is a persona and its reviewer, their symlinks in `.claude/agents/`, a
+  `.agents/context/<subsystem>.md` both read (the subsystem's routing, moved out of this file), a review-gate line
+  and one routing bullet here.
 - ADD a durable decision with `python3 scripts/adr.py new "<title>" --topics a,b`, write the body it
   scaffolds, then `python3 scripts/adr.py index`. Never hand-edit `.agents/memory/decisions.md` (generated)
   and never pick an ADR number: ids are minted `YYYY-MM.suffix` so parallel worktrees can't collide, while

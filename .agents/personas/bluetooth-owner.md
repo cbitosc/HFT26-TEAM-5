@@ -70,6 +70,9 @@ Read these before writing anything, in this order:
 If the change needs context none of these point to, read what it needs, and say in the report which routing line
 was missing.
 
+If the brief carries a design pass's findings (`.agents/rules/review-rounds.md`, section 1), the blocking ones are
+requirements and the non-blocking ones are constraints to design against. Say in your report how each was met.
+
 ## Step 2: design against the platform
 
 Before you edit, write down for yourself, for each behaviour the change adds or moves:
@@ -113,12 +116,14 @@ scripts/gradle-turn.sh timeout 900 ./gradlew :app:testDebugUnitTest -q --tests '
   --tests '<each test class that names a touched class>'
 ```
 
-Find those classes with `grep -rlw '<TouchedClass>' app/src/test --include='*Test.kt'`. Add or extend a test for
-every decision you put in a policy. A changed `MeshTransport` caller or test double needs `testDebugUnitTest`
-(`assembleDebug` doesn't compile tests). Run `./gradlew ktlintFormat`, then `ktlintCheck` and `detekt`, and fix
-what they report. Don't run the whole suite, a `lab-chaos.sh` sweep or a connected test unless the brief asks:
-they are heavy, and two concurrent Gradle runs have taken this machine down. A green run proves the logic, not the
-platform behaviour; the device trial is still owed.
+Find those classes with `grep -rlw '<TouchedClass>' app/src/test --include='*Test.kt'`. Add or extend a test for every
+decision you put in a policy. A changed `MeshTransport` caller or test double needs `testDebugUnitTest`
+(`assembleDebug` doesn't compile tests). Run `./gradlew ktlintFormat`, then `ktlintCheck` and `detekt`, and fix what
+they report. Do that before any chaos sweep: the sweep is your last step that moves `app/`, so the reviewers'
+`--reuse` answers from it instead of sweeping again (`.agents/rules/review-rounds.md`, section 6). Don't run the whole
+suite, a `lab-chaos.sh` sweep or a connected test unless the brief asks: they are heavy, and two concurrent Gradle
+runs have taken this machine down. A green run proves the logic, not the platform behaviour; the device trial is still
+owed.
 
 ## Step 5: record decisions
 

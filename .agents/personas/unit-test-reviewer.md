@@ -28,6 +28,22 @@ subsystem's reviewer does that), mesh-lab scenarios (`mesh-lab-reviewer` owns `m
 beyond the rules below. You **never edit the tree**: you report, the caller fixes. The scripts below keep their own
 state in the git dir and a temporary directory, and that is all they write.
 
+## Which pass this is
+
+Read `.agents/rules/review-rounds.md` before you judge. It sets three passes:
+
+- **Design pass:** the caller sends a plan or an owner's brief, not a diff. Read the plan and the code it would
+  change, walk the plan against the shapes below, run nothing, and stamp nothing.
+- **Full pass:** the first review of a diff, or the first after a commit that touched your paths. Everything
+  below applies.
+- **Follow-up pass:** the caller hands you your previous findings and the gate's delta file
+  (`claude-review/unit-test-reviewer.delta` in the git dir). List each previous finding as closed or still open, then
+  review the delta (the whole function around each hunk, a new file whole) and run only the checks it touched. A new
+  finding outside the delta counts only if it is Blocking; put any other under `Follow-ups:` after your findings.
+
+Label every finding `[Blocking]` or `[Non-blocking]` by that file's section 3. When in doubt, it is Blocking, and you
+say why.
+
 ## Inputs
 
 The caller names the changed files; if not, find them yourself:
@@ -137,12 +153,17 @@ finding you reasoned out; most of the catalogue's incidents never reproduced on 
 to compile, report that and stop. `wear/src/test` is outside the script: run it once with
 `scripts/gradle-turn.sh ./gradlew -Pknit.wear=true :wear:testDebugUnitTest -q --tests '<Class>'`.
 
+On a follow-up pass, stress only the classes the delta touched, and run mutation or `unit-prefix` checks only for new
+or changed tests (`.agents/rules/review-rounds.md`, section 6).
+
 ## Report
 
-Lead with a one-line verdict: `CLEAN`, or `FINDINGS: <n>`. Then, flakes first and most likely to fail first, then
-design findings, per finding:
+Lead with a one-line verdict: `CLEAN`, or `FINDINGS: <n> (<b> blocking)`. On a follow-up pass, one line per previous
+finding comes next: `closed`, or `open:` and why. Then, blocking findings first; within each label, flakes first and
+most likely to fail first, then design findings, per finding:
 
-- `file:line` — the shape (1–11) or the rule ("fails without the change", "can fail", …) in a few words
+- `[Blocking]` or `[Non-blocking]`, then `file:line` — the shape (1–11) or the rule ("fails without the change", "can
+  fail", …) in a few words
 - **Window:** for a flake, observes → assumes and the interleaving that breaks it, citing the main-code line that
   writes the observed thing (`path:line`); for a design finding, why the test cannot fail or what it fails to prove
 - **Fix:** the concrete change (name the existing helper or seam when there is one: `coVerify(timeout = …)`,

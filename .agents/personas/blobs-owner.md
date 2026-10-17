@@ -93,6 +93,9 @@ Read these before writing anything, in this order:
 If the change needs context none of these point to, read what it needs, and say in the report which routing line
 was missing.
 
+If the brief carries a design pass's findings (`.agents/rules/review-rounds.md`, section 1), the blocking ones are
+requirements and the non-blocking ones are constraints to design against. Say in your report how each was met.
+
 ## Step 2: design against the mesh
 
 Before you edit, write down for yourself, for each behaviour the change adds or moves:
@@ -147,14 +150,15 @@ scripts/gradle-turn.sh timeout 900 ./gradlew :app:testDebugUnitTest -q --tests '
 Find those classes with `grep -rlw '<TouchedClass>' app/src/test --include='*Test.kt'`. The anchors are
 `BlobExchangeTest`, `BlobHolderQueryTest`, `CarrierPullPolicyTest`, `PartialBlobsTest`, `FileIntakeTest`,
 `IncomingFilesTest`, `AttachmentIdentitiesTest`, `ForwardSyncTest`, `ForwardRepositoryTest`, `ForwardDaoTest`,
-`StoreDigestTest`, `DigestTrackerTest`, `SeenSetTest`, `PendingInboundTest` and `KeyExchangeTest`; a schema touch
-runs `KnitDatabaseMigrationTest`. Add or extend a test for every decision you put in a pure class. For a lab
-scenario in scope, run `scripts/lab-chaos.sh --tests '<Class>'` once your edits are in; the plane's classes are
+`StoreDigestTest`, `DigestTrackerTest`, `SeenSetTest`, `PendingInboundTest` and `KeyExchangeTest`; a schema touch runs
+`KnitDatabaseMigrationTest`. Add or extend a test for every decision you put in a pure class. For a lab scenario in
+scope, run `scripts/lab-chaos.sh --tests '<Class>'` once your edits are in; the plane's classes are
 `BlobFirstAskLabTest`, `BlobHaveLabTest`, `PictureFanoutLabTest`, `AttachmentLabTest`, `AttachmentResumeLabTest`,
-`AttachmentReuseLabTest`, `CustodyLabTest`, `CustodyQuotaLabTest`, `StrangerBacklogLabTest`, `KeyExchangeLabTest`
-and `RoomFloodLabTest`. Run `./gradlew ktlintFormat`, then `ktlintCheck` and `detekt`, and fix what they report.
-Don't run the whole suite or a whole-package chaos sweep unless the brief asks: two concurrent Gradle runs have
-taken this machine down.
+`AttachmentReuseLabTest`, `CustodyLabTest`, `CustodyQuotaLabTest`, `StrangerBacklogLabTest`, `KeyExchangeLabTest` and
+`RoomFloodLabTest`. Run `./gradlew ktlintFormat`, then `ktlintCheck` and `detekt`, and fix what they report. Do that
+before any chaos sweep: the sweep is your last step that moves `app/`, so the reviewers' `--reuse` answers from it
+instead of sweeping again (`.agents/rules/review-rounds.md`, section 6). Don't run the whole suite or a whole-package
+chaos sweep unless the brief asks: two concurrent Gradle runs have taken this machine down.
 
 ## Step 5: record decisions
 
