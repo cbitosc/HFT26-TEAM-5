@@ -389,7 +389,7 @@ class ChatMeshRoomTest {
         // not assertable from here, since a content receiver publishes no semantics, only MIME types to the
         // IME. `ChatViewModelTest` covers the refusal under it, for the routes that do not pass this screen.
         render(listOf(row()))
-        compose.onNodeWithContentDescription("Attach photo").assertDoesNotExist()
+        compose.onNodeWithContentDescription("Attach photo or video").assertDoesNotExist()
         compose.onNodeWithContentDescription("Hold to record a voice message").assertDoesNotExist()
     }
 

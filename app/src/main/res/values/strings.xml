@@ -1138,7 +1138,7 @@
 
     <!-- Generic actions / content descriptions -->
     <string name="action_send">Send</string>
-    <string name="action_attach_photo">Attach photo</string>
+    <string name="action_attach_media">Attach photo or video</string>
     <string name="action_take_photo">Take photo</string>
     <string name="action_open_settings">Open settings</string>
     <string name="action_back">Back</string>

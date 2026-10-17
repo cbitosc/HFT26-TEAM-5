@@ -239,13 +239,15 @@ interface MessageDao {
 
     /**
      * Records what a held video's own bytes say — its duration and upright size — on every message naming [hash]
-     * (ADR 2026-10.hmfe), replacing the sender's claim; keyed by hash for [setVoiceMeta]'s reason. Only rows that
+     * that the sender described as a video (ADR 2026-10.hmfe), replacing the sender's claim; keyed by hash for
+     * [setVoiceMeta]'s reason. A row with no description is an `.mp4` sent as a file, by an older build or another
+     * client, and stays one: stamping it would turn its file bubble into a video with no poster. Only rows that
      * differ are touched, so a re-served frame that brings the held blob back here writes nothing.
      */
     @Query(
         "UPDATE messages SET videoDurationMs = :durationMs, videoWidth = :width, videoHeight = :height " +
-            "WHERE attachmentHash = :hash AND (videoDurationMs IS NOT :durationMs OR videoWidth IS NOT :width " +
-            "OR videoHeight IS NOT :height)",
+            "WHERE attachmentHash = :hash AND videoDurationMs IS NOT NULL AND (videoDurationMs IS NOT :durationMs " +
+            "OR videoWidth IS NOT :width OR videoHeight IS NOT :height)",
     )
     suspend fun setVideoMeta(
         hash: String,

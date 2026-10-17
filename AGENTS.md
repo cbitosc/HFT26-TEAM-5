@@ -334,7 +334,8 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   memory (never a file, never passed through), in **CBR** (the platform's VBR quality floor raised a 490 kbps ask to
   1.23 Mbps), **not streamable** (a `free` pad was 16 % of the file), with the source's metadata dropped except the
   orientation. Its description and poster ride inside the message; a room post declares its size so js2p holds it.
-  A video is its description on a video MIME, tested ahead of the name; an `.mp4` sent as a file stays a file.
+  A video is its description on a video MIME, tested ahead of the name; a video picked with either button is
+  re-encoded, and only an undescribed `.mp4` that arrives (an older build's) stays a file (the amendment).
   Tests: `VideoEncodePolicyTest`, `MemoryMp4MuxerTest`, `AttachmentStoreVideoTest`; on hardware
   `VideoTranscoderInstrumentedTest` (run one test class on one device with `am instrument`, never
   `connectedDebugAndroidTest` with lab phones attached).

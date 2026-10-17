@@ -1850,6 +1850,36 @@ class ChatViewModelTest {
         }
 
     @Test
+    fun aVideoFromTheFileButtonIsEncodedAndOneTheEncoderCannotReadGoesAsAFile() =
+        runTest {
+            // ADR 2026-10.hmfe's amendment: sent as-is, a video was refused past 8 MB and went out poster-less, a file
+            // bubble on the sender's side. It takes the video door whichever button picked it.
+            val clip = Uri.parse("content://docs/clip")
+            val odd = Uri.parse("content://docs/odd")
+            val video = VideoInfo(30_000L, 480, 854, byteArrayOf(1))
+            val encoded = AttachmentStore.Ingested(hash = "v8", mime = "video/mp4", name = "video.mp4", video = video)
+            val asFile = AttachmentStore.Ingested(hash = "f8", mime = "video/x-msvideo", name = "odd.avi", sizeBytes = 10)
+            coEvery { attachments.isVideo(any()) } returns true
+            coEvery { attachments.ingestVideo(clip, any(), any()) } returns AttachmentStore.IngestResult.Success(encoded, flagged = false)
+            coEvery { attachments.ingestVideo(odd, any(), any()) } returns
+                AttachmentStore.IngestResult.Failed(AttachmentStore.IngestResult.Reason.Unreadable)
+            coEvery { attachments.ingestFile(odd, any()) } returns AttachmentStore.IngestResult.Success(asFile, flagged = false)
+            coEvery { peers.find("bob") } returns peer("bob", "Bob", capabilities = Protocol.LOCAL_CAPABILITIES)
+            stubDm("bob")
+            val vm = vm("bob")
+
+            vm.attachFile(clip)
+            advanceUntilIdle()
+            assertEquals(encoded, vm.pendingAttachment.value)
+            coVerify(exactly = 0) { attachments.ingestFile(clip, any()) }
+
+            vm.clearAttachment()
+            vm.attachFile(odd)
+            advanceUntilIdle()
+            assertEquals("a video the encoder cannot read is still a file", asFile, vm.pendingAttachment.value)
+        }
+
+    @Test
     fun attachingAnImageInADmNeverAsksForAScreenAndStagesIt() =
         runTest {
             // Only the Nearby room screens what is sent (ADR 2026-10.9rh6); a DM's receivers screen it.

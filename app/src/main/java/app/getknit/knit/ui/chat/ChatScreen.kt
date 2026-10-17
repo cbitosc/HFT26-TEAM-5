@@ -76,7 +76,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Reply
 import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.BrokenImage
@@ -93,6 +92,7 @@ import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -4238,7 +4238,7 @@ private fun MessageInput(
                     when (action) {
                         SendAction.Sending -> stringResource(R.string.chat_sending)
                         SendAction.Send -> stringResource(R.string.action_send)
-                        SendAction.Attach -> stringResource(R.string.action_attach_photo)
+                        SendAction.Attach -> stringResource(R.string.action_attach_media)
                     }
                 // The byte counter belongs to the button it constrains, not to the thread: it says what the
                 // *send* will carry, so it rides directly over the send button rather than across the width of
@@ -4326,8 +4326,9 @@ private fun MessageInput(
                                     }
 
                                     SendAction.Attach -> {
+                                        // The gallery, not "add a photo": the picker behind it offers videos too.
                                         Icon(
-                                            imageVector = Icons.Filled.AddPhotoAlternate,
+                                            imageVector = Icons.Filled.PhotoLibrary,
                                             contentDescription = null,
                                             modifier = Modifier.size(24.dp),
                                         )

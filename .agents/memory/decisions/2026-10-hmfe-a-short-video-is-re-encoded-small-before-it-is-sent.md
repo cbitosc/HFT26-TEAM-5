@@ -8,7 +8,7 @@ topics: [attachments, wire, moderation]
 
 # ADR 2026-10.hmfe — A short video is re-encoded small before it is sent
 
-Status: Accepted (2026-10-16). Amends ADR 2026-10.js2p (a room post now declares its size, so a large room
+Status: Accepted (2026-10-16); amended 2026-10-17 (below: the file button, the receiver's re-label, the poster). Amends ADR 2026-10.js2p (a room post now declares its size, so a large room
 attachment is held like a sealed one), ADR 2026-10.9rh6 (the room screens a video's frames on the way out) and ADR
 2026-10.unqn (a video is never passed through). Additive wire: `ChatContent.attachmentSize` and `.video`,
 `MessageContent.video` (`MessageContentV2` label 16), all null and omitted by default; three vectors added, none
@@ -95,3 +95,31 @@ two video cases and `onCarriedFrameJudgesARoomPostByTheSizeItDeclares`,
 `MeshManagerTest.aCarriedRoomPostNoRowNamesIsJudgedByTheSizeItDeclares`, `ChatViewModelTest.aPickedVideoIsEncodedThenStaged…`,
 `LargeAttachmentLabTest`'s two room-video scenarios, and
 on hardware `VideoTranscoderInstrumentedTest`.
+
+## Amendment 2026-10-17 — a video is a video whichever button picks it; the poster is chosen
+
+The first device trial (Pixel 9 Pro XL to Pixel 7) used "Send a file", and point 6 showed three faults at once. The
+sender's `.mp4` went out as picked, so one over 8 MB was refused ("files are sent as-is"), and one under it went with
+no description: the sender drew a file bubble. The receiver then read the bytes' own duration and size onto that row
+(`MessageDao.setVideoMeta`, keyed by hash over every row naming it), which turned the file into a video bubble with no
+poster, drawn on the bubble's black.
+
+1. **The file button takes the video door** (`ChatViewModel.attachFile`). A pick `AttachmentStore.isVideo` calls a
+   video is re-encoded and staged with its poster exactly as from the photo picker, so it is never refused for its
+   picked size and both sides draw the same bubble. Point 6's "an `.mp4` sent through Send a file stays a file" is
+   superseded. A video the encoder cannot read or encode is still a file and goes out as-is, under the file cap
+   (`attachAsFile`); one still too big after shrinking is refused as from the photo picker, since past the ceiling
+   it is past the file cap too.
+2. **Only a described row is re-labelled.** `setVideoMeta` touches rows whose `videoDurationMs` is already set. An
+   `.mp4` that arrives as a file, from an older build or another client, keeps its file bubble.
+3. **The poster is the best of eight frames** (`VideoFrames.poster`). The fixed instant, a second in, could land on a
+   fade or a covered lens. Eight frames spread across the clip (`sampleTimes`, never its very start) are ranked by
+   `posterOrder`: exposure (zero for a black or blown-out frame), times contrast plus capped detail, ties to the
+   frame nearest mid-grey and then the earlier. The first in that order whose JPEG fits the 6 KiB budget is the
+   poster. The poster is screened as before, so choosing it buys no way past the room's screen. Pure and JVM-tested
+   in `VideoFramesTest`; the decode stays `getScaledFrameAtTime` at the poster's size.
+
+The photo button's icon is the gallery (`PhotoLibrary`) and its label "Attach photo or video", since its picker has
+offered videos since point 1. Guards: `ChatViewModelTest.aVideoFromTheFileButtonIsEncodedAndOneTheEncoderCannotReadGoesAsAFile`,
+`MessageDaoTest`'s `setVideoMeta` case, `VideoFramesTest`'s three poster cases. Device trial owed: a file-button video
+over 8 MB, P9 to P7, both sides drawing the video bubble with a picture.

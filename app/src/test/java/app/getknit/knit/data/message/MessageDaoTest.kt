@@ -695,6 +695,24 @@ class MessageDaoTest : RoomDbTest() {
         }
 
     @Test
+    fun `setVideoMeta replaces a described video's claim and leaves an mp4 sent as a file alone`() =
+        runTest {
+            // ADR 2026-10.hmfe: the bytes' own duration and size win over the sender's claim, but only on a row the
+            // sender described as a video. An .mp4 sent as a file has no description and keeps its file bubble.
+            dao.upsert(msg("video", attachmentHash = "clip").copy(videoDurationMs = 30_000L, videoWidth = 480, videoHeight = 854))
+            dao.upsert(msg("file", attachmentHash = "clip", sentAt = 2L).copy(attachmentName = "clip.mp4"))
+
+            dao.setVideoMeta("clip", 29_970L, 480, 852)
+
+            val video = checkNotNull(dao.findById("video"))
+            assertEquals(29_970L, video.videoDurationMs)
+            assertEquals(852, video.videoHeight)
+            val file = checkNotNull(dao.findById("file"))
+            assertNull("an undescribed .mp4 stays a file", file.videoDurationMs)
+            assertNull(file.videoWidth)
+        }
+
+    @Test
     fun `the field log's latency reads take others' arrivals and receipts for our own, inside the window`() =
         runTest {
             // Someone else's, arrived inside the window over Bluetooth: 1.5 s on the way.

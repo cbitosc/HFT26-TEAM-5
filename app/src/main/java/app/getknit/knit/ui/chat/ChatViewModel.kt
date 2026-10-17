@@ -2025,8 +2025,15 @@ class ChatViewModel(
      * meanwhile. Refused up front where a video can never go — the Meshtastic room and a commons carry text — rather
      * than after a half-minute encode. A new pick cancels one still encoding, as does [cancelVideoEncoding] and
      * leaving the chat (the job is the screen's). Every failure speaks: unlike a photo, the user waited for it.
+     *
+     * [orAsFile] is the file button's pick: a video the encoder cannot read or encode is still a file, so it goes out
+     * as-is through [attachAsFile] rather than being refused. One that stays too big after shrinking does not: past
+     * the ceiling it is past the 8 MB file cap too, and the message names Direct file send.
      */
-    private fun attachVideo(uri: Uri) {
+    private fun attachVideo(
+        uri: Uri,
+        orAsFile: Boolean = false,
+    ) {
         if (isBridged || isCommons) {
             _events.tryEmit(R.string.chat_video_text_only)
             return
@@ -2039,13 +2046,12 @@ class ChatViewModel(
                     val result = attachments.ingestVideo(uri, screen = isRoom) { _videoEncoding.value = it }
                     when (result) {
                         is AttachmentStore.IngestResult.Failed -> {
-                            _events.tryEmit(
-                                if (result.reason == AttachmentStore.IngestResult.Reason.TooLarge) {
-                                    R.string.chat_video_too_large
-                                } else {
-                                    R.string.chat_video_unreadable
-                                },
-                            )
+                            val tooLarge = result.reason == AttachmentStore.IngestResult.Reason.TooLarge
+                            when {
+                                tooLarge -> _events.tryEmit(R.string.chat_video_too_large)
+                                orAsFile -> attachAsFile(uri)
+                                else -> _events.tryEmit(R.string.chat_video_unreadable)
+                            }
                         }
 
                         is AttachmentStore.IngestResult.Success -> {
@@ -2074,12 +2080,23 @@ class ChatViewModel(
      */
     fun attachFile(uri: Uri) {
         viewModelScope.launch {
-            refusalForFile()?.let {
-                _events.tryEmit(it)
-                return@launch
+            // A video is a video whichever button picked it (ADR 2026-10.hmfe's amendment): sent as-is it would be
+            // refused past 8 MB, and under it would go out with no poster, as a file bubble on our side.
+            if (attachments.isVideo(uri)) {
+                attachVideo(uri, orAsFile = true)
+            } else {
+                attachAsFile(uri)
             }
-            stage(attachments.ingestFile(uri, screen = isRoom), notifyFailure = true)
         }
+    }
+
+    /** [attachFile]'s refusals and ingest, the bytes sent as they are. */
+    private suspend fun attachAsFile(uri: Uri) {
+        refusalForFile()?.let {
+            _events.tryEmit(it)
+            return
+        }
+        stage(attachments.ingestFile(uri, screen = isRoom), notifyFailure = true)
     }
 
     // --- direct file transfer (transfer/TransferManager) ---

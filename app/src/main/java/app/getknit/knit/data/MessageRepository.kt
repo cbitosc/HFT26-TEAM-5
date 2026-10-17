@@ -161,7 +161,7 @@ class MessageRepository(
     /** Marks message [id]'s video poster explicit (ADR 2026-10.hmfe). */
     suspend fun markPosterFlagged(id: String) = dao.markPosterFlagged(id)
 
-    /** A held video's own duration and upright size, over the sender's claim, on every row naming [hash]. */
+    /** A held video's own duration and upright size, over the sender's claim, on every row naming [hash] as a video. */
     suspend fun setVideoMeta(
         hash: String,
         durationMs: Long,
