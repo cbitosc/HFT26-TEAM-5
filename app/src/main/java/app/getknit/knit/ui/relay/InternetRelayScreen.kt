@@ -3,6 +3,7 @@ package app.getknit.knit.ui.relay
 import android.content.ClipData
 import android.os.Build
 import android.text.format.DateUtils
+import android.text.format.Formatter
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -62,12 +63,14 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.getknit.knit.R
+import app.getknit.knit.data.relay.FreeUploadChoice
 import app.getknit.knit.data.relay.RelayInviteApplier
 import app.getknit.knit.mesh.spool.KeyAnswer
 import app.getknit.knit.mesh.spool.RelayInvite
 import app.getknit.knit.mesh.spool.ScopeSync
 import app.getknit.knit.mesh.spool.SpoolConnection
 import app.getknit.knit.mesh.spool.SpoolErrCode
+import app.getknit.knit.mesh.spool.SpoolUrl
 import app.getknit.knit.ui.components.noAutofillMenu
 import app.getknit.knit.ui.preview.KnitPreview
 import app.getknit.knit.ui.shareText
@@ -147,6 +150,7 @@ fun InternetRelayScreen(
         onDismissInvite = viewModel::dismissInvite,
         onShareInvite = viewModel::shareInvite,
         onCopyInvite = viewModel::copyInvite,
+        onSetFreeUploads = viewModel::setFreeUploads,
     )
 }
 
@@ -173,6 +177,7 @@ internal fun InternetRelayScreenContent(
     onDismissInvite: () -> Unit = {},
     onShareInvite: (String) -> Unit = {},
     onCopyInvite: (String) -> Unit = {},
+    onSetFreeUploads: (String, Boolean) -> Unit = { _, _ -> },
 ) {
     var addDialogOpen by remember { mutableStateOf(false) }
     var pendingRemoval by remember { mutableStateOf<RelayRow?>(null) }
@@ -238,6 +243,7 @@ internal fun InternetRelayScreenContent(
                         onLeaveCommons = { leaving = relay },
                         onShareInvite = { onShareInvite(relay.url) },
                         onCopyInvite = { onCopyInvite(relay.url) },
+                        onSetFreeUploads = { allowed -> SpoolUrl.hostname(relay.url)?.let { onSetFreeUploads(it, allowed) } },
                     )
                 }
             }
@@ -396,12 +402,14 @@ private fun RelayListRow(
     onLeaveCommons: () -> Unit = {},
     onShareInvite: () -> Unit = {},
     onCopyInvite: () -> Unit = {},
+    onSetFreeUploads: (Boolean) -> Unit = {},
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
         RelayHeadRow(relay, planeEnabled, offline, onSetEnabled, onRemove, onShareInvite, onCopyInvite)
         // What the relay offers calls and where this phone stands with its ticket and key — text only, below the
         // head row like the room, so the switch's announcement stays the host and its status.
         if (relay.calls != null || relay.account != null) RelayCallDetails(relay)
+        relay.freeUploads?.let { FreeUploadsSwitch(relay.host, it, onSetFreeUploads) }
         // The relay's commons (§7.4), once its HELLO has advertised one: the room's name and one verb —
         // Join while this device is outside it, Leave once inside. Below the head row rather than in it, so
         // the switch and the delete button stay the two controls a screen reader already knows there.
@@ -552,6 +560,38 @@ private fun RelayCallDetails(relay: RelayRow) {
     }
 }
 
+/**
+ * Free tickets for a relay (docs/VOICE_CALLS.md C-7.6-34): one labelled switch saying which host the phone would
+ * contact, on only once the person said yes. Turning it off forgets a free key held there.
+ */
+@Composable
+private fun FreeUploadsSwitch(
+    host: String,
+    choice: FreeUploadChoice,
+    onSet: (Boolean) -> Unit,
+) {
+    val on = choice.allowed == true
+    Row(
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .padding(start = 22.dp)
+                .testTag("relay_free_uploads_$host")
+                .toggleable(value = on, onValueChange = onSet, role = Role.Switch),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(text = stringResource(R.string.relays_free_uploads_title), style = MaterialTheme.typography.bodyMedium)
+            Text(
+                text = stringResource(R.string.relays_free_uploads_summary, choice.issuerHost),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Switch(checked = on, onCheckedChange = null)
+    }
+}
+
 @Composable
 private fun ticketLine(
     ticket: RelayTicket,
@@ -568,11 +608,15 @@ private fun ticketLine(
 
         is RelayTicket.Live -> {
             val until = stringResource(R.string.relays_calls_ticket_live, dateTime(ticket.exp * MS_PER_S))
+            val context = LocalContext.current
             val grants =
                 buildList {
                     if (ticket.turn) add(stringResource(R.string.relays_calls_turn))
                     if (ticket.walkie) add(stringResource(R.string.relays_calls_walkie))
                     if (ticket.files) add(stringResource(R.string.relays_calls_files))
+                    // The ticket's own limits (S-7.6-22, S-7.6-31), where it sets them: what a free ticket is told apart by.
+                    ticket.am?.let { add(stringResource(R.string.relays_calls_files_each, Formatter.formatShortFileSize(context, it))) }
+                    ticket.ab?.let { add(stringResource(R.string.relays_calls_files_day, Formatter.formatShortFileSize(context, it))) }
                 }
             if (grants.isEmpty()) until else "$until · ${grants.joinToString(", ")}"
         }
@@ -588,6 +632,22 @@ private fun ticketLine(
 
 @Composable
 private fun accountLine(account: RelayAccount): String =
+    when {
+        // A free key (C-7.6-37) has no end to show, and is never called an account.
+        account.free -> freeKeyLine(account)
+        else -> customerKeyLine(account)
+    }
+
+@Composable
+private fun freeKeyLine(account: RelayAccount): String =
+    when {
+        account.answer == null && account.failures > 0 -> stringResource(R.string.relays_free_key_unanswered, account.issuer)
+        account.answer == null -> stringResource(R.string.relays_free_key_waiting, account.issuer)
+        else -> stringResource(R.string.relays_free_key_held, account.issuer)
+    }
+
+@Composable
+private fun customerKeyLine(account: RelayAccount): String =
     when (account.answer) {
         null -> {
             stringResource(

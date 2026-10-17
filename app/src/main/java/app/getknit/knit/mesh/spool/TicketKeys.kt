@@ -35,6 +35,9 @@ object IssuerOrigin {
     /** Where the badge issue lives under the same origin (docs/SUPPORTER_BADGE.md §5). */
     const val BADGE_PATH = "/api/v1/badge"
 
+    /** Where the free account route lives under a free issuer's origin (docs/VOICE_CALLS.md §2.6). */
+    const val ACCOUNT_PATH = "/api/v1/account"
+
     private val PATTERN =
         Regex(
             "^(https?)://" +
@@ -62,18 +65,24 @@ object IssuerOrigin {
     /** The badge issue's URL under [origin]. */
     fun badgeUrl(origin: String): String = origin + BADGE_PATH
 
+    /** The account route's URL under [origin], without its query. */
+    fun accountUrl(origin: String): String = origin + ACCOUNT_PATH
+
     private const val MAX_PORT = 65_535
 }
 
 /**
- * The customer key held for one relay host, and the issuer it goes to. A data class for the change feed's equality,
- * whose [toString] names the issuer only: the key must not reach a log line through it.
+ * The key held for one relay host, and the issuer it goes to: a customer key an invite handed over, or a [free] one
+ * this phone made at a free issuer (C-7.6-37), which never rides a backup, never asks on a schedule and never asks for
+ * a badge. A data class for the change feed's equality, whose [toString] names the issuer only: the key must not reach
+ * a log line through it.
  */
 data class HeldKey(
     val issuer: String,
     val key: String,
+    val free: Boolean = false,
 ) {
-    override fun toString(): String = "HeldKey(issuer=$issuer)"
+    override fun toString(): String = "HeldKey(issuer=$issuer, free=$free)"
 }
 
 /** The issuer's last verdict on a key, as the store keeps it and the debug dump names it. */
@@ -121,8 +130,9 @@ interface TicketKeyJournal {
     val keyStates: Flow<Map<String, KeyState>>
 
     /**
-     * Holds [key] for [host]. The same key again changes nothing; a different one (or a different issuer) replaces it
-     * and resets its state to [KeyState.FRESH], which is what lifts an `unknown-key` park.
+     * Holds [key] for [host], in the one slot a host has: a customer key replaces a free one, and a free one made after
+     * a customer key ended replaces that. The same key again changes nothing; a different one (or a different issuer)
+     * replaces it and resets its state to [KeyState.FRESH], which is what lifts an `unknown-key` park.
      */
     suspend fun putKey(
         host: String,

@@ -4,6 +4,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.getknit.knit.BuildConfig
 import app.getknit.knit.data.commons.CommonsRepository
+import app.getknit.knit.data.relay.FreeUploadChoice
+import app.getknit.knit.data.relay.FreeUploads
 import app.getknit.knit.data.relay.RelayInviteApplier
 import app.getknit.knit.data.relay.RelayStatusRepository
 import app.getknit.knit.data.settings.SettingsStore
@@ -25,6 +27,7 @@ import app.getknit.knit.mesh.spool.SpoolUrl
 import app.getknit.knit.mesh.spool.StoredSpoolTicket
 import app.getknit.knit.mesh.spool.TicketKeyJournal
 import app.getknit.knit.net.InternetGate
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -38,6 +41,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * One configured relay, resolved for display: the [url] as stored, a redacted [host] for the row, and
@@ -68,6 +72,9 @@ data class RelayRow(
     // The ticket key this phone holds for the relay's host and what its issuer last said. Not a fact about the
     // connection, so it shows while disconnected too; null when no key is held, and in a build without calls.
     val account: RelayAccount? = null,
+    // Free tickets for this relay (docs/VOICE_CALLS.md C-7.6-34): the free issuer's host and the person's answer, what
+    // the row's switch shows. Null where the relay has no free issuer, and in a build without calls.
+    val freeUploads: FreeUploadChoice? = null,
 )
 
 /** A relay's commons as the row shows it: the operator's name for it, and our thread id when joined. */
@@ -103,12 +110,17 @@ sealed interface RelayTicket {
     /** One is on its way to the relay, or held and about to go. */
     data object Presenting : RelayTicket
 
-    /** The relay accepted a ticket good until [exp] (Unix seconds), granting TURN, casts and uploads as its flags say. */
+    /**
+     * The relay accepted a ticket good until [exp] (Unix seconds), granting TURN, casts and uploads as its flags say,
+     * with its own day's upload budget [ab] and per-attachment limit [am] in bytes where it sets them.
+     */
     data class Live(
         val exp: Long,
         val turn: Boolean,
         val walkie: Boolean,
         val files: Boolean = false,
+        val ab: Long? = null,
+        val am: Long? = null,
     ) : RelayTicket
 
     /** The relay refused the ticket with [reason], its `err ticket` word. */
@@ -125,13 +137,15 @@ sealed interface RelayTicket {
 /**
  * The ticket key held for a relay's host (ADR 2026-10.3sk7), as the row shows it: the issuer it is traded with (its
  * host, never the key), the issuer's last verdict ([answer], null before the first), the account's end as the issuer
- * last said it ([endsAt], epoch millis), and how many asks in a row got no verdict ([failures]).
+ * last said it ([endsAt], epoch millis), and how many asks in a row got no verdict ([failures]). A [free] key
+ * (C-7.6-37) shows no end: its account lives while it is used.
  */
 data class RelayAccount(
     val issuer: String,
     val answer: KeyAnswer?,
     val endsAt: Long?,
     val failures: Int,
+    val free: Boolean = false,
 )
 
 data class InternetRelayUiState(
@@ -196,6 +210,8 @@ class InternetRelayViewModel(
     // Where a relay's held ticket and its verdict live (`SettingsStore`), and the one seam for a row's call details:
     // production passes it only where calls are wired (`CALLS_WIRED`), and without it no row shows any, nor the key.
     private val spoolTickets: SpoolTicketJournal? = null,
+    // Free tickets' switch (C-7.6-34), only where calls are wired; without it no row offers one.
+    private val freeUploads: FreeUploads? = null,
     private val clock: () -> Long = System::currentTimeMillis,
 ) : ViewModel() {
     val state: StateFlow<InternetRelayUiState> =
@@ -207,6 +223,7 @@ class InternetRelayViewModel(
         val tickets: Map<String, StoredSpoolTicket>,
         val keys: Map<String, HeldKey>,
         val keyStates: Map<String, KeyState>,
+        val free: Map<String, FreeUploadChoice>,
     )
 
     private fun callStores(): Flow<CallStores?> {
@@ -215,6 +232,7 @@ class InternetRelayViewModel(
             tickets.spoolTickets,
             ticketKeys?.keys ?: flowOf(emptyMap()),
             ticketKeys?.keyStates ?: flowOf(emptyMap()),
+            freeUploads?.choices ?: flowOf(emptyMap()),
             ::CallStores,
         )
     }
@@ -252,6 +270,7 @@ class InternetRelayViewModel(
                                 },
                             calls = stores?.let { live?.let { relayCalls(it, SpoolUrl.hostname(url)?.let(stores.tickets::get), clock()) } },
                             account = stores?.let { relayAccount(SpoolUrl.hostname(url), stores.keys, stores.keyStates) },
+                            freeUploads = stores?.let { SpoolUrl.hostname(url)?.let(stores.free::get) },
                         )
                     },
             )
@@ -441,6 +460,18 @@ class InternetRelayViewModel(
     ) {
         viewModelScope.launch { settings.setSpoolUrlEnabled(url, enabled) }
     }
+
+    /**
+     * The relay row's free-tickets switch for [host] (C-7.6-34): on lets this phone make a free account at the relay's
+     * free issuer when an upload waits; off forgets a free key held there. Written past the screen's life.
+     */
+    fun setFreeUploads(
+        host: String,
+        allowed: Boolean,
+    ) {
+        val uploads = freeUploads ?: return
+        viewModelScope.launch { withContext(NonCancellable) { uploads.answer(host, allowed) } }
+    }
 }
 
 /**
@@ -477,6 +508,8 @@ internal fun relayTicket(
                 turn = live.fl and SpoolTicket.FL_TURN != 0L,
                 walkie = live.fl and SpoolTicket.FL_CAST != 0L,
                 files = live.fl and SpoolTicket.FL_FILES != 0L,
+                ab = live.ab,
+                am = live.am,
             )
         }
 
@@ -508,7 +541,7 @@ internal fun relayAccount(
 ): RelayAccount? {
     val key = host?.let(keys::get) ?: return null
     val state = states[host] ?: KeyState.FRESH
-    return RelayAccount(IssuerOrigin.host(key.issuer), state.answer, state.endsAt, state.failures)
+    return RelayAccount(IssuerOrigin.host(key.issuer), state.answer, state.endsAt, state.failures, key.free)
 }
 
 private const val MS_PER_S = 1_000L

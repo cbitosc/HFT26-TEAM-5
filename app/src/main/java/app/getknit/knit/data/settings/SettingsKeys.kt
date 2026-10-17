@@ -1,5 +1,6 @@
 package app.getknit.knit.data.settings
 
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 
 /**
@@ -41,6 +42,23 @@ object SettingsKeys {
 
     fun spoolKeyStateKey(host: String) = stringPreferencesKey(SPOOL_KEY_STATE_PREFIX + host)
 
+    // The free half (docs/VOICE_CALLS.md C-7.6-33 to C-7.6-38): a free key made at a free issuer, the account route's
+    // backoff, the person's answer to the notice, and a debug build's own free issuer, per relay host name. All under
+    // "spool_free_", which is in [TRANSIENT_PREFIXES]: a free key never rides a backup (a restored phone makes its own),
+    // and a restored phone asks the person again before it contacts an issuer. No prefix here is a prefix of another.
+    const val SPOOL_FREE_KEY_PREFIX = "spool_free_key:"
+    const val SPOOL_FREE_STATE_PREFIX = "spool_free_state:"
+    const val SPOOL_FREE_CONSENT_PREFIX = "spool_free_consent:"
+    const val SPOOL_FREE_ISSUER_PREFIX = "spool_free_issuer:"
+
+    fun spoolFreeKeyKey(host: String) = stringPreferencesKey(SPOOL_FREE_KEY_PREFIX + host)
+
+    fun spoolFreeStateKey(host: String) = stringPreferencesKey(SPOOL_FREE_STATE_PREFIX + host)
+
+    fun spoolFreeConsentKey(host: String) = booleanPreferencesKey(SPOOL_FREE_CONSENT_PREFIX + host)
+
+    fun spoolFreeIssuerKey(host: String) = stringPreferencesKey(SPOOL_FREE_ISSUER_PREFIX + host)
+
     // The calls this phone saw end (`CallTombStore`, docs/VOICE_CALLS.md C-3.4-3): about this phone's calls, so in
     // [TRANSIENT_PREFIXES].
     const val CALL_TOMBS = "call_tombs"
@@ -73,7 +91,9 @@ object SettingsKeys {
      * Debug-build diagnostic knobs (`debug_`, e.g. the Bluetooth link cap) are about this phone's test run. A spool
      * entitlement ticket (`spool_ticket…`, ADR 2026-10.xkp4) is a bearer grant to this phone for a day, and must not
      * ride a backup file anywhere; what the ticket refresher knows about its asks (`spool_key_state…`, ADR 2026-10.3sk7)
-     * is this phone's schedule, so a restored phone asks at once. The customer key beside it rides, like a `?k=` token.
+     * is this phone's schedule, so a restored phone asks at once. The customer key beside it rides, like a `?k=` token;
+     * a free key (`spool_free_…`) does not, nor does the person's answer to the free-account notice, so a restored phone
+     * asks again before it contacts an issuer.
      * The calls this phone saw end (`call_tombs`) are this phone's too: a restored phone holds new sessions. So are the
      * Wi-Fi Direct host guard (`direct_host_`) and the call microphone's verdict (`call_capture_`): another phone's ROM
      * is not this one's. The supporter badges this phone holds (`badge_held…`) carry the `r` it drew for them, which
@@ -95,6 +115,7 @@ object SettingsKeys {
             "debug_",
             "spool_ticket",
             "spool_key_state",
+            "spool_free_",
             CALL_TOMBS,
             DIRECT_HOST_PREFIX,
             CALL_CAPTURE_PREFIX,

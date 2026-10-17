@@ -1,5 +1,6 @@
 package app.getknit.knit.mesh.spool
 
+import app.getknit.knit.mesh.crypto.scope.ScopeCrypto
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.cbor.Cbor
@@ -73,9 +74,9 @@ object SpoolErrCode {
      * An `ent` the spool will not accept, or a gated verb on a connection without the live ticket its gate needs
      * (experimental, docs/VOICE_CALLS.md §2.6): a `turnreq` under bit 0 of `entGates`, an `aput` under bit 1.
      * `msg` carries one word: `malformed`, `key`, `signature`, `audience`, `early` or `expired` for an `ent`;
-     * `missing`, `expired` or `flags` for a `turnreq`; those three or `budget` (the ticket's pseudonym has spent its
-     * day's uploads here) for an `aput`, which carries the record's `q` and `scope`. Never a strike, and never the
-     * answer to a SUB.
+     * `missing`, `expired` or `flags` for a `turnreq`; those three, `size` (the attachment's `total` is over the ticket's
+     * `am`, S-7.6-31) or `budget` (the ticket's pseudonym has spent its day's uploads here) for an `aput`, which carries
+     * the record's `q` and `scope`. Never a strike, and never the answer to a SUB.
      */
     const val TICKET = "ticket"
 }
@@ -377,9 +378,10 @@ class SpoolEnt(
 )
 
 /**
- * The claims of a ticket's `tk`, as far as a client reads them (experimental, docs/VOICE_CALLS.md §2.6): [aud] is the
- * one spool host it is good for, [nbf] and [exp] are Unix **seconds**, [fl] says which gated verbs it unlocks, and
- * [ab], when the issuer set it, is the upload budget in bytes for the holder's day (absent: the spool's own). The
+ * The claims of a ticket's `tk`, as far as a client reads them (docs/SPOOL_PROTOCOL.md §7.6): [aud] is the one spool
+ * host it is good for, [nbf] and [exp] are Unix **seconds**, [fl] says which gated verbs it unlocks, [ab], when the
+ * issuer set it, is the upload budget in bytes for the holder's day (absent: the spool's own), and [am], when set, is
+ * the largest attachment `|A|` in bytes it may `aput`, in whole chunks ([maxChunks], S-7.6-31, C-7.6-32). The
  * wire also carries `kid` and `ps`, the holder's daily pseudonym; neither is declared here, so the codec skips both
  * and the claims never hold the pseudonym in a field they could log or show (`HeldTicket.pseudonym` reads it apart,
  * behind a redacted type). Unknown keys are ignored, so later claims add without a version bump.
@@ -392,8 +394,15 @@ class SpoolTicket(
     val exp: Long,
     val fl: Long,
     val ab: Long? = null,
+    val am: Long? = null,
 ) {
-    override fun toString(): String = "SpoolTicket(aud=$aud, nbf=$nbf, exp=$exp, fl=$fl, ab=$ab)"
+    /**
+     * The most chunks an attachment may have on a files-gated spool under this ticket, `⌊am / aChunkBytes⌋`, or null when
+     * the ticket sets no `am` and the spool's own limit is the only one. 0 for an `am` under one chunk: no `aput` at all.
+     */
+    val maxChunks: Int? get() = am?.let(::chunksOf)
+
+    override fun toString(): String = "SpoolTicket(aud=$aud, nbf=$nbf, exp=$exp, fl=$fl, ab=$ab, am=$am)"
 
     companion object {
         const val VERSION = 1
@@ -416,6 +425,9 @@ class SpoolTicket(
 
         /** The gates a HELLO with `ent` and no `entGates` means (S-7.6-13): TURN and cast, what a key gated first. */
         const val LEGACY_GATES = FL_TURN or FL_CAST
+
+        /** `⌊am / aChunkBytes⌋`: the whole chunks an `am` of [am] bytes admits (S-7.6-31). */
+        fun chunksOf(am: Long): Int = (am / ScopeCrypto.ATTACH_CHUNK_BYTES).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
     }
 }
 

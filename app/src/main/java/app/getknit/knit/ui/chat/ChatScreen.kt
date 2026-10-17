@@ -217,6 +217,7 @@ import app.getknit.knit.data.message.quoteHasAttachment
 import app.getknit.knit.data.message.quoteSnippet
 import app.getknit.knit.data.relay.AttachmentRelay
 import app.getknit.knit.data.relay.AttachmentWait
+import app.getknit.knit.data.relay.FreeUploadOffer
 import app.getknit.knit.data.relay.RelayReach
 import app.getknit.knit.data.relay.dismissable
 import app.getknit.knit.data.relay.marksNearbyOnly
@@ -313,6 +314,7 @@ fun ChatScreen(
     val meshCallFirst by viewModel.meshCallFirst.collectAsStateWithLifecycle()
     val showLocationConsent by viewModel.showLocationConsent.collectAsStateWithLifecycle()
     val showTransferConsent by viewModel.showTransferConsent.collectAsStateWithLifecycle()
+    val freeUploadOffer by viewModel.freeUploadOffer.collectAsStateWithLifecycle()
     val voiceRecording by viewModel.voiceRecording.collectAsStateWithLifecycle()
     val voicePlayback by viewModel.voicePlayback.collectAsStateWithLifecycle()
     val arrivals by viewModel.arrivals.collectAsStateWithLifecycle()
@@ -667,6 +669,45 @@ fun ChatScreen(
             },
         )
     }
+
+    // The free-account notice (docs/VOICE_CALLS.md C-7.6-34): once, before this phone contacts a free issuer. Allow and
+    // Not now are answers and end it; a tap outside answers nothing and only puts it off for this visit.
+    var freeOfferPutOff by rememberSaveable { mutableStateOf<String?>(null) }
+    freeUploadOffer?.takeIf { it.relayHost != freeOfferPutOff }?.let { offer ->
+        FreeUploadsNotice(
+            offer = offer,
+            onAnswer = { allowed -> viewModel.answerFreeUploads(offer, allowed) },
+            onPutOff = { freeOfferPutOff = offer.relayHost },
+        )
+    }
+}
+
+/**
+ * Asks once whether this phone may get free tickets from [offer]'s issuer to send small files through its relay
+ * (C-7.6-34): names the host it will contact and how often, and nothing about a product, a price or a way to buy one.
+ */
+@Composable
+internal fun FreeUploadsNotice(
+    offer: FreeUploadOffer,
+    onAnswer: (Boolean) -> Unit,
+    onPutOff: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onPutOff,
+        modifier = Modifier.testTag("free_uploads_notice"),
+        title = { Text(stringResource(R.string.chat_free_uploads_title)) },
+        text = { Text(stringResource(R.string.chat_free_uploads_body, offer.issuerHost)) },
+        confirmButton = {
+            TextButton(onClick = { onAnswer(true) }, modifier = Modifier.testTag("free_uploads_allow")) {
+                Text(stringResource(R.string.chat_free_uploads_allow))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = { onAnswer(false) }, modifier = Modifier.testTag("free_uploads_decline")) {
+                Text(stringResource(R.string.chat_free_uploads_decline))
+            }
+        },
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

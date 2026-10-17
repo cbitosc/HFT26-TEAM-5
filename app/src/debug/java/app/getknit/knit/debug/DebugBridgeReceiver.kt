@@ -85,6 +85,7 @@ import app.getknit.knit.mesh.bluetooth.TunePhy
 import app.getknit.knit.mesh.bluetooth.TunePriority
 import app.getknit.knit.mesh.crypto.AttachmentCrypto
 import app.getknit.knit.mesh.crypto.b64d
+import app.getknit.knit.mesh.crypto.scope.SpoolPow
 import app.getknit.knit.mesh.indirectPeers
 import app.getknit.knit.mesh.link.FeedWindow
 import app.getknit.knit.mesh.link.LinkFraming
@@ -97,8 +98,10 @@ import app.getknit.knit.mesh.power.LowPowerSource
 import app.getknit.knit.mesh.power.PowerStateSource
 import app.getknit.knit.mesh.protocol.ReplyRef
 import app.getknit.knit.mesh.sha256Hex
+import app.getknit.knit.mesh.spool.AccountStamp
 import app.getknit.knit.mesh.spool.CommonsInvite
 import app.getknit.knit.mesh.spool.CustomerKey
+import app.getknit.knit.mesh.spool.FreeState
 import app.getknit.knit.mesh.spool.HeldKey
 import app.getknit.knit.mesh.spool.IssuerOrigin
 import app.getknit.knit.mesh.spool.KeyState
@@ -132,9 +135,11 @@ import app.getknit.knit.ui.chat.ChatWindow
 import app.getknit.knit.ui.chat.quoteLabels
 import app.getknit.knit.ui.invite.prepareKnitApk
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
@@ -144,6 +149,7 @@ import org.webrtc.NetworkChangeDetector
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.ByteBuffer
+import java.security.SecureRandom
 
 /**
  * Debug-only ADB "bridge" that lets an automation agent drive the app headlessly — originating a chat
@@ -214,8 +220,10 @@ import java.nio.ByteBuffer
  *   debug-only on/off switch: `--es url <ws(s)://…/spool/v1>` adds a spool, `--es drop <url>` removes one,
  *   `--ez on <bool>` flips the global opt-in, `--es url <url> --es ticket <knit-ticket:v1:…|clear>` holds or clears
  *   that relay's entitlement ticket (VOICE_CALLS.md §2.6), `--es url <url> --es issuer <origin> --es key
- *   <kak1_…|clear>` holds or forgets that relay's customer key without an invite (ADR 2026-10.3sk7), and no extras at
- *   all just dumps state. The per-scope
+ *   <kak1_…|clear>` holds or forgets that relay's customer key without an invite (ADR 2026-10.3sk7), `--es url <url>
+ *   --es freeIssuer <origin|clear>` sets that relay host's free issuer (docs/VOICE_CALLS.md C-7.6-33), `--es url <url>
+ *   --es freeConsent <allow|decline|clear>` answers the free-ticket notice for it (C-7.6-34), `--ei mine <bits>` times
+ *   one account stamp on this phone (C-7.6-36, no network), and no extras at all just dumps state. The per-scope
  *   `local` vs `spool` counts are the convergence oracle, the way `liveFingerprint` parity is for custody.
  * - [ACTION_RATCHET] — dumps the DM ratchet's per-peer state (X3DH inputs, session/confirmed, send epoch,
  *   the reset floor's anchor) and, with `--es reset <peerNodeId>`, forces a session reset past the
@@ -1653,7 +1661,12 @@ class DebugBridgeReceiver :
         if (ticketNote?.optString("status") == "error") return ticketNote
         val keyNote = keyText?.let { holdKey(intent.getStringExtra(EXTRA_URL)?.trim(), intent.getStringExtra(EXTRA_ISSUER)?.trim(), it) }
         if (keyNote?.optString("status") == "error") return keyNote
-        if (ticketText == null && keyText == null) {
+        val freeIssuerText = intent.getStringExtra(EXTRA_FREE_ISSUER)?.takeIf { it.isNotBlank() }?.trim()
+        val freeConsentText = intent.getStringExtra(EXTRA_FREE_CONSENT)?.takeIf { it.isNotBlank() }?.trim()
+        val freeNote = free(intent.getStringExtra(EXTRA_URL)?.trim(), freeIssuerText, freeConsentText)
+        if (freeNote?.optString("status") == "error") return freeNote
+        val mineNote = if (intent.hasExtra(EXTRA_MINE)) mineStamp(intent.getIntExtra(EXTRA_MINE, 0)) else null
+        if (ticketText == null && keyText == null && freeNote == null) {
             intent.getStringExtra(EXTRA_URL)?.takeIf { it.isNotBlank() }?.let { settings.addSpoolUrl(it.trim()) }
         }
         intent.getStringExtra(EXTRA_DROP)?.takeIf { it.isNotBlank() }?.let { dropped ->
@@ -1667,6 +1680,11 @@ class DebugBridgeReceiver :
         if (intent.hasExtra(EXTRA_ON)) settings.setSpoolEnabled(intent.getBooleanExtra(EXTRA_ON, false))
 
         val spools = JSONArray()
+        val freeIssuers = ticketKeys.freeIssuers.first()
+        val freeConsent = ticketKeys.freeConsent.first()
+        val freeStates = ticketKeys.freeStates.first()
+        val heldKeys = ticketKeys.keys.first()
+        val asking = mesh.freeTicketAsking()
         mesh.spoolStatus().forEach { spool ->
             val scopes = JSONArray()
             spool.scopes.forEach { scope ->
@@ -1740,13 +1758,22 @@ class DebugBridgeReceiver :
                     // no `ent`, 0), and whether it takes this phone's uploads (C-7.6-24): `open`,
                     // `locked:<missing|expired|flags|pending>` or `spent`. Facts about the live connection.
                     .put("entGates", spool.entGates)
-                    .put("uploads", spool.uploads.word),
+                    .put("uploads", spool.uploads.word)
+                    // C-7.6-32: the most chunks one attachment of ours may have here under the live files ticket's `am`,
+                    // or null for no limit beyond `maxAttachBytes`.
+                    .put("uploadLimitChunks", spool.uploadLimitChunks ?: JSONObject.NULL)
+                    // C-7.6-33 to C-7.6-38: this host's free issuer (null for none) and where its free key stands —
+                    // `none`, `asking`, `held`, `declined` or `backoff:<epoch ms>`.
+                    .put("freeIssuer", SpoolUrl.hostname(spool.url)?.let(freeIssuers::get) ?: JSONObject.NULL)
+                    .put("freeKey", freeKeyWord(SpoolUrl.hostname(spool.url), heldKeys, freeConsent, freeStates, asking)),
             )
         }
         return JSONObject()
             .put("status", "ok")
             .put("ticketImport", ticketNote?.optString("message") ?: JSONObject.NULL)
             .put("keyImport", keyNote?.optString("message") ?: JSONObject.NULL)
+            .put("free", freeNote?.optString("message") ?: JSONObject.NULL)
+            .put("mine", mineNote ?: JSONObject.NULL)
             .put("enabled", settings.spoolEnabled.first())
             .put("configured", JSONArray(settings.spoolUrls.first().toList()))
             .put("disabled", JSONArray(settings.disabledSpoolUrls.first().toList()))
@@ -1816,6 +1843,74 @@ class DebugBridgeReceiver :
     }
 
     /**
+     * `…debug.SPOOL --es url <spoolUrl> --es freeIssuer <origin|clear>` sets (or returns to the seeded one) the free
+     * issuer for the URL's host (docs/VOICE_CALLS.md C-7.6-33): the lab's door, since only the seeded relay ships with
+     * one. `--es freeConsent <allow|decline|clear>` answers the free-ticket notice for that host (C-7.6-34); `decline`
+     * forgets a free key held there, as the relay row's switch does. Null when neither extra was given.
+     */
+    private suspend fun free(
+        url: String?,
+        issuer: String?,
+        consent: String?,
+    ): JSONObject? {
+        if (issuer == null && consent == null) return null
+        if (url.isNullOrBlank()) return reply("error", "freeIssuer and freeConsent need --es url <the relay they are for>")
+        val host = SpoolUrl.hostname(url) ?: return reply("error", "the url names no host")
+        val notes = mutableListOf<String>()
+        if (issuer != null) {
+            val origin = issuer.takeUnless { it == "clear" }
+            if (origin != null && !IssuerOrigin.isAcceptable(origin, allowCleartext = true)) {
+                return reply("error", "a free issuer is a bare origin, https://host[:port]")
+            }
+            ticketKeys.setFreeIssuer(host, origin)
+            notes += origin?.let { "free issuer for $host is ${IssuerOrigin.host(it)}" } ?: "free issuer for $host back to the seeded one"
+        }
+        if (consent != null) {
+            val allowed =
+                when (consent) {
+                    "allow" -> true
+                    "decline" -> false
+                    "clear" -> null
+                    else -> return reply("error", "freeConsent is allow, decline or clear")
+                }
+            ticketKeys.setFreeConsent(host, allowed)
+            notes += "the free-ticket notice for $host: ${allowed?.let { if (it) "allowed" else "declined" } ?: "will ask again"}"
+        }
+        return reply("ok", notes.joinToString("; "))
+    }
+
+    /** Times one account stamp of [bits] on this phone (C-7.6-36) with a fresh nonce and today's UTC day; no network. */
+    private suspend fun mineStamp(bits: Int): JSONObject {
+        val nonce = ByteArray(AccountStamp.NONCE_BYTES).also(SecureRandom()::nextBytes)
+        val day = SpoolPow.utcDay(System.currentTimeMillis())
+        val started = SystemClock.elapsedRealtime()
+        val n = withContext(Dispatchers.Default) { AccountStamp.mine(day, nonce, bits.coerceIn(0, AccountStamp.MAX_BITS), 1L shl 34) }
+        return JSONObject()
+            .put("bits", bits)
+            .put("n", n ?: JSONObject.NULL)
+            .put("ms", SystemClock.elapsedRealtime() - started)
+    }
+
+    /** The bridge's word for where [host]'s free key stands: `none`, `asking`, `held`, `declined` or `backoff:<ms>`. */
+    private fun freeKeyWord(
+        host: String?,
+        keys: Map<String, HeldKey>,
+        consent: Map<String, Boolean>,
+        states: Map<String, FreeState>,
+        asking: Set<String>,
+    ): String {
+        if (host == null) return "none"
+        val backoff = states[host]?.notBefore?.takeIf { it > System.currentTimeMillis() }
+        return when {
+            host in asking -> "asking"
+            keys[host]?.free == true -> "held"
+            consent[host] == false -> "declined"
+            backoff != null -> "backoff:$backoff"
+            else -> "none"
+        }
+    }
+
+    /**
      * What the refresher knows about [url]'s host (ADR 2026-10.3sk7): the issuer origin, whether a key is held, the last
      * answer, the account's `endsAt` and the next ask — never the key or the ticket. `nextAskAt` is null for a parked
      * (`unknown-key`) key; it is when the refresher would ask with the plane running and a route up.
@@ -1830,6 +1925,7 @@ class DebugBridgeReceiver :
         val next = TicketRefreshPolicy.dueAt(state, tickets.presentable(url)?.claims?.exp)
         return JSONObject()
             .put("held", true)
+            .put("free", key.free)
             .put("issuer", key.issuer)
             .put("answer", state.answer?.word ?: JSONObject.NULL)
             .put("endsAt", state.endsAt ?: JSONObject.NULL)
@@ -3246,6 +3342,9 @@ class DebugBridgeReceiver :
         const val EXTRA_TICKET = "ticket"
         const val EXTRA_ISSUER = "issuer"
         const val EXTRA_KEY = "key"
+        const val EXTRA_FREE_ISSUER = "freeIssuer"
+        const val EXTRA_FREE_CONSENT = "freeConsent"
+        const val EXTRA_MINE = "mine"
         const val EXTRA_RESET_PEER = "reset"
         const val EXTRA_PREFIX = "prefix"
         const val EXTRA_DRY = "dry"

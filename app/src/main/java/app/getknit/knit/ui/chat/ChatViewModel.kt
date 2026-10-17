@@ -49,6 +49,8 @@ import app.getknit.knit.data.message.receivedPlane
 import app.getknit.knit.data.reaction.ReactionEntity
 import app.getknit.knit.data.relay.AttachmentRelay
 import app.getknit.knit.data.relay.AttachmentWait
+import app.getknit.knit.data.relay.FreeUploadOffer
+import app.getknit.knit.data.relay.FreeUploads
 import app.getknit.knit.data.relay.RelayFacts
 import app.getknit.knit.data.relay.RelayPlane
 import app.getknit.knit.data.relay.RelayReach
@@ -101,6 +103,7 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -570,6 +573,8 @@ class ChatViewModel(
     private val identities: AttachmentIdentities = AttachmentIdentities(messages, blobs),
     // Voice calls (experimental, di/CallWiring): null in a build that wires none, which hides the call button.
     private val calls: CallManager? = null,
+    // Free accounts' notice (docs/VOICE_CALLS.md C-7.6-34): null where tickets are not wired, which shows none.
+    private val freeUploads: FreeUploads? = null,
 ) : ViewModel() {
     /** This thread is the broadcast room (vs a 1:1 DM keyed by the peer's node id). */
     private val isRoom = conversationId == Conversations.NEARBY
@@ -1379,6 +1384,31 @@ class ChatViewModel(
             val bytes = staged?.hash?.let { sizes[it] } ?: return@combine AttachmentRelay.Silent
             attachmentReach(conversationId, bytes, relay)
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AttachmentRelay.Silent)
+
+    /**
+     * The free-account notice for this thread (C-7.6-34), or null. It shows once something sent here is held back for
+     * want of a files ticket — the staged attachment, or one of ours already in the thread, reads
+     * [AttachmentRelay.Locked] — on a relay whose free issuer the person has not answered for. Their answer removes
+     * the offer, so it shows once.
+     */
+    val freeUploadOffer: StateFlow<FreeUploadOffer?> =
+        if (freeUploads == null) {
+            MutableStateFlow(null)
+        } else {
+            combine(freeUploads.offers, stagedAttachmentRelay, state) { offers, staged, ui ->
+                val held = staged == AttachmentRelay.Locked || ui.rows.any { it.attachmentRelay == AttachmentRelay.Locked }
+                offers.firstOrNull()?.takeIf { held }
+            }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+        }
+
+    /** The person's answer to [offer]'s notice. Written past the screen's life: a Back must not lose it. */
+    fun answerFreeUploads(
+        offer: FreeUploadOffer,
+        allowed: Boolean,
+    ) {
+        val uploads = freeUploads ?: return
+        viewModelScope.launch { withContext(NonCancellable) { uploads.answer(offer.relayHost, allowed) } }
+    }
 
     /**
      * The card for [m] when it carries one that has been decoded ([cards]) **and** whose link the body

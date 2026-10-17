@@ -75,8 +75,11 @@ class RelayStatusRepository(
                 coveredLabels = coveredLabelsOf(live),
                 // The union rule (§9.1): one relay willing to carry the bytes is enough.
                 maxAttachBytes = live.mapNotNull { it.maxAttachBytes }.maxOrNull(),
-                // And for sending, one relay that takes this phone's uploads (C-7.6-24).
-                maxUploadBytes = live.filter { it.uploads == SpoolUploads.Open }.mapNotNull { it.maxAttachBytes }.maxOrNull(),
+                // And for sending, one relay that takes this phone's uploads (C-7.6-24), with its ticket's limit (C-7.6-32).
+                uploadRooms =
+                    live
+                        .filter { it.uploads == SpoolUploads.Open }
+                        .mapNotNull { spool -> spool.maxAttachBytes?.let { UploadRoom(it, spool.uploadLimitChunks) } },
             )
         }.distinctUntilChanged()
 

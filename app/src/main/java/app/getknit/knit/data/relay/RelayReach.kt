@@ -30,10 +30,11 @@ import app.getknit.knit.mesh.spool.SpoolStatus
  * willing to store the bytes is enough. It says what a member can *fetch*, so it is what the reader's
  * placeholder ([attachmentWait]) reads.
  *
- * [maxUploadBytes] is the same max taken over only the connected spools that take **this phone's** uploads
- * (`SpoolStatus.uploads`, C-7.6-24): a spool that gates `aput` behind a files ticket this phone does not hold
- * still serves every attachment it stores, but takes none of ours. Null when no connected spool would take an
- * upload of any size. Always at most [maxAttachBytes]; what the sender's marker ([attachmentReach]) reads.
+ * [uploadRooms] are the connected spools that take **this phone's** uploads (`SpoolStatus.uploads`, C-7.6-24), one
+ * [UploadRoom] each: a spool that gates `aput` behind a files ticket this phone does not hold still serves every
+ * attachment it stores, but takes none of ours. Empty when no connected spool would take an upload of any size; what
+ * the sender's marker ([attachmentReach]) reads. Kept per relay rather than folded into one max, because a ticket's
+ * per-attachment limit (`am`, C-7.6-32) and a spool's budget are two bounds that must hold on the same relay.
  */
 data class RelayFacts(
     val enabled: Boolean = false,
@@ -42,8 +43,28 @@ data class RelayFacts(
     val connected: Int = 0,
     val coveredLabels: Set<String> = emptySet(),
     val maxAttachBytes: Int? = null,
-    val maxUploadBytes: Int? = maxAttachBytes,
-)
+    val uploadRooms: List<UploadRoom> = listOfNotNull(maxAttachBytes?.let { UploadRoom(it) }),
+) {
+    /** The largest budget among the relays that take this phone's uploads, or null when none does. */
+    val maxUploadBytes: Int? get() = uploadRooms.maxOfOrNull { it.maxAttachBytes }
+}
+
+/**
+ * One connected relay that takes this phone's uploads: its per-scope attachment budget ([maxAttachBytes], spec §6.5),
+ * and the most chunks one attachment may have under this phone's ticket there ([maxChunks], from the ticket's `am`,
+ * C-7.6-32), null where the ticket sets no such limit.
+ */
+data class UploadRoom(
+    val maxAttachBytes: Int,
+    val maxChunks: Int? = null,
+) {
+    /**
+     * Whether an attachment whose `A` (the end-to-end sealed bytes the blob store holds) is [sizeBytes] goes up here:
+     * within the budget once chunk-sealed, and its `total = ⌈|A| / aChunkBytes⌉` within [maxChunks].
+     */
+    fun takes(sizeBytes: Int): Boolean =
+        sealedAttachmentBytes(sizeBytes) <= maxAttachBytes && (maxChunks == null || ScopeAttachments.chunkCount(sizeBytes) <= maxChunks)
+}
 
 /**
  * The [RelayFacts.coveredLabels] of the **connected** spools in [live]: every live scope's label, but for two kinds
@@ -117,7 +138,10 @@ enum class AttachmentRelay {
     /** Fits, and a connected relay will carry it. */
     Relayable,
 
-    /** Larger than every connected relay's per-scope budget: refused `quota` (spec §6.5), permanently. */
+    /**
+     * Larger than every connected relay that takes this phone's uploads will hold: over its per-scope budget (refused
+     * `quota`, spec §6.5), or over the per-attachment limit this phone's ticket carries there (`am`, C-7.6-32).
+     */
     TooLarge,
 
     /** No connected relay advertises attachment support at all (spec §7.3) — frames only. */
@@ -260,8 +284,9 @@ fun dismissable(reach: RelayReach): Boolean = reach == RelayReach.Room
  *   "too big for any relay that takes yours", each true until something changes on the relay or the phone.
  *
  * The precedence is that order: [AttachmentRelay.Unsupported] when no relay carries attachments at all,
- * [AttachmentRelay.Locked] when some do but none takes this phone's ([RelayFacts.maxUploadBytes] is null),
- * then [AttachmentRelay.TooLarge] against the relays that do take them.
+ * [AttachmentRelay.Locked] when some do but none takes this phone's ([RelayFacts.uploadRooms] is empty), then
+ * [AttachmentRelay.TooLarge] when no relay that takes them takes this one ([UploadRoom.takes]). [sizeBytes] is the
+ * attachment's `A`, the bytes the blob store holds for it.
  */
 fun attachmentReach(
     conversationId: String,
@@ -270,8 +295,8 @@ fun attachmentReach(
 ): AttachmentRelay {
     if (reachFor(conversationId, facts) != RelayReach.Covered) return AttachmentRelay.Silent
     if (facts.maxAttachBytes == null) return AttachmentRelay.Unsupported
-    val budget = facts.maxUploadBytes ?: return AttachmentRelay.Locked
-    return if (sealedAttachmentBytes(sizeBytes) <= budget) AttachmentRelay.Relayable else AttachmentRelay.TooLarge
+    if (facts.uploadRooms.isEmpty()) return AttachmentRelay.Locked
+    return if (facts.uploadRooms.any { it.takes(sizeBytes) }) AttachmentRelay.Relayable else AttachmentRelay.TooLarge
 }
 
 /**

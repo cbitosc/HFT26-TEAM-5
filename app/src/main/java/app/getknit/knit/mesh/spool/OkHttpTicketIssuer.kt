@@ -4,6 +4,9 @@ import app.getknit.knit.badge.BadgeAnswer
 import app.getknit.knit.badge.BadgeIssuer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -21,7 +24,8 @@ import java.util.concurrent.TimeUnit
  * The one place the key swap speaks OkHttp (`rules/mesh.md`, ADR 2026-10.3sk7): a single `POST <origin>/api/v1/ticket`
  * with `Authorization: Bearer <key>` and an empty body, read into [IssuerAnswer.read]. The badge issue
  * ([issueBadge], ADR 2026-10.r99s) is the same `POST` to `/api/v1/badge` with a `{"sub": …}` body, under every rule
- * below.
+ * below. So is the free account's route (docs/VOICE_CALLS.md §2.6, [accountParams] and [createAccount]): a `GET` and a
+ * `POST` to `/api/v1/account` that carry no key at all.
  *
  * - **Bound to the validated network**, as the link-preview fetch is: [clientFor] hands back a client whose sockets and
  *   lookups belong to the default network `net/AndroidInternetGate` vouched for, or null when there is none
@@ -42,7 +46,8 @@ class OkHttpTicketIssuer(
     private val clientFor: () -> OkHttpClient?,
     private val allowCleartext: Boolean,
 ) : TicketIssuer,
-    BadgeIssuer {
+    BadgeIssuer,
+    AccountIssuer {
     override suspend fun swap(
         origin: String,
         key: String,
@@ -72,6 +77,48 @@ class OkHttpTicketIssuer(
         }
     }
 
+    /** `GET <origin>/api/v1/account?aud=<aud>`: the stamp's parameters, with no key and no body. */
+    override suspend fun accountParams(
+        origin: String,
+        aud: String,
+    ): AccountAnswer {
+        val url =
+            IssuerOrigin
+                .accountUrl(origin)
+                .toHttpUrlOrNull()
+                ?.newBuilder()
+                ?.addQueryParameter("aud", aud)
+                ?.build()
+                ?.toString() ?: return AccountAnswer.NoAnswer("refused origin")
+        return call(origin, url, key = null, body = null, AccountAnswer::NoAnswer) { code, bytes, retryAfter ->
+            AccountAnswer.read(code, bytes, retryAfter)
+        }
+    }
+
+    /** `POST <origin>/api/v1/account` with `{ aud, day, nonce, n }`: a free account, with no key in the request. */
+    override suspend fun createAccount(
+        origin: String,
+        aud: String,
+        day: Long,
+        nonce: ByteArray,
+        n: Long,
+    ): AccountAnswer {
+        val body =
+            buildJsonObject {
+                put("aud", aud)
+                put("day", day)
+                put("nonce", Base64.getUrlEncoder().withoutPadding().encodeToString(nonce))
+                put("n", n)
+            }.toString()
+        return call(origin, IssuerOrigin.accountUrl(origin), key = null, body.toRequestBody(JSON.toMediaType()), AccountAnswer::NoAnswer) {
+                code,
+                bytes,
+                retryAfter,
+            ->
+            AccountAnswer.read(code, bytes, retryAfter)
+        }
+    }
+
     private suspend fun <A> post(
         origin: String,
         url: String,
@@ -79,6 +126,20 @@ class OkHttpTicketIssuer(
         body: RequestBody,
         noVerdict: (String) -> A,
         read: (Int, ByteArray) -> A,
+    ): A = call(origin, url, key, body, noVerdict) { code, bytes, _ -> read(code, bytes) }
+
+    /**
+     * One request: a `POST` of [body], or a `GET` without one, with [key] in `Authorization` when there is one. [read]
+     * gets the status, the capped body and a numeric `retry-after` in seconds.
+     */
+    @Suppress("LongParameterList") // one request's parts; a holder class would only rename them
+    private suspend fun <A> call(
+        origin: String,
+        url: String,
+        key: String?,
+        body: RequestBody?,
+        noVerdict: (String) -> A,
+        read: (Int, ByteArray, Long?) -> A,
     ): A {
         if (!IssuerOrigin.isAcceptable(origin, allowCleartext)) return noVerdict("refused origin")
         val client = clientFor() ?: return noVerdict("offline")
@@ -86,15 +147,15 @@ class OkHttpTicketIssuer(
             Request
                 .Builder()
                 .url(url)
-                .header(AUTHORIZATION, "Bearer $key")
+                .apply { if (key != null) header(AUTHORIZATION, "Bearer $key") }
                 .header(ACCEPT, JSON)
-                .post(body)
+                .apply { if (body != null) post(body) else get() }
                 .build()
         return withContext(Dispatchers.IO) {
             try {
                 client.newCall(request).execute().use { response ->
                     val bytes = readCapped(response) ?: return@use noVerdict("too large")
-                    read(response.code, bytes)
+                    read(response.code, bytes, response.header(RETRY_AFTER)?.trim()?.toLongOrNull())
                 }
             } catch (_: UnknownHostException) {
                 noVerdict("dns")
@@ -127,6 +188,7 @@ class OkHttpTicketIssuer(
         const val CALL_TIMEOUT_S = 20L
 
         private const val AUTHORIZATION = "Authorization"
+        private const val RETRY_AFTER = "Retry-After"
         private const val ACCEPT = "Accept"
         private const val JSON = "application/json"
 

@@ -86,8 +86,10 @@ import app.getknit.knit.mesh.protocol.TransferPayload
 import app.getknit.knit.mesh.protocol.TypingContent
 import app.getknit.knit.mesh.protocol.WireCodec
 import app.getknit.knit.mesh.protocol.WireEnvelope
+import app.getknit.knit.mesh.spool.AccountIssuer
 import app.getknit.knit.mesh.spool.AttachmentDeferPolicy
 import app.getknit.knit.mesh.spool.CommonsStore
+import app.getknit.knit.mesh.spool.FreeKeyJournal
 import app.getknit.knit.mesh.spool.GroupRootPolicy
 import app.getknit.knit.mesh.spool.GroupRootStore
 import app.getknit.knit.mesh.spool.GroupScopeRoots
@@ -279,6 +281,10 @@ class MeshManager(
     // `CALLS_WIRED`), and then nothing ever asks an issuer for anything.
     private val ticketKeys: TicketKeyJournal? = null,
     private val ticketIssuer: TicketIssuer? = null,
+    // The free half of the swap (docs/VOICE_CALLS.md C-7.6-33 to C-7.6-38): the free issuers, the person's answer to
+    // the notice, and the account route. Null with the rest of tickets, so release makes no free account.
+    private val freeKeys: FreeKeyJournal? = null,
+    private val accountIssuer: AccountIssuer? = null,
     private val allowCleartext: Boolean = false,
     // The supporter badge (docs/SUPPORTER_BADGE.md, ADR 2026-10.r99s): the holder's toggle and held badges, read into the
     // sealed profile, and the issuer that signs them. The journal is wired in every build (a release build simply never
@@ -634,6 +640,8 @@ class MeshManager(
                 allowCleartext = allowCleartext,
                 clock = clock,
                 log = { Log.i(SPOOL_TAG, it) },
+                free = freeKeys,
+                accounts = accountIssuer,
             )
         } else {
             null
@@ -711,6 +719,9 @@ class MeshManager(
                 // Entitlement tickets (experimental, docs/VOICE_CALLS.md §2.6, ADR 2026-10.xkp4), held beside the relay
                 // list. Imported by [ticketRefresher] from an invite's issuer, or through the debug bridge.
                 tickets = spoolTickets,
+                // An upload locked for want of a files ticket asks the refresher now (C-7.6-27 amended). Read late:
+                // the refresher is built below this field.
+                onUploadWanted = { url -> ticketRefresher?.uploadWanted(url) },
                 log = { Log.i(SPOOL_TAG, it) },
             )
         }
@@ -956,6 +967,8 @@ class MeshManager(
         )
 
     override fun spoolStatus(): List<SpoolStatus> = demoSpools ?: scopeSync?.status().orEmpty()
+
+    override fun freeTicketAsking(): Set<String> = ticketRefresher?.asking?.value.orEmpty()
 
     /**
      * Demo-screenshot only: pin a fixed set of spool statuses, so the relay indicators (the chat header's
@@ -1823,6 +1836,9 @@ class MeshManager(
             override suspend fun has(aHash: String): Boolean = blobs.exists(aHash)
 
             override suspend fun bytes(aHash: String): ByteArray? = blobs.bytes(aHash)
+
+            // The row's length, not its bytes: a ticket's `am` check runs before every upload look (C-7.6-32).
+            override suspend fun size(aHash: String): Int? = blobs.sizes(listOf(aHash))[aHash]?.toInt()
 
             // [mime] is only the fetcher's hint (since ADR 035 a sealed frame carries none); `ingest` prefers
             // what our own decrypted row says, and screens the bytes exactly as a radio pull would.

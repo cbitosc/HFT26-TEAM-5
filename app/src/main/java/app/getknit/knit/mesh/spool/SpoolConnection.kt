@@ -86,10 +86,15 @@ sealed interface SpoolTicketState {
     /** An `ent` is on its way and nothing accepted is live. */
     data object Pending : SpoolTicketState
 
-    /** The spool accepted a ticket good until [exp] (Unix seconds) with flags [fl]. */
+    /**
+     * The spool accepted a ticket good until [exp] (Unix seconds) with flags [fl], and, when it sets them, its own
+     * upload budget [ab] and per-attachment limit [am] in bytes (S-7.6-22, S-7.6-31).
+     */
     data class Accepted(
         val exp: Long,
         val fl: Long,
+        val ab: Long? = null,
+        val am: Long? = null,
     ) : SpoolTicketState
 
     /** The spool refused the last ticket presented here with [reason], and nothing accepted is live. */
@@ -136,6 +141,12 @@ sealed interface SpoolUploads {
 
         /** The `aput` refusal that spends a pseudonym's day here, rather than locking the connection. */
         const val BUDGET = "budget"
+
+        /**
+         * The `aput` refusal that says only that one attachment is over the ticket's `am` (S-7.6-31): it locks nothing
+         * and spends nothing (C-7.6-32), so it never becomes an upload state.
+         */
+        const val SIZE = "size"
     }
 }
 
@@ -540,6 +551,14 @@ class SpoolConnection(
         return SpoolUploads.Locked(reason)
     }
 
+    /**
+     * The most chunks an attachment of this phone's may have to go up here (C-7.6-32): `⌊am / aChunkBytes⌋` of the live
+     * accepted files ticket where `aput` is gated and that ticket sets `am`, else null — no limit beyond the spool's own.
+     * Ungated, a spool ignores `am`, and so does this.
+     */
+    fun uploadLimitChunks(): Int? =
+        liveTicket()?.takeIf { gated(SpoolTicket.FL_FILES) && it.fl and SpoolTicket.FL_FILES != 0L }?.am?.let(SpoolTicket::chunksOf)
+
     /** The pseudonym an upload here is charged to: the live accepted ticket's, while it grants files; else null. */
     fun uploadPseudonym(): TicketPseudonym? = acceptedPseudonym?.takeIf { filesTicketLive() }
 
@@ -830,7 +849,7 @@ class SpoolConnection(
         // reply completes, so a TURN ask waiting on it reads the ticket it waited for.
         if (ticket != null) {
             settleTicket(entry) {
-                accepted = SpoolTicketState.Accepted(exp = ticket.claims.exp, fl = ticket.claims.fl)
+                accepted = SpoolTicketState.Accepted(ticket.claims.exp, ticket.claims.fl, ticket.claims.ab, ticket.claims.am)
                 acceptedPseudonym = ticket.pseudonym
                 refusal = null
             }

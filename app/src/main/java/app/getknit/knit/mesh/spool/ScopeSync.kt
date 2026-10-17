@@ -42,6 +42,9 @@ interface ScopeBlobs {
 
     suspend fun bytes(aHash: String): ByteArray?
 
+    /** The stored length of [aHash] (its `A`), or null when it is not held: what a ticket's `am` is measured against. */
+    suspend fun size(aHash: String): Int? = bytes(aHash)?.size
+
     /** Stores bytes already checked against [aHash], and screens them exactly as a radio pull does (#109). */
     suspend fun save(
         aHash: String,
@@ -199,6 +202,11 @@ class SpoolStatus(
      * where [maxAttachBytes] is null anyway.
      */
     val uploads: SpoolUploads = SpoolUploads.Open,
+    /**
+     * The most chunks an attachment of this phone's may have to go up here (C-7.6-32), from the live files ticket's `am`
+     * ([SpoolConnection.uploadLimitChunks]), or null for no limit beyond [maxAttachBytes]. Null while disconnected.
+     */
+    val uploadLimitChunks: Int? = null,
 )
 
 /**
@@ -290,6 +298,10 @@ class ScopeSync(
     // included: there nothing imports into it (the import doors and the refresher sit behind `CALLS_WIRED`), so a
     // release phone holds no ticket and is locked out of uploads on a files-gated spool, as an unticketed one is.
     private val tickets: SpoolTickets? = null,
+    // A relay URL where an upload of this phone's was just settled as locked `missing` or `expired` behind the files
+    // gate (C-7.6-27): the ticket refresher's reason to ask now rather than on its schedule, and a free key's only one.
+    // Called on the worker's coroutine, possibly once per attachment in a round; the receiver de-duplicates.
+    private val onUploadWanted: (String) -> Unit = {},
     // Where the plane says what it did with a ticket and a TURN ask (the app's `ScopeSync` logcat tag). Never handed
     // a ticket, a credential or a token: hosts, outcome words and counts only.
     private val log: (String) -> Unit = {},
@@ -592,6 +604,18 @@ class ScopeSync(
         val accepted: Int,
     )
 
+    /** What one `aput` came to ([Worker.putChunk]). */
+    private enum class ChunkPut {
+        /** Stored, or refused in a way that leaves the next chunk worth trying. */
+        NEXT,
+
+        /** The rest of this attachment is not worth attempting on this connection now. */
+        STOP,
+
+        /** The spool refused it `size` (S-7.6-31): too large for this relay under this ticket. */
+        TOO_LARGE,
+    }
+
     /** An attachment a round passed by without a round trip, and how much of a later look it still owes. */
     private enum class LocalPass(
         val owed: Int,
@@ -607,6 +631,13 @@ class ScopeSync(
          * looked at again only when a files ticket is accepted here or the connection is replaced.
          */
         LOCKED(0),
+
+        /**
+         * Ours to push, but larger than this connection's files ticket lets one attachment be (`am`, C-7.6-32), or the
+         * spool already said so (`size`): settled, owed nothing, never `aput`. Looked at again when a files ticket is
+         * accepted here, whose `am` may differ, or the connection is replaced. Uploads stay open for the rest.
+         */
+        TOO_LARGE(0),
     }
 
     /**
@@ -708,6 +739,13 @@ class ScopeSync(
         // our uploads ([LocalPass.LOCKED]). Guarded by [settledAttachments]' lock; what [reopenUploads] un-settles
         // when a files ticket is accepted, so they go up without waiting for the hourly recheck.
         private val lockedUploads = HashMap<String, MutableSet<String>>()
+
+        // scopeHex → the attachments of ours a round settled as larger than this connection's ticket admits
+        // ([LocalPass.TOO_LARGE]), and the hashes the spool itself refused `size` for here, whatever we computed. Both
+        // guarded by [settledAttachments]' lock, and both undone by [reopenUploads]: the next files ticket's `am` may
+        // take them.
+        private val tooLargeUploads = HashMap<String, MutableSet<String>>()
+        private val sizeRefused = LinkedHashSet<String>()
 
         // The word of the `err ticket` an `aput` drew on this connection (`missing`, `expired`, `flags`, or `budget`
         // without a pseudonym to mark): uploads stay locked here until a files ticket is next accepted. Reset with
@@ -817,6 +855,7 @@ class ScopeSync(
             synchronized(settledAttachments) {
                 settledAttachments.keys.retainAll(live)
                 lockedUploads.keys.retainAll(live)
+                tooLargeUploads.keys.retainAll(live)
             }
             // A scope that stayed but now takes a different push set — a live DM scope that became the retiring
             // one our reset rides, or the reset's ephemeral cleared on the answer (ADR 2026-10.j67x) — is healed
@@ -1018,6 +1057,10 @@ class ScopeSync(
             synchronized(settledAttachments) {
                 for ((scopeHex, hashes) in lockedUploads) settledAttachments[scopeHex]?.keys?.removeAll(hashes)
                 lockedUploads.clear()
+                // A new ticket's `am` may take what the last one did not (C-7.6-32).
+                for ((scopeHex, hashes) in tooLargeUploads) settledAttachments[scopeHex]?.keys?.removeAll(hashes)
+                tooLargeUploads.clear()
+                sizeRefused.clear()
             }
             markAllDirty()
         }
@@ -1043,6 +1086,7 @@ class ScopeSync(
                 cast = connection?.takeIf { it.isReady }?.cast,
                 entGates = connection?.takeIf { it.isReady }?.gates ?: 0L,
                 uploads = connection?.takeIf { it.isReady }?.let(::uploadsOn) ?: SpoolUploads.Open,
+                uploadLimitChunks = connection?.takeIf { it.isReady }?.uploadLimitChunks(),
                 scopes =
                     mine(all, connection).map { scope ->
                         ScopeStatus(
@@ -1237,6 +1281,8 @@ class ScopeSync(
             synchronized(settledAttachments) {
                 settledAttachments.clear()
                 lockedUploads.clear()
+                tooLargeUploads.clear()
+                sizeRefused.clear()
             }
             cancelAttachmentRetries()
             // A session we had to abort is not "reached": the backoff must grow, or an unresponsive spool
@@ -1796,6 +1842,8 @@ class ScopeSync(
          * - **Locked** (C-7.6-24): ours to push, on a connection that may not take this phone's uploads ([uploadsOn]):
          *   no `ahave`, no `aput`, and no retry — settled until a files ticket is accepted here. Fetching is never
          *   locked, so an attachment we lack goes on to the round trip as before.
+         * - **Too large** (C-7.6-32): ours to push, over the chunks this connection's files ticket admits ([tooLargeFor]):
+         *   no `ahave`, no `aput`, settled until a files ticket is accepted here. It locks nothing else.
          * - **Deferred**: the radios are still carrying an attachment we hold, so its push waits (§9.5).
          */
         private suspend fun passLocally(
@@ -1814,6 +1862,11 @@ class ScopeSync(
 
                 mine && uploadsOn(conn) != SpoolUploads.Open && settleLocked(conn, scope, ref.aHash) -> {
                     LocalPass.LOCKED
+                }
+
+                mine && tooLargeFor(conn, ref.aHash, blobStore) -> {
+                    settleTooLarge(conn, scope, ref.aHash)
+                    LocalPass.TOO_LARGE
                 }
 
                 mine && deferAttachment(scope, ref) -> {
@@ -1892,15 +1945,53 @@ class ScopeSync(
             scope: Scope,
             aHash: String,
         ): Boolean {
+            val uploads =
+                synchronized(settledAttachments) {
+                    val uploads = uploadsOn(conn)
+                    if (uploads == SpoolUploads.Open) return false
+                    settleAttachment(scope, aHash)
+                    val set = lockedUploads.getOrPut(scope.idHex) { LinkedHashSet() }
+                    set += aHash
+                    if (set.size > BLOB_SET_MAX) set.remove(set.first())
+                    uploads
+                }
+            metrics.onSpoolAttachmentLocked()
+            // An upload waits for a files ticket this phone may be able to fetch (C-7.6-27): no ticket, or one that has
+            // lapsed. `pending` is one on its way, `flags` one no fetch would change, and a spent day stays spent.
+            val reason = (uploads as? SpoolUploads.Locked)?.reason
+            if (reason == SpoolUploads.MISSING || reason == SpoolUploads.EXPIRED) onUploadWanted(url)
+            return true
+        }
+
+        /**
+         * Whether [aHash], ours, is too large to go up on [conn] (C-7.6-32): the spool refused it `size` here, or its
+         * `total = ⌈|A| / aChunkBytes⌉` is over [SpoolConnection.uploadLimitChunks]. False with no limit, and for a blob
+         * no longer held, which the push itself settles.
+         */
+        private suspend fun tooLargeFor(
+            conn: SpoolConnection,
+            aHash: String,
+            blobStore: ScopeBlobs,
+        ): Boolean {
+            if (synchronized(settledAttachments) { aHash in sizeRefused }) return true
+            val limit = conn.uploadLimitChunks() ?: return false
+            val size = blobStore.size(aHash) ?: return false
+            return ScopeAttachments.chunkCount(size) > limit
+        }
+
+        /** Settles [aHash] as too large for [conn] ([LocalPass.TOO_LARGE]), for [reopenUploads] to undo. */
+        private fun settleTooLarge(
+            conn: SpoolConnection,
+            scope: Scope,
+            aHash: String,
+        ) {
             synchronized(settledAttachments) {
-                if (uploadsOn(conn) == SpoolUploads.Open) return false
                 settleAttachment(scope, aHash)
-                val set = lockedUploads.getOrPut(scope.idHex) { LinkedHashSet() }
+                val set = tooLargeUploads.getOrPut(scope.idHex) { LinkedHashSet() }
                 set += aHash
                 if (set.size > BLOB_SET_MAX) set.remove(set.first())
             }
-            metrics.onSpoolAttachmentLocked()
-            return true
+            log("${SpoolUrl.host(url)}: an attachment is over this ticket's limit (${conn.uploadLimitChunks()} chunks); not uploaded")
         }
 
         private fun scheduleAttachmentRetry(scope: Scope) {
@@ -2046,12 +2137,28 @@ class ScopeSync(
             // A spool holding a different chunk count for this id is serving another member's
             // disagreement; first write wins there, so adding ours would only collect `conflict`s.
             if (presence.total != 0 && presence.total != total) return true
+            // C-7.6-32, again here: a ticket accepted since [passLocally] looked may carry an `am` this is over.
+            if (conn.uploadLimitChunks()?.let { total > it } == true) {
+                settleTooLarge(conn, scope, ref.aHash)
+                return true
+            }
             val stamp = stampFor(scope, conn.powBits)
             val missing = (0 until total).filter { presence.total == 0 || !ScopeAttachments.bitSet(presence.bits, it) }
             for (index in missing) {
                 val sealed =
                     ScopeCrypto.sealChunk(scope.keys, scope.id, aHashBytes, index, total, ScopeAttachments.sliceAt(bytes, index))
-                if (!putChunk(conn, scope, aid, index, total, sealed, stamp)) return false
+                val put = putChunk(conn, scope, aid, index, total, sealed, stamp)
+                if (put == ChunkPut.STOP) return false
+                // The spool's own `size` (S-7.6-31): too large for this relay, whatever we computed. Settled, never a
+                // lock, and nothing marked spent (C-7.6-32).
+                if (put == ChunkPut.TOO_LARGE) {
+                    synchronized(settledAttachments) {
+                        sizeRefused += ref.aHash
+                        if (sizeRefused.size > BLOB_SET_MAX) sizeRefused.remove(sizeRefused.first())
+                    }
+                    settleTooLarge(conn, scope, ref.aHash)
+                    return true
+                }
             }
             return true
         }
@@ -2063,7 +2170,10 @@ class ScopeSync(
             presence: SpoolReply.Presence,
         ): Boolean = !scope.retiring && !presence.dead && ref.sentAt + scope.bounds.ttlMs > clock()
 
-        /** Stores one sealed chunk; false means the rest of this attachment is not worth attempting. */
+        /**
+         * Stores one sealed chunk: [ChunkPut.NEXT] when the next one is worth trying, [ChunkPut.STOP] when the rest of this
+         * attachment is not, or [ChunkPut.TOO_LARGE] when the spool refused it `size` (S-7.6-31).
+         */
         @Suppress("LongParameterList") // the aput record's own field list
         private suspend fun putChunk(
             conn: SpoolConnection,
@@ -2073,23 +2183,25 @@ class ScopeSync(
             total: Int,
             sealed: ByteArray,
             stamp: PowStamp?,
-        ): Boolean {
+        ): ChunkPut {
             val reply = conn.aput(scope.id, aid, index, total, ScopeCrypto.blobId(sealed), sealed, stamp)
             if (reply is SpoolReply.Ok) {
                 metrics.onSpoolAttachmentPushed()
-                return true
+                return ChunkPut.NEXT
             }
-            if (reply !is SpoolReply.Failed) return false
+            if (reply !is SpoolReply.Failed) return ChunkPut.STOP
             // The files gate (S-7.6-22), ahead of [survivable], which frame PUSH shares: no strike, no error to show —
-            // the connection's upload state says it — and no further chunk on this connection until it reopens.
+            // the connection's upload state says it — and no further chunk on this connection until it reopens. `size`
+            // is the one word that is about this attachment alone (C-7.6-32).
             if (reply.code == SpoolErrCode.TICKET) {
+                if (reply.msg == SpoolUploads.SIZE) return ChunkPut.TOO_LARGE
                 uploadRefused(conn, reply.msg)
-                return false
+                return ChunkPut.STOP
             }
-            if (stampDemand(scope.idHex, reply, stamp)) return false
+            if (stampDemand(scope.idHex, reply, stamp)) return ChunkPut.STOP
             metrics.onSpoolError()
             lastError = reply.code
-            return survivable(reply)
+            return if (survivable(reply)) ChunkPut.NEXT else ChunkPut.STOP
         }
 
         private fun quarantineAttachment(

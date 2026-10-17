@@ -66,7 +66,13 @@ class HeldTicket private constructor(
 
         // The spool checks more (key id, window length, pseudonym size); a client only needs claims it can act on.
         private fun wellFormed(claims: SpoolTicket): Boolean =
-            claims.v == SpoolTicket.VERSION && claims.aud.isNotEmpty() && claims.nbf >= 0 && claims.exp >= claims.nbf && claims.fl >= 0
+            claims.v == SpoolTicket.VERSION &&
+                claims.aud.isNotEmpty() &&
+                claims.nbf >= 0 &&
+                claims.exp >= claims.nbf &&
+                claims.fl >= 0 &&
+                (claims.ab ?: 0L) >= 0 &&
+                (claims.am ?: 0L) >= 0
     }
 }
 
@@ -214,13 +220,18 @@ class SpoolTickets(
         ) : Import
     }
 
-    /** What the oracle shows of a held ticket: its claims and verdict, never its bytes or its pseudonym. */
+    /**
+     * What the oracle shows of a held ticket: its claims and verdict, never its bytes or its pseudonym. [ab] and [am] are
+     * the ticket's own upload budget and per-attachment limit in bytes, null where it leaves them to the spool.
+     */
     class View(
         val exp: Long,
         val grantsTurn: Boolean,
         val grantsFiles: Boolean,
         val grantsCast: Boolean,
         val verdict: String?,
+        val ab: Long? = null,
+        val am: Long? = null,
     )
 
     /** Every held ticket and verdict, distinct: what a live connection watches to present an import at once. */
@@ -279,7 +290,15 @@ class SpoolTickets(
         val host = SpoolUrl.hostname(url) ?: return null
         val stored = journal.spoolTickets.first()[host] ?: return null
         val ticket = HeldTicket.parse(stored.text) ?: return null
-        return View(ticket.claims.exp, ticket.grantsTurn, ticket.grantsFiles, ticket.grantsCast, stored.verdict)
+        return View(
+            ticket.claims.exp,
+            ticket.grantsTurn,
+            ticket.grantsFiles,
+            ticket.grantsCast,
+            stored.verdict,
+            ticket.claims.ab,
+            ticket.claims.am,
+        )
     }
 
     private companion object {

@@ -9,6 +9,7 @@ import app.getknit.knit.data.LinkCardStore
 import app.getknit.knit.data.commons.CommonsRepository
 import app.getknit.knit.data.crypto.IdentityKeyStore
 import app.getknit.knit.data.forward.ForwardRepository
+import app.getknit.knit.data.relay.FreeUploads
 import app.getknit.knit.data.relay.RelayStatusRepository
 import app.getknit.knit.data.settings.BadgeStore
 import app.getknit.knit.data.settings.OwnIceStore
@@ -79,6 +80,7 @@ val uiModule =
                 get<CommonsRepository>(),
                 get<AttachmentIdentities>(),
                 getOrNull<CallManager>(),
+                freeUploads = if (CALLS_WIRED) get<FreeUploads>() else null,
             )
         }
         viewModel {
@@ -196,6 +198,7 @@ val uiModule =
                 ticketKeys = get<TicketKeyStore>(),
                 // A row's call details (TURN, STUN, casts, the ticket and its key) only where calls are wired.
                 spoolTickets = if (CALLS_WIRED) get<SettingsStore>() else null,
+                freeUploads = if (CALLS_WIRED) get<FreeUploads>() else null,
             )
         }
         viewModel { LoraRadioViewModel(get(), get(), get(), get()) }

@@ -14,6 +14,7 @@ import app.getknit.knit.data.KnitDatabase
 import app.getknit.knit.data.MeshBlobStore
 import app.getknit.knit.data.crypto.IdentityKeyStore
 import app.getknit.knit.data.forward.ForwardRepository
+import app.getknit.knit.data.relay.FreeUploads
 import app.getknit.knit.data.relay.RelayStatusRepository
 import app.getknit.knit.data.settings.BadgeStore
 import app.getknit.knit.data.settings.DirectHostStore
@@ -71,6 +72,7 @@ import app.getknit.knit.mesh.power.PowerMonitor
 import app.getknit.knit.mesh.power.PowerStateSource
 import app.getknit.knit.mesh.power.awareSwitchedOff
 import app.getknit.knit.mesh.protocol.Protocol
+import app.getknit.knit.mesh.spool.AccountIssuer
 import app.getknit.knit.mesh.spool.OkHttpSpoolDialer
 import app.getknit.knit.mesh.spool.OkHttpTicketIssuer
 import app.getknit.knit.mesh.spool.SpoolDialer
@@ -405,6 +407,8 @@ val meshModule =
                 // Tickets buy TURN and casts, which only a build with calls has: release holds no key and asks no issuer.
                 ticketKeys = if (CALLS_WIRED) get<TicketKeyStore>() else null,
                 ticketIssuer = if (CALLS_WIRED) get<TicketIssuer>() else null,
+                freeKeys = if (CALLS_WIRED) get<TicketKeyStore>() else null,
+                accountIssuer = if (CALLS_WIRED) get<TicketIssuer>() as? AccountIssuer else null,
                 allowCleartext = BuildConfig.DEBUG,
                 // The supporter badge (ADR 2026-10.r99s): the journal in every build, the issuer beside the ticket swap's.
                 badgeJournal = get<BadgeStore>(),
@@ -458,6 +462,8 @@ val meshModule =
         // One place that turns settings + `spoolStatus()` into the relay facts the chat indicator, the
         // relay settings screen and Diagnostics all read.
         single { RelayStatusRepository(get(), get()) }
+        // Free accounts' notice and switch (docs/VOICE_CALLS.md C-7.6-34): read only where tickets are wired.
+        single { FreeUploads(get<RelayStatusRepository>().statuses, get<TicketKeyStore>(), get<TicketKeyStore>()) }
         // The LoRa plane's UI face: the transport itself when the build ships the plane, a dark stand-in
         // otherwise — so the chat header's repository (resolved by every open chat) never instantiates the
         // board session in release. Its facts feed the header glyph, the DM notice and the composer hint.

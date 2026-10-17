@@ -145,8 +145,9 @@ class BadgeRefresher(
     }
 
     /**
-     * The key to ask with: the first held key, by relay host name, whose issuer passes [IssuerOrigin] and whose last
-     * ticket answer is neither `ended` nor `unknown-key`. Null when none, so a phone with no live account never asks.
+     * The key to ask with: the first held customer key, by relay host name, whose issuer passes [IssuerOrigin] and whose
+     * last ticket answer is neither `ended` nor `unknown-key`. Null when none, so a phone with no live account never
+     * asks. A free key (C-7.6-37) never does: a badge says its holder supports Knit, and a free account pays nothing.
      */
     private suspend fun issuerKey(): HeldKey? {
         val states = keys.keyStates.first()
@@ -155,7 +156,8 @@ class BadgeRefresher(
             .toSortedMap()
             .entries
             .firstOrNull { (host, key) ->
-                IssuerOrigin.isAcceptable(key.issuer, allowCleartext) &&
+                !key.free &&
+                    IssuerOrigin.isAcceptable(key.issuer, allowCleartext) &&
                     CustomerKey.isWellFormed(key.key) &&
                     states[host]?.answer.let { it != KeyAnswer.ENDED && it != KeyAnswer.UNKNOWN_KEY }
             }?.value

@@ -118,7 +118,8 @@ class ProfileViewModel(
                 if (me.isEmpty()) return@combine null
                 val nowS = clock() / MS_PER_S
                 val verified = held.firstNotNullOfOrNull { Badges.verify(it.wrapper, it.r, me, nowS, pins) }
-                if (keys.isEmpty() && verified == null) null else OwnBadgeRow(on = on, showing = verified?.b)
+                // A free key earns no badge, so it offers none (C-7.6-37).
+                if (keys.values.none { !it.free } && verified == null) null else OwnBadgeRow(on = on, showing = verified?.b)
             }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
         }
 

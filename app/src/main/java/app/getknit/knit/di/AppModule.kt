@@ -8,6 +8,7 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.preferencesDataStoreFile
 import androidx.room3.withWriteTransaction
 import app.getknit.knit.BuildConfig
+import app.getknit.knit.R
 import app.getknit.knit.badge.BadgeKeys
 import app.getknit.knit.badge.PeerBadges
 import app.getknit.knit.contacts.ContactCards
@@ -69,6 +70,7 @@ import app.getknit.knit.mesh.crypto.ratchet.GroupRatchetStore
 import app.getknit.knit.mesh.crypto.ratchet.RatchetStore
 import app.getknit.knit.mesh.lora.LoraStatusRepository
 import app.getknit.knit.mesh.spool.CommonsStore
+import app.getknit.knit.mesh.spool.FreeIssuers
 import app.getknit.knit.mesh.spool.GroupRootStore
 import app.getknit.knit.moderation.ImageScreeningService
 import app.getknit.knit.moderation.ScopedTextModerator
@@ -213,7 +215,8 @@ val appModule =
         // share. The commons store rides only while `BuildConfig.COMMONS` is on — null is the wx8e seam.
         single { RelayInviteInbox() }
         // The customer keys an invite hands this phone (ADR 2026-10.3sk7), beside the relay list in the settings DataStore.
-        single { TicketKeyStore(get()) }
+        // The free issuers this build ships (C-7.6-33) seed its free half; a debug build's bridge may add its own.
+        single { TicketKeyStore(get(), FreeIssuers.parse(androidContext().resources.getStringArray(R.array.free_issuers))) }
         // The supporter badge (docs/SUPPORTER_BADGE.md, ADR 2026-10.r99s): the holder's toggle and held badges beside the
         // customer keys, and every peer's received badges verified at display time against this build's pinned keys.
         single { BadgeStore(get()) }

@@ -16,4 +16,12 @@
     <string-array name="default_spools" translatable="false">
         <item>wss://lax.spool.getknit.app/spool/v1</item>
     </string-array>
+    <!--
+      Free issuers (docs/VOICE_CALLS.md C-7.6-33): `<relay host> <issuer origin>`, the one place a free account may be
+      made for that relay's uploads, after the person allows it (C-7.6-34). Only the seeded relay has one; a debug
+      build sets its own for any host through `…debug.SPOOL` (.agents/context/debug-bridge.md).
+    -->
+    <string-array name="free_issuers" translatable="false">
+        <item>lax.spool.getknit.app https://anywhere.getknit.app</item>
+    </string-array>
 </resources>

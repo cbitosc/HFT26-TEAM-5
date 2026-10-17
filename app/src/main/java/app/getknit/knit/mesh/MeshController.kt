@@ -118,6 +118,12 @@ interface MeshController {
     fun spoolStatus(): List<SpoolStatus> = emptyList()
 
     /**
+     * The relay host names a free account request or a free key's ticket ask is running for right now (docs/VOICE_CALLS.md
+     * C-7.6-35): the debug bridge's `asking`. Empty without tickets.
+     */
+    fun freeTicketAsking(): Set<String> = emptySet()
+
+    /**
      * Per-peer DM ratchet state, for diagnosing a session that will not recover. Debug-only observability:
      * every gate in the reset path returns silently, so from outside there is no way to tell a peer whose
      * heuristic has not fired from one we hold no prekey for — states that look identical and need opposite

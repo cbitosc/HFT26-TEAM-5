@@ -149,11 +149,12 @@ class TicketRefresherTest {
     }
 
     @Test
-    fun a200WhoseTicketWasNotHeldIsNoVerdict() {
+    fun a200WhoseTicketWasNotHeldIsNoVerdictButWaitsOutTheFloor() {
+        // Contract revision 1: asking again at once would fetch the same unusable ticket, and a free key would loop.
         val after = TicketRefreshPolicy.afterAnswer(KeyState.FRESH, IssuerAnswer.Issued("t", 10), held = false, now = now)
         assertNull(after.answer)
         assertEquals(1, after.failures)
-        assertEquals(now + TicketRefreshPolicy.FIRST_BACKOFF_MS, TicketRefreshPolicy.dueAt(after, null))
+        assertEquals(now + TicketRefreshPolicy.OK_FLOOR_MS, TicketRefreshPolicy.dueAt(after, null))
     }
 
     // ── the refresher, against the stores ─────────────────────────────────────────────────────────────

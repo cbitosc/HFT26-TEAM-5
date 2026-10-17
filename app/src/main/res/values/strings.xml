@@ -1416,6 +1416,16 @@
     <string name="relays_calls_key_unknown">%1$s doesn\'t recognise this ticket key</string>
     <string name="relays_calls_key_ended">Account at %1$s ended %2$s</string>
     <string name="relays_calls_key_ended_undated">Account at %1$s has ended</string>
+    <!-- A ticket's own limits (S-7.6-22, S-7.6-31) after its grants: %1$s is a size such as "256 kB". -->
+    <string name="relays_calls_files_each">up to %1$s each</string>
+    <string name="relays_calls_files_day">%1$s a day</string>
+    <!-- A free key (C-7.6-37): no account, no end date. %1$s is the free issuer's host name. -->
+    <string name="relays_free_key_waiting">Free tickets from %1$s · asking for one</string>
+    <string name="relays_free_key_unanswered">Free tickets from %1$s · not answering</string>
+    <string name="relays_free_key_held">Free tickets from %1$s</string>
+    <!-- The relay row's switch for free tickets (C-7.6-34); %1$s is the free issuer's host name. -->
+    <string name="relays_free_uploads_title">Free tickets for small photos</string>
+    <string name="relays_free_uploads_summary">Fetched from %1$s on days this phone sends files here</string>
     <string name="relays_error_unreachable">Cannot be reached</string>
     <string name="relays_error_busy">Busy — it is not taking new connections right now</string>
     <string name="relays_error_auth">Rejected the access token</string>
@@ -1485,7 +1495,8 @@
     <string name="chat_relay_nearby_only">Nearby only</string>
     <string name="chat_relay_nearby_only_desc">Attachment will not be sent over the Internet</string>
     <string name="chat_relay_too_large_title">Too large for your relays</string>
-    <string name="chat_relay_too_large_body">This attachment is bigger than any of your relays will hold, so it is not being uploaded. It still arrives when you and %1$s are in Wi-Fi or Bluetooth range of each other.</string>
+    <!-- Over every relay's budget, or over the per-file limit this phone's ticket carries there (C-7.6-32). -->
+    <string name="chat_relay_too_large_body">This attachment is bigger than your relays will take from this phone, so it is not being uploaded. It still arrives when you and %1$s are in Wi-Fi or Bluetooth range of each other.</string>
     <string name="chat_relay_unsupported_title">Your relays carry messages only</string>
     <string name="chat_relay_unsupported_body">None of your relays accepts attachments, so this one is not being uploaded. It still arrives when you and %1$s are in Wi-Fi or Bluetooth range of each other.</string>
     <string name="chat_relay_staged_too_large">Nearby only — too large for your relays</string>
@@ -1496,6 +1507,13 @@
     <string name="chat_relay_locked_title">Your relays are not taking files from this phone</string>
     <string name="chat_relay_locked_body">They take attachments from phones with a ticket for sending files, up to a daily amount for each ticket. This phone has none there, or has sent today\'s amount, so this one is not being uploaded. It still arrives when you and %1$s are in Wi-Fi or Bluetooth range of each other, and attachments sent to you still come through your relays.</string>
     <string name="chat_relay_staged_locked">Nearby only — your relays are not taking your files</string>
+    <!-- The free-ticket notice (docs/VOICE_CALLS.md C-7.6-34), shown once before this phone first contacts a free
+         issuer; %1$s is that issuer's host name. Name no product, price or shop, and never "Get" or "Upgrade"; the
+         daily amount is a sending allowance, never storage. -->
+    <string name="chat_free_uploads_title">Send small photos through your relay?</string>
+    <string name="chat_free_uploads_body">With a free ticket, your relay carries small photos and files from this phone, up to a daily amount. To fetch the ticket, the phone contacts %1$s on each day it sends something through the relay. You can turn this off any time in Internet relays.</string>
+    <string name="chat_free_uploads_allow">Allow</string>
+    <string name="chat_free_uploads_decline">Not now</string>
     <!-- LoRa plane (ADR 040): a DM whose peer only the board has heard lately, and the composer's length hint -->
     <string name="chat_lora_only">Reachable over LoRa only</string>
     <string name="chat_lora_only_title">Over LoRa only</string>
