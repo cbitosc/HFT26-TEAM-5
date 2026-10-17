@@ -16,14 +16,21 @@ import app.getknit.knit.mesh.protocol.LinkPreviewBlob
  * name that is not a card — a shape no shipped build originates, but one a future or hostile peer could — so
  * it is checked explicitly rather than left to fall through as a photo.
  */
-enum class AttachmentKind { Photo, Voice, File, Link }
+enum class AttachmentKind { Photo, Voice, File, Link, Video }
 
-/** The [AttachmentKind] of an attachment with this [mime] and [name]. */
+/**
+ * The [AttachmentKind] of an attachment with this [mime] and [name]. A **video** (ADR 2026-10.hmfe) is the one kind
+ * tested ahead of the name: it is named only so an older build shows it as a file, and what makes it one is its
+ * description ([video], the row's `videoDurationMs` present) on a video MIME — an `.mp4` sent through "Send a file"
+ * has none and stays a file, sent and saved as-is.
+ */
 fun attachmentKindOf(
     mime: String?,
     name: String?,
+    video: Boolean = false,
 ): AttachmentKind =
     when {
+        video && mime != null && mime.startsWith("video/") -> AttachmentKind.Video
         name != null -> AttachmentKind.File
         VoiceAudio.isVoice(mime) -> AttachmentKind.Voice
         mime == LinkPreviewBlob.MIME -> AttachmentKind.Link

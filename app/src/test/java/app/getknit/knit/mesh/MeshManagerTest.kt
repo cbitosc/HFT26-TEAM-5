@@ -2693,6 +2693,41 @@ class MeshManagerTest {
         }
 
     @Test
+    fun aCarriedRoomPostNoRowNamesIsJudgedByTheSizeItDeclares() =
+        runTest(UnconfinedTestDispatcher()) {
+            // ADR 2026-10.hmfe: a room post is every node's and declares its size in the clear. A tick between custody's
+            // write and the delivery's row, a blocked sender's post, a swept row: the re-arm judges the post as its row
+            // would be, never as a carrier pull over Bluetooth. Folded as the rows are: an undeclared post lifts it.
+            val rig = Rig(backgroundScope)
+            val author = "author-node"
+            rig.bluetoothDownloadLimit.value = 1_000_000L
+            rig.forwardStore.carried =
+                listOf(
+                    CarriedAttachment("big-clip", recipientId = null, carriedAt = 0L, senderId = author, declaredSize = 3_000_000L),
+                    CarriedAttachment("small-clip", recipientId = null, carriedAt = 0L, senderId = author, declaredSize = 400_000L),
+                    CarriedAttachment("lifted", recipientId = null, carriedAt = 0L, senderId = author, declaredSize = 3_000_000L),
+                    CarriedAttachment("lifted", recipientId = null, carriedAt = 0L, senderId = "older-build"),
+                )
+            rig.transport.nearby.value = setOf(Peer(author)) // a Bluetooth link only: no Wi-Fi Aware route
+            rig.stubProfileState(MutableStateFlow(0L))
+            coEvery { rig.groups.observeGroups() } returns flowOf(emptyList())
+
+            rig.manager.start()
+            rig.await(2) { rig.blobAsks().size }
+            assertEquals(
+                "the large room post is held to Wi-Fi Aware; the small and the lifted one asked plain",
+                setOf("small-clip", "lifted"),
+                rig.blobAsks().mapTo(HashSet()) { it.second.hash },
+            )
+            assertTrue(rig.blobAsks().none { it.second.fastOnly != null })
+
+            rig.bluetoothDownloadLimit.value = null // "Never ask": the room post is fetched as a carrier pull
+            rig.await(3) { rig.blobAsks().size }
+            assertEquals(author to BlobReqContent("big-clip"), rig.blobAsks().last())
+            rig.manager.stop()
+        }
+
+    @Test
     fun tapToDownloadApprovesTheRowsAndAsksTheAuthorPlainAtOnce() =
         runTest(UnconfinedTestDispatcher()) {
             val rig = Rig(backgroundScope)

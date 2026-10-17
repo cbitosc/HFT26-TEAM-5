@@ -458,6 +458,41 @@ class GoldenVectorTest {
                         attachmentSize = 1_400_000L,
                     ),
                 ),
+            // Short videos (ADR 2026-10.hmfe): the description a video's bubble draws before its bytes land, sealed in
+            // both plaintext layouts and cleartext in a room post, plus the room's declared size. Every fixture above
+            // stays byte-identical: the fields are additive and absent unless set.
+            "messageContentVideo" to
+                MessageContent(
+                    body = "",
+                    attachmentHash = hex(bytes(32, 4)),
+                    attachmentMime = "video/mp4",
+                    attachmentKey = b64(bytes(32, 5)),
+                    attachmentName = "video.mp4",
+                    attachmentSize = 3_000_000L,
+                    video = VideoInfo(durationMs = 61_000L, width = 480, height = 854, poster = bytes(6, 13)),
+                ).encode(),
+            "messageContentV2Video" to
+                compact(
+                    MessageContent(
+                        body = "",
+                        attachmentHash = hex(bytes(32, 4)),
+                        attachmentMime = "video/mp4",
+                        attachmentKey = b64(bytes(32, 5)),
+                        attachmentName = "video.mp4",
+                        attachmentSize = 3_000_000L,
+                        video = VideoInfo(durationMs = 61_000L, width = 480, height = 854, poster = bytes(6, 13)),
+                    ),
+                ),
+            "chatContentVideo" to
+                WireCodec.encodePayload(
+                    ChatContent(
+                        body = "look",
+                        attachmentHash = hex(bytes(32, 4)),
+                        attachmentMime = "video/mp4",
+                        attachmentSize = 3_000_000L,
+                        video = VideoInfo(durationMs = 30_000L, width = 854, height = 480, poster = bytes(6, 14)),
+                    ),
+                ),
             // Link-preview cards: the container a card attachment's blob holds. Its own type under its own MIME,
             // so no fixture above moves; `v` is required and always emitted (an elided version cannot gate), and
             // the text-only shape pins that an absent picture costs no bytes at all.

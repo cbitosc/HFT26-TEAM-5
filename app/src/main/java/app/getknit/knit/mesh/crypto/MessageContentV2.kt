@@ -10,6 +10,7 @@ import app.getknit.knit.mesh.protocol.Mention
 import app.getknit.knit.mesh.protocol.ProfilePayload
 import app.getknit.knit.mesh.protocol.ReactionPayload
 import app.getknit.knit.mesh.protocol.ReplyRef
+import app.getknit.knit.mesh.protocol.VideoInfo
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.cbor.CborLabel
@@ -71,6 +72,7 @@ internal object MessageContentV2 {
             attachmentKey = content.attachmentKey?.let(::keyBytes),
             attachmentName = content.attachmentName,
             attachmentSize = content.attachmentSize,
+            video = content.video?.let { VideoV2(it.durationMs, it.width, it.height, it.poster) },
             replyTo = content.replyTo?.let(::replyRefOf),
             ctl = content.ctl,
             ack = content.ack?.let(::frameIdBytes),
@@ -120,6 +122,7 @@ internal object MessageContentV2 {
                 attachmentKey = w.attachmentKey?.let(::b64),
                 attachmentName = w.attachmentName,
                 attachmentSize = w.attachmentSize,
+                video = w.video?.let { VideoInfo(it.durationMs, it.width, it.height, it.poster) },
                 replyTo =
                     w.replyTo?.let {
                         ReplyRef(
@@ -160,7 +163,8 @@ internal object MessageContentV2 {
      * payload with raw 32-byte seeds (44 B each as base64 today) — both readable by this build already,
      * since `ignoreUnknownKeys` skips a label it does not model: a new label is additive, a new *form* (the
      * group form) is a new envelope version. `14`/`15` are the file attachment's name and byte count (ADR
-     * 2026-09.qq2r), which took the next free labels rather than the reserved pair. Never recycle a label.
+     * 2026-09.qq2r), which took the next free labels rather than the reserved pair, and `16` a short video's
+     * duration, size and poster (ADR 2026-10.hmfe). Never recycle a label.
      * The nested layouts are append-only too: `ProfileV2`'s label 5 is the open-to-chat flag (defaulted, so
      * elided while off — a profile without it decodes as before), label 6 the bound LoRa board's node
      * number (nullable, elided while unbound) and label 7 that board's signing key (32 raw bytes here, base64
@@ -197,6 +201,22 @@ internal object MessageContentV2 {
         val attachmentName: String? = null,
         @CborLabel(15)
         val attachmentSize: Long? = null,
+        @CborLabel(16)
+        val video: VideoV2? = null,
+    )
+
+    /** [VideoInfo] (label 16, ADR 2026-10.hmfe): its own layout, like every nested type here. */
+    @Serializable
+    @Suppress("MagicNumber") // the CBOR labels are the layout itself, pinned by GoldenVectorTest
+    private class VideoV2(
+        @CborLabel(1)
+        val durationMs: Long,
+        @CborLabel(2)
+        val width: Int,
+        @CborLabel(3)
+        val height: Int,
+        @CborLabel(4)
+        val poster: ByteArray,
     )
 
     @Serializable

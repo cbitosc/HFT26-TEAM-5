@@ -5,7 +5,9 @@ import androidx.room3.Index
 import androidx.room3.PrimaryKey
 import app.getknit.knit.mesh.protocol.Mention
 import app.getknit.knit.mesh.protocol.ReplyRef
+import app.getknit.knit.mesh.protocol.VideoInfo
 import kotlinx.serialization.json.Json
+import java.util.Base64
 
 /**
  * A chat message as stored on this device. [id] is the globally-unique wire id (also the dedup key
@@ -237,6 +239,28 @@ data class MessageEntity(
      * ([MessageDao.approveAttachmentFetch]), so the database re-arm never gates a tapped attachment again. **Local only.**
      */
     val attachmentFetchApproved: Boolean = false,
+    /**
+     * A short video's duration, upright width and height (ADR 2026-10.hmfe): the sender's claim from
+     * [app.getknit.knit.mesh.protocol.VideoInfo] until the bytes land, then what the bytes themselves say (derived
+     * on arrival like [voiceDurationMs]). All null for anything but a video.
+     */
+    val videoDurationMs: Long? = null,
+    val videoWidth: Int? = null,
+    val videoHeight: Int? = null,
+    /**
+     * The video's poster, a small JPEG, base64: carried inside the message so the bubble has a picture before the
+     * bytes arrive. Base64 text rather than a BLOB so the row keeps a value `equals` (a `ByteArray` compares by
+     * identity, and every Flow of rows would re-emit). Never in the blob table, where any neighbour could ask for it
+     * by hash. Empty when the sender had none.
+     */
+    val videoPoster: String? = null,
+    /**
+     * This phone's screen judged [videoPoster] explicit (ADR 2026-10.hmfe): the bubble draws it hidden like a flagged
+     * picture, under the Content filtering toggle. On the row, not in `blob_verdicts`, so it goes with the message
+     * rather than outliving it: the poster is no blob, and nothing would ever collect a verdict keyed by it.
+     * **Local only.**
+     */
+    val videoPosterFlagged: Boolean = false,
 ) {
     companion object {
         // [originSigned] values. Append-only like every other registry here: the value is stored on the row.
@@ -385,6 +409,30 @@ fun MessageEntity.replyRef(): ReplyRef? =
             hasAttachment = replyToHasAttachment,
         )
     }
+
+/** The video description this row carries, for the sealed content and the room frame; null for a non-video. */
+fun MessageEntity.videoInfo(): VideoInfo? =
+    videoDurationMs?.let { duration ->
+        VideoInfo(
+            durationMs = duration,
+            width = videoWidth ?: 0,
+            height = videoHeight ?: 0,
+            poster = videoPoster?.let { runCatching { Base64.getDecoder().decode(it) }.getOrNull() } ?: ByteArray(0),
+        )
+    }
+
+/** A copy with the video columns set from [video] (all cleared when it's null); a poster over the cap is dropped. */
+fun MessageEntity.withVideo(video: VideoInfo?): MessageEntity =
+    copy(
+        videoDurationMs = video?.durationMs,
+        videoWidth = video?.width,
+        videoHeight = video?.height,
+        videoPoster =
+            video
+                ?.poster
+                ?.takeIf { it.isNotEmpty() && it.size <= VideoInfo.MAX_POSTER_BYTES }
+                ?.let { Base64.getEncoder().encodeToString(it) },
+    )
 
 /** A copy with the quoted-reply columns populated from [replyTo] (all cleared when it's null). */
 fun MessageEntity.withReply(replyTo: ReplyRef?): MessageEntity =

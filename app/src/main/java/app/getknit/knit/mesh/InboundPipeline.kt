@@ -27,10 +27,15 @@ import app.getknit.knit.data.message.MessageEntity
 import app.getknit.knit.data.message.REPLY_SNIPPET_MAX
 import app.getknit.knit.data.message.StatusNotices
 import app.getknit.knit.data.message.hiddenByFilter
+import app.getknit.knit.data.message.videoInfo
 import app.getknit.knit.data.message.withReply
+import app.getknit.knit.data.message.withVideo
 import app.getknit.knit.data.peer.PeerEntity
 import app.getknit.knit.data.reaction.ReactionEntity
 import app.getknit.knit.data.settings.InboundSettings
+import app.getknit.knit.data.video.VideoAttachment
+import app.getknit.knit.data.video.VideoFrames
+import app.getknit.knit.data.video.isPlausible
 import app.getknit.knit.identity.IdentitySource
 import app.getknit.knit.identity.NodeId
 import app.getknit.knit.isValidReactionEmoji
@@ -77,6 +82,7 @@ import app.getknit.knit.mesh.protocol.RelayEnvelope
 import app.getknit.knit.mesh.protocol.ReplyRef
 import app.getknit.knit.mesh.protocol.TransferPayload
 import app.getknit.knit.mesh.protocol.TypingContent
+import app.getknit.knit.mesh.protocol.VideoInfo
 import app.getknit.knit.mesh.protocol.WireCodec
 import app.getknit.knit.mesh.protocol.WireEnvelope
 import app.getknit.knit.mesh.protocol.isStorable
@@ -1001,6 +1007,9 @@ class InboundPipeline(
             attachmentMime = plain.attachmentMime,
             enc = null,
             replyTo = plain.replyTo,
+            // The room's own fields, never read off an encrypted frame's shell: a DM's size and video ride sealed.
+            attachmentSize = null,
+            video = null,
         )
 
     /**
@@ -2055,8 +2064,11 @@ class InboundPipeline(
      *
      * A frame addressed to us — our DM, a group we are in — is custodied before it is opened, so its attachment's
      * declared size is still sealed: while the user has a Bluetooth download limit it is left to [deliverChat], right
-     * behind, which wants it by the real verdict ([carriedFastOnly], ADR 2026-10.js2p). A carrier's pull of somebody
-     * else's frame is not the user's download, and is never held to the limit.
+     * behind, which wants it by the real verdict ([carriedFastOnly], ADR 2026-10.js2p). A room post is every node's and
+     * declares its size in the clear (ADR 2026-10.hmfe), so it is judged here as its row will be: this runs ahead of
+     * [deliverChat], and a plain want here would ask a Bluetooth holder for a large room video before the delivery's
+     * fast-only want could hold it (an outstanding ask is left to run). A carrier's pull of somebody else's DM or group
+     * frame is not the user's download, and is never held to the limit.
      */
     suspend fun onCarriedFrame(
         env: RelayEnvelope,
@@ -2064,7 +2076,8 @@ class InboundPipeline(
         via: String? = null,
     ) {
         if (env.type != FrameType.CHAT) return
-        val hash = WireCodec.decodeChecked<ChatContent>(env.payload)?.attachmentHash ?: return
+        val content = WireCodec.decodeChecked<ChatContent>(env.payload) ?: return
+        val hash = content.attachmentHash ?: return
         if (blobStore.has(hash)) return
         if (copyFromOwnStore(hash, env.senderId)) return
         if (blobs.carrierOnlyBlobBytes() >= CARRIER_BLOB_BUDGET_BYTES) return
@@ -2075,7 +2088,7 @@ class InboundPipeline(
             metrics.onCarrierPullDeferred()
             return
         }
-        val fastOnly = carriedFastOnly(env, hash, member) ?: return
+        val fastOnly = carriedFastOnly(env, content, hash, member) ?: return
         blobExchange.want(hash, author = env.senderId, via = via, fastOnly = fastOnly)
     }
 
@@ -2116,20 +2129,32 @@ class InboundPipeline(
 
     /**
      * How [onCarriedFrame] wants [env]'s attachment [hash] (ADR 2026-10.js2p): plain unless the frame is addressed to us
-     * ([member] of its group, or its DM's recipient) and a limit is set. Then the rows naming it judge it, as the database
-     * re-arm does — a re-served DM we already stored, which no delivery follows — and with none it is not wanted here at
-     * all (null): its size is sealed inside, and [deliverChat], right behind, wants it by its verdict. One that never
-     * opens is the tick's (`MeshManager.rewantMissingBlobs`, fast-only); a want here would only query the Wi-Fi Aware
-     * neighbours once more per incoming picture.
+     * ([member] of its group, or its DM's recipient) or is a room post, and a limit is set. A room post's own declared
+     * size ([content], cleartext, ADR 2026-10.hmfe) is folded with the rows naming the hash, exactly as [deliveredFetch]
+     * will fold its row: no read when the post is not gated itself. For a DM or a group frame the rows naming it judge
+     * it, as the database re-arm does — a re-served DM we already stored, which no delivery follows — and with none it is
+     * not wanted here at all (null): its size is sealed inside, and [deliverChat], right behind, wants it by its verdict.
+     * One that never opens is the tick's (`MeshManager.rewantMissingBlobs`, fast-only); a want here would only query the
+     * Wi-Fi Aware neighbours once more per incoming picture.
      */
     private suspend fun carriedFastOnly(
         env: RelayEnvelope,
+        content: ChatContent,
         hash: String,
         member: Boolean,
     ): Boolean? {
         val me = identity.nodeId()
-        if (env.recipientId != me && !member) return false
+        val room = env.recipientId == null && env.group == null && content.enc == null
+        if (!room && env.recipientId != me && !member) return false
         val limit = settings.bluetoothDownloadLimitBytes.first() ?: return false
+        if (room) {
+            val declared = content.attachmentSize?.takeIf { it > 0 }
+            val own = env.senderId == me
+            if (!BluetoothFetchGate.fastOnly(declared, limit, approved = false, own = own)) return false
+            val stored = messages.attachmentFetchRows(hash, me)
+            val post = AttachmentFetchRow(hash, env.senderId, declared, approved = stored.any { it.approved }, own = own)
+            return BluetoothFetchGate.fastOnly(stored + post, limit)
+        }
         val rows = messages.attachmentFetchRows(hash, me).takeIf { it.isNotEmpty() } ?: return null
         return BluetoothFetchGate.fastOnly(rows, limit)
     }
@@ -2799,7 +2824,8 @@ class InboundPipeline(
         val isNew = !messages.exists(env.id)
         val hash = content.attachmentHash
         val moderation = inboundModeration(isNew, content.body, conversationId)
-        val fetch = deliveredFetch(hash, sealed?.attachmentSize, isNew, env.senderId, me)
+        val (declaredSize, video) = deliveredDescription(content, sealed)
+        val fetch = deliveredFetch(hash, declaredSize, isNew, env.senderId, me)
         val built =
             MessageEntity(
                 id = env.id,
@@ -2829,7 +2855,7 @@ class InboundPipeline(
                 attachmentMime = content.attachmentMime,
                 attachmentKey = sealed?.attachmentKey,
                 attachmentName = sealed?.attachmentName,
-                attachmentSize = sealed?.attachmentSize,
+                attachmentSize = declaredSize,
                 attachmentFetchApproved = fetch.inheritsTap,
                 moderation = moderation,
                 originNode = origin?.node,
@@ -2841,7 +2867,8 @@ class InboundPipeline(
                 originPeerId = origin?.peerId,
                 originSigned = origin?.signed ?: MessageEntity.ORIGIN_UNSIGNED,
             ).withReply(admitReply(content.replyTo))
-        val stored = persistQuoted(built, isNew, me, conversationId, persist)
+        val stored = persistQuoted(built.withVideo(video), isNew, me, conversationId, persist)
+        screenPoster(stored, fresh = isNew, own = env.senderId == me)
         val hidden = stored.hiddenByFilter(settings.contentFilteringEnabled.first())
         // Start pulling the referenced blob unless we already hold it (the UI observes the blobs table
         // and flips the attachment from "loading" to shown once the bytes land, and onObtained describes it).
@@ -2868,11 +2895,12 @@ class InboundPipeline(
         // and relay run outside this dispatch path (before it / after it returns), so mesh convergence is
         // untouched; this is a purely local presentation decision.
         if (isNew) {
+            val (shown, fileName) = notificationSubject(content, sealed, video)
             if (isAccepted(conversationId, me)) {
                 if (env.senderId != me && content.mentions.mention(me)) {
-                    notifyMention(env, content, conversationId, sealed?.attachmentName, hidden)
+                    notifyMention(env, shown, conversationId, fileName, hidden)
                 } else {
-                    notifyIncoming(env, content, conversationId, sealed?.attachmentName, hidden, origin)
+                    notifyIncoming(env, shown, conversationId, fileName, hidden, origin)
                 }
             } else if (env.senderId != me) {
                 // A stranger's first DM/group: no per-message alert — just refresh the coalesced
@@ -2884,6 +2912,46 @@ class InboundPipeline(
         // DM, doubles as the vaccine that purges this message from any carrier that missed the first ack.
         if (ack) acknowledge(env, me, plane)
     }
+
+    /**
+     * The declared size and video description a delivered message carries (ADR 2026-10.hmfe): a sealed frame's from
+     * inside it, a room post's from the post. Labels, both: a size that is not positive declares nothing, and a video
+     * description is kept only on a video and only when it is one a bubble can draw ([isPlausible]).
+     */
+    private fun deliveredDescription(
+        content: ChatContent,
+        sealed: MessageContent?,
+    ): Pair<Long?, VideoInfo?> {
+        val size = (sealed?.attachmentSize ?: content.attachmentSize)?.takeIf { it > 0 }
+        val video = (sealed?.video ?: content.video)?.takeIf { VideoAttachment.isVideo(content.attachmentMime) && it.isPlausible() }
+        return size to video
+    }
+
+    /**
+     * A video's poster is a picture this phone shows before the video lands, so it is screened at once (9rh6): on a
+     * [fresh] delivery of someone else's message, never our own ([own]) and never a re-serve.
+     */
+    private suspend fun screenPoster(
+        row: MessageEntity,
+        fresh: Boolean,
+        own: Boolean,
+    ) {
+        if (!fresh || own) return
+        val poster = row.videoInfo()?.poster?.takeIf { it.isNotEmpty() } ?: return
+        // After the row's commit and before its receipt: a failure here must never cost the ✓✓ or count a drop.
+        runCatching { if (imageScreening.isPosterExplicit(poster)) messages.markPosterFlagged(row.id) }
+            .onFailure { Log.w(TAG, "poster screen failed: ${it.javaClass.simpleName}") }
+    }
+
+    /**
+     * What a notification describes: a video is named only for an older build's sake, so its line says "Video",
+     * not "video.mp4" (ADR 2026-10.hmfe) — the content carries its description and no file name.
+     */
+    private fun notificationSubject(
+        content: ChatContent,
+        sealed: MessageContent?,
+        video: VideoInfo?,
+    ): Pair<ChatContent, String?> = if (video != null) content.copy(video = video) to null else content to sealed?.attachmentName
 
     /**
      * Sends a delivery receipt for [env]. A DM addressed to us answers with a **sealed** receipt when the
@@ -3166,6 +3234,7 @@ class InboundPipeline(
     ): String =
         when {
             content.attachmentHash == null -> content.body
+            content.video != null -> labels.video
             fileName != null -> labels.file.format(fileName)
             VoiceAudio.isVoice(content.attachmentMime) -> labels.voice
             content.attachmentMime == LinkPreviewBlob.MIME -> labels.link
@@ -3625,6 +3694,7 @@ class InboundPipeline(
     ) {
         screenHeldAttachment(hash, key, mime)
         deriveVoiceMeta(hash, key, mime)
+        deriveVideoMeta(hash, key, mime)
         deriveAnimation(hash, key, mime)
         identities.notePlain(hash)
     }
@@ -3668,7 +3738,13 @@ class InboundPipeline(
         val plain =
             when {
                 key != null -> AttachmentCrypto.open(stored, b64d(key)) ?: return
+
                 mime == LinkPreviewBlob.MIME -> stored
+
+                // A room video whose bytes landed before any row named it was tried as a picture there and got no
+                // verdict; now the row says what it is (ADR 2026-10.hmfe). Idempotent per hash, like the others.
+                VideoAttachment.isVideo(mime) -> stored
+
                 else -> return
             }
         imageScreening.screenAttachment(hash, plain, mime, isRoom = key == null)
@@ -3700,6 +3776,25 @@ class InboundPipeline(
             if (described.isEmpty) return
             messages.setVoiceMeta(hash, described.durationMs, described.peaks)
         }.onFailure { Log.w(TAG, "voice metadata derivation failed: ${it.javaClass.simpleName}") }
+    }
+
+    /**
+     * If the row names a held blob as a video ([mime]), read its duration and upright size off the bytes and record
+     * them over the sender's claim on every row naming it (ADR 2026-10.hmfe) — "derive, don't carry" once the bytes
+     * are here, as for a voice note. Decrypts with [key] as [deriveVoiceMeta] does. Never throws.
+     */
+    private suspend fun deriveVideoMeta(
+        hash: String,
+        key: String?,
+        mime: String?,
+    ) {
+        runCatching {
+            if (!VideoAttachment.isVideo(mime)) return
+            val stored = blobs.bytes(hash) ?: return
+            val video = if (key == null) stored else AttachmentCrypto.open(stored, b64d(key)) ?: return
+            val meta = VideoFrames.meta(video) ?: return
+            messages.setVideoMeta(hash, meta.durationMs, meta.width, meta.height)
+        }.onFailure { Log.w(TAG, "video metadata derivation failed: ${it.javaClass.simpleName}") }
     }
 
     /**

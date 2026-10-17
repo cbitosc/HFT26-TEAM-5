@@ -3,6 +3,7 @@ package app.getknit.knit.mesh.lab
 import app.getknit.knit.data.message.Conversations
 import app.getknit.knit.data.settings.BluetoothDownloadLimit
 import app.getknit.knit.mesh.BulkRoute
+import app.getknit.knit.mesh.protocol.VideoInfo
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
@@ -21,6 +22,7 @@ import kotlin.random.Random
  * Ask before large Bluetooth-only downloads (ADR 2026-10.js2p). An attachment its sender declared over the recipient's
  * limit (1 MB by default, as shipped — the lab keeps the default) is fetched on its own only over Wi-Fi Aware; with
  * Bluetooth alone in reach nothing is asked until the user taps "Tap to download" (`MeshController.downloadAttachment`).
+ * A Nearby-room post declares its size too since ADR 2026-10.hmfe, so a large room video is held the same way.
  * The lab has no Wi-Fi Aware: `LabTransport.bulkRoutes` declares which plane a file between two nodes would ride, on
  * each end, as the composite's `bulkRouteTo` reports it. The `blobAsks` recorder is the oracle for who was asked, and
  * whether the ask said fast-only.
@@ -158,23 +160,90 @@ class LargeAttachmentLabTest {
             }
         }
 
+    /** Alice's 2 MB video posted to the Nearby room, and its id and hash: the post declares its size (ADR 2026-10.hmfe). */
+    private suspend fun largeRoomVideo(
+        alice: LabNode,
+        seed: Int,
+    ): Pair<String, String> {
+        assertTrue(alice.sendVideo(Random(seed).nextBytes(LARGE_BYTES), CLIP, text = "the clip"))
+        val id = alice.ownMessageId(Conversations.NEARBY, "the clip")
+        return id to checkNotNull(alice.attachmentHash(Conversations.NEARBY, id))
+    }
+
     /**
-     * A large picture posted to the room declares no size — the cleartext frame has no field for one — so it is fetched
-     * over Bluetooth as it always was.
+     * A room post is every node's, and every node that hears it is a carrier too: custody's want runs ahead of the
+     * delivery's, and the tick re-arms the carried frame as well as the row. Over Bluetooth alone neither Bob nor Carol
+     * asks anyone for Alice's large video until Bob taps; then it crosses to Bob once, and Carol, who never tapped,
+     * still holds it to Wi-Fi Aware (ADR 2026-10.hmfe).
      */
     @Test
-    fun aLargeAttachmentThatDeclaresNoSizeIsFetchedAsBefore() =
+    fun aLargeRoomVideoOverBluetoothAloneWaitsForTheTapThenCrossesOnce() =
+        runBlocking {
+            val alice = lab.node("alice").apply { setDisplayName("Alice") }
+            val bob = lab.node("bob").apply { setDisplayName("Bob") }
+            val carol = lab.node("carol").apply { setDisplayName("Carol") }
+            lab.link(alice, bob)
+            lab.link(alice, carol)
+            lab.link(bob, carol)
+
+            val (id, hash) = largeRoomVideo(alice, seed = 2007)
+            for (n in listOf(bob, carol)) {
+                lab.await(1) { if (n.row(id) != null) 1 else 0 }
+                assertEquals("${n.name}: the post declares its size", LARGE_BYTES.toLong(), n.row(id)?.attachmentSize)
+                lab.await(1) { if (n.metrics.files().blobFastOnlyHeld > 0) 1 else 0 }
+                val heldBefore = n.metrics.files().blobFastOnlyHeld
+                n.reoffer()
+                lab.await(1) { if (n.metrics.files().blobFastOnlyHeld > heldBefore) 1 else 0 }
+            }
+            for (n in listOf(bob, carol)) {
+                assertTrue("${n.name}: nothing asked over Bluetooth before the tap: ${n.asksFor(hash)}", n.asksFor(hash).isEmpty())
+                assertEquals("${n.name}: no copy before the tap", 0, alice.filesTo(n, hash))
+            }
+
+            bob.manager.downloadAttachment(hash)
+            lab.assertConverged(listOf(alice, bob), atLeast = 1, carriers = listOf(carol)) { Conversations.NEARBY }
+            assertTrue("the tap's ask is plain: ${bob.asksFor(hash)}", bob.asksFor(hash).run { isNotEmpty() && none { it.fastOnly } })
+            assertEquals("one copy", 1, alice.filesTo(bob, hash) + carol.filesTo(bob, hash))
+            carol.reoffer()
+            assertTrue("Carol never tapped: ${carol.asksFor(hash)}", carol.asksFor(hash).none { !it.fastOnly })
+            assertEquals("Carol took no copy", 0, alice.filesTo(carol, hash) + bob.filesTo(carol, hash))
+        }
+
+    /** Wi-Fi Aware linked: the large room video is fetched without a tap, asking fast-only, one copy. */
+    @Test
+    fun aLargeRoomVideoWithWifiAwareLinkedIsFetchedWithoutATap() =
+        runBlocking {
+            val alice = lab.node("alice").apply { setDisplayName("Alice") }
+            val bob = lab.node("bob").apply { setDisplayName("Bob") }
+            alice.transport.bulkRoutes[bob.nodeId] = BulkRoute.Linked
+            bob.transport.bulkRoutes[alice.nodeId] = BulkRoute.Linked
+            lab.link(alice, bob)
+
+            val (_, hash) = largeRoomVideo(alice, seed = 2008)
+            lab.assertConverged(listOf(alice, bob), atLeast = 1) { Conversations.NEARBY }
+            assertTrue("asked fast-only: ${bob.asksFor(hash)}", bob.asksFor(hash).run { isNotEmpty() && all { it.fastOnly } })
+            assertEquals("one copy", 1, alice.filesTo(bob, hash))
+        }
+
+    /**
+     * A room picture under the declaring floor says nothing of its size, as a post from an older build or the iOS port
+     * says nothing of any, so it is fetched over Bluetooth as it always was.
+     */
+    @Test
+    fun aRoomPictureThatDeclaresNoSizeIsFetchedAsBefore() =
         runBlocking {
             val alice = lab.node("alice").apply { setDisplayName("Alice") }
             val bob = lab.node("bob").apply { setDisplayName("Bob") }
             lab.link(alice, bob)
             lab.awaitAcquainted(alice, bob)
 
-            assertTrue(alice.sendImage(Random(2004).nextBytes(LARGE_BYTES), "big room picture"))
-            val id = alice.ownMessageId(Conversations.NEARBY, "big room picture")
+            assertTrue(alice.sendImage(Random(2004).nextBytes(UNDECLARED_BYTES), "room picture"))
+            val id = alice.ownMessageId(Conversations.NEARBY, "room picture")
             val hash = checkNotNull(alice.attachmentHash(Conversations.NEARBY, id))
             lab.assertConverged(listOf(alice, bob), atLeast = 1) { Conversations.NEARBY }
+            assertEquals("no size declared", null, bob.row(id)?.attachmentSize)
             assertTrue(bob.asksFor(hash).none { it.fastOnly })
+            assertEquals(1, alice.filesTo(bob, hash))
         }
 
     /** "Never ask": a large file over Bluetooth alone is fetched as it always was. */
@@ -196,5 +265,11 @@ class LargeAttachmentLabTest {
     private companion object {
         // Past the 1 MB default limit: its sender declares it, and its recipient holds it to Wi-Fi Aware.
         const val LARGE_BYTES = 2_000_000
+
+        // Under `BluetoothFetchGate.DECLARE_SIZE_FLOOR`: its sender declares no size, so no limit can hold it.
+        const val UNDECLARED_BYTES = 900_000
+
+        // The sender's label for the clip; the lab's bytes hold no video, so nothing derives over it.
+        val CLIP = VideoInfo(durationMs = 30_000L, width = 480, height = 854, poster = byteArrayOf(1, 2, 3))
     }
 }

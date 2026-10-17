@@ -47,6 +47,21 @@ class FileTypesTest {
     }
 
     @Test
+    fun aVideoContainerIsTypedByItsBrandAndNeverAsAnImage() {
+        fun ftyp(brand: String) = withHeader(ByteArray(4) + ascii("ftyp") + ascii(brand))
+        assertEquals("video/mp4", FileTypes.videoMimeOf(ftyp("isom")))
+        assertEquals("video/mp4", FileTypes.videoMimeOf(ftyp("mp42")))
+        assertEquals("video/quicktime", FileTypes.videoMimeOf(ftyp("qt  ")))
+        assertEquals("video/3gpp", FileTypes.videoMimeOf(ftyp("3gp4")))
+        assertEquals("video/webm", FileTypes.videoMimeOf(withHeader(byteArrayOf(0x1A, 0x45, 0xDF.toByte(), 0xA3.toByte()))))
+        // A HEIC photo shares the box and is not a video; an unknown brand is nothing we claim.
+        assertNull(FileTypes.videoMimeOf(ftyp("heic")))
+        assertNull(FileTypes.videoMimeOf(ftyp("zzzz")))
+        assertNull(FileTypes.imageMimeOf(ftyp("qt  ")))
+        assertNull(FileTypes.videoMimeOf(ByteArray(8)))
+    }
+
+    @Test
     fun ordinaryFilesAreNotImages() {
         assertNull(FileTypes.imageMimeOf(withHeader(ascii("%PDF-1.7"))))
         assertNull(FileTypes.imageMimeOf(ByteArray(0)))

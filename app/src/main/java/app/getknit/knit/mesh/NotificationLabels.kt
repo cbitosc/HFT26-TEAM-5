@@ -14,6 +14,7 @@ data class NotificationLabels(
     val location: String,
     val file: String,
     val hidden: String,
+    val video: String = "🎬 Video",
 ) {
     companion object {
         /** The English labels — the test rigs' default; the app hands the pipeline the reader's own. */
@@ -26,6 +27,7 @@ data class NotificationLabels(
                 location = "📍 Location",
                 file = "📎 %1\$s",
                 hidden = "Message hidden",
+                video = "🎬 Video",
             )
     }
 }

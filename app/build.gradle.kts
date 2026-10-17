@@ -912,6 +912,11 @@ dependencies {
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.exifinterface)
+    // Short videos (data/video/): Transformer re-encodes, Effect scales and drops frames, and Muxer writes the
+    // MP4 into memory so no plaintext video ever reaches the filesystem.
+    implementation(libs.androidx.media3.transformer)
+    implementation(libs.androidx.media3.effect)
+    implementation(libs.androidx.media3.muxer)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)

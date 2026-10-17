@@ -6,11 +6,15 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import android.util.Log
 import androidx.exifinterface.media.ExifInterface
+import app.getknit.knit.data.video.TranscodeResult
+import app.getknit.knit.data.video.VideoEncoder
+import app.getknit.knit.data.video.VideoTranscoder
 import app.getknit.knit.data.webp.AnimatedFrames
 import app.getknit.knit.data.webp.WebpTranscode
 import app.getknit.knit.mesh.protocol.AttachmentName
 import app.getknit.knit.mesh.protocol.LinkCard
 import app.getknit.knit.mesh.protocol.LinkPreviewBlob
+import app.getknit.knit.mesh.protocol.VideoInfo
 import app.getknit.knit.moderation.ImageScreeningService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -62,6 +66,7 @@ class AttachmentStore(
     private val blobs: BlobRepository,
     private val imageScreening: ImageScreeningService,
     private val identities: AttachmentIdentities,
+    private val videos: VideoEncoder = VideoTranscoder(context),
 ) {
     /**
      * The result of ingesting a picked/keyboard/captured image or a recorded voice note: its content [hash]
@@ -100,6 +105,9 @@ class AttachmentStore(
         val animated: Boolean = false,
         val sourceHash: String? = null,
         val reuse: AttachmentIdentities.Held? = null,
+        val video: VideoInfo? = null,
+        /** A video cut to its first 61 s on the way in: the composer says so, once. */
+        val trimmed: Boolean = false,
     )
 
     /**
@@ -267,6 +275,79 @@ class AttachmentStore(
                 flagged = false,
             )
         }
+
+    /**
+     * Whether a pick from the photo picker or the share sheet is a video, which takes [ingestVideo] rather than the
+     * image door: the provider's type when it names one, else the container's own signature
+     * ([FileTypes.videoMimeOf]) read off the first bytes.
+     */
+    suspend fun isVideo(uri: Uri): Boolean =
+        withContext(Dispatchers.IO) {
+            val declared = runCatching { context.contentResolver.getType(uri) }.getOrNull()
+            when {
+                declared?.startsWith("video/") == true -> {
+                    true
+                }
+
+                declared?.startsWith("image/") == true -> {
+                    false
+                }
+
+                else -> {
+                    runCatching {
+                        context.contentResolver.openInputStream(uri)?.use { stream ->
+                            val head = ByteArray(VIDEO_SNIFF_BYTES)
+                            val read = stream.read(head)
+                            read > 0 && FileTypes.videoMimeOf(head.copyOf(read)) != null
+                        }
+                    }.getOrNull() == true
+                }
+            }
+        }
+
+    /**
+     * Ingests a picked short video (ADR 2026-10.hmfe): re-encoded by [VideoEncoder] to about 480p HEVC, 30 fps and
+     * 400 kbps, cut to its first 61 s, with the source's metadata dropped — never sent as picked, unlike a picture
+     * that is already small (ADR 2026-10.unqn): no source video is. Stored under `video/mp4` with the name
+     * `video.mp4` (what an older build's file bubble shows and saves) and [Ingested.video], the duration, size and
+     * poster the bubble draws before the bytes land. [onProgress] reports the encode in 0..1.
+     *
+     * Bound for the Nearby room ([screen]), the poster and frames sampled across the clip are classified, and a
+     * flagged video is reported as an image is. Not found by its source's bytes ([AttachmentIdentities]): hashing a
+     * source that may be hundreds of MB to save one encode is the wrong trade, and a re-encode of the same pick lands
+     * on new bytes anyway.
+     */
+    suspend fun ingestVideo(
+        uri: Uri,
+        screen: Boolean,
+        onProgress: (Float) -> Unit = {},
+    ): IngestResult {
+        val encoded =
+            when (val result = videos.transcode(uri, onProgress)) {
+                is TranscodeResult.Success -> result
+                TranscodeResult.TooLarge -> return IngestResult.Failed(IngestResult.Reason.TooLarge)
+                TranscodeResult.Unreadable, is TranscodeResult.Failed -> return IngestResult.Failed(IngestResult.Reason.Unreadable)
+            }
+        return withContext(Dispatchers.IO) {
+            val bytes = encoded.bytes
+            failureFor(bytes)?.let { return@withContext it }
+            val flagged = screen && imageScreening.isVideoExplicit(bytes, encoded.poster)
+            val hash = sha256(bytes)
+            blobs.insert(hash, VIDEO_MIME, bytes)
+            val video = VideoInfo(encoded.meta.durationMs, encoded.meta.width, encoded.meta.height, encoded.poster)
+            IngestResult.Success(
+                Ingested(
+                    hash,
+                    VIDEO_MIME,
+                    name = VIDEO_NAME,
+                    sizeBytes = bytes.size,
+                    video = video,
+                    trimmed = encoded.plan.trimmed,
+                ),
+                flagged,
+            )
+        }
+    }
 
     /**
      * Ingests any picked file — a PDF, a spreadsheet, an archive — into the same content-addressed blob
@@ -548,6 +629,15 @@ class AttachmentStore(
         const val ANIMATED_PASS_MAX_DIMENSION = 512
         const val ANIMATED_PASS_MAX_FRAMES = 200
         const val ANIMATED_PASS_MAX_BYTES = 1024 * 1024
+
+        /** What a re-encoded short video is stored and sent as (ADR 2026-10.hmfe). */
+        const val VIDEO_MIME = "video/mp4"
+
+        /** The name a video carries in a DM or a group: what an older build's file bubble shows and saves it as. */
+        const val VIDEO_NAME = "video.mp4"
+
+        /** Enough of a file's head to read an ISO base-media brand or a Matroska header. */
+        const val VIDEO_SNIFF_BYTES = 16
 
         const val MAX_BYTES = 8 * 1024 * 1024 // 8 MiB cap (a transcoded GIF should land well under this)
 

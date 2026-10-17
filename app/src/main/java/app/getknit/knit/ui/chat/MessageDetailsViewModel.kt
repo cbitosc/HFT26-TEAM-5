@@ -91,6 +91,7 @@ data class MessageDetailsUiState(
     val attachmentSize: Long? = null,
     // More than one frame: the body line says "GIF" rather than "Photo".
     val attachmentAnimated: Boolean = false,
+    val attachmentVideo: Boolean = false,
     val moderationFlagged: Boolean = false,
     val mine: Boolean = false,
     val senderName: String = "",
@@ -214,6 +215,7 @@ class MessageDetailsViewModel(
                         attachmentName = message.attachmentName,
                         attachmentSize = message.attachmentSize,
                         attachmentAnimated = message.attachmentAnimated,
+                        attachmentVideo = message.videoDurationMs != null,
                         moderationFlagged = message.hiddenByFilter(hideSensitive),
                         mine = message.senderId == me,
                         senderName = directory.label(message.senderId).text,

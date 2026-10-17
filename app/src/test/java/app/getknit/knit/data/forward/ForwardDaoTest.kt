@@ -153,10 +153,37 @@ class ForwardDaoTest : RoomDbTest() {
                 ),
                 dao.carriedAttachments().mapTo(HashSet()) { listOf(it.hash, it.recipientId, it.receivedAt, it.senderId, it.groupId) },
             )
-            // Only a group frame's bytes are loaded, for the roster it carries (ADR 2026-10.js2p).
+            // Only a frame with no cleartext recipient brings its bytes: a group's for its roster (ADR 2026-10.js2p), a
+            // room post's for its declared size (ADR 2026-10.hmfe). A DM's are never loaded.
             assertEquals(
-                mapOf(null to true, "g-1" to false),
-                dao.carriedAttachments().groupBy { it.groupId }.mapValues { (_, rows) -> rows.all { it.signed == null } },
+                mapOf("dm" to true, "room" to false, "group" to false),
+                dao.carriedAttachments().associate { row ->
+                    val kind =
+                        when {
+                            row.groupId != null -> "group"
+                            row.recipientId != null -> "dm"
+                            else -> "room"
+                        }
+                    kind to (row.signed == null)
+                },
+            )
+        }
+
+    @Test
+    fun `a room post a message row already names brings no bytes, while a group frame always does`() =
+        runTest {
+            // The tick reads a room post's declared size only for a hash no row covers (ADR 2026-10.hmfe): a delivered,
+            // untapped room video must not reload its poster-sized frame on every re-arm. A group's roster is read anyway.
+            dao.insert(fwd("room", attachmentHash = "H3", recipientId = null))
+            dao.insert(fwd("group", attachmentHash = "H3", recipientId = null, groupId = "g-1"))
+            db.messageDao().upsert(
+                app.getknit.knit.data.message
+                    .MessageEntity(id = "m", senderId = "peer", body = "", sentAt = 1L, attachmentHash = "H3"),
+            )
+
+            assertEquals(
+                mapOf("room" to true, "group" to false),
+                dao.carriedAttachments().associate { (if (it.groupId != null) "group" else "room") to (it.signed == null) },
             )
         }
 

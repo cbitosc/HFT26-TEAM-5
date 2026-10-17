@@ -881,12 +881,37 @@ class KnitDatabaseMigrationTest {
             }
         }
 
+    @Test
+    fun `migrate 24 to 25 adds the video columns empty on every row`() =
+        runTest {
+            // ADR 2026-10.hmfe: nothing before this build sent a video, so no row describes one.
+            helper.createDatabase(24).use { c ->
+                c.execSQL(
+                    "INSERT INTO messages (id, senderId, conversationId, body, sentAt, received, receivedVia, mentions, " +
+                        "replyToHasAttachment, moderation, pendingKey, kind, originViaMqtt, originSigned, attachmentAnimated, " +
+                        "replyCheck, replyToFlagged, attachmentFetchApproved, attachmentHash, attachmentMime) " +
+                        "VALUES ('v1','n1','peer-1','',2,0,0,'[]',0,0,0,0,0,0,0,0,0,0,'H1','video/mp4')",
+                )
+            }
+            helper.runMigrationsAndValidate(25, listOf(KnitMigrations.MIGRATION_24_25)).use { c ->
+                c
+                    .prepare(
+                        "SELECT videoDurationMs, videoWidth, videoHeight, videoPoster, attachmentMime, videoPosterFlagged FROM messages",
+                    ).use { s ->
+                        assertTrue(s.step())
+                        (0..3).forEach { assertTrue("column $it is null", s.isNull(it)) }
+                        assertEquals("video/mp4", s.getText(4))
+                        assertEquals("no poster is flagged at upgrade", 0L, s.getLong(5))
+                    }
+            }
+        }
+
     private companion object {
         /**
          * KnitDatabase `@Database(version = …)` — bump alongside the DB (its retention is CLASS, so the version
          * can't be read reflectively). A missing schemas/<db>/<version>.json fails the smoke test.
          */
-        const val CURRENT_VERSION = 24
+        const val CURRENT_VERSION = 25
 
         /** The v16 column list with an attachment — MIGRATION_16_17's test seeds rows through it. */
         const val INSERT_V16 =

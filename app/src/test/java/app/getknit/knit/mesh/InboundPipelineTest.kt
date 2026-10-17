@@ -30,6 +30,7 @@ import app.getknit.knit.data.message.StatusNotices
 import app.getknit.knit.data.message.isStatusNotice
 import app.getknit.knit.data.message.receivedPlane
 import app.getknit.knit.data.message.settledWith
+import app.getknit.knit.data.message.videoInfo
 import app.getknit.knit.data.peer.PeerEntity
 import app.getknit.knit.data.ratchet.GroupRatchetRepository
 import app.getknit.knit.data.ratchet.RatchetRepository
@@ -82,6 +83,7 @@ import app.getknit.knit.mesh.protocol.RelayEnvelope
 import app.getknit.knit.mesh.protocol.ReplyRef
 import app.getknit.knit.mesh.protocol.TransferPayload
 import app.getknit.knit.mesh.protocol.TypingContent
+import app.getknit.knit.mesh.protocol.VideoInfo
 import app.getknit.knit.mesh.protocol.WireCodec
 import app.getknit.knit.mesh.protocol.WireEnvelope
 import app.getknit.knit.mesh.sha256Hex
@@ -2617,6 +2619,116 @@ class InboundPipelineTest {
         }
 
     /**
+     * A room video (ADR 2026-10.hmfe) declares its size in the post itself, so "Ask before large Bluetooth downloads"
+     * holds it like a sealed file — js2p had no size to judge a room post by. Its description lands on the row and its
+     * poster is screened at once; a description on a non-video, or an absurd one, is dropped.
+     */
+    @Test
+    fun aRoomVideoDeclaresItsSizeIsHeldAndCarriesItsScreenedPoster() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.peerMap[alice.nodeId] =
+                PeerEntity(nodeId = alice.nodeId, pubKey = alice.bundle.encoded, verified = true, updatedAt = 1L)
+            rig.settings.bluetoothDownloadLimitBytes.value = 1_000_000L
+            val poster = byteArrayOf(9, 8, 7)
+            coEvery { rig.imageScreening.isPosterExplicit(poster) } returns true
+
+            fun roomPost(
+                id: String,
+                hash: String,
+                mime: String,
+                video: VideoInfo?,
+            ) = RelayEnvelope(
+                type = FrameType.CHAT,
+                id = id,
+                senderId = alice.nodeId,
+                sentAt = 5L,
+                payload =
+                    WireCodec.encodePayload(
+                        ChatContent(attachmentHash = hash, attachmentMime = mime, attachmentSize = 3_000_000L, video = video),
+                    ),
+            )
+
+            rig.deliver(alice, roomPost("r1", "clip", "video/mp4", VideoInfo(30_000L, 480, 854, poster)), from = "c")
+            rig.deliver(alice, roomPost("r2", "pic", "image/jpeg", VideoInfo(30_000L, 480, 854, poster)), from = "c")
+            rig.deliver(alice, roomPost("r3", "odd", "video/mp4", VideoInfo(30_000L, 0, 854, poster)), from = "c")
+
+            coVerify { rig.blobExchange.want("clip", alice.nodeId, "c", null, true) }
+            val row = checkNotNull(rig.msgMap["r1"])
+            assertEquals(3_000_000L, row.attachmentSize)
+            assertEquals(VideoInfo(30_000L, 480, 854, poster), row.videoInfo())
+            coVerify(exactly = 1) { rig.imageScreening.isPosterExplicit(poster) }
+            coVerify(exactly = 1) { rig.messages.markPosterFlagged("r1") }
+            assertNull("a photo carries no video", checkNotNull(rig.msgMap["r2"]).videoDurationMs)
+            assertNull("an absurd description is dropped", checkNotNull(rig.msgMap["r3"]).videoDurationMs)
+        }
+
+    /**
+     * A room video whose bytes were held before any row named them was tried as a picture on arrival and got no
+     * verdict; once its row lands, it is screened as the video it is (the #132 "both orders" rule).
+     */
+    @Test
+    fun aRoomVideoHeldBeforeItsRowIsScreenedOnceTheRowNamesIt() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.peerMap[alice.nodeId] =
+                PeerEntity(nodeId = alice.nodeId, pubKey = alice.bundle.encoded, verified = true, updatedAt = 1L)
+            val clip = byteArrayOf(0, 0, 0, 24)
+            coEvery { rig.blobStore.has("early") } returns true
+            coEvery { rig.blobs.bytes("early") } returns clip
+
+            rig.deliver(alice, rig.attachmentChat(alice, id = "r9", attachmentHash = "early", mime = "video/mp4"), from = "c")
+
+            coVerify { rig.imageScreening.screenAttachment("early", clip, "video/mp4", isRoom = true) }
+        }
+
+    /** A sealed video's description comes from inside the seal; the cleartext shell's room fields are never read. */
+    @Test
+    fun aSealedVideoTakesItsDescriptionFromTheSealNeverTheShell() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.peerMap[alice.nodeId] =
+                PeerEntity(nodeId = alice.nodeId, pubKey = alice.bundle.encoded, verified = true, updatedAt = 1L)
+            val header = MessageCrypto.header("v1", alice.nodeId, 5L, rig.self.nodeId)
+            val sealed =
+                MessageContent(
+                    body = "",
+                    attachmentHash = "sealed-clip",
+                    attachmentMime = "video/mp4",
+                    attachmentKey = "a2V5",
+                    attachmentName = "video.mp4",
+                    attachmentSize = 2_500_000L,
+                    video = VideoInfo(20_000L, 854, 480, byteArrayOf(1)),
+                )
+            val enc = alice.crypto.seal(sealed.encode(), header, mapOf(rig.self.nodeId to rig.self.bundle))!!
+            val shell =
+                ChatContent(
+                    enc = enc,
+                    attachmentHash = "sealed-clip",
+                    attachmentSize = 9L,
+                    video = VideoInfo(1L, 1, 1, byteArrayOf(2)),
+                )
+            rig.deliver(
+                alice,
+                RelayEnvelope(
+                    type = FrameType.CHAT,
+                    id = "v1",
+                    senderId = alice.nodeId,
+                    sentAt = 5L,
+                    recipientId = rig.self.nodeId,
+                    payload = WireCodec.encodePayload(shell),
+                ),
+                from = "c",
+            )
+            val row = checkNotNull(rig.msgMap["v1"])
+            assertEquals(2_500_000L, row.attachmentSize)
+            assertEquals(VideoInfo(20_000L, 854, 480, byteArrayOf(1)), row.videoInfo())
+        }
+
+    /**
      * A stranger's row naming a contact's attachment with an inflated size must not hold the contact's fetch: the rows
      * are folded, and one that would fetch it — here the contact's, declaring nothing — fetches it for all.
      */
@@ -2743,6 +2855,58 @@ class InboundPipelineTest {
             rig.settings.bluetoothDownloadLimitBytes.value = null
             rig.pipeline.onCarriedFrame(dm("d4", "ours-no-limit", rig.self.nodeId))
             coVerify { rig.blobExchange.want("ours-no-limit", alice.nodeId, null, null, false) }
+        }
+
+    /**
+     * ADR 2026-10.hmfe: custody runs ahead of delivery, so a room post's carried want comes first. Its size is in the
+     * clear, so it is judged there as its row will be — a plain want would ask a Bluetooth holder before the delivery's
+     * fast-only want could hold it. Folded with the rows: a tapped hash or a row declaring nothing fetches it plain.
+     */
+    @Test
+    fun onCarriedFrameJudgesARoomPostByTheSizeItDeclares() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.settings.bluetoothDownloadLimitBytes.value = 1_000_000L
+
+            fun roomPost(
+                id: String,
+                hash: String,
+                size: Long?,
+            ) = RelayEnvelope(
+                type = FrameType.CHAT,
+                id = id,
+                senderId = alice.nodeId,
+                sentAt = 5L,
+                payload = WireCodec.encodePayload(ChatContent(attachmentHash = hash, attachmentMime = "video/mp4", attachmentSize = size)),
+            )
+
+            rig.pipeline.onCarriedFrame(roomPost("r1", "big-clip", 3_000_000L), via = "c")
+            rig.pipeline.onCarriedFrame(roomPost("r2", "small-clip", 400_000L), via = "c")
+            rig.pipeline.onCarriedFrame(roomPost("r3", "undeclared", null), via = "c")
+            coVerify { rig.blobExchange.want("big-clip", alice.nodeId, "c", null, true) }
+            coVerify(exactly = 0) { rig.blobExchange.want("big-clip", any(), any(), any(), false) }
+            coVerify { rig.blobExchange.want("small-clip", alice.nodeId, "c", null, false) }
+            coVerify { rig.blobExchange.want("undeclared", alice.nodeId, "c", null, false) }
+
+            // The user already tapped the hash on another row: the post comes in tapped, and its fetch is plain.
+            rig.msgMap["r0"] =
+                MessageEntity(
+                    id = "r0",
+                    senderId = alice.nodeId,
+                    conversationId = Conversations.NEARBY,
+                    body = "",
+                    sentAt = 4L,
+                    attachmentHash = "tapped-clip",
+                    attachmentSize = 3_000_000L,
+                    attachmentFetchApproved = true,
+                )
+            rig.pipeline.onCarriedFrame(roomPost("r4", "tapped-clip", 3_000_000L), via = "c")
+            coVerify { rig.blobExchange.want("tapped-clip", alice.nodeId, "c", null, false) }
+
+            rig.settings.bluetoothDownloadLimitBytes.value = null // "Never ask"
+            rig.pipeline.onCarriedFrame(roomPost("r5", "never-clip", 3_000_000L), via = "c")
+            coVerify { rig.blobExchange.want("never-clip", alice.nodeId, "c", null, false) }
         }
 
     /** ADR 2026-10.g24x: a DM's linked recipient is fetching its picture now, so a carrier holds its own pull back. */

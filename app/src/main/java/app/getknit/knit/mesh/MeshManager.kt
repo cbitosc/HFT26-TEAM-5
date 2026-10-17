@@ -24,6 +24,7 @@ import app.getknit.knit.data.message.DeliveryPlane
 import app.getknit.knit.data.message.MentionStore
 import app.getknit.knit.data.message.MessageEntity
 import app.getknit.knit.data.message.withReply
+import app.getknit.knit.data.message.withVideo
 import app.getknit.knit.data.peer.MetPeerRepository
 import app.getknit.knit.data.peer.PeerEntity
 import app.getknit.knit.data.reaction.ReactionEntity
@@ -1139,6 +1140,12 @@ class MeshManager(
 
         // Broadcast room: plaintext (no fixed recipient set to encrypt to) — the legacy path, unchanged.
         if (isRoom) {
+            // Declared by the sealed path's rule: a room post is never named, so only a large one says its size.
+            val roomSize =
+                attachment
+                    ?.takeIf { BluetoothFetchGate.declaresSize(it.sizeBytes.toLong(), named = false) }
+                    ?.sizeBytes
+                    ?.toLong()
             messages.save(
                 MessageEntity(
                     id = id,
@@ -1159,7 +1166,9 @@ class MeshManager(
                     // The room's hash already is the plaintext's, so only the picker's own bytes are worth a
                     // column: they are how the same original, picked again, finds this post (ADR 2026-10.mptm).
                     attachmentSourceHash = attachment?.sourceHash,
-                ).withReply(replyTo),
+                    attachmentSize = roomSize,
+                ).withReply(replyTo)
+                    .withVideo(attachment?.video),
             )
             val content =
                 ChatContent(
@@ -1168,6 +1177,10 @@ class MeshManager(
                     attachmentHash = attachment?.hash,
                     attachmentMime = attachment?.mime,
                     replyTo = replyTo,
+                    // The room's two additive fields (ADR 2026-10.hmfe): the declared size "Ask before large Bluetooth
+                    // downloads" judges (ADR 2026-10.js2p), and a video's description for its bubble.
+                    attachmentSize = roomSize,
+                    video = attachment?.video,
                 )
             originateSigned(chatEnvelope(id, me, sentAt, recipientId = null, group = null, content))
             return true
@@ -1220,6 +1233,8 @@ class MeshManager(
                 attachmentSourceHash = attachment?.sourceHash,
                 pendingKey = false,
             ).withReply(replyTo)
+                // A video's duration, size and poster, sealed with the rest (ADR 2026-10.hmfe).
+                .withVideo(attachment?.video)
         // The piggyback (ADR 054): a DM to a peer that reads inline acks carries the receipts we still owe
         // it for DMs that came over the board, in place of a standalone tick that would cost ~3 s of LoRa
         // air. Attached only in the v2 arm of the seal; a v1 fallback or a parked DM gives them back.
@@ -2450,7 +2465,7 @@ class MeshManager(
             carried.forEach { (hash, author) ->
                 if (hash !in ownHashes && hash !in held) wanted += hash to author
             }
-            if (limit != null) fastOnly += unopenedForUs(carried.keys - ownHashes, frames, me)
+            if (limit != null) fastOnly += unopenedForUs(carried.keys - ownHashes, frames, me, limit)
         }
         // A group's decided photo not shown yet (ADR 2026-09.nxcq): the row is the durable want, so a pull lost
         // to a restart or the fetch TTL comes back here and not only on the group's next frame. A photo
@@ -2475,22 +2490,36 @@ class MeshManager(
     /**
      * The carried attachments among [hashes] that no stored row names and that *every* carried frame naming them
      * addresses to us — our DM, a group we are in ([carriedFrames]): frames not opened yet (waiting on a key, or never
-     * delivered), their declared size still sealed. While a limit is set they are fetched fast-only, as
-     * `InboundPipeline.onCarriedFrame` leaves them, so the tick's carrier re-arm does not lift what custody held (ADR
-     * 2026-10.js2p). Folded as the rows are: one frame we carry for somebody else keeps the pull plain, so a stranger's DM
-     * naming a hash we carry for others can lift the gate on our side and never impose it.
+     * delivered), their declared size still sealed — or a room post, which is every node's, declaring over the user's
+     * [limit] (ADR 2026-10.hmfe). While a limit is set they are fetched fast-only, as `InboundPipeline.onCarriedFrame`
+     * leaves them, so the tick's carrier re-arm does not lift what custody held (ADR 2026-10.js2p). The room post's half
+     * covers the tick that lands between custody's write and the delivery's row, and a post whose row is never written
+     * (a blocked sender) or was swept: judged by the size it declares, as its row would be. Folded as the rows are: one
+     * frame we carry for somebody else, or a room post declaring nothing or under the limit, keeps the pull plain, so a
+     * stranger's frame naming a hash can lift the gate on our side and never impose it.
      */
     private fun unopenedForUs(
         hashes: Set<String>,
         frames: List<CarriedAttachment>,
         me: String,
+        limit: Long,
     ): Set<String> {
         if (hashes.isEmpty()) return emptySet()
         return frames
             .groupBy { it.hash }
-            .filter { (hash, named) -> hash in hashes && named.all { it.recipientId == me || it.member } }
+            .filter { (hash, named) -> hash in hashes && named.all { it.recipientId == me || it.member || roomPostWaits(it, me, limit) } }
             .keys
     }
+
+    /** Whether [frame] is a room post whose own declared size holds its fetch to Wi-Fi Aware under [limit] (ADR 2026-10.hmfe). */
+    private fun roomPostWaits(
+        frame: CarriedAttachment,
+        me: String,
+        limit: Long,
+    ): Boolean =
+        frame.recipientId == null &&
+            frame.groupId == null &&
+            BluetoothFetchGate.fastOnly(frame.declaredSize, limit, approved = false, own = frame.senderId == me)
 
     /** The carried attachments among [hashes] whose pull [CarrierPullPolicy] holds back now, [linked] being who is. */
     private fun heldForLinkedRecipients(

@@ -20,4 +20,11 @@ class AttachmentKindTest {
         assertEquals(AttachmentKind.File, attachmentKindOf(LinkPreviewBlob.MIME, name = "card.bin"))
         assertEquals(AttachmentKind.File, attachmentKindOf("image/webp", name = "photo.webp"))
     }
+
+    @Test
+    fun aVideoIsItsDescriptionOnAVideoMimeAndAnMp4FileStaysAFile() {
+        assertEquals(AttachmentKind.Video, attachmentKindOf("video/mp4", name = "video.mp4", video = true))
+        assertEquals(AttachmentKind.File, attachmentKindOf("video/mp4", name = "holiday.mp4", video = false))
+        assertEquals(AttachmentKind.File, attachmentKindOf("application/pdf", name = "a.pdf", video = true))
+    }
 }

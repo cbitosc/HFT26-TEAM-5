@@ -3,6 +3,7 @@ package app.getknit.knit.mesh.crypto
 import app.getknit.knit.data.message.MentionStore
 import app.getknit.knit.data.message.MessageEntity
 import app.getknit.knit.data.message.withReply
+import app.getknit.knit.data.message.withVideo
 import app.getknit.knit.mesh.protocol.GroupInfo
 import app.getknit.knit.mesh.protocol.GroupKeyPayload
 import app.getknit.knit.mesh.protocol.GroupRootPayload
@@ -12,6 +13,7 @@ import app.getknit.knit.mesh.protocol.ProfilePayload
 import app.getknit.knit.mesh.protocol.ReactionPayload
 import app.getknit.knit.mesh.protocol.ReplyRef
 import app.getknit.knit.mesh.protocol.TransferPayload
+import app.getknit.knit.mesh.protocol.VideoInfo
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.descriptors.elementNames
 import kotlinx.serialization.json.Json
@@ -65,6 +67,7 @@ class MessageContentTest {
                 attachmentName = "quarterly-report.pdf",
                 attachmentSize = 1_400_000L,
             ).withReply(ReplyRef(messageId = "m0", authorId = "bob00000", author = "Bob", snippet = "send it?"))
+                .withVideo(VideoInfo(durationMs = 30_000L, width = 480, height = 854, poster = byteArrayOf(1, 2, 3)))
 
         val content = row.sealedContent()
         val emitted =
@@ -86,6 +89,16 @@ class MessageContentTest {
         assertEquals(1_400_000L, content.attachmentSize)
         assertEquals(listOf(Mention("bob00000", "Bob")), content.mentions)
         assertEquals("m0", content.replyTo?.messageId)
+        assertEquals(VideoInfo(30_000L, 480, 854, byteArrayOf(1, 2, 3)), content.video)
+    }
+
+    /** A video's description survives the named layout byte for byte, poster included (ADR 2026-10.hmfe). */
+    @Test
+    fun aVideoDescriptionRoundTripsTheNamedLayout() {
+        val video = VideoInfo(durationMs = 61_000L, width = 854, height = 480, poster = ByteArray(5_000) { it.toByte() })
+        val content = MessageContent(body = "", attachmentMime = "video/mp4", attachmentSize = 3_000_000L, video = video)
+        assertEquals(video, checkNotNull(MessageContent.decode(content.encode())).video)
+        assertEquals(null, MessageContent.decode(MessageContent(body = "x").encode())?.video)
     }
 
     @Test

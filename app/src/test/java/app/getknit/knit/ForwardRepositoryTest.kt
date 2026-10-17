@@ -151,6 +151,26 @@ class ForwardRepositoryTest : RoomDbTest() {
         }
 
     @Test
+    fun `a carried room post's attachment carries the size the post declares, never an encrypted frame's shell`() =
+        runTest {
+            // ADR 2026-10.hmfe: what says a room post is large before its row exists. A DM's shell is never read.
+            val repo = repo(db, StoreDigest())
+            val clip = ChatContent(attachmentHash = "CLIP", attachmentMime = "video/mp4", attachmentSize = 3_000_000L)
+            repo.store(chat("r1", "alice", 1L, null, clip), ForwardStore.ORIGIN_RELAY, now = 0L)
+            repo.store(chat("r2", "alice", 2L, null, ChatContent(attachmentHash = "PIC")), ForwardStore.ORIGIN_RELAY, now = 0L)
+            repo.store(
+                chat("d1", "alice", 3L, "bob", ChatContent(attachmentHash = "DM", attachmentSize = 3_000_000L)),
+                ForwardStore.ORIGIN_RELAY,
+                now = 0L,
+            )
+
+            val byHash = repo.carriedAttachments().associateBy { it.hash }
+            assertEquals(3_000_000L, byHash.getValue("CLIP").declaredSize)
+            assertNull("a post that declares nothing", byHash.getValue("PIC").declaredSize)
+            assertNull("a DM's bytes are never loaded", byHash.getValue("DM").declaredSize)
+        }
+
+    @Test
     fun `store denormalizes the attachment hash but never gates the insert on it`() =
         runTest {
             val dao = db.forwardDao()

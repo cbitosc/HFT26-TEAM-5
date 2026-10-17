@@ -158,6 +158,17 @@ class MessageRepository(
         peaks: String?,
     ) = dao.setVoiceMeta(hash, durationMs, peaks)
 
+    /** Marks message [id]'s video poster explicit (ADR 2026-10.hmfe). */
+    suspend fun markPosterFlagged(id: String) = dao.markPosterFlagged(id)
+
+    /** A held video's own duration and upright size, over the sender's claim, on every row naming [hash]. */
+    suspend fun setVideoMeta(
+        hash: String,
+        durationMs: Long,
+        width: Int,
+        height: Int,
+    ) = dao.setVideoMeta(hash, durationMs, width, height)
+
     /** Whether a row naming attachment [hash] still lacks its voice-note duration — [setVoiceMeta]'s want. */
     suspend fun voiceMetaWanted(hash: String): Boolean = dao.voiceMetaWanted(hash)
 

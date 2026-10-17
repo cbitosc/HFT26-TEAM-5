@@ -341,6 +341,26 @@ decryption in `InboundPipeline.screenHeldAttachment` in DM scope, and a room car
 screened by the same `screenHeldAttachment` when the message names it. A MIME an author claims can
 therefore route a blob *into* the stricter screen, never around one.
 
+### 7.2 Short videos are screened as pictures, frame by frame
+
+A short video (ADR 2026-10.hmfe) is pictures and sound. The pictures are screened with the image classifier, and the
+sound is not screened, like a voice note's. Three things get a verdict:
+
+- **On the sender, for the Nearby room only**: `ImageScreeningService.isVideoExplicit` classifies the poster and 12
+  frames sampled evenly across the encoded clip, and a flagged video is refused like a flagged room picture. A DM's or
+  a group's video is not screened on the sender (ADR 2026-10.9rh6).
+- **The poster, on the recipient, when the message arrives** (`isPosterExplicit`, from `InboundPipeline.deliverChat`,
+  after the row commits and guarded so it can never cost the receipt): the bubble shows it before the video is
+  fetched, so it is screened then. The verdict is the row's own (`messages.videoPosterFlagged`), apart from the
+  video's, so a clean poster never vouches for the frames, and it goes when the message goes.
+- **The frames, on the recipient, once the bytes are held** (`screenVideo`): a room video in `MeshBlobStore.ingest`
+  (a key-less `video/` row), a sealed one after decryption in `screenHeldAttachment`, 12 frames, flagged if any is.
+  Every frame is decoded bounded (`getScaledFrameAtTime`). Bytes with no frame to read go to `screenImage` instead,
+  so a picture labelled a video still meets the image screen.
+
+A flagged poster or flagged frames hide the bubble behind the same tap-to-view as a flagged photo, under the same
+toggle. An `.mp4` sent through "Send a file" carries no video description, is never played, and stays a file (§7).
+
 ## 8. When a model crashes the process: the poison-pill
 
 Both classifiers degrade to allow-all on any **Java** failure — a missing asset, a corrupt flatbuffer,

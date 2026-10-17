@@ -213,7 +213,50 @@ data class ChatContent(
     // DM/group the quote rides inside [enc] ([MessageContent.replyTo]) so it stays private, and this is
     // left null — mirroring how [body]/[mentions] are blank on an encrypted frame.
     val replyTo: ReplyRef? = null,
+    // The room attachment's plaintext length (additive; ADR 2026-10.hmfe), declared by the rule a sealed
+    // `MessageContent.attachmentSize` follows (`BluetoothFetchGate.declaresSize`): a label for "Ask before large
+    // Bluetooth downloads" (ADR 2026-10.js2p), which had no size to judge a room post by — never a bound. Room only;
+    // an encrypted frame carries its size sealed.
+    val attachmentSize: Long? = null,
+    // A room video's duration, size and poster (additive; ADR 2026-10.hmfe). Sealed for a DM or a group
+    // (`MessageContent.video`), cleartext here like the rest of a room post.
+    val video: VideoInfo? = null,
 )
+
+/**
+ * What a short video's bubble needs before its bytes arrive (ADR 2026-10.hmfe): its [durationMs], its upright
+ * [width] × [height] and a small JPEG [poster], carried inside the message so a video waiting on "Tap to download"
+ * (ADR 2026-10.js2p) or still fetching shows a picture of itself. All of it is the sender's claim, a label: once the
+ * bytes land the receiver derives the duration and size from them, and screens the poster like any picture it is
+ * shown.
+ *
+ * Every field is required (WIRE_COMPAT rule 6, and its rule against a defaulted `ByteArray`), so it is a nested type
+ * of its own rather than four nullable fields. A plain `class` with a content `equals` (see [WrappedKey] for why not
+ * `data`).
+ */
+@Serializable
+class VideoInfo(
+    val durationMs: Long,
+    val width: Int,
+    val height: Int,
+    @ByteString val poster: ByteArray,
+) {
+    override fun equals(other: Any?): Boolean =
+        other is VideoInfo &&
+            durationMs == other.durationMs &&
+            width == other.width &&
+            height == other.height &&
+            poster.contentEquals(other.poster)
+
+    override fun hashCode(): Int = ((durationMs.hashCode() * 31 + width) * 31 + height) * 31 + poster.contentHashCode()
+
+    override fun toString(): String = "VideoInfo(durationMs=$durationMs, width=$width, height=$height, poster=${poster.size} B)"
+
+    companion object {
+        /** The largest poster a receiver keeps; a bigger one is dropped (the bubble draws without it). */
+        const val MAX_POSTER_BYTES = 8 * 1024
+    }
+}
 
 /**
  * Content of a [FrameType.COMMONS] frame: one post in a spool's commons (docs/SPOOL_PROTOCOL.md §7.4).

@@ -216,6 +216,7 @@ import app.getknit.knit.data.relay.AttachmentRelay
 import app.getknit.knit.data.relay.AttachmentWait
 import app.getknit.knit.data.relay.RelayReach
 import app.getknit.knit.data.relay.dismissable
+import app.getknit.knit.data.video.VideoAttachment
 import app.getknit.knit.demo.DemoComposeCommand
 import app.getknit.knit.demo.DemoComposer
 import app.getknit.knit.identity.PeerLabel
@@ -300,6 +301,7 @@ fun ChatScreen(
     val pendingAttachment by viewModel.pendingAttachment.collectAsStateWithLifecycle()
     val stagedAttachmentRelay by viewModel.stagedAttachmentRelay.collectAsStateWithLifecycle()
     val linkPreviewLoading by viewModel.linkPreviewLoading.collectAsStateWithLifecycle()
+    val videoEncoding by viewModel.videoEncoding.collectAsStateWithLifecycle()
     val showPublicConsent by viewModel.showPublicConsent.collectAsStateWithLifecycle()
     val stagedLocation by viewModel.stagedLocation.collectAsStateWithLifecycle()
     val showLocationConsent by viewModel.showLocationConsent.collectAsStateWithLifecycle()
@@ -327,7 +329,8 @@ fun ChatScreen(
     // System.currentTimeMillis() alone is not a tracked read and would freeze at first composition.
     val now by rememberCurrentTimeMillis()
 
-    // Modern Android Photo Picker — needs no runtime permission. ImageOnly still includes GIFs.
+    // Modern Android Photo Picker — needs no runtime permission. Photos (GIFs included) and videos, which are
+    // re-encoded small before they are staged (ADR 2026-10.hmfe).
     val picker =
         rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
             uri?.let(viewModel::attach)
@@ -553,7 +556,7 @@ fun ChatScreen(
         onOpenLocationSettings = { openLocationSettings(context) },
         onAttachClick = {
             picker.launch(
-                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo),
             )
         },
         onCameraClick = { capturing = true },
@@ -579,6 +582,8 @@ fun ChatScreen(
         onTyping = viewModel::onUserTyping,
         onDraftChanged = viewModel::onDraftChanged,
         linkPreviewLoading = linkPreviewLoading,
+        videoEncoding = videoEncoding,
+        onCancelVideo = viewModel::cancelVideoEncoding,
         mentions = pendingMentions,
         onMentionAdded = { m -> if (pendingMentions.none { it == m }) pendingMentions.add(m) },
         onMentionsAdded = { added -> pendingMentions.addAll(added.distinct().filter { it !in pendingMentions }) },
@@ -602,6 +607,8 @@ fun ChatScreen(
             }
         },
         onSaveAttachment = viewModel::saveAttachment,
+        onLoadVideo = viewModel::videoBytes,
+        onSaveVideo = viewModel::saveVideo,
         onLoadOlder = viewModel::loadOlder,
         onRevealMessage = viewModel::revealMessage,
         jumpToMessageId = jumpToMessageId,
@@ -710,6 +717,9 @@ internal fun ChatScreenContent(
     onDraftChanged: (String) -> Unit = {},
     // True while that card is being fetched; the input bar shows a transient "Loading preview…" line.
     linkPreviewLoading: Boolean = false,
+    // While a picked video is re-encoded, how far along (0..1), drawn as a tile with a Cancel (ADR 2026-10.hmfe).
+    videoEncoding: Float? = null,
+    onCancelVideo: () -> Unit = {},
     // The draft's autocompleted mentions, drawn and edited as chips in the field (see [MentionChips]).
     mentions: List<Mention> = emptyList(),
     onMentionAdded: (Mention) -> Unit,
@@ -725,6 +735,9 @@ internal fun ChatScreenContent(
     onUnblock: (nodeId: String) -> Unit,
     onCopy: (text: String) -> Unit,
     onSaveAttachment: (hash: String, key: String?, mime: String?) -> Unit,
+    // A held video's plaintext for the player, and its save (ADR 2026-10.hmfe); defaulted for previews and tests.
+    onLoadVideo: suspend (hash: String, key: String?) -> ByteArray? = { _, _ -> null },
+    onSaveVideo: (hash: String, key: String?, mime: String?) -> Unit = { _, _, _ -> },
     // Closes the room's relay notice for good. Defaulted so previews and the content tests that never
     // render a dismissable notice need not name it.
     onDismissRelayNotice: () -> Unit = {},
@@ -753,6 +766,7 @@ internal fun ChatScreenContent(
     jumpToMessageId: String? = null,
 ) {
     var fullscreenImage by remember { mutableStateOf<FullscreenImage?>(null) }
+    var fullscreenVideo by remember { mutableStateOf<ChatRow?>(null) }
     // The message the full emoji picker is open for (from the long-press menu's "+"), or null. Saveable so a
     // rotation mid-pick keeps the sheet; hosted here, not in the row, so scrolling can't dispose it.
     var emojiSheetFor by rememberSaveable { mutableStateOf<String?>(null) }
@@ -1206,6 +1220,8 @@ internal fun ChatScreenContent(
                         onTyping = onTyping,
                         onDraftChanged = onDraftChanged,
                         linkPreviewLoading = linkPreviewLoading,
+                        videoEncoding = videoEncoding,
+                        onCancelVideo = onCancelVideo,
                         loraBudget =
                             loraBudgetFor(state.loraCarry, replying = replyingTo != null, attached = pendingAttachment != null)
                                 // A staged position rides the body, so its bytes come off the same budget.
@@ -1361,6 +1377,7 @@ internal fun ChatScreenContent(
                                         imageRatios = imageRatios,
                                         highlighted = row.id == highlightedMessageId,
                                         onImageClick = { fullscreenImage = it },
+                                        onVideoClick = { fullscreenVideo = it },
                                         onSaveFile = onSaveFile,
                                         onDownloadAttachment = onDownloadAttachment,
                                         onOpenProfile = onOpenProfile,
@@ -1436,6 +1453,17 @@ internal fun ChatScreenContent(
                 }
             }
         }
+    }
+
+    fullscreenVideo?.let { video ->
+        val hash = checkNotNull(video.attachmentHash)
+        FullscreenVideoPlayer(
+            load = { onLoadVideo(hash, video.attachmentKey) },
+            width = video.videoWidth,
+            height = video.videoHeight,
+            onDismiss = { fullscreenVideo = null },
+            onSave = { onSaveVideo(hash, video.attachmentKey, video.attachmentMime) },
+        )
     }
 
     fullscreenImage?.let { fs ->
@@ -2051,6 +2079,7 @@ private fun MessageBubble(
     // True to briefly highlight this bubble after a quote-tap scrolled to it; defaulted for previews.
     highlighted: Boolean = false,
     onImageClick: (FullscreenImage) -> Unit,
+    onVideoClick: (ChatRow) -> Unit = {},
     // Saving a file attachment through the storage picker; defaulted so the @Preview call sites and the
     // content tests need no extra wiring.
     onSaveFile: (hash: String, key: String?, name: String?, mime: String?) -> Unit = { _, _, _, _ -> },
@@ -2265,7 +2294,27 @@ private fun MessageBubble(
                             Spacer(Modifier.height(4.dp))
                         }
                         if (row.attachmentHash != null) {
-                            if (row.attachmentAwaitsTap && arrival == null && row.attachmentSize != null) {
+                            if (row.videoDurationMs != null && VideoAttachment.isVideo(row.attachmentMime)) {
+                                // A short video (ADR 2026-10.hmfe): its poster stands in from the first moment, with
+                                // js2p's tap, the arrival ring or the play button over it. Ahead of the tap card and
+                                // the name arm: a video is named only so an older build can show it as a file.
+                                VideoBubble(
+                                    hash = row.attachmentHash,
+                                    poster = row.videoPoster,
+                                    durationMs = row.videoDurationMs,
+                                    width = row.videoWidth,
+                                    height = row.videoHeight,
+                                    ready = row.attachmentReady,
+                                    flagged = row.attachmentFlagged || row.posterFlagged,
+                                    awaitsTap = row.attachmentAwaitsTap,
+                                    declaredSize = row.attachmentSize,
+                                    wait = row.attachmentWait,
+                                    arrival = arrival,
+                                    onPlay = { onVideoClick(row) },
+                                    onDownload = { onDownloadAttachment(row.attachmentHash) },
+                                    onLongClick = { showPicker = true },
+                                )
+                            } else if (row.attachmentAwaitsTap && arrival == null && row.attachmentSize != null) {
                                 // Over the user's limit and only Bluetooth could bring it: nothing is fetched until
                                 // the tap (ADR 2026-10.js2p). Bytes arriving — Wi-Fi Aware needs no tap — put the
                                 // kind's own placeholder and its progress ring back.
@@ -3711,6 +3760,8 @@ private fun MessageInput(
     onTyping: (String) -> Unit = {},
     onDraftChanged: (String) -> Unit = {},
     linkPreviewLoading: Boolean = false,
+    videoEncoding: Float? = null,
+    onCancelVideo: () -> Unit = {},
     // The LoRa body budget for this draft ([loraBudgetFor]), or null when it would not ride the board. Above
     // it the composer shows the "long message" hint — a hedge, since the true ceiling is a little higher.
     loraBudget: Int? = null,
@@ -3938,6 +3989,10 @@ private fun MessageInput(
                         }
                     }
                 }
+            }
+            if (videoEncoding != null) {
+                VideoEncodingTile(progress = videoEncoding, onCancel = onCancelVideo)
+                Spacer(Modifier.height(8.dp))
             }
             if (pendingAttachment != null) {
                 if (VoiceAudio.isVoice(pendingAttachment.mime)) {
@@ -4640,7 +4695,9 @@ private fun AttachmentPreview(
             // A named attachment is a file, and there is nothing to thumbnail: handing its bytes to the
             // image loader drew a blank 72dp square with only the ✕ on it, which read as a broken attachment
             // rather than a staged one. It gets the same icon/name/size tile the sent bubble will draw.
-            if (attachment.name != null) {
+            if (attachment.video != null) {
+                StagedVideoTile(video = attachment.video)
+            } else if (attachment.name != null) {
                 StagedFileTile(attachment)
             } else if (attachment.link != null) {
                 // A link-preview card: the title and host the bubble will draw, beside the same ✕.

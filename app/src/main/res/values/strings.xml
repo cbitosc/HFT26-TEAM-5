@@ -249,6 +249,24 @@
     <string name="chat_attachment_tap_hint">Slow over Bluetooth. Wi-Fi Aware gets it on its own.</string>
     <string name="chat_attachment_tap_hint_bluetooth_only">Can take minutes over Bluetooth.</string>
     <string name="chat_attachment_download_action">Download</string>
+
+    <!-- Short videos (ADR 2026-10.hmfe): a picked video is re-encoded small before it is staged. -->
+    <string name="chat_video_encoding">Shrinking video… %1$d%%</string>
+    <string name="chat_video_cancel">Cancel</string>
+    <string name="chat_video_trimmed">Videos are up to 61 seconds, so this sends the first 61</string>
+    <string name="chat_video_too_large">This video is still too big after shrinking. Direct file send can take the original.</string>
+    <string name="chat_video_unreadable">Couldn\'t read that video</string>
+    <string name="chat_video_text_only">Videos can\'t be sent here</string>
+    <string name="chat_video_play">Play video, %1$s</string>
+    <string name="chat_video_loading">Waiting for the video</string>
+    <string name="chat_video_close">Close video</string>
+    <string name="chat_video_pause">Pause</string>
+    <string name="chat_video_resume">Play</string>
+    <string name="chat_video_unplayable">Couldn\'t play this video</string>
+    <string name="chat_video_save">Save</string>
+    <string name="chat_video_saved">Video saved</string>
+    <string name="chat_video_save_failed">Couldn\'t save that video</string>
+    <string name="moderation_video_hidden">Sensitive video — tap to view</string>
     <string name="chat_attachment_photo">Photo</string>
     <string name="chat_attachment_voice">Voice message</string>
 
@@ -556,6 +574,7 @@
     <string name="whats_new_2_9_field_log_title">Help tune Knit with a field log</string>
     <string name="whats_new_2_9_field_log_body">Turn on the field log in Diagnostics to record three days of how your phone\'s radios behaved, with no names, messages or ids. It stays on your phone unless you share it.</string>
     <string name="chat_list_preview_photo">📷 Photo</string>
+    <string name="chat_list_preview_video">🎬 Video</string>
     <string name="chat_list_preview_gif">🎞️ GIF</string>
     <string name="chat_list_preview_voice">🎤 Voice message</string>
     <string name="chat_list_preview_file">📎 %1$s</string>
@@ -1135,6 +1154,7 @@
     <string name="moderation_text_blocked">Message not sent: it may contain abusive language</string>
     <string name="moderation_text_hidden">Message hidden — tap to reveal</string>
     <string name="moderation_image_blocked">Explicit images can\'t be sent to the Nearby room</string>
+    <string name="moderation_video_blocked">Explicit videos can\'t be sent to the Nearby room</string>
     <string name="moderation_image_hidden">Sensitive image — tap to view</string>
     <string name="moderation_link_hidden">Sensitive preview — tap to view</string>
     <!-- Stands in for a received message's text where it would be shown unasked (a notification, the chat

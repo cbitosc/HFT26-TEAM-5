@@ -4,6 +4,7 @@ import android.util.Log
 import app.getknit.knit.data.blob.BlobVerdictDao
 import app.getknit.knit.data.blob.BlobVerdictEntity
 import app.getknit.knit.data.decodeBoundedFromBytes
+import app.getknit.knit.data.video.VideoFrames
 import app.getknit.knit.mesh.protocol.LinkPreviewBlob
 import kotlinx.coroutines.flow.Flow
 
@@ -66,7 +67,69 @@ class ImageScreeningService(
         mime: String?,
         isRoom: Boolean,
     ) {
-        if (mime == LinkPreviewBlob.MIME) screenLinkPreview(hash, bytes, isRoom) else screenImage(hash, bytes)
+        when {
+            mime == LinkPreviewBlob.MIME -> screenLinkPreview(hash, bytes, isRoom)
+            mime?.startsWith(VIDEO_PREFIX) == true -> screenVideo(hash, bytes)
+            else -> screenImage(hash, bytes)
+        }
+    }
+
+    /**
+     * Send-side screen for a short video bound for the Nearby room (ADR 2026-10.hmfe): its [poster] and
+     * [VIDEO_SAMPLES] frames spread across [bytes], each through the image classifier; explicit if any one is. Like
+     * [isImageExplicit], fail-open on frames that do not decode, and nothing cached.
+     */
+    suspend fun isVideoExplicit(
+        bytes: ByteArray,
+        poster: ByteArray,
+    ): Boolean {
+        if (poster.isNotEmpty() && isImageExplicit(poster)) return true
+        return anyFrameExplicit(bytes, "outgoing video")
+    }
+
+    /**
+     * Receive-side screen for a held video, cached under [hash] like [screenImage]: [VIDEO_SAMPLES] frames, flagged
+     * if any one is. Bytes with no frame to read go to [screenImage] instead: the MIME is the sender's claim, and a
+     * picture labelled a video must still meet the image screen.
+     */
+    suspend fun screenVideo(
+        hash: String,
+        bytes: ByteArray,
+    ) {
+        if (verdicts.find(hash) != null) return
+        val frames = VideoFrames.sample(bytes, VIDEO_SAMPLES, SCREEN_MAX_DIM)
+        // No video in them: screened as the picture they may be, so a mislabel can only pick a screen, not skip one.
+        if (frames.isEmpty()) return screenImage(hash, bytes)
+        val scores = frames.map { frame -> imageModerator.classify(frame).also { frame.recycle() } }
+        val flagged = scores.any { it.flagged }
+        Log.d(TAG, "incoming video hash=$hash frames=${scores.size} flagged=$flagged")
+        verdicts.upsert(BlobVerdictEntity(hash, flagged, scores.maxOf { it.score }))
+    }
+
+    /**
+     * Receive-side screen for a video's inline poster (ADR 2026-10.hmfe), the picture its bubble shows before the
+     * bytes land: true when explicit. Nothing cached here: the caller marks the row that shows it, so the verdict goes
+     * with the message, and the poster's verdict never stands in for the frames [screenVideo] judges later.
+     */
+    suspend fun isPosterExplicit(poster: ByteArray): Boolean {
+        val bitmap = decodeBoundedFromBytes(poster, SCREEN_MAX_DIM) ?: return false
+        val verdict = imageModerator.classify(bitmap)
+        Log.d(TAG, "incoming poster score=${verdict.score} flagged=${verdict.flagged}")
+        return verdict.flagged
+    }
+
+    private suspend fun anyFrameExplicit(
+        bytes: ByteArray,
+        what: String,
+    ): Boolean {
+        val frames = VideoFrames.sample(bytes, VIDEO_SAMPLES, SCREEN_MAX_DIM)
+        var flagged = false
+        for (frame in frames) {
+            if (!flagged) flagged = imageModerator.classify(frame).flagged
+            frame.recycle()
+        }
+        Log.d(TAG, "$what frames=${frames.size} flagged=$flagged")
+        return flagged
     }
 
     /**
@@ -118,11 +181,16 @@ class ImageScreeningService(
     /** Whether [hash] has a cached verdict marking it explicit (used to refuse adopting a flagged avatar). */
     suspend fun isImageFlagged(hash: String): Boolean = verdicts.find(hash)?.flagged == true
 
-    private companion object {
-        const val TAG = "ImageModeration"
+    companion object {
+        private const val TAG = "ImageModeration"
+
+        private const val VIDEO_PREFIX = "video/"
+
+        /** Frames a video is screened by: one every five seconds or so of a 61 s clip. */
+        const val VIDEO_SAMPLES = 12
 
         // Screening downsamples to the model's input anyway; bound the decode so a peer-supplied image
         // can't OOM before classification.
-        const val SCREEN_MAX_DIM = 512
+        private const val SCREEN_MAX_DIM = 512
     }
 }

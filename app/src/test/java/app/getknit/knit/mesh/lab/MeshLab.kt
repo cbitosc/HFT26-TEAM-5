@@ -82,6 +82,7 @@ import app.getknit.knit.mesh.lora.LoraPacePolicy
 import app.getknit.knit.mesh.protocol.FrameType
 import app.getknit.knit.mesh.protocol.Protocol
 import app.getknit.knit.mesh.protocol.ReplyRef
+import app.getknit.knit.mesh.protocol.VideoInfo
 import app.getknit.knit.mesh.sha256Hex
 import app.getknit.knit.mesh.spool.FakeSpool
 import app.getknit.knit.mesh.spool.RelayInvite
@@ -1543,6 +1544,35 @@ class LabNode internal constructor(
     }
 
     /**
+     * Sends [bytes] as a short video described by [video] — to [to], into [groupId], or into the room when both are
+     * null — the frame the composer sends once the re-encode is done (ADR 2026-10.hmfe). Like [sendImage] the bytes go
+     * straight into the blob store under their own hash: the re-encode needs the platform codecs Robolectric does not
+     * have, and the mesh's half is the same for any bytes. The description is the sender's label, carried as is.
+     */
+    suspend fun sendVideo(
+        bytes: ByteArray,
+        video: VideoInfo,
+        text: String = "",
+        to: LabNode? = null,
+        groupId: String? = null,
+    ): Boolean {
+        val hash = sha256Hex(bytes)
+        blobs.insert(hash, VIDEO_MIME, bytes)
+        val attachment = AttachmentStore.Ingested(hash = hash, mime = VIDEO_MIME, sizeBytes = bytes.size, video = video)
+        val group = groupId?.let { checkNotNull(groups.find(it)) { "$name holds no group $it" }.toGroupInfo() }
+        return spaced {
+            manager.sendChat(
+                text = text,
+                attachment = attachment,
+                mentions = emptyList(),
+                recipientId = to?.nodeId,
+                group = group,
+                replyTo = null,
+            )
+        }
+    }
+
+    /**
      * Sends [bytes] as a voice note — to [to], into [groupId], or into the room when both are null — the frame the
      * composer sends when a recording stops. The sender describes its own copy at ingest, as `AttachmentStore` does;
      * the duration is header arithmetic, so an `adts` fixture times on the host, while the waveform needs the
@@ -2132,6 +2162,7 @@ class LabNode internal constructor(
 
     private companion object {
         const val IMAGE_MIME = "image/jpeg"
+        const val VIDEO_MIME = "video/mp4"
         const val LORA_LOG_LINES = 24
 
         /** The text classifier's answer to words it minds, under [flaggedText]. */

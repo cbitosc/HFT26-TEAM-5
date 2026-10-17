@@ -255,6 +255,15 @@ data class ChatRow(
     // its link is one the body actually contains. Null until then: the bubble draws nothing for a card that
     // has not arrived, never a spinner, since the body's own link is already tappable.
     val linkCard: LinkCard? = null,
+    // A short video's duration and upright size (the sender's until the bytes land, then the bytes' own) and its
+    // poster, base64 as the row stores it (a String keeps this data class's value equality), with the poster's own
+    // screening verdict: a flagged poster is drawn blurred like a flagged picture (ADR 2026-10.hmfe). All null for
+    // anything but a video.
+    val videoDurationMs: Long? = null,
+    val videoWidth: Int? = null,
+    val videoHeight: Int? = null,
+    val videoPoster: String? = null,
+    val posterFlagged: Boolean = false,
     // The position this message carries as a `geo:` token in its body ([app.getknit.knit.location.GeoUri]),
     // parsed once here so the bubble draws a card in the token's place and the token itself stays out of
     // the text it shows. Null for every body without one — including a token that fails the grammar, which
@@ -1116,6 +1125,11 @@ class ChatViewModel(
                                 m.attachmentMime != LinkPreviewBlob.MIME &&
                                 BluetoothFetchGate.fastOnly(m.attachmentSize, downloadLimit, m.attachmentFetchApproved, own = mine),
                         attachmentFlagged = hideSensitive && m.attachmentHash != null && m.attachmentHash in flaggedHashes,
+                        videoDurationMs = m.videoDurationMs,
+                        videoWidth = m.videoWidth,
+                        videoHeight = m.videoHeight,
+                        videoPoster = m.videoPoster,
+                        posterFlagged = hideSensitive && m.videoPosterFlagged,
                         // Outbound reach only: a received attachment has already arrived, so telling its
                         // reader it is "nearby only" would describe a journey that is over. Unknown size
                         // (bytes reclaimed by retention) falls through to Silent rather than guessing. A
@@ -1990,7 +2004,67 @@ class ChatViewModel(
      * explain.
      */
     fun attach(uri: Uri) {
-        viewModelScope.launch { stage(attachments.ingest(uri, screen = isRoom), notifyFailure = false) }
+        viewModelScope.launch {
+            if (attachments.isVideo(uri)) {
+                attachVideo(uri)
+            } else {
+                stage(attachments.ingest(uri, screen = isRoom), notifyFailure = false)
+            }
+        }
+    }
+
+    private val _videoEncoding = MutableStateFlow<Float?>(null)
+
+    /** While a picked video is being re-encoded, how far along (0..1); null otherwise. ADR 2026-10.hmfe. */
+    val videoEncoding: StateFlow<Float?> = _videoEncoding.asStateFlow()
+
+    private var videoJob: Job? = null
+
+    /**
+     * Re-encodes a picked video small (ADR 2026-10.hmfe) and stages it, the composer showing the encode's progress
+     * meanwhile. Refused up front where a video can never go — the Meshtastic room and a commons carry text — rather
+     * than after a half-minute encode. A new pick cancels one still encoding, as does [cancelVideoEncoding] and
+     * leaving the chat (the job is the screen's). Every failure speaks: unlike a photo, the user waited for it.
+     */
+    private fun attachVideo(uri: Uri) {
+        if (isBridged || isCommons) {
+            _events.tryEmit(R.string.chat_video_text_only)
+            return
+        }
+        videoJob?.cancel()
+        videoJob =
+            viewModelScope.launch {
+                _videoEncoding.value = 0f
+                try {
+                    val result = attachments.ingestVideo(uri, screen = isRoom) { _videoEncoding.value = it }
+                    when (result) {
+                        is AttachmentStore.IngestResult.Failed -> {
+                            _events.tryEmit(
+                                if (result.reason == AttachmentStore.IngestResult.Reason.TooLarge) {
+                                    R.string.chat_video_too_large
+                                } else {
+                                    R.string.chat_video_unreadable
+                                },
+                            )
+                        }
+
+                        is AttachmentStore.IngestResult.Success -> {
+                            stage(result, notifyFailure = true)
+                            if (result.ingested.trimmed && _pendingAttachment.value == result.ingested) {
+                                _events.tryEmit(R.string.chat_video_trimmed)
+                            }
+                        }
+                    }
+                } finally {
+                    _videoEncoding.value = null
+                }
+            }
+    }
+
+    /** Stops a video encode the composer is showing; nothing is staged. */
+    fun cancelVideoEncoding() {
+        videoJob?.cancel()
+        videoJob = null
     }
 
     /**
@@ -2228,7 +2302,9 @@ class ChatViewModel(
                     isRoom && result.flagged -> {
                         // Hard block in the broadcast room, the one scope that screens; drop the unsent blob.
                         blobs.deleteIfUnreferenced(result.ingested.hash)
-                        _events.tryEmit(R.string.moderation_image_blocked)
+                        _events.tryEmit(
+                            if (result.ingested.video != null) R.string.moderation_video_blocked else R.string.moderation_image_blocked,
+                        )
                     }
 
                     else -> {
@@ -2372,6 +2448,32 @@ class ChatViewModel(
             draftEpoch.value++
         }
         viewModelScope.launch { blobs.deleteIfUnreferenced(pending.hash) }
+    }
+
+    /**
+     * A held video's plaintext, for the player (ADR 2026-10.hmfe): read and decrypted into memory like a voice
+     * note's, never staged as a file. Null when the blob is gone or does not open.
+     */
+    suspend fun videoBytes(
+        hash: String,
+        key: String?,
+    ): ByteArray? {
+        val raw = blobs.bytes(hash) ?: return null
+        if (key == null) return raw
+        return withContext(Dispatchers.Default) { AttachmentCrypto.open(raw, b64d(key)) }
+    }
+
+    /** Saves a held video to `Movies/Knit` (ADR 2026-10.hmfe), the video half of [saveAttachment]. */
+    fun saveVideo(
+        hash: String,
+        key: String?,
+        mime: String?,
+    ) {
+        viewModelScope.launch {
+            val bytes = videoBytes(hash, key)
+            val ok = bytes != null && gallerySaver.saveToMovies(bytes, hash, mime ?: "video/mp4")
+            _events.tryEmit(if (ok) R.string.chat_video_saved else R.string.chat_video_save_failed)
+        }
     }
 
     /**

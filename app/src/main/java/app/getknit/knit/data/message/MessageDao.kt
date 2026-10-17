@@ -238,6 +238,27 @@ interface MessageDao {
     )
 
     /**
+     * Records what a held video's own bytes say — its duration and upright size — on every message naming [hash]
+     * (ADR 2026-10.hmfe), replacing the sender's claim; keyed by hash for [setVoiceMeta]'s reason. Only rows that
+     * differ are touched, so a re-served frame that brings the held blob back here writes nothing.
+     */
+    @Query(
+        "UPDATE messages SET videoDurationMs = :durationMs, videoWidth = :width, videoHeight = :height " +
+            "WHERE attachmentHash = :hash AND (videoDurationMs IS NOT :durationMs OR videoWidth IS NOT :width " +
+            "OR videoHeight IS NOT :height)",
+    )
+    suspend fun setVideoMeta(
+        hash: String,
+        durationMs: Long,
+        width: Int,
+        height: Int,
+    )
+
+    /** Marks the inline poster of message [id] explicit, as this phone's screen judged it (ADR 2026-10.hmfe). */
+    @Query("UPDATE messages SET videoPosterFlagged = 1 WHERE id = :id AND videoPosterFlagged = 0")
+    suspend fun markPosterFlagged(id: String)
+
+    /**
      * Whether a message naming [hash] still lacks its voice-note duration — [setVoiceMeta]'s want. The inbound
      * pipeline asks it before decoding, because a held blob meets its row again on every re-serve of the frame,
      * and describing the audio is a full decode.

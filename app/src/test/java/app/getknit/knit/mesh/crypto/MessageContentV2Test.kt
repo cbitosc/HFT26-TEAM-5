@@ -9,6 +9,7 @@ import app.getknit.knit.mesh.protocol.ProfilePayload
 import app.getknit.knit.mesh.protocol.ReactionPayload
 import app.getknit.knit.mesh.protocol.ReplyRef
 import app.getknit.knit.mesh.protocol.TransferPayload
+import app.getknit.knit.mesh.protocol.VideoInfo
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -160,6 +161,17 @@ class MessageContentV2Test {
         assertEquals("report.pdf", back.attachmentName)
         assertEquals(1_400_000L, back.attachmentSize)
         assertEquals("application/pdf", back.attachmentMime)
+    }
+
+    /** A video's description takes label 16 and its poster rides as raw bytes (ADR 2026-10.hmfe). */
+    @Test
+    fun aVideoDescriptionRoundTripsWithItsPosterRaw() {
+        val poster = ByteArray(5_000) { (it * 7).toByte() }
+        val plain = MessageContent(body = "", attachmentHash = hash, attachmentMime = "video/mp4", attachmentKey = key)
+        val video = plain.copy(video = VideoInfo(durationMs = 61_000L, width = 480, height = 854, poster = poster))
+        assertEquals(video.video, roundTrip(video).video)
+        val growth = checkNotNull(MessageContentV2.encodeOrNull(video)).size - checkNotNull(MessageContentV2.encodeOrNull(plain)).size
+        assertTrue("the poster is raw, not base64: grew $growth B", growth < poster.size + 32)
     }
 
     /** The open-to-chat flag is additive: a profile without it carries no label 5, so an older peer's bytes are unchanged. */

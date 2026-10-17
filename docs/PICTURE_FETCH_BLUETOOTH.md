@@ -250,7 +250,11 @@ diagram above runs over the neighbours on the two Wi-Fi Aware tiers alone, every
 in reach nobody is queried or asked — no blind round, no pull-through over Bluetooth. A cycle that asked a reachable holder
 and still wants the bytes backs off as a dead one does, until a Wi-Fi Aware link comes up. A holder serves such an ask over a
 live Wi-Fi Aware link or one it raises, and otherwise drops it rather than feed it to Bluetooth. "Tap to download" wants
-it plain, and from there it is fetched as this page describes. A room picture declares no size and is never held.
+it plain, and from there it is fetched as this page describes. A room post declares its size too (ADR 2026-10.hmfe: an
+attachment of 1 MB or more says so in the clear `ChatContent`), so a large room picture or video is held the same
+way — by custody's want, which runs ahead of the delivery's, and by the tick's re-arm of a carried room post that no
+row names yet, both judged by the size the post declares. A post that declares none (an older build, the iOS port) is
+never held.
 
 ## How fast a link is fed
 

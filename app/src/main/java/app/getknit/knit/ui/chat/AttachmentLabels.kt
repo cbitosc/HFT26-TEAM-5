@@ -33,6 +33,7 @@ fun attachmentPreview(
         message.attachmentName,
         message.attachmentSize,
         animated = message.attachmentAnimated,
+        video = message.videoDurationMs != null,
     )
 
 /**
@@ -72,9 +73,14 @@ fun attachmentLabel(
     name: String?,
     size: Long? = null,
     animated: Boolean = false,
+    video: Boolean = false,
 ): String {
     val label =
-        when (attachmentKindOf(mime, name)) {
+        when (attachmentKindOf(mime, name, video)) {
+            AttachmentKind.Video -> {
+                context.getString(R.string.chat_list_preview_video)
+            }
+
             AttachmentKind.Voice -> {
                 context.getString(R.string.chat_list_preview_voice)
             }
@@ -107,6 +113,7 @@ fun notificationLabels(context: Context): NotificationLabels =
         location = context.getString(R.string.chat_list_preview_location),
         file = context.getString(R.string.chat_list_preview_file),
         hidden = context.getString(R.string.moderation_preview_hidden),
+        video = context.getString(R.string.chat_list_preview_video),
     )
 
 /** What to say about an ingest that produced nothing. */

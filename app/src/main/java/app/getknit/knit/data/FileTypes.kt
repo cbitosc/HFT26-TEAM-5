@@ -39,6 +39,24 @@ object FileTypes {
         return null
     }
 
+    /**
+     * The video container [bytes] carry, or null if no signature matches: an ISO base-media file whose major brand
+     * is a video one (MP4, QuickTime, 3GPP), or a Matroska/WebM file. Only the container is named: whether its
+     * streams decode is the encode's to find out, and a container that does not is refused there.
+     */
+    @Suppress("MagicNumber") // the brand is a fixed four-byte field at a fixed offset
+    fun videoMimeOf(bytes: ByteArray): String? {
+        if (bytes.startsWith(EBML)) return "video/webm"
+        if (bytes.size < 12 || !bytes.matchesAt(FTYP, 4)) return null
+        val brand = String(bytes, 8, 4, Charsets.US_ASCII)
+        return when {
+            brand == "qt  " -> "video/quicktime"
+            brand.startsWith("3g") -> "video/3gpp"
+            brand in MP4_VIDEO_BRANDS -> "video/mp4"
+            else -> null
+        }
+    }
+
     /** The ISO base-media brand at offset 8 mapped to an image type, or null for a video/unknown brand. */
     @Suppress("MagicNumber") // the brand is a fixed four-byte field at a fixed offset
     private fun brandMime(bytes: ByteArray): String? {
@@ -105,6 +123,11 @@ object FileTypes {
 
     private val HEIF_BRANDS = setOf("heic", "heix", "hevc", "hevx", "heim", "heis", "hevm", "hevs", "mif1", "msf1")
     private val AVIF_BRANDS = setOf("avif", "avis")
+    private val MP4_VIDEO_BRANDS =
+        setOf("isom", "iso2", "iso3", "iso4", "iso5", "iso6", "iso8", "iso9", "mp41", "mp42", "avc1", "M4V ", "mmp4", "MSNV", "dash")
+
+    @Suppress("MagicNumber") // raw file-signature bytes
+    private val EBML = byteArrayOf(0x1A, 0x45, 0xDF.toByte(), 0xA3.toByte())
 
     private val APK_EXTENSIONS = setOf("apk", "apks", "xapk", "apkm", "aab")
 

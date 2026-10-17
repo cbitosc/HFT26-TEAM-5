@@ -143,10 +143,16 @@ interface ForwardDao {
     /**
      * One row per carried frame naming an attachment not in the `blobs` table yet: whom it is for, when it was carried,
      * its author and its group — [attachmentsNeedingFetch] per frame, for the carrier's pull deferral (ADR 2026-10.g24x).
+     * A frame with no cleartext recipient — a group's, for the roster it carries, or a room post's, for the size it
+     * declares (ADR 2026-10.hmfe) — brings its signed bytes; a DM's are never loaded. A room post's only while no
+     * message row names its hash: the tick reads the declared size only for hashes no row covers (`unopenedForUs`),
+     * and a delivered, untapped room video would otherwise reload its poster-sized frame on every re-arm.
      */
     @Query(
         "SELECT attachmentHash AS hash, recipientId, receivedAt, senderId, groupId, " +
-            "CASE WHEN groupId IS NOT NULL THEN signed END AS signed FROM forward_store " +
+            "CASE WHEN recipientId IS NULL AND (groupId IS NOT NULL OR NOT EXISTS " +
+            "(SELECT 1 FROM messages AS m WHERE m.attachmentHash = forward_store.attachmentHash)) " +
+            "THEN signed END AS signed FROM forward_store " +
             "WHERE attachmentHash IS NOT NULL AND attachmentHash NOT IN (SELECT hash FROM blobs)",
     )
     suspend fun carriedAttachments(): List<CarriedAttachmentRow>
@@ -256,6 +262,6 @@ class CarriedAttachmentRow(
     val receivedAt: Long,
     val senderId: String,
     val groupId: String?,
-    /** A group frame's signed bytes, for its roster; null for every other frame, whose bytes are never loaded. */
+    /** A group frame's or a room post's signed bytes (its roster, its declared size); null for a DM, never loaded. */
     val signed: ByteArray?,
 )

@@ -147,6 +147,12 @@ class MeshBlobStore(
                 imageScreening.screenAttachment(hash, bytes, localMime, isRoom = true)
             }
 
+            isVideo(localMime) && key == null -> {
+                // A room video (ADR 2026-10.hmfe): its frames, sampled. Bytes that hold no readable video fall to
+                // the image screen, so calling a picture a video routes it to a screen, never around one.
+                imageScreening.screenVideo(hash, bytes)
+            }
+
             !isImage(localMime) && key != null -> {
                 // A sealed non-image: ciphertext here, screened after decryption in InboundPipeline.onObtained.
             }
@@ -189,6 +195,8 @@ class MeshBlobStore(
      * the key test, and a row-less blob has no key either, so it falls to the safe side.
      */
     private fun isImage(mime: String?): Boolean = mime != null && mime.startsWith("image/")
+
+    private fun isVideo(mime: String?): Boolean = mime != null && mime.startsWith("video/")
 
     private companion object {
         const val TAG = "MeshBlobStore"

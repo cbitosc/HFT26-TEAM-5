@@ -114,7 +114,11 @@ Adjacent routing that stays where its owner is, because another subsystem owns i
   rows on every re-arm and limit change, the re-arms and the tap's want run under one mutex (the tap's approval before
   it, on the manager's scope), and the tap is sticky in the exchange; a neighbour's ask sets the flag only on a want it creates. An unopened frame addressed to us — by its own roster
   for a group, never by group rows alone — is not wanted by custody (delivery follows; the tick holds one that never
-  opens to Wi-Fi Aware, only when every carried frame naming the hash is ours). A room post declares no size and is never held.
+  opens to Wi-Fi Aware, only when every carried frame naming the hash is ours). A room post declares its size in the
+  clear since ADR 2026-10.hmfe (`ChatContent.attachmentSize`, the sealed path's `declaresSize` rule): it is every node's,
+  so `onCarriedFrame` — which runs ahead of `deliverChat` — judges it by that size folded with the rows, and the tick
+  counts a carried room post no row names (`CarriedAttachment.declaredSize`, read off its signed bytes) as ours when it
+  declares over the limit; a post declaring nothing is never held.
   Lab: `LargeAttachmentLabTest`, `AttachmentLabTest`'s two #132 cases; unit: `BlobExchangeTest`'s fast-only cases,
   `CompositeMeshTransportTest`, `BluetoothFetchGateTest`.
 - **When touching `KeyExchange`'s cache / `profileFor` / `serveKey`, `peer_profiles` (`PeerProfileEntity`,

@@ -589,6 +589,21 @@ object KnitMigrations {
             }
         }
 
+    /**
+     * v24 → v25: a short video's duration, upright size and inline poster on the message row (ADR 2026-10 short
+     * videos). All nullable and null on every existing row: nothing before this build sent a video.
+     */
+    val MIGRATION_24_25 =
+        object : Migration(24, 25) {
+            override suspend fun migrate(connection: SQLiteConnection) {
+                connection.execSQL("ALTER TABLE `messages` ADD COLUMN `videoDurationMs` INTEGER")
+                connection.execSQL("ALTER TABLE `messages` ADD COLUMN `videoWidth` INTEGER")
+                connection.execSQL("ALTER TABLE `messages` ADD COLUMN `videoHeight` INTEGER")
+                connection.execSQL("ALTER TABLE `messages` ADD COLUMN `videoPoster` TEXT")
+                connection.execSQL("ALTER TABLE `messages` ADD COLUMN `videoPosterFlagged` INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
     /** All migrations, applied by Room in order. */
     val ALL: Array<Migration> =
         arrayOf(
@@ -615,5 +630,6 @@ object KnitMigrations {
             MIGRATION_21_22,
             MIGRATION_22_23,
             MIGRATION_23_24,
+            MIGRATION_24_25,
         )
 }

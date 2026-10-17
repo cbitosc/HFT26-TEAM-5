@@ -39,6 +39,9 @@ import app.getknit.knit.ui.chat.SystemNoticePreview
 import app.getknit.knit.ui.chat.TapToDownloadBluetoothOnlyPreview
 import app.getknit.knit.ui.chat.TapToDownloadFilePreview
 import app.getknit.knit.ui.chat.TapToDownloadPhotoPreview
+import app.getknit.knit.ui.chat.VideoBubbleHeldPreview
+import app.getknit.knit.ui.chat.VideoBubbleTapToDownloadPreview
+import app.getknit.knit.ui.chat.VideoEncodingTilePreview
 import com.android.tools.screenshot.PreviewTest
 
 // Screenshot tests over the previews in `ui.chat`.
@@ -223,3 +226,18 @@ fun TapToDownloadPhoto() = TapToDownloadPhotoPreview()
 @ComponentShots
 @Composable
 fun TapToDownloadBluetoothOnly() = TapToDownloadBluetoothOnlyPreview()
+
+@PreviewTest
+@ComponentShots
+@Composable
+fun VideoEncodingTile() = VideoEncodingTilePreview()
+
+@PreviewTest
+@ComponentShots
+@Composable
+fun VideoBubbleHeld() = VideoBubbleHeldPreview()
+
+@PreviewTest
+@ComponentShots
+@Composable
+fun VideoBubbleTapToDownload() = VideoBubbleTapToDownloadPreview()

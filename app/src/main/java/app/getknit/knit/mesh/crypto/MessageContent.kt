@@ -3,6 +3,7 @@ package app.getknit.knit.mesh.crypto
 import app.getknit.knit.data.message.MentionStore
 import app.getknit.knit.data.message.MessageEntity
 import app.getknit.knit.data.message.replyRef
+import app.getknit.knit.data.message.videoInfo
 import app.getknit.knit.mesh.protocol.AttachmentName
 import app.getknit.knit.mesh.protocol.GroupKeyPayload
 import app.getknit.knit.mesh.protocol.Mention
@@ -10,6 +11,7 @@ import app.getknit.knit.mesh.protocol.ProfilePayload
 import app.getknit.knit.mesh.protocol.ReactionPayload
 import app.getknit.knit.mesh.protocol.ReplyRef
 import app.getknit.knit.mesh.protocol.TransferPayload
+import app.getknit.knit.mesh.protocol.VideoInfo
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromByteArray
@@ -53,6 +55,9 @@ data class MessageContent(
     // (docs/SPOOL_PROTOCOL.md C-4.5-8). Once the blob lands its stored length is the authority.
     val attachmentName: String? = null,
     val attachmentSize: Long? = null,
+    // A short video's duration, upright size and poster (additive; ADR 2026-10.hmfe): what its bubble draws
+    // before the bytes land, sealed like the name for the same reason. Labels only; the bytes are the authority.
+    val video: VideoInfo? = null,
     // Quoted-reply reference for an encrypted DM/group, carried here (inside the ciphertext) so the
     // quoted author + snippet stay private — never on the cleartext [ChatContent.replyTo] for these.
     // Relies, like every field here, on cryptoCbor's `encodeDefaults = false` to stay off the wire when
@@ -169,5 +174,6 @@ internal fun MessageEntity.sealedContent(): MessageContent =
         attachmentKey = attachmentKey,
         attachmentName = attachmentName,
         attachmentSize = attachmentSize,
+        video = videoInfo(),
         replyTo = replyRef(),
     )

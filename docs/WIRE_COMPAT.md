@@ -725,6 +725,22 @@ passes the unknown key through and verifies its own rebuild). No version bump, n
 wire's account; `vectors/wire-v1.json` gained `blobReqContentFastOnly`, and nothing moved. *Metadata cost:* a
 neighbour asked learns that this phone holds back a large download over Bluetooth — a setting, never which message.
 
+**Precedent — a short video's description and a room post's size (`VideoInfo`, `ChatContent.attachmentSize`, ADR
+2026-10.hmfe).** A video's bubble needs its duration, size and a poster before the bytes arrive, and none of the three
+is a function of bytes the receiver holds yet, so derive-don't-carry cannot reach them until the blob lands (when the
+receiver does re-derive the duration and size). They ride as one nested type with every field required — rule 6, and
+rule 1's exception for a `ByteArray` — as `MessageContent.video` (named layout, the poster a CBOR byte string) and
+`MessageContentV2` label 16 (raw), sealed, and as `ChatContent.video` in a room post. The room also gained
+`ChatContent.attachmentSize`, declared by `BluetoothFetchGate.declaresSize`, the second field ADR 2026-10.js2p named:
+a room post had no size for "Ask before large Bluetooth downloads" to judge. Both are null and omitted by default, so
+every existing frame is the bytes it was; an older reader skips the keys (a room video draws there as a broken
+picture, fetched ungated), and the fast codec passes the unknown keys through. A sealed frame's cleartext shell never
+supplies either: `InboundPipeline.plaintextContent` clears them. No capability bit, no version bump;
+`vectors/wire-v1.json` gained `messageContentVideo`, `messageContentV2Video` and `chatContentVideo`, and nothing
+moved. *Metadata cost:* in the room, the poster and length are as public as the post. Sealed, the content stays private,
+but not the fact that a poster rides along: the seal does not pad, so a video DM is about 6.5 KB longer than another
+attachment DM, and its length shows a carrier it is a video.
+
 **Precedent — the nested-type rule (rule 6) came from the interop audit, not a split.** The 2026-10 audit
 decoded `{"inner": {}}` both ways: kotlinx-cbor gave a null `inner`, iOS an `inner` of defaults. No nested
 wire type was all-defaults then, so no frame read differently on the two platforms. The rule keeps it that

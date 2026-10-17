@@ -327,6 +327,17 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   animated WebP within 512 px / 200 frames / 1 MiB goes out stripped under the same allow-list rule, anything past
   it and every APNG (Android cannot play one) is composited at the output size into an animated WebP, and
   `identityFor` prefers an animated row so a send flattened before #133 is not reused. Tests: `AnimatedFramesTest`.
+- **When touching `data/video/` (`VideoEncodePolicy`, `VideoTranscoder`, `MemoryMp4Muxer`, `MemoryMuxerOutput`,
+  `VideoFrames`), `AttachmentStore.ingestVideo`, `VideoInfo` / `ChatContent.attachmentSize`, the `messages.video*`
+  columns, `ImageScreeningService.isVideoExplicit` / `screenVideo` / `isPosterExplicit`, or `ui/chat/VideoBubbles`:** READ
+  ADR 2026-10.hmfe. A picked video is re-encoded to 480p, 30 fps, about 400 kbps and 61 s by Media3 Transformer into
+  memory (never a file, never passed through), in **CBR** (the platform's VBR quality floor raised a 490 kbps ask to
+  1.23 Mbps), **not streamable** (a `free` pad was 16 % of the file), with the source's metadata dropped except the
+  orientation. Its description and poster ride inside the message; a room post declares its size so js2p holds it.
+  A video is its description on a video MIME, tested ahead of the name; an `.mp4` sent as a file stays a file.
+  Tests: `VideoEncodePolicyTest`, `MemoryMp4MuxerTest`, `AttachmentStoreVideoTest`; on hardware
+  `VideoTranscoderInstrumentedTest` (run one test class on one device with `am instrument`, never
+  `connectedDebugAndroidTest` with lab phones attached).
 - **When touching a presence dot or an online / offline label** (Profile Details, Diagnostics' node
   sections, the Contacts dot): the four evidence tiers live in `ui/Reach.kt` — `Direct` is
   `MeshController.neighbors` (a short-range radio saw the peer's own radio), `Indirect` is

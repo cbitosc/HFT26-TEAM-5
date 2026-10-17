@@ -259,9 +259,10 @@ class MainActivity : ComponentActivity() {
         // EXTRA_STREAM is read-granted for any stream our filters accept, which since ADR 2026-09.qq2r is
         // any type at all. The split is by *destination*, not by grant: an image can be attached in any
         // thread, while a file is offered only in DMs and groups, so the two ride separate fields and the
-        // chat screen says so when it cannot take one.
+        // chat screen says so when it cannot take one. A video rides the image field: like a picture it is re-encoded
+        // and can go to any thread, the Nearby room included (ADR 2026-10.hmfe).
         val stream = IntentCompat.getParcelableExtra(intent, Intent.EXTRA_STREAM, Uri::class.java)?.toString()
-        val isImage = intent.type?.startsWith("image/") == true
+        val isImage = intent.type?.let { it.startsWith("image/") || it.startsWith("video/") } == true
         shareInbox.offer(
             SharedContent(
                 text = text,

@@ -60,6 +60,7 @@ import app.getknit.knit.mesh.protocol.LinkPreviewBlob
 import app.getknit.knit.mesh.protocol.Mention
 import app.getknit.knit.mesh.protocol.Protocol
 import app.getknit.knit.mesh.protocol.ReplyRef
+import app.getknit.knit.mesh.protocol.VideoInfo
 import app.getknit.knit.mesh.sha256Hex
 import app.getknit.knit.moderation.ImageScreeningService
 import app.getknit.knit.notifications.Notifier
@@ -1819,6 +1820,33 @@ class ChatViewModelTest {
             assertNull("flagged image is not staged in the public room", vm.pendingAttachment.value)
             coVerify { blobs.deleteIfUnreferenced("h1") }
             coVerify { attachments.ingest(uri, true) }
+        }
+
+    @Test
+    fun aPickedVideoIsEncodedThenStagedAndAFlaggedRoomVideoIsBlocked() =
+        runTest {
+            // ADR 2026-10.hmfe: a pick the store calls a video takes the video door, with its progress shown meanwhile.
+            val uri = Uri.parse("content://media/video/7")
+            val video = VideoInfo(30_000L, 480, 854, byteArrayOf(1))
+            val ingested = AttachmentStore.Ingested(hash = "v7", mime = "video/mp4", name = "video.mp4", video = video)
+            coEvery { attachments.isVideo(uri) } returns true
+            coEvery { attachments.ingestVideo(uri, any(), any()) } returns AttachmentStore.IngestResult.Success(ingested, flagged = false)
+            val vm = vm() // Nearby room
+
+            vm.attach(uri)
+            advanceUntilIdle()
+
+            assertEquals(ingested, vm.pendingAttachment.value)
+            assertNull("the encode tile is gone once it is staged", vm.videoEncoding.value)
+            coVerify { attachments.ingestVideo(uri, true, any()) }
+            coVerify(exactly = 0) { attachments.ingest(uri, any()) }
+
+            vm.clearAttachment()
+            coEvery { attachments.ingestVideo(uri, any(), any()) } returns AttachmentStore.IngestResult.Success(ingested, flagged = true)
+            vm.attach(uri)
+            advanceUntilIdle()
+            assertNull("a flagged video is not staged in the public room", vm.pendingAttachment.value)
+            coVerify { blobs.deleteIfUnreferenced("v7") }
         }
 
     @Test
