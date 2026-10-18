@@ -767,6 +767,12 @@ class ScopeSync(
         @Volatile
         private var seenGates: Long? = null
 
+        /** Keeps what [conn]'s hello said about attachments past this session, for a photo staged while it is down. */
+        private fun rememberHello(conn: SpoolConnection) {
+            seenAttachments = conn.limits?.attachments == true
+            seenGates = conn.gates
+        }
+
         // scopeHex → the one pending re-look for an attachment a round could not finish (the spool has no
         // chunks yet, an upload half done, a deferral in force) — the old 15 s reconcile's cadence, paid
         // only by a scope that has such an attachment.
@@ -1203,9 +1209,7 @@ class ScopeSync(
             // relabel a transport death as this fault.
             if (!ready && conn.isOpen && socket.closeReason == null) conn.abort(NO_HELLO)
             if (ready) {
-                // Kept past this session, for a photo staged while the relay is down.
-                seenAttachments = conn.limits?.attachments == true
-                seenGates = conn.gates
+                rememberHello(conn)
                 // Paired with the dialer's "spool socket failed" line: together they bound when a frame could reach
                 // the spool (a call offer queued in between went out on the next hello, possibly after its end).
                 log("${SpoolUrl.host(url)}: connected (hello ${clock() - dialedAt} ms after the dial)")
