@@ -50,6 +50,7 @@ import app.getknit.knit.data.ratchet.RatchetRepository
 import app.getknit.knit.data.relay.RelayInviteApplier
 import app.getknit.knit.data.settings.BadgeStore
 import app.getknit.knit.data.settings.OwnIceStore
+import app.getknit.knit.data.settings.ReviewPromptStore
 import app.getknit.knit.data.settings.SettingsKeys
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.data.settings.TicketKeyStore
@@ -234,6 +235,7 @@ val appModule =
         // Single-shot signal that the rate/review prompt should show (drained by KnitApp).
         single { ReviewPromptInbox() }
         // Decides when to ask for an app rating and where to route it (installer-aware); no-op in demo builds.
+        single { ReviewPromptStore(get()) }
         single { ReviewPrompter(androidContext(), get(), get(), get(), get()) }
 
         single {

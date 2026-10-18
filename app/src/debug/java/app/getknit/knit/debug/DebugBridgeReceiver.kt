@@ -66,7 +66,9 @@ import app.getknit.knit.data.relay.photoFitBytes
 import app.getknit.knit.data.settings.BadgeStore
 import app.getknit.knit.data.settings.KnitBoardSetup
 import app.getknit.knit.data.settings.LowPowerSwitch
+import app.getknit.knit.data.settings.ModelLoadJournal
 import app.getknit.knit.data.settings.OwnIceStore
+import app.getknit.knit.data.settings.ReviewPromptStore
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.data.settings.TicketKeyStore
 import app.getknit.knit.data.settings.TranscriptStore
@@ -379,7 +381,9 @@ class DebugBridgeReceiver :
     private val forwardDao: ForwardDao by inject()
     private val digest: StoreDigest by inject()
     private val reviewPrompter: ReviewPrompter by inject()
+    private val reviewStore: ReviewPromptStore by inject()
     private val modelGuard: ModelLoadGuard by inject()
+    private val modelJournal: ModelLoadJournal by inject()
     private val conversationFaces: app.getknit.knit.notifications.ConversationFaces by inject()
     private val textModel: MlTextModerator by inject()
     private val imageModel: NsfwImageModerator by inject()
@@ -1225,10 +1229,10 @@ class DebugBridgeReceiver :
         intent: Intent,
     ): JSONObject {
         val now = System.currentTimeMillis()
-        if (intent.getBooleanExtra(EXTRA_RESET, false)) settings.clearReviewState()
+        if (intent.getBooleanExtra(EXTRA_RESET, false)) reviewStore.clear()
         if (intent.getBooleanExtra(EXTRA_ARM, false)) {
-            settings.clearReviewState()
-            settings.setReviewEngagementStartedAt(now - ReviewPromptPolicy.MIN_ENGAGEMENT_AGE_MS - ARM_MARGIN_MS)
+            reviewStore.clear()
+            reviewStore.setEngagementStartedAt(now - ReviewPromptPolicy.MIN_ENGAGEMENT_AGE_MS - ARM_MARGIN_MS)
         }
         @Suppress("DEPRECATION")
         val installer =
@@ -1271,7 +1275,7 @@ class DebugBridgeReceiver :
         val stamp = modelGuardStamp(BuildConfig.VERSION_CODE, Build.FINGERPRINT.orEmpty())
         val models = JSONArray()
         for (model in ModelLoadGuard.ALL) {
-            val state = settings.modelLoadState(model)
+            val state = modelJournal.modelLoadState(model)
             val (resident, lastUsedAt) =
                 when (model) {
                     ModelLoadGuard.TOXICITY -> textModel.isResident to textModel.lastUsedAt

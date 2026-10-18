@@ -131,18 +131,6 @@ class SettingsStoreLoraTest {
         }
 
     @Test
-    fun theNanInitiatorLatchAndGiveUpStampPersist() =
-        runTest {
-            val store = newStore()
-            assertEquals(NanInitiatorLatch(stamp = "", probedAt = 0L), store.initiatorLatch())
-            assertEquals("", store.awareGiveUpStamp())
-            store.setInitiatorLatch(NanInitiatorLatch(stamp = "build+rom", probedAt = 1_700_000_000_000L))
-            store.setAwareGiveUpStamp("build+rom")
-            assertEquals(NanInitiatorLatch(stamp = "build+rom", probedAt = 1_700_000_000_000L), store.initiatorLatch())
-            assertEquals("build+rom", store.awareGiveUpStamp())
-        }
-
-    @Test
     fun theOneTimeConsentsAndDismissalsStick() =
         runTest {
             val store = newStore()

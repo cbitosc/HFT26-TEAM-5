@@ -60,7 +60,7 @@ does not start relighting ICM for held peers. `expectBulkTransfer` refuses a hel
 attachment falls back to Bluetooth at once instead of waiting the composite's 10 s grace for a link that will
 not come.
 
-The hold is **journaled** (`data/settings/NanInitiatorJournal`, on `SettingsStore`) under the same build + ROM
+The hold is **journaled** (`data/settings/NanInitiatorJournal`, on `NanJournalStore` — `SettingsStore` until 2026-10-18) under the same build + ROM
 stamp as the attach give-up (ADR 055): `MeshService` is `START_STICKY`, and a fresh process must not re-learn
 the hold by dropping the user's Wi-Fi three more times; a new build or a flashed firmware re-arms on its own.
 Once a day (`PROBE_INTERVAL_MS`, on the **wall clock** because it is persisted and must survive a reboot; a

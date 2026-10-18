@@ -3,7 +3,8 @@ package app.getknit.knit.di
 import android.os.Build
 import app.getknit.knit.BuildConfig
 import app.getknit.knit.crash.ProcessExitReasons
-import app.getknit.knit.data.settings.SettingsStore
+import app.getknit.knit.data.settings.ModelLoadJournal
+import app.getknit.knit.data.settings.ModelLoadStore
 import app.getknit.knit.moderation.HybridTextModerator
 import app.getknit.knit.moderation.ImageModerator
 import app.getknit.knit.moderation.ImageScreeningService
@@ -33,9 +34,10 @@ val moderationModule =
     module {
         // The poison-pill both bundled models load behind (ADR 037): a native crash inside TFLite is
         // invisible to CrashHandler and, on the launch-path toxicity model, unrecoverable without it.
+        single<ModelLoadJournal> { ModelLoadStore(get()) }
         single {
             ModelLoadGuard(
-                journal = get<SettingsStore>(),
+                journal = get<ModelLoadJournal>(),
                 exits = get<ProcessExitReasons>()::lastExit,
                 stamp = modelGuardStamp(BuildConfig.VERSION_CODE, Build.FINGERPRINT.orEmpty()),
             )

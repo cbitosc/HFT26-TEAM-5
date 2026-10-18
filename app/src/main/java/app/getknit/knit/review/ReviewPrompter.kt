@@ -3,7 +3,7 @@ package app.getknit.knit.review
 import android.content.Context
 import app.getknit.knit.BuildConfig
 import app.getknit.knit.data.MessageRepository
-import app.getknit.knit.data.settings.SettingsStore
+import app.getknit.knit.data.settings.ReviewPromptStore
 import app.getknit.knit.identity.Identity
 import app.getknit.knit.legal.InstallSource
 import app.getknit.knit.legal.installSourceOf
@@ -34,7 +34,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class ReviewPrompter(
     private val context: Context,
-    private val settings: SettingsStore,
+    private val store: ReviewPromptStore,
     private val messages: MessageRepository,
     private val identity: Identity,
     private val inbox: ReviewPromptInbox,
@@ -60,9 +60,9 @@ class ReviewPrompter(
         return ReviewPromptPolicy.Inputs(
             peerMessageCount = messages.countFromOthers(me),
             sentMessageCount = messages.countMine(me),
-            engagementStartedAt = settings.reviewEngagementStartedAt.first(),
-            lastAttemptAt = settings.reviewLastAttemptAt.first(),
-            attemptCount = settings.reviewAttemptCount.first(),
+            engagementStartedAt = store.engagementStartedAt.first(),
+            lastAttemptAt = store.lastAttemptAt.first(),
+            attemptCount = store.attemptCount.first(),
             now = now,
         )
     }
@@ -79,13 +79,13 @@ class ReviewPrompter(
         if (inputs.engagementStartedAt == 0L && inputs.peerMessageCount > 0) {
             // First peer message observed: stamp the local-clock watermark. The age gate can't pass on
             // this same evaluation, so just start the clock and wait for a later chat-list visit.
-            settings.setReviewEngagementStartedAt(inputs.now)
+            store.setEngagementStartedAt(inputs.now)
             return
         }
         if (!ReviewPromptPolicy.shouldPrompt(inputs)) return
         if (!shownThisProcess.compareAndSet(false, true)) return
         // Record before showing (attempt = shown); which button the user taps doesn't change the cooldown.
-        settings.recordReviewAttempt(System.currentTimeMillis())
+        store.recordAttempt(System.currentTimeMillis())
         inbox.offer()
     }
 }

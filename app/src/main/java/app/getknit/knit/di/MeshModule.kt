@@ -21,6 +21,7 @@ import app.getknit.knit.data.settings.BadgeStore
 import app.getknit.knit.data.settings.DirectHostStore
 import app.getknit.knit.data.settings.LoraPlaneStateStore
 import app.getknit.knit.data.settings.LowPowerSwitch
+import app.getknit.knit.data.settings.NanJournalStore
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.data.settings.TicketKeyStore
 import app.getknit.knit.device.DeviceImage
@@ -216,8 +217,8 @@ val meshModule =
                         // explicit SDK_INT guard — redundant with isSupported()'s own — is what lint reads to
                         // clear the @RequiresApi companion/constructor calls on this pre-31-reachable line.
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && WifiAwareTransport.isSupported(ctx)) {
-                            // SettingsStore is both journals (the attach give-up and the initiator hold, ADR 055 / 2026-09.m8kc).
-                            val settings = get<SettingsStore>()
+                            // One store is both journals (the attach give-up and the initiator hold, ADR 055 / 2026-09.m8kc).
+                            val journals = NanJournalStore(get())
                             val nan =
                                 WifiAwareTransport(
                                     ctx,
@@ -226,15 +227,15 @@ val meshModule =
                                     get(),
                                     get(),
                                     get(),
-                                    settings,
-                                    settings,
+                                    journals,
+                                    journals,
                                     get(),
                                     field = get<FieldLog>(),
                                 )
                             // Low-power mode switches the plane off live in every build (ADR 2026-10.d44b), and a debug
                             // build's own switch (Diagnostics / the bridge's NANOFF) does too; debugNanOff reads false in
                             // release.
-                            val off = awareSwitchedOff(settings.debugNanOff, get<LowPowerSource>().posture)
+                            val off = awareSwitchedOff(get<SettingsStore>().debugNanOff, get<LowPowerSource>().posture)
                             // Log.i: release keeps it, so a bugreport shows the plane stopped for low-power mode.
                             add(SwitchableTransport(nan, off, get(), { msg -> Log.i("WifiAwareTransport", msg) }))
                         }

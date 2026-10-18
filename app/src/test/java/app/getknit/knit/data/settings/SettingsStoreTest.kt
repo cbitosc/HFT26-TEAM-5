@@ -274,30 +274,6 @@ class SettingsStoreTest {
         }
 
     @Test
-    fun `recordReviewAttempt stamps the time and increments the lifetime count`() =
-        runTest {
-            val store = newStore()
-            store.recordReviewAttempt(now = 1_000L)
-            store.recordReviewAttempt(now = 2_000L)
-            assertEquals(2_000L, store.reviewLastAttemptAt.first())
-            assertEquals(2L, store.reviewAttemptCount.first())
-        }
-
-    @Test
-    fun `clearReviewState resets engagement, attempt time, and count`() =
-        runTest {
-            val store = newStore()
-            store.setReviewEngagementStartedAt(500L)
-            store.recordReviewAttempt(now = 1_000L)
-
-            store.clearReviewState()
-
-            assertEquals(0L, store.reviewEngagementStartedAt.first())
-            assertEquals(0L, store.reviewLastAttemptAt.first())
-            assertEquals(0L, store.reviewAttemptCount.first())
-        }
-
-    @Test
     fun `addContributions accumulates across writes and stamps since exactly once`() =
         runTest {
             val store = newStore()
@@ -400,20 +376,6 @@ class SettingsStoreTest {
             val bare = newStore()
             bare.seedDefaultSpools(emptyList())
             assertEquals(emptySet<String>(), bare.spoolUrls.first())
-        }
-
-    @Test
-    fun `model load state defaults to nothing attempted, and round-trips per model`() =
-        runTest {
-            val store = newStore()
-            assertEquals(ModelLoadState.NONE, store.modelLoadState("toxicity"))
-
-            store.setModelLoadState("toxicity", ModelLoadState("16|rom", pendingSince = 1_700L, fails = 1))
-
-            assertEquals(ModelLoadState("16|rom", 1_700L, 1), store.modelLoadState("toxicity"))
-            // Keyed per model: latching the text classifier must not touch the image one.
-            assertEquals(ModelLoadState.NONE, store.modelLoadState("nsfw"))
-            assertEquals(ModelLoadState("16|rom", 1_700L, 1), store.observeModelLoad("toxicity").first())
         }
 
     @Test

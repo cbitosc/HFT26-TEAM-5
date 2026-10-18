@@ -3,7 +3,7 @@ package app.getknit.knit.data.settings
 /**
  * What survives a process death about this device's ability to open a Wi-Fi Aware session.
  *
- * The two-method slice of [SettingsStore] that `mesh/wifiaware/WifiAwareTransport` needs to stop re-learning
+ * The two-method record ([NanJournalStore]) that `mesh/wifiaware/WifiAwareTransport` needs to stop re-learning
  * the same thing after every kill — the [ModelLoadJournal] precedent, extracted as a seam for the same reason.
  *
  * The value is a **stamp**, not a flag: the app version code plus the OS build fingerprint under which we gave

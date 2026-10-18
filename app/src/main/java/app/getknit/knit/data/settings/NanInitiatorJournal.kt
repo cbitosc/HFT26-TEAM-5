@@ -21,7 +21,7 @@ data class NanInitiatorLatch(
 
 /**
  * What survives a process death about this phone's Wi-Fi dropping whenever it starts a Wi-Fi Aware data path
- * (`mesh/wifiaware/NanInitiatorPolicy`, work item #78). The two-method slice of [SettingsStore] that
+ * (`mesh/wifiaware/NanInitiatorPolicy`, work item #78). The two-method record ([NanJournalStore]) that
  * `WifiAwareTransport` reads once at start and writes on each transition — the [NanAttachJournal] shape, for
  * the same reason: `MeshService` is `START_STICKY`, so without it a fresh process re-learns the hold by
  * dropping the user's Wi-Fi three more times.

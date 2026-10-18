@@ -29,9 +29,6 @@ class SettingsStore(
     private val dataStore: DataStore<Preferences>,
 ) : InboundSettings,
     CloneWatchSettings,
-    ModelLoadJournal,
-    NanAttachJournal,
-    NanInitiatorJournal,
     ContributionJournal,
     SpoolTicketJournal {
     override val displayName: Flow<String> = dataStore.data.map { it[KEY_NAME] ?: "" }
@@ -226,20 +223,6 @@ class SettingsStore(
      * Phone-bound (`SettingsKeys.TRANSIENT_PREFIXES`): a backup taken mid-pause must not plant one elsewhere.
      */
     val meshPausedUntil: Flow<Long?> = dataStore.data.map { it[KEY_MESH_PAUSED_UNTIL] }
-
-    /**
-     * Local-clock time the first peer message was observed (0 until then) — the start of the
-     * review-prompt engagement window (see [app.getknit.knit.review.ReviewPromptPolicy]). Deliberately a
-     * locally-stamped watermark rather than anything derived from a message's `sentAt`, which is the
-     * sender's skewable clock.
-     */
-    val reviewEngagementStartedAt: Flow<Long> = dataStore.data.map { it[KEY_REVIEW_ENGAGEMENT_STARTED_AT] ?: 0L }
-
-    /** Local-clock time of the last rate-prompt shown (0 = never). See [recordReviewAttempt]. */
-    val reviewLastAttemptAt: Flow<Long> = dataStore.data.map { it[KEY_REVIEW_LAST_ATTEMPT_AT] ?: 0L }
-
-    /** Lifetime rate-prompts shown — we don't record the user's choice, so shown-count is all we keep. */
-    val reviewAttemptCount: Flow<Long> = dataStore.data.map { it[KEY_REVIEW_ATTEMPT_COUNT] ?: 0L }
 
     /** What this phone has done for other people's messages, all time — see [ContributionJournal]. */
     override val contributionTotals: Flow<ContributionTotals> =
@@ -706,15 +689,6 @@ class SettingsStore(
             if (value != null) it[KEY_MESH_PAUSED_UNTIL] = value else it.remove(KEY_MESH_PAUSED_UNTIL)
         }
 
-    suspend fun setReviewEngagementStartedAt(value: Long) = dataStore.edit { it[KEY_REVIEW_ENGAGEMENT_STARTED_AT] = value }
-
-    /** Stamps the attempt time and bumps the lifetime count in one transaction (mirrors [setProfile]). */
-    suspend fun recordReviewAttempt(now: Long) =
-        dataStore.edit {
-            it[KEY_REVIEW_LAST_ATTEMPT_AT] = now
-            it[KEY_REVIEW_ATTEMPT_COUNT] = (it[KEY_REVIEW_ATTEMPT_COUNT] ?: 0L) + 1
-        }
-
     /** Additive on purpose — see [ContributionJournal]: no read-before-write, so flushes can never race. */
     override suspend fun addContributions(
         passedAlong: Long,
@@ -727,14 +701,6 @@ class SettingsStore(
             if (it[KEY_CONTRIB_SINCE] == null) it[KEY_CONTRIB_SINCE] = now
         }
     }
-
-    /** Clears all review-prompt state (debug bridge reset). */
-    suspend fun clearReviewState() =
-        dataStore.edit {
-            it.remove(KEY_REVIEW_ENGAGEMENT_STARTED_AT)
-            it.remove(KEY_REVIEW_LAST_ATTEMPT_AT)
-            it.remove(KEY_REVIEW_ATTEMPT_COUNT)
-        }
 
     suspend fun setSpoolEnabled(value: Boolean) = dataStore.edit { it[KEY_SPOOL_ENABLED] = value }
 
@@ -1034,73 +1000,12 @@ class SettingsStore(
         it[KEY_SPOOL_DISABLED] = if (enabled) parked - url else parked + url
     }
 
-    override fun observeModelLoad(model: String): Flow<ModelLoadState> = dataStore.data.map { it.modelLoadState(model) }
-
-    override suspend fun modelLoadState(model: String): ModelLoadState = dataStore.data.map { it.modelLoadState(model) }.first()
-
-    /**
-     * All three fields in **one** write, so they can never disagree — the `acceptSpoolConsent` argument.
-     * It is also the durability barrier `moderation/ModelLoadGuard` relies on: `edit {}` fsyncs the new
-     * file and renames it before it resumes, so a native crash immediately afterwards still finds this.
-     */
-    override suspend fun setModelLoadState(
-        model: String,
-        state: ModelLoadState,
-    ) {
-        dataStore.edit {
-            it[modelStampKey(model)] = state.stamp
-            it[modelPendingKey(model)] = state.pendingSince
-            it[modelFailsKey(model)] = state.fails
-        }
-    }
-
-    override suspend fun awareGiveUpStamp(): String = dataStore.data.map { it[KEY_AWARE_GIVE_UP_STAMP].orEmpty() }.first()
-
-    override suspend fun setAwareGiveUpStamp(stamp: String) {
-        dataStore.edit { it[KEY_AWARE_GIVE_UP_STAMP] = stamp }
-    }
-
-    override suspend fun initiatorLatch(): NanInitiatorLatch =
-        dataStore.data
-            .map {
-                NanInitiatorLatch(
-                    stamp = it[KEY_NAN_INITIATOR_HOLD_STAMP].orEmpty(),
-                    probedAt = it[KEY_NAN_INITIATOR_HOLD_PROBED_AT] ?: 0L,
-                )
-            }.first()
-
-    override suspend fun setInitiatorLatch(latch: NanInitiatorLatch) {
-        dataStore.edit {
-            it[KEY_NAN_INITIATOR_HOLD_STAMP] = latch.stamp
-            it[KEY_NAN_INITIATOR_HOLD_PROBED_AT] = latch.probedAt
-        }
-    }
-
-    private fun Preferences.modelLoadState(model: String) =
-        ModelLoadState(
-            stamp = this[modelStampKey(model)].orEmpty(),
-            pendingSince = this[modelPendingKey(model)] ?: 0L,
-            fails = this[modelFailsKey(model)] ?: 0,
-        )
-
     /** Dynamic per-conversation read-watermark key, e.g. "last_read_nearby" / "last_read_<nodeId>". */
     private fun lastReadKey(conversationId: String) = longPreferencesKey(LAST_READ_PREFIX + conversationId)
-
-    /** Dynamic per-model poison-pill keys, e.g. "model_load_stamp_toxicity" (see [ModelLoadJournal]). */
-    private fun modelStampKey(model: String) = stringPreferencesKey(MODEL_LOAD_PREFIX + "stamp_" + model)
-
-    private fun modelPendingKey(model: String) = longPreferencesKey(MODEL_LOAD_PREFIX + "pending_" + model)
-
-    private fun modelFailsKey(model: String) = intPreferencesKey(MODEL_LOAD_PREFIX + "fails_" + model)
 
     private companion object {
         const val LAST_READ_PREFIX = "last_read_"
 
-        const val MODEL_LOAD_PREFIX = "model_load_"
-
-        val KEY_AWARE_GIVE_UP_STAMP = stringPreferencesKey("aware_give_up_stamp")
-        val KEY_NAN_INITIATOR_HOLD_STAMP = stringPreferencesKey("nan_initiator_hold_stamp")
-        val KEY_NAN_INITIATOR_HOLD_PROBED_AT = longPreferencesKey("nan_initiator_hold_probed_at")
         val KEY_NAME = stringPreferencesKey("display_name")
         val KEY_STATUS = stringPreferencesKey("status")
         val KEY_AVATAR_UPDATED_AT = longPreferencesKey("avatar_updated_at")
@@ -1124,9 +1029,6 @@ class SettingsStore(
         val KEY_OPEN_TO_CHAT_LAST_POST_AT = longPreferencesKey("open_to_chat_last_post_at")
         val KEY_MESH_ENABLED = booleanPreferencesKey("mesh_enabled")
         val KEY_MESH_PAUSED_UNTIL = longPreferencesKey("mesh_pause_until")
-        val KEY_REVIEW_ENGAGEMENT_STARTED_AT = longPreferencesKey("review_engagement_started_at")
-        val KEY_REVIEW_LAST_ATTEMPT_AT = longPreferencesKey("review_last_attempt_at")
-        val KEY_REVIEW_ATTEMPT_COUNT = longPreferencesKey("review_attempt_count")
         val KEY_CONTRIB_PASSED_ALONG = longPreferencesKey("contrib_passed_along")
         val KEY_CONTRIB_HANDED_DIRECT = longPreferencesKey("contrib_handed_direct")
         val KEY_CONTRIB_SINCE = longPreferencesKey("contrib_since")

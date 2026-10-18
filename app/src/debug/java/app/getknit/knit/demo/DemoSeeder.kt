@@ -5,8 +5,8 @@ import android.util.Log
 import app.getknit.knit.BuildConfig
 import app.getknit.knit.crash.CrashStore
 import app.getknit.knit.crash.currentCrashEnvironment
+import app.getknit.knit.data.settings.ModelLoadJournal
 import app.getknit.knit.data.settings.ModelLoadState
-import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.identity.Identity
 import app.getknit.knit.identity.NodeId
 import app.getknit.knit.mesh.MeshManager
@@ -112,7 +112,7 @@ class DemoSeeder(
      * `ModerationRevealUiAutomatorTest` drives the synthetic `FLAGMSG` seam instead.
      */
     private suspend fun seedLatchedModel() {
-        koin.get<SettingsStore>().setModelLoadState(
+        koin.get<ModelLoadJournal>().setModelLoadState(
             model = ModelLoadGuard.TOXICITY,
             state =
                 ModelLoadState(

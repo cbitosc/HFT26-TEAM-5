@@ -26,7 +26,7 @@ data class ModelLoadState(
 }
 
 /**
- * The three-method slice of [SettingsStore] the model poison-pill needs (see
+ * The three-method record the model poison-pill keeps ([ModelLoadStore]; see
  * `moderation/ModelLoadGuard`, ADR 037). Extracted as a seam — the [InboundSettings] precedent — so the
  * guard's state machine is exercised in a plain JVM test instead of standing up a Preferences DataStore.
  *
