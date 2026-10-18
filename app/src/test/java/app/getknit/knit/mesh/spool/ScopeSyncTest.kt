@@ -96,6 +96,7 @@ class ScopeSyncTest {
         blobs: FakeBlobs = FakeBlobs(),
         deferAttachment: suspend (Scope, ScopeAttachments.Ref) -> Boolean = { _, _ -> false },
         provedAttachment: suspend (Scope, ScopeAttachments.Ref) -> Boolean = { _, _ -> false },
+        holdsForProof: suspend (Scope, ScopeAttachments.Ref) -> Boolean = { _, _ -> false },
         // The confirmed-session roots (a DM scope per entry) and the intro driver's pair-scope inputs
         // (spec §3.5), both read live so a test can move a peer between them mid-run.
         roots: () -> List<ScopeRoots> = { listOf(ScopeRoots(peer, pairwiseRoot)) },
@@ -147,6 +148,7 @@ class ScopeSyncTest {
                 onAttachmentObtained = { obtained.add(it) },
                 deferAttachment = deferAttachment,
                 provedAttachment = provedAttachment,
+                holdsForProof = holdsForProof,
                 onPresenceChanged = presence,
                 metrics = metrics,
                 clock = clock,
@@ -2716,6 +2718,81 @@ class ScopeSyncTest {
             )
             assertTrue(waiting.isEmpty())
             other.sync.stop()
+        }
+
+    @Test
+    fun `a photo in its proof round on a locked relay wakes the refresher once, when the round ends without proof`() =
+        runTest {
+            // ADR 2026-10.vy27: inside the round it is no upload that waits yet, so nothing may ask for a ticket.
+            val wanted = mutableListOf<String>()
+            val (aHash, bytes) = image()
+            val roundEnds = testScheduler.currentTime + AttachmentDeferPolicy.PROOF_WAIT_MS
+            val locked = FakeSpool(ent = true, entGates = SpoolTicket.FL_FILES) // no ticket: locked `missing`
+            val phone =
+                member(
+                    locked,
+                    alice,
+                    bob,
+                    blobs = FakeBlobs(aHash to bytes),
+                    urls = listOf(filesUrl),
+                    holdsForProof = { _, _ -> testScheduler.currentTime < roundEnds },
+                    onUploadWanted = { wanted += it },
+                )
+            phone.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now, attachmentHash = aHash), ForwardStore.ORIGIN_SELF, now)
+            phone.sync.start(backgroundScope)
+            pump(rounds = 3)
+            // However often the scope is passed inside the round, none of them locks it or wakes anything.
+            repeat(3) {
+                phone.sync.onCustodyChanged()
+                pump(rounds = 2)
+            }
+            assertTrue("the round was held", phone.metrics.spool().spoolAttachDeferred > 0)
+            assertEquals(0L, phone.metrics.spool().spoolAttachLocked)
+            assertEquals(emptyList<String>(), wanted)
+
+            // The re-look the held pass scheduled comes back after the round and locks it: one wake, and no more.
+            advanceTimeBy(ScopeSync.ATTACHMENT_RETRY_MS)
+            runCurrent()
+            assertEquals(1L, phone.metrics.spool().spoolAttachLocked)
+            assertEquals(listOf(filesUrl), wanted)
+            pump(rounds = 60)
+            assertEquals("one wake per round", listOf(filesUrl), wanted)
+            assertEquals(emptyList<String>(), locked.chunksPut)
+            phone.sync.stop()
+        }
+
+    @Test
+    fun `a photo proved inside its proof round on a locked relay settles proved and wakes nothing`() =
+        runTest {
+            val wanted = mutableListOf<String>()
+            val (aHash, bytes) = image()
+            val start = testScheduler.currentTime
+            val locked = FakeSpool(ent = true, entGates = SpoolTicket.FL_FILES)
+            val phone =
+                member(
+                    locked,
+                    alice,
+                    bob,
+                    blobs = FakeBlobs(aHash to bytes),
+                    urls = listOf(filesUrl),
+                    // The recipient's HAVE lands a few seconds into the round.
+                    provedAttachment = { _, _ -> testScheduler.currentTime >= start + 3_000 },
+                    holdsForProof = { _, _ -> testScheduler.currentTime < start + AttachmentDeferPolicy.PROOF_WAIT_MS },
+                    onUploadWanted = { wanted += it },
+                )
+            phone.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now, attachmentHash = aHash), ForwardStore.ORIGIN_SELF, now)
+            phone.sync.start(backgroundScope)
+            pump(rounds = 2)
+            assertTrue("held while unproved", phone.metrics.spool().spoolAttachDeferred > 0)
+
+            advanceTimeBy(ScopeSync.ATTACHMENT_RETRY_MS)
+            runCurrent()
+            pump(rounds = 60)
+            assertTrue("settled on the proof", phone.metrics.spool().spoolAttachProved > 0)
+            assertEquals(0L, phone.metrics.spool().spoolAttachLocked)
+            assertEquals("nothing asked for a ticket, in the round or after it", emptyList<String>(), wanted)
+            assertEquals(emptyList<String>(), locked.chunksPut)
+            phone.sync.stop()
         }
 
     @Test

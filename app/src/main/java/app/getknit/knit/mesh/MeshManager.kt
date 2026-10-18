@@ -743,6 +743,7 @@ class MeshManager(
                 onAttachmentObtained = { hash -> pipeline.onObtained(hash) },
                 deferAttachment = attachmentDefer::defer,
                 provedAttachment = attachmentDefer::proved,
+                holdsForProof = attachmentDefer::holdsForProof,
                 deliver = { wire, env, from -> router.handleInbound(wire, env, from) },
                 metrics = metrics,
                 clock = clock,

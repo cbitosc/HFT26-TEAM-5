@@ -111,7 +111,15 @@ re-look of a deferred attachment, so that is the very next pass: a delay of one 
 requires. A no does not end the wait early. At the spool's pass granularity it makes no difference, and it would take
 the exchange a second callback for nothing. A peer that is not linked, or that does not answer, changes nothing, and
 neither does a photo that is not ours: the recipient's proof is its own arrival, not an answer. The hold is counted
-as a deferral (`spoolAttachDeferred`). `AttachmentDeferPolicyTest`'s three revision-2 cases pin the rule.
+as a deferral (`spoolAttachDeferred`).
+
+The round also holds back the ticket ask on a relay whose uploads are locked. There the lock settles an upload before
+the deferral is reached, and settling it wakes the ticket refresher, a free key's only reason to ask (ADR
+2026-10.s3ep's order). So `ScopeSync.passLocally` asks `AttachmentDeferPolicy.holdsForProof` ahead of the lock: a
+send of ours whose recipient is linked and answering is deferred, not locked, until its round ends. A yes settles it
+proved and nothing is woken. A no or silence lets the scheduled re-look lock it, with one wake. ADR 021's ordinary
+deferral keeps the order the ticket work gave it (the lock first), since a photo nobody can prove is an upload that
+waits. `ScopeSyncTest` pins both outcomes on a locked relay, driven by the re-look itself. `AttachmentDeferPolicyTest`'s three revision-2 cases pin the rule.
 `PhotoProofLabTest.aPhotoWhoseReceiptCameOverTheRelayWaitsOneProofRoundAndNeverGoesUp` replays the slipped photo: a
 frames-only relay, the receipt pinned to it, then attachment support past the grace. The hold runs on wall time, so
 the lab widens it to 30 s (`LabLimits.proofWaitMs`) rather than let a stalled node outlast it.

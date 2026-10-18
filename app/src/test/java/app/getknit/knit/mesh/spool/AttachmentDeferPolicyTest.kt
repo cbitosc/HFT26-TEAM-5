@@ -426,4 +426,30 @@ class AttachmentDeferPolicyTest {
             authored = true
             assertFalse("a group never holds", policy().defer(groupScope(), settled()))
         }
+
+    @Test
+    fun `on a locked relay a send of ours holds for its proof round, asks for it, and lets go when the round ends`() =
+        runTest {
+            linked = true
+            val p = policy()
+            assertTrue(p.holdsForProof(dmScope(), settled()))
+            assertEquals("asked, so the round can end in a proof", listOf(aHash to bob), asked)
+            clock += AttachmentDeferPolicy.PROOF_WAIT_MS
+            assertFalse("the round is over: the lock may settle it", p.holdsForProof(dmScope(), settled()))
+        }
+
+    @Test
+    fun `nothing else holds for proof on a locked relay`() =
+        runTest {
+            linked = false
+            assertFalse("no live link that answers", policy().holdsForProof(dmScope(), settled()))
+            linked = true
+            authored = false
+            assertFalse("the peer's own send", policy().holdsForProof(dmScope(), settled()))
+            authored = true
+            assertFalse("a group", policy().holdsForProof(groupScope(), settled()))
+            clock = start + custodyTtlMs - AttachmentDeferPolicy.LAST_CALL_MS
+            assertFalse("last call", policy().holdsForProof(dmScope(), ref()))
+            assertTrue("none of these asked", asked.isEmpty())
+        }
 }

@@ -269,6 +269,10 @@ class ScopeSync(
     // crosses the Internet at all (§9.5, C-9.5-6's exception; [AttachmentDeferPolicy.proved], ADR 2026-10.vy27). The
     // default proves nothing, which is the pre-proof behaviour every existing test asserts.
     private val provedAttachment: suspend (Scope, ScopeAttachments.Ref) -> Boolean = { _, _ -> false },
+    // Whether a DM attachment of ours is inside its proof round, asked only on a connection whose uploads are locked:
+    // there the lock would settle it first and wake the ticket refresher for an upload the proof may yet spare
+    // ([AttachmentDeferPolicy.holdsForProof], ADR 2026-10.vy27). The default holds nothing.
+    private val holdsForProof: suspend (Scope, ScopeAttachments.Ref) -> Boolean = { _, _ -> false },
     // The commons half (§7.4): the joined rooms' own posts and their member roster. Null switches it off —
     // no commons scope is ever derived without it, so the frame plane is unaffected.
     private val commons: CommonsStore? = null,
@@ -1875,6 +1879,9 @@ class ScopeSync(
          * - **Proved**: an attachment we hold whose DM recipient provably holds the bytes (C-9.5-6's exception): no
          *   `ahave`, no `aput`, settled for good — the peers parting changes nothing, so it goes ahead of the gates that
          *   might otherwise owe it a later look.
+         * - **Held for proof**: ours, on a connection that may not take this phone's uploads, while its DM recipient is
+         *   still answering the holder query ([holdsForProof]): deferred, owed a look, and not yet locked — locking it
+         *   would wake the ticket refresher for an upload the proof may yet spare. The round's end lets it lock.
          * - **Locked** (C-7.6-24): ours to push, on a connection that may not take this phone's uploads ([uploadsOn]):
          *   no `ahave`, no `aput`, and no retry — settled until a files ticket is accepted here. Fetching is never
          *   locked, so an attachment we lack goes on to the round trip as before.
@@ -1902,16 +1909,57 @@ class ScopeSync(
                     LocalPass.PROVED
                 }
 
-                mine && uploadsOn(conn) != SpoolUploads.Open && settleLocked(conn, scope, ref.aHash) -> {
+                mine -> {
+                    heldOrLocked(conn, scope, ref) ?: sizedOrDeferred(conn, scope, ref, blobStore)
+                }
+
+                else -> {
+                    null
+                }
+            }
+
+        /**
+         * [passLocally]'s gates for a connection that takes none of this phone's uploads: held for its proof round, else
+         * locked. Null when uploads are open, or opened since the caller looked, so the open connection's gates run.
+         */
+        private suspend fun heldOrLocked(
+            conn: SpoolConnection,
+            scope: Scope,
+            ref: ScopeAttachments.Ref,
+        ): LocalPass? =
+            when {
+                uploadsOn(conn) == SpoolUploads.Open -> {
+                    null
+                }
+
+                holdsForProof(scope, ref) -> {
+                    metrics.onSpoolAttachmentDeferred()
+                    LocalPass.DEFERRED
+                }
+
+                settleLocked(conn, scope, ref.aHash) -> {
                     LocalPass.LOCKED
                 }
 
-                mine && tooLargeFor(conn, ref.aHash, blobStore) -> {
+                else -> {
+                    null
+                }
+            }
+
+        /** [passLocally]'s gates for an upload [conn] would take: too large for its ticket, or deferred (§9.5). */
+        private suspend fun sizedOrDeferred(
+            conn: SpoolConnection,
+            scope: Scope,
+            ref: ScopeAttachments.Ref,
+            blobStore: ScopeBlobs,
+        ): LocalPass? =
+            when {
+                tooLargeFor(conn, ref.aHash, blobStore) -> {
                     settleTooLarge(conn, scope, ref.aHash)
                     LocalPass.TOO_LARGE
                 }
 
-                mine && deferAttachment(scope, ref) -> {
+                deferAttachment(scope, ref) -> {
                     metrics.onSpoolAttachmentDeferred()
                     LocalPass.DEFERRED
                 }

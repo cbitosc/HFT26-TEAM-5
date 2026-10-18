@@ -168,6 +168,26 @@ class AttachmentDeferPolicy(
     }
 
     /**
+     * Whether [ref], a send of ours, is inside its proof round on a relay whose uploads are locked: the round [defer]
+     * holds at its end, asked for and opened here because a locked relay settles an upload before [defer] is reached,
+     * and settling it wakes the ticket refresher for an upload the proof may yet spare (ADR 2026-10.vy27). True only
+     * while the peer is on a live link that answers the holder query ([canAskHolder]), never at last call; when the
+     * round ends without proof the upload is a waiting one again, and the relay's lock settles it.
+     */
+    suspend fun holdsForProof(
+        scope: Scope,
+        ref: ScopeAttachments.Ref,
+    ): Boolean {
+        val now = clock()
+        noteReachable(now)
+        val peerId = scope.peerId ?: return false
+        if (ref.sentAt + custodyTtlMs - now <= lastCallMs) return false
+        if (!canAskHolder(peerId) || !authoredHere(ref.aHash)) return false
+        askHolder(ref.aHash, peerId)
+        return inProofRound(ref.aHash, peerId, now)
+    }
+
+    /**
      * Whether [ref]'s bytes should be held back from this round's push for [scope]. False — push, today's
      * behaviour — for everything the rules below don't positively cover.
      *
