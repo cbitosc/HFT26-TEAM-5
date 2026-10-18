@@ -143,6 +143,40 @@ class FreeUploadsTest {
         assertEquals(5, chunks(status(), keys = mapOf("lax.spool.getknit.app" to free)))
     }
 
+    // ── a photo staged while the relay is down (the device run's step 5) ───────────────────────────────
+
+    // What `ScopeSync.status` says of a relay it dials but has no hello from: nothing about its gates or limits.
+    private val down = SpoolStatus(url, false, 0, "unreachable", emptyList())
+
+    private val freeKey = HeldKey("https://anywhere.getknit.app", "kak1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", free = true)
+
+    @Test
+    fun aRelayThatIsDownFitsToTheLastFreeTicketHeldThere() {
+        val lapsed = SpoolTicketsTest.ticket(aud = "lax.spool.getknit.app", fl = SpoolTicket.FL_FILES, am = 3L * 49_152)
+        val held = mapOf("lax.spool.getknit.app" to StoredSpoolTicket(lapsed.text, null))
+        assertEquals(3, chunks(down, held = held, keys = mapOf("lax.spool.getknit.app" to freeKey)))
+    }
+
+    @Test
+    fun aRelayThatIsDownWithNoKeyFitsToTheHintWhereAFreeAccountCouldBeMade() {
+        assertEquals(5, chunks(down))
+        assertEquals(5, chunks(down, consent = mapOf("lax.spool.getknit.app" to true)))
+        // Declined or turned off: no free ticket will come, so nothing is fitted for it.
+        assertNull(chunks(down, consent = mapOf("lax.spool.getknit.app" to false)))
+    }
+
+    @Test
+    fun aRelayThatIsDownUnderACustomerKeyIsNotFitted() {
+        val customer = HeldKey("https://anywhere.getknit.app", "kak1_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+        assertNull(chunks(down, keys = mapOf("lax.spool.getknit.app" to customer)))
+    }
+
+    @Test
+    fun aConnectedRelayThatTakesThePhotoWholeStillWinsOverOneThatIsDown() {
+        val other = SpoolStatus("wss://open.example/spool/v1", true, 0, null, emptyList(), maxAttachBytes = 16 shl 20)
+        assertNull(photoChunks(listOf(down, other), emptyMap(), issuers, emptyMap(), emptyMap(), expected))
+    }
+
     @Test
     fun aPhotosFitIsItsChunksLessTheSeal() {
         assertEquals(245_732, photoFitBytes(5))

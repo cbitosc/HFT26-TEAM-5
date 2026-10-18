@@ -70,8 +70,9 @@ an issuer only from an invite's `i`.
   product-language-editor skill: no product, price, shop, "Get" or "Upgrade".
 - **Fitting a photo** (`AttachmentStore.fitted`, `FreeUploads.photoChunks`, `photoFitBytes`). A free key asks only
   once an upload waits, so a phone's first photo is staged before it has held a ticket; re-encoding later would change
-  the hash its sent frame names. So a still photo is fitted at staging to the smallest chunk limit among the connected
-  relays that would carry it, unless one would take it as it is: the live ticket's `am`, else the last held ticket's
+  the hash its sent frame names. So a still photo is fitted at staging to the smallest chunk limit among the relays it
+  goes to, connected or not (a relay that is down is judged by what this phone holds for its host, so a photo staged
+  offline is fitted too — the device run's step 5, 2026-10-17), unless one would take it as it is: the live ticket's `am`, else the last held ticket's
   (even lapsed), else the seeded hint `free_issuer_am` (`https://anywhere.getknit.app 262144`), only where the phone
   holds a free key or none and a free account could be made (contract revision 4) — never under a customer key, which
   goes to the same origin. The ladder (`FIT_STEPS`) is quality first, then size: 1280 px q75, q65, q55, then 1024 px

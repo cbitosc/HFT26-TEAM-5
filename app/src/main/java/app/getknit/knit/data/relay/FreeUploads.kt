@@ -108,12 +108,14 @@ internal fun freeUploadOffers(
         .toList()
 
 /**
- * The chunk limit a photo is fitted to (C-7.6-32), over the connected relays that carry attachments: null — no
- * re-encode — when any of them would take it as it is (no files gate, or an open one whose ticket sets no `am`), since
- * one relay that takes it is enough (§9.1's union rule); else the smallest limit among the rest. An open relay's is its
- * live ticket's. One locked for want of a ticket counts where one could come — a key held, or a free issuer the person
- * has not turned down — at the `am` of the ticket last held there, live or lapsed, or with none yet, the `am` a free
- * ticket from its issuer is expected to carry. Spent, pending and refused relays take nothing today and do not count.
+ * The chunk limit a photo is fitted to (C-7.6-32), over the relays this phone dials, connected or not: null — no
+ * re-encode — when any of them would take it as it is (a connected one with no files gate, or an open one whose ticket
+ * sets no `am`, or one under a customer key), since one relay that takes it is enough (§9.1's union rule); else the
+ * smallest limit among the rest. A connected, open relay's is its live ticket's. One locked for want of a ticket, and
+ * one that is down (a photo staged offline goes up when it is back), count where a ticket could come — a key held, or
+ * a free issuer the person has not turned down — at the `am` of the ticket last held there, live or lapsed, or with
+ * none yet, the `am` a free ticket from its issuer is expected to carry. A connected relay that carries no attachments,
+ * and a spent, pending or refused one, take nothing today and do not count.
  */
 @Suppress("LongParameterList") // the facts one rule reads; a holder would only rename them
 internal fun photoChunks(
@@ -125,7 +127,7 @@ internal fun photoChunks(
     expectedAm: Map<String, Long>,
 ): Int? {
     val facts = FitFacts(held, issuers, consent, keys, expectedAm)
-    val fits = statuses.filter { it.connected && it.maxAttachBytes != null }.map { relayFit(it, facts) }
+    val fits = statuses.filter { !it.connected || it.maxAttachBytes != null }.map { relayFit(it, facts) }
     if (fits.any { it == Fit.Whole }) return null
     return fits.filterIsInstance<Fit.Chunks>().minOfOrNull { it.chunks }
 }
@@ -157,16 +159,26 @@ private fun relayFit(
     status: SpoolStatus,
     facts: FitFacts,
 ): Fit {
-    if (status.entGates and SpoolTicket.FL_FILES == 0L) return Fit.Whole
-    val uploads = status.uploads
-    if (uploads == SpoolUploads.Open) return status.uploadLimitChunks?.let(Fit::Chunks) ?: Fit.Whole
     val host = SpoolUrl.hostname(status.url)
-    if (host == null || uploads !is SpoolUploads.Locked || uploads.reason !in WAITING) return Fit.None
-    return lockedFit(host, facts)
+    val uploads = status.uploads
+    return when {
+        host == null -> Fit.None
+
+        // Down, its gates are unknown until the next hello: judged as a locked one, by what this phone holds for its host.
+        !status.connected -> lockedFit(host, facts)
+
+        status.entGates and SpoolTicket.FL_FILES == 0L -> Fit.Whole
+
+        uploads == SpoolUploads.Open -> status.uploadLimitChunks?.let(Fit::Chunks) ?: Fit.Whole
+
+        uploads is SpoolUploads.Locked && uploads.reason in WAITING -> lockedFit(host, facts)
+
+        else -> Fit.None
+    }
 }
 
 /**
- * A relay locked for want of a ticket: the last held ticket's `am`; else, under a customer key, any size (its ticket's
+ * A relay locked for want of a ticket, or down: the last held ticket's `am`; else, under a customer key, any size (its ticket's
  * `am` is unknown, and the hint is a free ticket's, contract revision 4); else, with a free key or none and a free
  * account not turned down, the hint; else nothing.
  */
