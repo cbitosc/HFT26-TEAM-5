@@ -874,6 +874,13 @@ search never finds it. The chat list is the exception, as it is for a transfer. 
 the same sentence without the time, and with no "You: " in front of it, because the sentence already says who did
 what. A missed call is notified on its own (`ui/call/CallController`), so the badge does not count it twice.
 
+The field log keeps its own account of each call, apart from the thread (`docs/FIELD_LOG.md`, ADR 2026-10.a239's
+2026-10-18 amendment). Each call writes a start line and an end line; there is an end line for every offer this phone
+saw, refused and never-rung ones included. A live call also writes its selected pairs and a media reading every 30 s,
+a Wi-Fi Direct leg writes how it ended, and a walkie writes each burst and its session's totals. These lines hold
+types, counts and times, under a pseudonym for the peer. They are off until the user switches the log on, and only
+the user shares them.
+
 ### 3.13 The audio route
 
 Every call, live or walkie, is registered with the phone as a self-managed Telecom call (Jetpack core-telecom, debug

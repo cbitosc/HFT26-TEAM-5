@@ -301,8 +301,9 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   screens:** READ ADR 028 and ADR 2026-10.fzsy. Reports are written redacted and leave the phone only by the user's
   hand; ANRs are imported from `ApplicationExitInfo` at start, once each (the `anr-seen` watermark), and `AnrTrace`
   is the privacy boundary for native frames, which the redactor passes verbatim.
-- **When touching `fieldlog/`, a `FieldEvent`, a `field.record(…)` / `field.sampler(…)` call in a transport,
-  `ui/diagnostics/FieldLog*`, or `MessageDao.inboundDelays` / `receiptDelays`:** READ ADR 2026-10.a239 and
+- **When touching `fieldlog/`, a `FieldEvent`, a `field.record(…)` / `field.sampler(…)` call in a transport or the
+  call plane (`call/CallFieldLog.kt`, `CallMediaSampler`), `ui/diagnostics/FieldLog*`, or `MessageDao.inboundDelays` /
+  `receiptDelays`:** READ ADR 2026-10.a239 (its 2026-10-18 amendment for the call lines) and
   `docs/FIELD_LOG.md`. Every build can keep a bounded record of how the radios behaved (4 MiB, 72 h, in
   `noBackupFilesDir`) — off until the user switches it on — and only the user shares it from Diagnostics; no
   upload path, ever. `FieldWriter` has

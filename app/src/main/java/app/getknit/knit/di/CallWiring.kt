@@ -10,6 +10,7 @@ import app.getknit.knit.call.CallDirect
 import app.getknit.knit.call.CallLog
 import app.getknit.knit.call.CallManager
 import app.getknit.knit.call.CallMedia
+import app.getknit.knit.call.CallMediaSampler
 import app.getknit.knit.call.CallReach
 import app.getknit.knit.call.CallReachRule
 import app.getknit.knit.call.CallSignals
@@ -37,6 +38,8 @@ import app.getknit.knit.data.settings.OwnIceStore
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.data.settings.TranscriptStore
 import app.getknit.knit.device.DeviceImage
+import app.getknit.knit.fieldlog.FieldLog
+import app.getknit.knit.fieldlog.FieldRecorder
 import app.getknit.knit.identity.Identity
 import app.getknit.knit.mesh.BulkRoute
 import app.getknit.knit.mesh.MeshController
@@ -180,6 +183,7 @@ private fun callGraph(): Module =
                 tombs = get<CallTombStore>(),
                 reach = callReach(),
                 takesIncoming = get<IncomingCalls>()::takes,
+                field = fieldLog(),
             )
         }
         if (STT_WIRED) speechGraph()
@@ -251,6 +255,7 @@ private fun Module.liveGraph() {
             mayJoinWhileRinging = { Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU || get<AppVisibility>().visible.value },
             enabled = { !directOff.value },
             log = { Log.i(TAG, it) },
+            field = fieldLog(),
         )
     }
     // C-3.13-12 (ADR 2026-10.kw29): which microphone path a call records from — the fallback on a generic system
@@ -273,10 +278,21 @@ private fun Module.liveGraph() {
             log = { Log.i(TAG, it) },
             // C-3.7-5: a live call's captions, where speech is wired.
             captions = if (STT_WIRED) get<CallCaptioner>() else null,
+            field = fieldLog(),
         )
     }
     // The call screen reads the media's stats itself (its diagnostics card); the manager sees only the seam.
     single<CallMedia> { get<WebRtcCallMedia>() }
+    // The field log's readings of a live call's media (ADR 2026-10.a239's amendment), on the media's second reader.
+    single {
+        CallMediaSampler(
+            calls = get<CallManager>().state,
+            read = { reconnecting -> get<WebRtcCallMedia>().fieldSample(reconnecting) },
+            field = fieldLog(),
+            scope = get<CoroutineScope>(),
+            log = { Log.i(TAG, it) },
+        )
+    }
     // The Calls screen's Test (C-3.14-5): the same factory, and refused while a call holds it.
     single<IceProbe> { get<WebRtcCallMedia>() }
     single {
@@ -413,9 +429,17 @@ private fun Module.walkieGraph() {
                     ?.headset == true
             },
             transcript = if (STT_WIRED) get<WalkieTranscriber>() else null,
+            field = fieldLog(),
         )
     }
 }
+
+/**
+ * The field log (ADR 2026-10.a239), resolved at each record and never as the call graph builds, like every mesh seam
+ * here: it is the mesh graph's, which the service builds off the main thread, and that graph is up before a call is
+ * dialled or rings.
+ */
+private fun Scope.fieldLog(): FieldRecorder = FieldRecorder { event -> get<FieldLog>().record(event) }
 
 /**
  * When a call is placed as a walkie (§3.11): the peer must run one, and a live call must look impossible — the peer
@@ -523,6 +547,9 @@ fun startCallsIfWired(koin: Koin) {
         // First: a call that rings before the system holds it has no route but the one the phone was left in.
         runCatching { koin.get<SystemCallSync>().start() }.onFailure { Log.w(TAG, "system calls not started", it) }
         if (LIVE_CALLS_WIRED) runCatching { koin.get<CallToneSync>().start() }.onFailure { Log.w(TAG, "call tones not started", it) }
+        if (LIVE_CALLS_WIRED) {
+            runCatching { koin.get<CallMediaSampler>().start() }.onFailure { Log.w(TAG, "call media sampling not started", it) }
+        }
         runCatching { koin.get<CallController>().start() }.onFailure { Log.w(TAG, "calls not started", it) }
         runCatching { koin.get<CallLog>().start() }.onFailure { Log.w(TAG, "call records not started", it) }
         if (WALKIE_WIRED) runCatching { koin.get<WalkieTalk>().start() }.onFailure { Log.w(TAG, "walkie not started", it) }

@@ -14,6 +14,10 @@ import app.getknit.knit.call.WalkieMeter
 import app.getknit.knit.call.WalkiePolicy
 import app.getknit.knit.call.WalkieStats
 import app.getknit.knit.call.WalkieTranscriber
+import app.getknit.knit.call.fieldEvent
+import app.getknit.knit.fieldlog.FieldEvent
+import app.getknit.knit.fieldlog.FieldRecorder
+import app.getknit.knit.fieldlog.TalkDirection
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
@@ -113,6 +117,9 @@ internal enum class TalkPath(
  * ends, and the player's tap hands it the audio between. Each burst spoken goes the same way from the recorder's tap,
  * opened at the press and ended at the release, so the sender's line shows what the model makes of the voice before
  * Opus.
+ *
+ * Each burst each way, and each session's totals as it ends, go into the field log ([field], ADR 2026-10.a239's
+ * amendment): counts, times and the way to the peer, never a sound.
  */
 internal class WalkieTalk(
     private val calls: CallManager,
@@ -128,6 +135,7 @@ internal class WalkieTalk(
     // Whether a headset has the call's audio now (§3.13): a burst is then spoken into its microphone.
     private val headset: () -> Boolean = { false },
     private val transcript: WalkieTranscriber? = null,
+    private val field: FieldRecorder = FieldRecorder.NONE,
 ) {
     private val _talk = MutableStateFlow<Talk>(Talk.Idle())
     val talk: StateFlow<Talk> = _talk.asStateFlow()
@@ -362,6 +370,7 @@ internal class WalkieTalk(
         val keep = kept.await()
         if (q == 0) return Talk.Note.TOO_SHORT
         out(if (keep) chunker.flush() else ByteArray(0), end = true)
+        recordOut(call.peerId, chunks = q, audioMs = chunker.totalMs, sent = delivered)
         log(
             "walkie: burst $b of ${chunker.totalMs}ms to ${call.peerId} in $q chunks ($bytesOut B before the seal), $delivered sealed, " +
                 "via ${pathTo(call.peerId) ?: "?"}; " +
@@ -373,6 +382,26 @@ internal class WalkieTalk(
         sent.incrementAndGet()
         meter.burstSent()
         return Talk.Note.SENT
+    }
+
+    /** A burst out's field-log line: its chunks, those a link took, and the way to [peerId] as it ended. */
+    private fun recordOut(
+        peerId: String,
+        chunks: Int,
+        audioMs: Long,
+        sent: Int,
+    ) {
+        val path = links?.pathTo(peerId, peerTicketed())
+        field.record(
+            FieldEvent.Talk(
+                TalkDirection.OUT,
+                chunks = chunks,
+                audioMs = audioMs,
+                sent = sent,
+                path = path,
+                held = holding && path == TalkPath.WIFI_AWARE,
+            ),
+        )
     }
 
     /** One connected session with [call]'s peer: play what it streams, hang up when it goes quiet. */
@@ -388,6 +417,7 @@ internal class WalkieTalk(
                 hear(call.id)
             }
         } finally {
+            field.record(meter.snapshot().fieldEvent())
             // The model's native heap goes with the call, not two idle minutes later.
             transcript?.release()
         }
@@ -455,7 +485,8 @@ internal class WalkieTalk(
             }
         }
 
-    // One line per burst heard: when each chunk came after the first, and when the burst began to play.
+    // One line per burst heard, in the log and the field log: when each chunk came after the first, and when the burst
+    // began to play.
     private fun logHeard(
         b: Int,
         at: List<Long>,
@@ -465,6 +496,15 @@ internal class WalkieTalk(
         val first = at.minOrNull() ?: return
         val offsets = at.joinToString("/") { "${it - first}" }
         log("walkie: heard burst $b: ${at.size} chunks, $skippedSince skipped, arrivals +$offsets ms, began +${playedAt - first} ms")
+        field.record(
+            FieldEvent.Talk(
+                TalkDirection.IN,
+                chunks = at.size,
+                lost = skippedSince,
+                waitMs = playedAt - first,
+                spreadMs = at.max() - first,
+            ),
+        )
     }
 
     private suspend fun hangUpWhenIdle() {

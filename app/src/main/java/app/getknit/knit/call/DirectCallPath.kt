@@ -1,5 +1,7 @@
 package app.getknit.knit.call
 
+import app.getknit.knit.fieldlog.FieldEvent
+import app.getknit.knit.fieldlog.FieldRecorder
 import app.getknit.knit.mesh.protocol.CallPayload
 import app.getknit.knit.mesh.protocol.DirectInvite
 import app.getknit.knit.transfer.DirectWifi
@@ -78,7 +80,8 @@ data class DirectTimings(
  * dialog. Once the group is up its [link] goes to the media layer, and the joiner dials the host's lane, proving the
  * call's secret. The lane then carries what [mirror] and [candidates] queued — from the moment the leg began, so the
  * signals the mesh carried while the radio changed hands reach the peer again — plus a ping each second; silence for
- * [DirectTimings.silenceMs] ends the leg. However a leg ends, the radio goes back to the mesh, once.
+ * [DirectTimings.silenceMs] ends the leg. However a leg ends, the radio goes back to the mesh, once, and the leg's
+ * line goes into the field log ([field]): how it ended and how long its group and its lane took to come up.
  */
 class DirectCallPath(
     // Late-bound: the lease wraps the Wi-Fi Direct radio, which holds the mesh transport — the service's to build.
@@ -99,6 +102,7 @@ class DirectCallPath(
     private val rng: SecureRandom = SecureRandom(),
     private val subnetsOf: (JoinedGroup) -> List<GroupAddress> = ::joinedSubnets,
     private val log: (String) -> Unit = {},
+    private val field: FieldRecorder = FieldRecorder.NONE,
 ) : CallDirect {
     private enum class Stage { Starting, Up, Over }
 
@@ -129,6 +133,20 @@ class DirectCallPath(
 
         var job: Job? = null
         val released = AtomicBoolean(false)
+
+        // For the leg's field-log line: when it began, its group and its lane came up, the joiner's attempts, how it
+        // ended on its own, and whether the call ended it first (which then names the end, whatever the lane saw).
+        val startedAt = clock()
+
+        @Volatile var groupAt: Long? = null
+
+        @Volatile var laneAt: Long? = null
+
+        @Volatile var joinTries = 0
+
+        @Volatile var end: DirectLegEnd? = null
+
+        @Volatile var ended = false
     }
 
     private val lease by lazy(leaseOf)
@@ -225,6 +243,7 @@ class DirectCallPath(
             listener.bind(LANE_BUFFER_BYTES)
             val socket = listener.accept(CallLane.proofKey(leg.secret), callId)
             if (socket == null) {
+                leg.end = DirectLegEnd.NO_LANE
                 log("call $callId: no lane within ${timings.hostWindowMs}ms; giving the radio back")
                 return@run
             }
@@ -260,6 +279,8 @@ class DirectCallPath(
         terminal: CallPayload?,
     ) {
         val leg = legs.remove(callId) ?: return
+        // Before a socket closes: the read that fails under it is the call's doing, not the lane's.
+        leg.ended = true
         scope.launch(io) {
             withContext(NonCancellable) {
                 leg.lane?.takeIf { leg.stage == Stage.Up }?.let { lane ->
@@ -311,8 +332,10 @@ class DirectCallPath(
                 try {
                     body()
                 } catch (e: DirectWifiException) {
+                    leg.end = DirectLegEnd.RADIO
                     log("call ${leg.callId}: direct leg failed: ${e.message}")
                 } catch (e: IOException) {
+                    leg.end = DirectLegEnd.LANE_FAILED
                     log("call ${leg.callId}: lane failed: ${e.javaClass.simpleName}")
                 } finally {
                     withContext(NonCancellable) {
@@ -331,6 +354,7 @@ class DirectCallPath(
         link: DirectLink,
     ) {
         leg.link = link
+        leg.groupAt = clock()
         _link.value = link
         log("call ${leg.callId}: group up on ${link.interfaceName ?: "?"} (${if (leg.hosting) "hosting" else "joined"})")
     }
@@ -342,6 +366,7 @@ class DirectCallPath(
     ) = coroutineScope {
         leg.lane = lane
         leg.heardAt = clock()
+        leg.laneAt = leg.heardAt
         leg.stage = Stage.Up
         log("call ${leg.callId}: lane up")
         val writer =
@@ -363,13 +388,14 @@ class DirectCallPath(
         val watchdog =
             async {
                 while (clock() - leg.heardAt <= timings.silenceMs) delay(timings.pingMs)
-                "silent for ${timings.silenceMs}ms"
+                "silent for ${timings.silenceMs}ms" to DirectLegEnd.SILENT
             }
-        val why =
+        val (why, end) =
             select {
                 reader.onAwait { it }
                 watchdog.onAwait { it }
             }
+        leg.end = end
         log("call ${leg.callId}: lane over ($why)")
         closeSockets(leg)
         pinger.cancel()
@@ -378,17 +404,17 @@ class DirectCallPath(
         reader.cancel()
     }
 
-    /** Frames in until the lane ends; why it ended. */
+    /** Frames in until the lane ends; why it ended, for the log and for the field log. */
     private suspend fun read(
         leg: Leg,
         lane: CallLane,
-    ): String {
+    ): Pair<String, DirectLegEnd> {
         while (true) {
             val frame =
                 try {
-                    lane.receive() ?: return "closed by the peer"
+                    lane.receive() ?: return "closed by the peer" to DirectLegEnd.CLOSED
                 } catch (e: IOException) {
-                    return "read failed: ${e.javaClass.simpleName}"
+                    return "read failed: ${e.javaClass.simpleName}" to DirectLegEnd.CLOSED
                 }
             leg.heardAt = clock()
             when (frame) {
@@ -405,7 +431,7 @@ class DirectCallPath(
                 }
 
                 LaneFrame.Bye -> {
-                    return "bye"
+                    return "bye" to DirectLegEnd.BYE
                 }
             }
         }
@@ -415,6 +441,7 @@ class DirectCallPath(
         val deadline = clock() + timings.joinWindowMs
         while (true) {
             try {
+                leg.joinTries += 1
                 return leg.wifi.join(leg.credentials, timings.joinAttemptMs, ipv4 = true)
             } catch (e: DirectWifiException) {
                 if (clock() >= deadline || e.refusal != null) throw e
@@ -457,6 +484,16 @@ class DirectCallPath(
         leg.link?.let { _link.compareAndSet(it, null) }
         runCatching { leg.wifi.release() }.onFailure { log("call ${leg.callId}: release failed: ${it.javaClass.simpleName}") }
         log("call ${leg.callId}: direct leg over; radio back to the mesh")
+        field.record(
+            FieldEvent.CallDirectLeg(
+                hosting = leg.hosting,
+                end = if (leg.ended) DirectLegEnd.CALL else leg.end ?: DirectLegEnd.CALL,
+                groupMs = leg.groupAt?.let { it - leg.startedAt },
+                laneMs = leg.laneAt?.let { it - leg.startedAt },
+                lifeMs = clock() - leg.startedAt,
+                joinTries = leg.joinTries,
+            ),
+        )
     }
 
     private companion object {

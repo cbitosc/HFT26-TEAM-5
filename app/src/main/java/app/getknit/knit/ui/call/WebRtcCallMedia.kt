@@ -9,13 +9,18 @@ import app.getknit.knit.call.CallSession
 import app.getknit.knit.call.CaptureHealth
 import app.getknit.knit.call.CaptureProfile
 import app.getknit.knit.call.DirectLink
+import app.getknit.knit.call.IceNetwork
 import app.getknit.knit.call.IceProbe
+import app.getknit.knit.call.IceProtocol
+import app.getknit.knit.call.IceType
 import app.getknit.knit.call.MediaEvent
 import app.getknit.knit.call.ProbeResult
 import app.getknit.knit.call.ProbeVerdict
 import app.getknit.knit.call.SdpGuard
 import app.getknit.knit.call.TurnServer
 import app.getknit.knit.call.iceSummary
+import app.getknit.knit.fieldlog.FieldEvent
+import app.getknit.knit.fieldlog.FieldRecorder
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.async
@@ -46,6 +51,7 @@ import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
 import org.webrtc.audio.JavaAudioDeviceModule
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.resume
 
 /**
@@ -73,6 +79,10 @@ import kotlin.coroutines.resume
  *
  * **It also answers the Calls screen's Test** ([IceProbe], C-3.14-5): a throwaway connection per kind on the same
  * factory, never while a call holds it, and never rebuilding the module under one.
+ *
+ * **What the field log keeps of a call's media** ([field], ADR 2026-10.a239's amendment): each pair the session
+ * selects, as [FieldEvent.CallRoute], and the readings `CallMediaSampler` takes through [fieldSample] — on a stats reader
+ * of their own, so the diagnostics card's rates and recent loss are never cut short by them. Types and numbers only.
  */
 internal class WebRtcCallMedia(
     private val context: Context,
@@ -82,6 +92,7 @@ internal class WebRtcCallMedia(
     private val log: (String) -> Unit,
     // The live call's captions (C-3.7-5), fed the peer's decoded audio; null where calls carry none.
     private val captions: CallCaptioner? = null,
+    private val field: FieldRecorder = FieldRecorder.NONE,
 ) : CallMedia,
     IceProbe {
     /** One audio module and the factory over it, for one capture profile. */
@@ -125,8 +136,21 @@ internal class WebRtcCallMedia(
             a.tap.begin(a.profile.name.lowercase(), canSwitch = a.profile == CaptureProfile.STANDARD)
             captions?.begin()
         }
-        return WebRtcSession(a.factory, a.tap, servers, relayOnly, direct, link, events, scope, log, path, captions, onClosed = ::closed)
-            .also(open::add)
+        return WebRtcSession(
+            a.factory,
+            a.tap,
+            servers,
+            relayOnly,
+            direct,
+            link,
+            events,
+            scope,
+            log,
+            path,
+            captions,
+            field,
+            onClosed = ::closed,
+        ).also(open::add)
     }
 
     private fun closed(session: WebRtcSession) {
@@ -280,6 +304,16 @@ internal class WebRtcCallMedia(
     /** The newest open session's stats, for the call screen's diagnostics card; null with no session or no report. */
     suspend fun stats(): CallStats? = open.lastOrNull()?.stats()
 
+    /**
+     * The newest open session's reading for the field log (`CallMediaSampler`), on that session's second stats reader,
+     * with the microphone's path and health; null with no session or no report.
+     */
+    suspend fun fieldSample(reconnecting: Boolean): FieldEvent.CallSample? {
+        val stats = open.lastOrNull()?.fieldStats() ?: return null
+        val a = audio
+        return stats.fieldSample(reconnecting, micPath = a?.profile, capture = a?.tap?.status?.value)
+    }
+
     /** The open call's microphone (C-3.13-13), or null with no call. */
     fun captureStatus(): CaptureStatus? = audio?.tap?.status?.value
 
@@ -384,6 +418,7 @@ private class WebRtcSession(
     private val log: (String) -> Unit,
     private val path: DefaultPath,
     private val captions: CallCaptioner?,
+    private val field: FieldRecorder,
     private val onClosed: (WebRtcSession) -> Unit,
 ) : CallSession {
     // Two locks, because libwebrtc's observer runs on its signaling thread and a getStats or setConfiguration call
@@ -395,6 +430,12 @@ private class WebRtcSession(
     private val lock = Any()
     private val pcLock = Any()
     private val statsReader = CallStatsReader()
+
+    // The field log's own reader (`fieldStats`): a reader's rates and recent loss are since its last report.
+    private val fieldReader = CallStatsReader()
+
+    // How many pairs this session has selected, for the field log's route lines.
+    private val routes = AtomicInteger()
     private val relays = RelayTally()
     private val gathered = CompletableDeferred<Unit>()
     private val firstCandidate = CompletableDeferred<Unit>()
@@ -472,8 +513,19 @@ private class WebRtcSession(
             }
 
             override fun onSelectedCandidatePairChanged(event: CandidatePairChangeEvent) {
-                val group = if (onGroup(event.local.sdp)) "/$ROUTE_DIRECT" else ""
+                val onGroup = onGroup(event.local.sdp)
+                val group = if (onGroup) "/$ROUTE_DIRECT" else ""
                 selected = "${typeOf(event.local)}/${typeOf(event.remote)}$group"
+                field.record(
+                    FieldEvent.CallRoute(
+                        local = IceType.of(typeOf(event.local)) ?: IceType.OTHER,
+                        remote = IceType.of(typeOf(event.remote)) ?: IceType.OTHER,
+                        protocol = IceProtocol.ofLine(event.local.sdp),
+                        network = IceNetwork.of(event.local.adapterType?.name),
+                        direct = onGroup,
+                        seq = routes.incrementAndGet(),
+                    ),
+                )
                 // libwebrtc's own words for why it switched, then every answered pair's round trip at that moment:
                 // what a switch to a lower-priority pair (srflx → relay) was chosen on.
                 log("webrtc: route $selected (${event.reason})")
@@ -633,14 +685,19 @@ private class WebRtcSession(
     override suspend fun route(): String? = selected
 
     /** One stats report, read: the first call's counters are the bitrates' baseline, so those come on the second. */
-    suspend fun stats(): CallStats? {
+    suspend fun stats(): CallStats? = read(statsReader)
+
+    /** The same reading on the field log's own reader, so neither consumer's rates eat into the other's. */
+    suspend fun fieldStats(): CallStats? = read(fieldReader)
+
+    private suspend fun read(reader: CallStatsReader): CallStats? {
         val report = report() ?: return null
         val prefer =
             synchronized(pcLock) { config.networkPreference }
                 .takeIf { it != PeerConnection.AdapterType.UNKNOWN }
                 ?.name
                 ?.lowercase()
-        return statsReader.read(report, wifiDirect = selected?.endsWith("/$ROUTE_DIRECT") == true).copy(prefer = prefer)
+        return reader.read(report, wifiDirect = selected?.endsWith("/$ROUTE_DIRECT") == true).copy(prefer = prefer)
     }
 
     /** One raw stats report, or null once closed or after [STATS_MS]. */

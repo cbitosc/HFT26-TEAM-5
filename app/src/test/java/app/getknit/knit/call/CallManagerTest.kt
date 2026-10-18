@@ -2,6 +2,8 @@ package app.getknit.knit.call
 
 import app.getknit.knit.data.message.CallOutcome
 import app.getknit.knit.data.settings.CallIntake
+import app.getknit.knit.fieldlog.FieldEvent
+import app.getknit.knit.fieldlog.FieldRecorder
 import app.getknit.knit.mesh.protocol.CallPayload
 import app.getknit.knit.mesh.protocol.DirectInvite
 import kotlinx.coroutines.CompletableDeferred
@@ -248,6 +250,8 @@ class CallManagerTest {
         val turnAsks: MutableList<String>,
         val direct: FakeDirect,
         val walkie: FakeWalkie,
+        // The field log's lines this side wrote (ADR 2026-10.a239's amendment), in order.
+        val field: MutableList<FieldEvent>,
     ) {
         var fail = false
         var turn: suspend (String) -> List<TurnServer> = { emptyList() }
@@ -282,6 +286,7 @@ class CallManagerTest {
         val missed = Collections.synchronizedList(mutableListOf<MissedCall>())
         val logged = Collections.synchronizedList(mutableListOf<CallLogged>())
         val turnAsks = Collections.synchronizedList(mutableListOf<String>())
+        val field = Collections.synchronizedList(mutableListOf<FieldEvent>())
         val media = FakeMedia()
         val direct = FakeDirect(name, backgroundScope)
         val walkie = FakeWalkie()
@@ -316,8 +321,9 @@ class CallManagerTest {
                 tombs = tombs,
                 reach = { side.reachable },
                 takesIncoming = { CallIntake(live = side.takesLive, walkie = side.takesWalkie).takes(it) },
+                field = FieldRecorder { field += it },
             )
-        side = Side(name, manager, media, sent, missed, logged, turnAsks, direct, walkie)
+        side = Side(name, manager, media, sent, missed, logged, turnAsks, direct, walkie, field)
         net.nodes[name] = manager
         backgroundScope.launch { manager.missed.collect { missed += it } }
         backgroundScope.launch { manager.logged.collect { logged += it } }
@@ -2064,11 +2070,246 @@ class CallManagerTest {
             assertEquals(3, heard.size)
         }
 
+    /** The field log's lines of kind [T] that [this] side wrote, in order. */
+    private inline fun <reified T : FieldEvent> Side.lines(): List<T> = synchronized(field) { field.filterIsInstance<T>() }
+
+    @Test
+    fun aConnectedCallLeavesOneStartAndOneEndLineOnEachSideTimedFromItsStart() =
+        runTest {
+            val (_, alice, bob) = pair()
+            alice.turn = { listOf(TurnServer(urls = listOf("turn:turn.example:3478"), user = "9999999999:a", pass = "p")) }
+            alice.stun = listOf("stun:stun.example:3478")
+            alice.manager.start(BOB)
+            runCurrent()
+            advanceTimeBy(PICK_UP_MS)
+            bob.manager.answer(bob.state!!.id)
+            runCurrent()
+            advanceTimeBy(ICE_MS)
+            alice.media.last.events(MediaEvent.Connected)
+            bob.media.last.events(MediaEvent.Connected)
+            runCurrent()
+            advanceTimeBy(TALK_MS)
+            alice.manager.hangUp()
+            runCurrent()
+
+            assertEquals(listOf(FieldEvent.CallStart(BOB, outgoing = true, walkie = false)), alice.lines<FieldEvent.CallStart>())
+            assertEquals(listOf(FieldEvent.CallStart(ALICE, outgoing = false, walkie = false)), bob.lines<FieldEvent.CallStart>())
+            // The RINGING comes back at once over the in-process net; the answer, the media and the talk take their time.
+            assertEquals(
+                FieldEvent.CallEnd(
+                    peer = BOB,
+                    outgoing = true,
+                    walkie = false,
+                    reason = CallEndReason.USER,
+                    lastPhase = CallPhase.Connected,
+                    lifeMs = PICK_UP_MS + ICE_MS + TALK_MS,
+                    ringMs = 0,
+                    answerMs = PICK_UP_MS,
+                    setupMs = PICK_UP_MS + ICE_MS,
+                    talkMs = TALK_MS,
+                    turn = 1,
+                    stun = 1,
+                ),
+                alice.lines<FieldEvent.CallEnd>().single(),
+            )
+            assertEquals(
+                FieldEvent.CallEnd(
+                    peer = ALICE,
+                    outgoing = false,
+                    walkie = false,
+                    reason = CallEndReason.USER,
+                    lastPhase = CallPhase.Connected,
+                    lifeMs = PICK_UP_MS + ICE_MS + TALK_MS,
+                    byPeer = true,
+                    answerMs = PICK_UP_MS,
+                    setupMs = PICK_UP_MS + ICE_MS,
+                    talkMs = TALK_MS,
+                    turn = 0,
+                    stun = 0,
+                ),
+                bob.lines<FieldEvent.CallEnd>().single(),
+            )
+        }
+
+    @Test
+    fun anOfferThatNeverRangLeavesOnlyAnEndLineOfNoLength() =
+        runTest {
+            val (_, _, bob) = pair()
+            val now = testScheduler.currentTime
+            bob.manager.onSignal(
+                ALICE,
+                CallPayload(id = "c1", ph = CallPayload.PHASE_OFFER, sdp = SDP),
+                sentAt =
+                    now - TIMINGS.staleOfferMs - 1,
+            )
+            runCurrent()
+            assertEquals(
+                listOf<FieldEvent>(
+                    FieldEvent.CallEnd(
+                        ALICE,
+                        outgoing = false,
+                        walkie = false,
+                        CallEndReason.STALE,
+                        lastPhase = null,
+                        lifeMs = 0,
+                        missed = true,
+                    ),
+                ),
+                bob.field.toList(),
+            )
+
+            // Just inside C-3.4-1's window it rings, and is a call that began.
+            bob.manager.onSignal(
+                ALICE,
+                CallPayload(id = "c2", ph = CallPayload.PHASE_OFFER, sdp = SDP),
+                sentAt = now - TIMINGS.staleOfferMs,
+            )
+            runCurrent()
+            assertEquals(listOf(FieldEvent.CallStart(ALICE, outgoing = false, walkie = false)), bob.lines<FieldEvent.CallStart>())
+            assertEquals(1, bob.lines<FieldEvent.CallEnd>().size)
+        }
+
+    @Test
+    fun anOfferOfAKindSwitchedOffAndOneWithMediaItCannotPlayEachLeaveARefusedLine() =
+        runTest {
+            val (_, _, bob) = pair()
+            val now = testScheduler.currentTime
+            // C-3.3-7: live calls switched off here.
+            bob.takesLive = false
+            bob.manager.onSignal(ALICE, CallPayload(id = "c1", ph = CallPayload.PHASE_OFFER, sdp = SDP), now)
+            runCurrent()
+            // SDES instead of DTLS: media this phone will not play.
+            bob.takesLive = true
+            val sdes = SDP.replace("a=fingerprint:sha-256 AB:CD", "a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:x")
+            bob.manager.onSignal(ALICE, CallPayload(id = "c2", ph = CallPayload.PHASE_OFFER, sdp = sdes), now)
+            runCurrent()
+            assertEquals(
+                listOf<FieldEvent>(
+                    FieldEvent.CallEnd(ALICE, outgoing = false, walkie = false, CallEndReason.OFF, lastPhase = null, lifeMs = 0),
+                    FieldEvent.CallEnd(ALICE, outgoing = false, walkie = false, CallEndReason.MEDIA, lastPhase = null, lifeMs = 0),
+                ),
+                bob.field.toList(),
+            )
+        }
+
+    @Test
+    fun aBusyCalleeWritesTheOfferItRefusedAndTheCallerItsOwnEnd() =
+        runTest {
+            val (net, alice, bob) = pair()
+            val carol = side(CAROL, net)
+            carol.manager.start(BOB)
+            runCurrent()
+            alice.manager.start(BOB)
+            runCurrent()
+            assertEquals(
+                FieldEvent.CallEnd(ALICE, outgoing = false, walkie = false, CallEndReason.BUSY, lastPhase = null, lifeMs = 0),
+                bob.lines<FieldEvent.CallEnd>().single(),
+            )
+            // Carol's call still rings: it began and has not ended.
+            assertEquals(listOf(FieldEvent.CallStart(CAROL, outgoing = false, walkie = false)), bob.lines<FieldEvent.CallStart>())
+            val alices = alice.lines<FieldEvent.CallEnd>().single()
+            assertEquals(CallEndReason.BUSY, alices.reason)
+            assertEquals(CallPhase.Calling, alices.lastPhase)
+            assertTrue(alices.byPeer)
+            assertNull(alices.ringMs)
+        }
+
+    @Test
+    fun aGlareLoserWritesTheEndOfItsOwnOfferSoEveryStartHasAnEnd() =
+        runTest {
+            val (_, alice, bob) = pair()
+            alice.manager.start(BOB)
+            bob.manager.start(ALICE)
+            runCurrent()
+            // C-3.5-1: Bob's own offer gives way to Alice's, which he answers at once.
+            val dropped = bob.lines<FieldEvent.CallEnd>().single()
+            assertEquals(CallEndReason.GLARE, dropped.reason)
+            assertTrue(dropped.outgoing)
+            assertEquals(CallPhase.Calling, dropped.lastPhase)
+            assertEquals(
+                listOf(
+                    FieldEvent.CallStart(ALICE, outgoing = true, walkie = false),
+                    FieldEvent.CallStart(ALICE, outgoing = false, walkie = false),
+                ),
+                bob.lines<FieldEvent.CallStart>(),
+            )
+
+            alice.media.last.events(MediaEvent.Connected)
+            bob.media.last.events(MediaEvent.Connected)
+            runCurrent()
+            alice.manager.hangUp()
+            runCurrent()
+            for (side in listOf(alice, bob)) {
+                assertEquals(side.name, side.lines<FieldEvent.CallStart>().size, side.lines<FieldEvent.CallEnd>().size)
+            }
+            assertTrue(alice.lines<FieldEvent.CallEnd>().none { it.reason == CallEndReason.GLARE })
+        }
+
+    @Test
+    fun aLostPathWonBackByARestartIsADropAndARestartOnBothSides() =
+        runTest {
+            val (_, alice, bob) = connected()
+            bob.media.last.events(MediaEvent.Disconnected)
+            alice.media.last.events(MediaEvent.Disconnected)
+            runCurrent()
+            advanceTimeBy(TIMINGS.restartDelayMs + 1)
+            runCurrent()
+            alice.media.last.events(MediaEvent.Connected)
+            bob.media.last.events(MediaEvent.Connected)
+            runCurrent()
+            alice.manager.hangUp()
+            runCurrent()
+            for (side in listOf(alice, bob)) {
+                val end = side.lines<FieldEvent.CallEnd>().single()
+                assertEquals(side.name, 1, end.drops)
+                assertEquals(side.name, 1, end.restarts)
+            }
+        }
+
+    @Test
+    fun aBlipThatHealsOnItsOwnIsADropWithNoRestart() =
+        runTest {
+            val (_, alice, _) = connected()
+            alice.media.last.events(MediaEvent.Disconnected)
+            runCurrent()
+            advanceTimeBy(TIMINGS.restartDelayMs / 2)
+            alice.media.last.events(MediaEvent.Connected)
+            runCurrent()
+            alice.manager.hangUp()
+            runCurrent()
+            val end = alice.lines<FieldEvent.CallEnd>().single()
+            assertEquals(1, end.drops)
+            assertEquals(0, end.restarts)
+        }
+
+    @Test
+    fun aWalkieSessionsEndLineSaysSoAndNamesNoIceServers() =
+        runTest {
+            val (_, alice, bob) = walkies(live = false)
+            alice.manager.start(BOB)
+            runCurrent()
+            bob.manager.answer(bob.state!!.id)
+            runCurrent()
+            bob.manager.hangUp()
+            runCurrent()
+            assertEquals(listOf(FieldEvent.CallStart(BOB, outgoing = true, walkie = true)), alice.lines<FieldEvent.CallStart>())
+            val end = alice.lines<FieldEvent.CallEnd>().single()
+            assertTrue(end.walkie && end.byPeer)
+            assertEquals(CallPhase.Connected, end.lastPhase)
+            assertNull(end.turn)
+            assertNull(end.stun)
+        }
+
     private companion object {
         const val ALICE = "alice"
         const val BOB = "bob"
         const val CAROL = "carol"
         const val HOUR_MS = 60 * 60_000L
+
+        // A call's timeline for its field-log line: the callee picks up, ICE connects, they talk.
+        const val PICK_UP_MS = 3_000L
+        const val ICE_MS = 1_500L
+        const val TALK_MS = 40_000L
         const val RELAY_CAND = "candidate:3 1 udp 41885439 203.0.113.9 49170 typ relay raddr 0.0.0.0 rport 0"
 
         val SDP =

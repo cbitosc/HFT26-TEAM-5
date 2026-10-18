@@ -1,5 +1,10 @@
 package app.getknit.knit.ui.call
 
+import app.getknit.knit.call.CaptureProfile
+import app.getknit.knit.call.IceNetwork
+import app.getknit.knit.call.IceProtocol
+import app.getknit.knit.call.IceType
+import app.getknit.knit.fieldlog.FieldEvent
 import kotlin.math.roundToLong
 
 /**
@@ -54,6 +59,48 @@ internal data class CallStats(
     val micLevel: Double? = null,
     val heardLevel: Double? = null,
 )
+
+/**
+ * This reading as the field log keeps it (ADR 2026-10.a239's amendment): whole milliseconds and kbit/s, loss in tenths
+ * of a percent, the two audio levels in ‰, and every word of the report turned into a constant. [micPath] and
+ * [capture] are the call's microphone (C-3.13-13), null where nothing reports it.
+ */
+internal fun CallStats.fieldSample(
+    reconnecting: Boolean,
+    micPath: CaptureProfile?,
+    capture: CaptureStatus?,
+): FieldEvent.CallSample =
+    FieldEvent.CallSample(
+        reconnecting = reconnecting,
+        rttMs = rttMs?.roundToLong(),
+        jitterMs = jitterMs?.roundToLong(),
+        bufferMs = jitterBufferMs?.roundToLong(),
+        lossIn10 = recentLossPercent?.tenths(),
+        lossOut10 = sentLossPercent?.tenths(),
+        lossCall10 = lossPercent?.tenths(),
+        sendKbps = sendKbps?.roundToLong(),
+        receiveKbps = receiveKbps?.roundToLong(),
+        packets = recentPacketsReceived,
+        micPermille = micLevel?.permille(),
+        heardPermille = heardLevel?.permille(),
+        local = IceType.of(localType),
+        remote = IceType.of(remoteType),
+        protocol = IceProtocol.of(protocol),
+        relayProtocol = IceProtocol.of(relayProtocol),
+        network = IceNetwork.of(networkType),
+        direct = wifiDirect,
+        pairs = pairs.size,
+        pending = pendingPairs,
+        micPath = micPath,
+        micHealth = capture?.health,
+    )
+
+private fun Double.tenths(): Long = (this * TENTHS).roundToLong()
+
+private fun Double.permille(): Long = (this * PER_MILLE).roundToLong()
+
+private const val TENTHS = 10.0
+private const val PER_MILLE = 1_000.0
 
 /** One answered candidate pair: its types, transport, relay leg, this phone's network for it and its round trip. */
 internal data class PairInfo(

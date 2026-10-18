@@ -78,3 +78,42 @@ lines. It could never catch a leak.
 a string method to `FieldWriter`. A sampler (`FieldRecorder.sampler`) runs on the log's tick and must only
 read. The Bluetooth one asks no handle for anything. Tests: `FieldEventSchemaTest`, `FieldJournalTest`,
 `FieldLogTest`, `FieldLogDocumentTest`, `MessageDaoTest`'s latency case.
+
+## Amendment 2026-10-18 — the calls write into it too
+
+**What was asked.** An alpha with calls switched on goes to testers, and the questions about calls are field
+questions, like the radio ones: why a call ended, how long ICE took, which pair it rode, what it lost, whether the
+microphone was dead, how a Wi-Fi Direct leg fared, what a walkie burst cost. Until now the answers were logcat lines
+and the call screen's diagnostics card, which keeps nothing.
+
+**What changed.** A build with calls (`-Pcalls=true`, ADR 2026-10.swvp) writes seven more kinds, under the same rules:
+no string field, a peer as its pseudonym, no call id, SDP, candidate address, TURN credential or caption. Fields are
+in `docs/FIELD_LOG.md`.
+
+- `call_start` and `call_end` come from `CallManager`. There is one end line for every call this phone saw, including
+  an offer refused on arrival (busy, a kind switched off, media it cannot play), one that never rang, and a glare
+  loser's own offer. So a start line with no end line means the process died during the call. The end line gives the
+  reason and the phase the call ended from, and its times run from the call's start: ring, answer, connected, talk.
+  It also counts restarts and drops, says whether a Wi-Fi Direct group was offered and taken, and counts the TURN
+  servers and STUN URLs the media gathered from. The line is written beside the thread's record (§3.12), never in
+  its place.
+- `call_route` comes from the WebRTC session, once per selected pair: each end's type, the local transport and
+  network, and whether the pair rides the group.
+- `call_media` comes from `CallMediaSampler`: one reading 5 s after the media connects, then one every 30 s while it
+  is up, through a reconnect too. It reads on a second `CallStatsReader` of the session's own, because a reader's
+  rates and recent loss run from its previous report, and sharing one would cut the diagnostics card's short.
+- `call_direct` comes from `DirectCallPath` as a leg gives its radio back. It records how the leg ended and how long
+  the group and the lane took to come up. When the call ended the leg, the end is the call's, whatever the lane saw
+  as its sockets closed.
+- `talk` (one per walkie burst each way) and `walkie_end` (a session's totals from `WalkieMeter`) come from
+  `WalkieTalk`.
+
+The call graph resolves the field log at each record, never as the graph builds (`CallWiring.fieldLog`), as it does
+every mesh seam. The words a call's code and libwebrtc spell become constants in `call/CallFieldLog.kt`
+(`CallEndReason`, `IceType`, `IceProtocol`, `IceNetwork`, `DirectLegEnd`).
+
+**What it costs.** About 120 `call_media` lines an hour of calling, each about 400 bytes: some 50 KiB of the 4 MiB.
+`walkie_end`'s `transit` carries the two clocks' skew, as `IN` latency does. A `call_media` reading taken while
+libwebrtc's report has no selected pair yet leaves the pair fields out. Tests: `FieldEventSchemaTest`'s call and
+walkie lines, `CallManagerTest`'s field-log cases, `CallFieldLogTest`, `DirectCallPathTest`'s leg lines, and
+`CallStatsReaderTest.theFieldLogKeepsAReadingInWholeUnitsAndConstants`.

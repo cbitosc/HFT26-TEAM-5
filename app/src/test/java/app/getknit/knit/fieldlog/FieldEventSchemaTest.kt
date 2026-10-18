@@ -1,5 +1,13 @@
 package app.getknit.knit.fieldlog
 
+import app.getknit.knit.call.CallEndReason
+import app.getknit.knit.call.CallPhase
+import app.getknit.knit.call.CaptureProfile
+import app.getknit.knit.call.CaptureWatch
+import app.getknit.knit.call.DirectLegEnd
+import app.getknit.knit.call.IceNetwork
+import app.getknit.knit.call.IceProtocol
+import app.getknit.knit.call.IceType
 import app.getknit.knit.data.message.DeliveryPlane
 import app.getknit.knit.mesh.ConnectFailReason
 import app.getknit.knit.mesh.TransportHealth
@@ -8,6 +16,7 @@ import app.getknit.knit.mesh.bluetooth.CodedPhyMode
 import app.getknit.knit.mesh.bluetooth.LinkPhy
 import app.getknit.knit.mesh.lora.LoraGatewayPolicy
 import app.getknit.knit.mesh.power.LowPowerReason
+import app.getknit.knit.ui.call.TalkPath
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -113,6 +122,144 @@ class FieldEventSchemaTest {
             """{"t":42,"e":"lora","role":"ACTIVE","snr10":-75,"rssi":-118,"queued":2,"heard":9,"boards":3,""" +
                 """"airUsed":4100,"airBudget":36000}""",
             line(FieldEvent.Lora(LoraGatewayPolicy.Role.ACTIVE, -75, -118, 2, 9, 3, 4_100, 36_000)),
+        )
+    }
+
+    @Test
+    fun theCallStartAndEndKeepTheirLines() {
+        val peer = "abcdefghijklmnopqrstuvwxyz"
+        val p = names.of(peer)
+        assertEquals(
+            """{"t":42,"e":"call_start","peer":"$p","out":true,"walkie":false}""",
+            line(FieldEvent.CallStart(peer, outgoing = true, walkie = false)),
+        )
+        assertEquals(
+            """{"t":42,"e":"call_end","peer":"$p","out":true,"walkie":false,"reason":"USER","last":"Connected","life":95000,""" +
+                """"byPeer":false,"missed":false,"degraded":false,"ring":600,"answer":4000,"setup":5200,"talk":89800,""" +
+                """"restarts":1,"drops":1,"relay":false,"direct":true,"directUp":true,"turn":2,"stun":1,"unreached":false,""" +
+                """"unproven":false}""",
+            line(
+                FieldEvent.CallEnd(
+                    peer,
+                    outgoing = true,
+                    walkie = false,
+                    reason = CallEndReason.USER,
+                    lastPhase = CallPhase.Connected,
+                    lifeMs = 95_000,
+                    ringMs = 600,
+                    answerMs = 4_000,
+                    setupMs = 5_200,
+                    talkMs = 89_800,
+                    restarts = 1,
+                    drops = 1,
+                    directOffered = true,
+                    directTaken = true,
+                    turn = 2,
+                    stun = 1,
+                ),
+            ),
+        )
+        assertEquals(
+            """{"t":42,"e":"call_end","peer":"$p","out":false,"walkie":true,"reason":"STALE","life":0,"byPeer":false,""" +
+                """"missed":true,"degraded":false,"restarts":0,"drops":0,"relay":false,"direct":false,"directUp":false,""" +
+                """"unreached":false,"unproven":false}""",
+            line(
+                FieldEvent.CallEnd(peer, outgoing = false, walkie = true, CallEndReason.STALE, lastPhase = null, lifeMs = 0, missed = true),
+            ),
+        )
+    }
+
+    @Test
+    fun theCallMediaKindsKeepTheirLines() {
+        assertEquals(
+            """{"t":42,"e":"call_route","local":"SRFLX","remote":"RELAY","proto":"UDP","net":"CELLULAR","direct":false,"seq":2}""",
+            line(FieldEvent.CallRoute(IceType.SRFLX, IceType.RELAY, IceProtocol.UDP, IceNetwork.CELLULAR, direct = false, seq = 2)),
+        )
+        assertEquals(
+            """{"t":42,"e":"call_media","lost":false,"rtt":48,"jitter":6,"buffer":60,"lossIn10":12,"lossOut10":3,""" +
+                """"lossCall10":8,"send":32,"recv":31,"pkts":1500,"mic":120,"heard":90,"local":"RELAY","remote":"SRFLX",""" +
+                """"proto":"UDP","relayProto":"TLS","net":"WIFI","direct":false,"pairs":3,"pending":1,"micPath":"STANDARD",""" +
+                """"micHealth":"LIVE"}""",
+            line(
+                FieldEvent.CallSample(
+                    reconnecting = false,
+                    rttMs = 48,
+                    jitterMs = 6,
+                    bufferMs = 60,
+                    lossIn10 = 12,
+                    lossOut10 = 3,
+                    lossCall10 = 8,
+                    sendKbps = 32,
+                    receiveKbps = 31,
+                    packets = 1_500,
+                    micPermille = 120,
+                    heardPermille = 90,
+                    local = IceType.RELAY,
+                    remote = IceType.SRFLX,
+                    protocol = IceProtocol.UDP,
+                    relayProtocol = IceProtocol.TLS,
+                    network = IceNetwork.WIFI,
+                    pairs = 3,
+                    pending = 1,
+                    micPath = CaptureProfile.STANDARD,
+                    micHealth = CaptureWatch.Health.LIVE,
+                ),
+            ),
+        )
+        assertEquals(
+            """{"t":42,"e":"call_media","lost":true,"direct":false,"pairs":0,"pending":0}""",
+            line(FieldEvent.CallSample(reconnecting = true)),
+        )
+    }
+
+    @Test
+    fun theDirectLegKeepsItsLine() {
+        assertEquals(
+            """{"t":42,"e":"call_direct","host":true,"end":"CALL","group":3100,"lane":6400,"life":120000,"tries":0}""",
+            line(
+                FieldEvent.CallDirectLeg(
+                    hosting = true,
+                    DirectLegEnd.CALL,
+                    groupMs = 3_100,
+                    laneMs = 6_400,
+                    lifeMs = 120_000,
+                    joinTries = 0,
+                ),
+            ),
+        )
+        assertEquals(
+            """{"t":42,"e":"call_direct","host":false,"end":"RADIO","life":21000,"tries":2}""",
+            line(
+                FieldEvent.CallDirectLeg(
+                    hosting = false,
+                    DirectLegEnd.RADIO,
+                    groupMs = null,
+                    laneMs = null,
+                    lifeMs = 21_000,
+                    joinTries = 2,
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun theWalkieKindsKeepTheirLines() {
+        assertEquals(
+            """{"t":42,"e":"talk","dir":"OUT","chunks":6,"ms":2880,"sent":6,"path":"WIFI_AWARE","held":true}""",
+            line(FieldEvent.Talk(TalkDirection.OUT, chunks = 6, audioMs = 2_880, sent = 6, path = TalkPath.WIFI_AWARE, held = true)),
+        )
+        assertEquals(
+            """{"t":42,"e":"talk","dir":"IN","chunks":5,"lost":1,"wait":700,"spread":2400}""",
+            line(FieldEvent.Talk(TalkDirection.IN, chunks = 5, lost = 1, waitMs = 700, spreadMs = 2_400)),
+        )
+        assertEquals(
+            """{"t":42,"e":"walkie_end","burstsOut":3,"burstsIn":2,"chunksOut":18,"failed":1,"chunksIn":11,"lost":2,""" +
+                """"transit":420,"jitter":35,"hand":12,"frameOut":310,"frameIn":305}""",
+            line(FieldEvent.WalkieEnd(3, 2, 18, 1, 11, 2, transitMs = 420, jitterMs = 35, handMs = 12, frameOut = 310, frameIn = 305)),
+        )
+        assertEquals(
+            """{"t":42,"e":"walkie_end","burstsOut":0,"burstsIn":0,"chunksOut":0,"failed":0,"chunksIn":0,"lost":0}""",
+            line(FieldEvent.WalkieEnd(0, 0, 0, 0, 0, 0)),
         )
     }
 

@@ -1,5 +1,11 @@
 package app.getknit.knit.ui.call
 
+import app.getknit.knit.call.CaptureProfile
+import app.getknit.knit.call.CaptureWatch
+import app.getknit.knit.call.IceNetwork
+import app.getknit.knit.call.IceProtocol
+import app.getknit.knit.call.IceType
+import app.getknit.knit.fieldlog.FieldEvent
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -272,5 +278,63 @@ class CallStatsReaderTest {
         assertEquals("★ relay/srflx udp/turn-tcp Wi-Fi 81 ms\n· srflx/srflx udp Cellular —\n3 unanswered", pairsText(stats))
         assertEquals("stun.lab.lax.spool.getknit.app · gathered tcp 4, udp 5", relayOf(stats))
         assertEquals("—", relayOf(CallStats()))
+    }
+
+    @Test
+    fun theFieldLogKeepsAReadingInWholeUnitsAndConstants() {
+        val stats =
+            CallStats(
+                localType = "relay",
+                remoteType = "prflx",
+                protocol = "udp",
+                relayProtocol = "tls",
+                networkType = "cellular",
+                rttMs = 47.6,
+                jitterMs = 5.8,
+                jitterBufferMs = 61.2,
+                lossPercent = 0.8,
+                recentLossPercent = 1.24,
+                sentLossPercent = 0.31,
+                sendKbps = 32.4,
+                receiveKbps = 30.6,
+                recentPacketsReceived = 1_500,
+                micLevel = 0.1204,
+                heardLevel = 0.09,
+                pairs = listOf(PairInfo(true, "relay", "prflx", "udp", "tls", "cellular", 47.6)),
+                pendingPairs = 2,
+            )
+        val capture = CaptureStatus(CaptureWatch.Health.SWITCHED, profile = "standard", switched = true)
+        assertEquals(
+            FieldEvent.CallSample(
+                reconnecting = true,
+                rttMs = 48,
+                jitterMs = 6,
+                bufferMs = 61,
+                lossIn10 = 12,
+                lossOut10 = 3,
+                lossCall10 = 8,
+                sendKbps = 32,
+                receiveKbps = 31,
+                packets = 1_500,
+                micPermille = 120,
+                heardPermille = 90,
+                local = IceType.RELAY,
+                remote = IceType.PRFLX,
+                protocol = IceProtocol.UDP,
+                relayProtocol = IceProtocol.TLS,
+                network = IceNetwork.CELLULAR,
+                direct = false,
+                pairs = 1,
+                pending = 2,
+                micPath = CaptureProfile.STANDARD,
+                micHealth = CaptureWatch.Health.SWITCHED,
+            ),
+            stats.fieldSample(reconnecting = true, micPath = CaptureProfile.STANDARD, capture = capture),
+        )
+        // A report that carries nothing yet: only what is always known.
+        assertEquals(
+            FieldEvent.CallSample(reconnecting = false),
+            CallStats().fieldSample(reconnecting = false, micPath = null, capture = null),
+        )
     }
 }

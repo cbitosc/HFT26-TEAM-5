@@ -13,7 +13,9 @@ number of phones, and prints the tables the open radio questions ask for:
 - dial time and failed dials by reason;
 - link RSSI by PHY from the 5-minute samples, and the RSSI each PHY step happened at;
 - Wi-Fi Aware data-path lifetimes and session cycles;
-- message latency per plane, as each phone summarised it.
+- message latency per plane, as each phone summarised it;
+- voice calls (a build with calls): how each ended and from which phase, ring and setup times, the media's round
+  trip and loss by route, the microphone's health, Wi-Fi Direct legs, walkie bursts, and calls with no end line.
 
 Peers are per-log pseudonyms, so nothing here joins two people's logs; a peer is keyed by (log, pseudonym).
 Standard library only.
@@ -52,7 +54,27 @@ KINDS: dict[str, set[str] | None] = {
     "low_power": {"on", "why"},
     "lora": {"role", "snr10", "rssi", "queued", "heard", "boards", "airUsed", "airBudget"},
     "latency": {"dir", "plane", "n", "p50", "p90", "max"},
+    "call_start": {"peer", "out", "walkie"},
+    "call_end": {
+        "peer", "out", "walkie", "reason", "last", "life", "byPeer", "missed", "degraded", "ring", "answer", "setup",
+        "talk", "restarts", "drops", "relay", "direct", "directUp", "turn", "stun", "unreached", "unproven",
+    },
+    "call_route": {"local", "remote", "proto", "net", "direct", "seq"},
+    "call_media": {
+        "lost", "rtt", "jitter", "buffer", "lossIn10", "lossOut10", "lossCall10", "send", "recv", "pkts", "mic",
+        "heard", "local", "remote", "proto", "relayProto", "net", "direct", "pairs", "pending", "micPath", "micHealth",
+    },
+    "call_direct": {"host", "end", "group", "lane", "life", "tries"},
+    "talk": {"dir", "chunks", "ms", "sent", "path", "held", "lost", "wait", "spread"},
+    "walkie_end": {
+        "burstsOut", "burstsIn", "chunksOut", "failed", "chunksIn", "lost", "transit", "jitter", "hand", "frameOut",
+        "frameIn",
+    },
 }
+
+# Summary sections shown as a count of lines, and as the values themselves, rather than as percentiles.
+COUNTED = {"nan cycles", "call routes", "call mic", "call deaf readings"}
+LISTED = {"call drops / restarts"}
 
 PSEUDONYM = re.compile(r"^p[0-9a-f]{8}$")
 ENUM = re.compile(r"^[A-Za-z0-9_]+$")
@@ -132,10 +154,18 @@ def percentiles(values: list[float]) -> str:
     return f"n={len(s)} p50={at(50):g} p90={at(90):g} max={s[-1]:g}"
 
 
+def route(e: dict) -> str:
+    """A call's selected pair as a call_route or call_media line names it: `RELAY/SRFLX CELLULAR`, `… direct`."""
+    pair = f"{e.get('local', '?')}/{e.get('remote', '?')}"
+    return f"{pair} {e.get('net', '?')}" + (" direct" if e.get("direct") else "")
+
+
 def summarise(logs: list[Log]) -> dict:
     out: dict = defaultdict(lambda: defaultdict(list))
     for log in logs:
         dev = log.device
+        # Calls that began and have no end line yet: a process death in the call, or one still up at export.
+        open_calls = 0
         for e in log.events:
             kind = e["e"]
             if kind == "bt_up":
@@ -162,6 +192,47 @@ def summarise(logs: list[Log]) -> dict:
                 out["latency s"][f"{dev} {e['dir']} {e['plane']}"].append(
                     f"n={e['n']} p50={e['p50'] / 1000:g} p90={e['p90'] / 1000:g} max={e['max'] / 1000:g}"
                 )
+            elif kind == "call_start":
+                open_calls += 1
+            elif kind == "call_end":
+                if "last" in e:
+                    open_calls = max(0, open_calls - 1)
+                what = f"{dev} {'walkie' if e['walkie'] else 'live'} {'out' if e['out'] else 'in'}"
+                out["call ends s"][f"{what} {e['reason']} from {e.get('last', 'never rang')}"].append(e["life"] / 1000)
+                if "ring" in e:
+                    out["call ring s"][dev].append(e["ring"] / 1000)
+                if "setup" in e and "answer" in e:
+                    out["call answer→connected s"][f"{what} direct={e['directUp']}"].append((e["setup"] - e["answer"]) / 1000)
+                if e["drops"] or e["restarts"]:
+                    out["call drops / restarts"][what].append(f"{e['drops']}/{e['restarts']}")
+            elif kind == "call_route":
+                out["call routes"][f"{dev} {route(e)}"].append(e["seq"])
+            elif kind == "call_media":
+                where = f"{dev} {route(e)}"
+                if "rtt" in e:
+                    out["call rtt ms"][where].append(e["rtt"])
+                if "lossIn10" in e:
+                    out["call loss in %"][where].append(e["lossIn10"] / 10)
+                if "lossOut10" in e:
+                    out["call loss out %"][where].append(e["lossOut10"] / 10)
+                if "micHealth" in e:
+                    out["call mic"][f"{dev} {e.get('micPath', '?')} {e['micHealth']}"].append(1)
+                if e.get("pkts") == 0 and not e["lost"]:
+                    out["call deaf readings"][dev].append(1)
+            elif kind == "call_direct":
+                out["call direct life s"][f"{dev} {'host' if e['host'] else 'join'} {e['end']}"].append(e["life"] / 1000)
+                if "lane" in e:
+                    out["call direct lane up s"][f"{dev} {'host' if e['host'] else 'join'}"].append(e["lane"] / 1000)
+            elif kind == "talk" and e["dir"] == "OUT" and e["chunks"]:
+                out["talk out sent %"][f"{dev} {e.get('path', '?')}"].append(100 * e.get("sent", 0) / e["chunks"])
+            elif kind == "talk" and e["dir"] == "IN":
+                heard = e["chunks"] + e.get("lost", 0)
+                if heard:
+                    out["talk in lost %"][dev].append(100 * e.get("lost", 0) / heard)
+                if "wait" in e:
+                    out["talk in wait ms"][dev].append(e["wait"])
+        if open_calls:
+            out["calls with no end line"][dev].append(open_calls)
     return out
 
 
@@ -192,9 +263,16 @@ def main(argv: list[str]) -> int:
         print(f"\n{section}")
         for key in sorted(rows):
             values = rows[key]
-            shown = values[0] if section == "latency s" else (
-                f"{len(values)}" if section == "nan cycles" else percentiles(values)
-            )
+            if section == "latency s":
+                shown = values[0]
+            elif section in COUNTED:
+                shown = f"{len(values)}"
+            elif section in LISTED:
+                shown = " ".join(str(v) for v in values)
+            elif section == "calls with no end line":
+                shown = f"{sum(values)}"
+            else:
+                shown = percentiles(values)
             print(f"  {key:<40} {shown}")
     return 0
 

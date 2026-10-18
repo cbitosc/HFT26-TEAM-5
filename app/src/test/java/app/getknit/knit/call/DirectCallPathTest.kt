@@ -1,5 +1,7 @@
 package app.getknit.knit.call
 
+import app.getknit.knit.fieldlog.FieldEvent
+import app.getknit.knit.fieldlog.FieldRecorder
 import app.getknit.knit.mesh.protocol.CallPayload
 import app.getknit.knit.mesh.protocol.DirectInvite
 import app.getknit.knit.transfer.DirectWifiLease
@@ -23,6 +25,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.Base64
+import java.util.Collections
 
 /**
  * Two [DirectCallPath]s over loopback (§3.10): [FakeDirectWifi] "forms" every group on 127.0.0.1, so the lane is a
@@ -35,11 +38,13 @@ class DirectCallPathTest {
     private class Side(
         name: String,
         scope: CoroutineScope,
+        timings: DirectTimings = TIMINGS,
     ) {
         val log = SideLog(name)
         val wifi = FakeDirectWifi(log)
         val lease = DirectWifiLease(wifi)
         val lines = mutableListOf<String>()
+        val field = Collections.synchronizedList(mutableListOf<FieldEvent>())
 
         @Volatile var enabled = true
         val path =
@@ -50,11 +55,15 @@ class DirectCallPathTest {
                 capable = { true },
                 mayJoinWhileRinging = { true },
                 enabled = { enabled },
-                timings = TIMINGS,
+                timings = timings,
                 log = { synchronized(lines) { lines += it } },
+                field = FieldRecorder { field += it },
             )
 
         fun radioCalls(what: String): Int = log.events.count { it == what }
+
+        /** The field log's leg lines; written after the radio goes back, so a test waits for them, not the release. */
+        fun legs(): List<FieldEvent.CallDirectLeg> = synchronized(field) { field.filterIsInstance<FieldEvent.CallDirectLeg>() }
     }
 
     private val alice = Side("alice", scope)
@@ -148,6 +157,13 @@ class DirectCallPathTest {
             until("released", TIMINGS.hostWindowMs + WAIT_MS) { alice.radioCalls("release") == 1 }
             assertFalse(alice.path.pending(ID))
             assertNull(alice.lease.owner)
+            // Its field-log line: the group came up, no lane ever did.
+            until("written") { alice.legs().isNotEmpty() }
+            val leg = alice.legs().single()
+            assertEquals(DirectLegEnd.NO_LANE, leg.end)
+            assertTrue(leg.hosting)
+            assertNotNull(leg.groupMs)
+            assertNull(leg.laneMs)
         }
 
     @Test
@@ -158,6 +174,34 @@ class DirectCallPathTest {
             until("released", TIMINGS.joinWindowMs + WAIT_MS) { bob.radioCalls("release") == 1 }
             assertTrue(bob.radioCalls("join") > 1)
             assertFalse(bob.path.pending(ID))
+            until("written") { bob.legs().isNotEmpty() }
+            val leg = bob.legs().single()
+            assertEquals(DirectLegEnd.RADIO, leg.end)
+            assertEquals(bob.radioCalls("join"), leg.joinTries)
+            assertNull(leg.groupMs)
+        }
+
+    @Test
+    fun aLegItsCallEndsIsTheCallsAndThePeersLegHearsItsBye() =
+        runBlocking {
+            // A flush with all the time it needs: the bye always leaves before the sockets close, so Bob's lane reads
+            // it rather than the close behind it (the shipped flush is a best effort under 300 ms). And no silence
+            // window a stalled runner could open first, which would end either lane before the call does.
+            val patient = TIMINGS.copy(flushMs = WAIT_MS, silenceMs = WAIT_MS)
+            val host = Side("alice", scope, patient)
+            val joiner = Side("bob", scope, patient)
+            val invite = invite()
+            joiner.path.join(ID, ALICE, invite)
+            host.path.host(ID, BOB, invite)
+            until("both legs up") { !host.path.pending(ID) && !joiner.path.pending(ID) }
+            host.path.end(ID, null)
+            until("both written") { host.legs().isNotEmpty() && joiner.legs().isNotEmpty() }
+            val hosted = host.legs().single()
+            assertEquals(DirectLegEnd.CALL, hosted.end)
+            assertNotNull(hosted.groupMs)
+            assertNotNull(hosted.laneMs)
+            assertEquals(DirectLegEnd.BYE, joiner.legs().single().end)
+            assertFalse(joiner.legs().single().hosting)
         }
 
     @Test

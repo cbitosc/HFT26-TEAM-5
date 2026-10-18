@@ -2,6 +2,8 @@ package app.getknit.knit.call
 
 import app.getknit.knit.data.forward.ForwardRepository
 import app.getknit.knit.data.message.CallRecord
+import app.getknit.knit.fieldlog.FieldEvent
+import app.getknit.knit.fieldlog.FieldRecorder
 import app.getknit.knit.mesh.protocol.CallPayload
 import app.getknit.knit.mesh.protocol.DirectInvite
 import app.getknit.knit.mesh.protocol.FrameId
@@ -170,6 +172,10 @@ data class CallTimings(
  * that has no RINGING after [CallTimings.ringingMs] is [CallState.unproven] (C-3.3-6), and if none ever comes its
  * ring-out ends no_route: with no RINGING there is no evidence the peer's phone rang at all.
  *
+ * **Every call this phone sees leaves a line in the field log** ([field], ADR 2026-10.a239's amendment): a
+ * [FieldEvent.CallStart] as it begins and one [FieldEvent.CallEnd] as it ends — an offer refused or never rung
+ * included — written beside the thread's record, never instead of it, and never on anything slower than a queue.
+ *
  * **A connected call whose path is lost reconnects by ICE restart** (§3.8): it is [CallPhase.Reconnecting] for
  * [CallTimings.reconnectWindowMs], in which the caller — only the caller, so two restarts never cross — sends
  * `OFFER gen+1` twice at most, and the callee answers each under the same call id without ringing. A dead peer, a
@@ -193,6 +199,7 @@ class CallManager(
     private val tombs: CallTombJournal = CallTombJournal.None,
     private val reach: CallReach = CallReach.Assumed,
     private val takesIncoming: (walkie: Boolean) -> Boolean = { true },
+    private val field: FieldRecorder = FieldRecorder.NONE,
 ) : CallControl {
     private class Live(
         val id: String,
@@ -248,6 +255,14 @@ class CallManager(
         var reachWatch: Job? = null
         var unreachable = false
         var unproven = false
+
+        // For the field log's line (FieldEvent.CallEnd): the caller's first proof the peer heard it, the answer, the
+        // times a connected call lost its path, and what its media gathered from.
+        var ringingAt: Long? = null
+        var answeredAt: Long? = null
+        var drops = 0
+        var turnServers: Int? = null
+        var stunUrls: Int? = null
     }
 
     private class Send(
@@ -341,6 +356,7 @@ class CallManager(
                     armRingOut(it)
                     watchReach(it)
                     publish()
+                    began(it)
                 }
             }
         log("call ${l.id} to ${l.peerId}${if (asWalkie) " (walkie)" else ""}")
@@ -367,6 +383,7 @@ class CallManager(
         val l =
             mutex.withLock {
                 val l = live?.takeIf { it.id == id && !it.outgoing && it.phase == CallPhase.Alerting } ?: return false
+                l.answeredAt = clock()
                 if (l.walkie) {
                     connectWalkie(l)
                 } else {
@@ -484,6 +501,7 @@ class CallManager(
             }
         if (!media) {
             bury(p.id, CallPayload.PHASE_DECLINE, CallPayload.REASON_MEDIA)
+            refused(sender, p, CallEndReason.MEDIA)
             return listOf(Send(sender, CallPayload(id = p.id, ph = CallPayload.PHASE_DECLINE, rsn = CallPayload.REASON_MEDIA)))
         }
         val current = live?.takeIf { it.phase != CallPhase.Ended }
@@ -498,6 +516,7 @@ class CallManager(
             l.servers = scope.async { servers(sender) }
         }
         armTimer(l, timings.alertMs) { finish(it, CallPayload.REASON_TIMEOUT, missed = true) }
+        began(l)
         // §3.10: join the caller's group while this rings, so an answer connects over it at once. The RINGING that
         // says so leaves before the join takes the radio from the mesh (the leg waits out a grace first).
         val joining = directMode == DirectMode.PREWARM && commitJoin(l, prewarm = true)
@@ -517,6 +536,7 @@ class CallManager(
     ): List<Send>? {
         if (takesIncoming(isWalkieOnly(p)) || (current != null && isGlare(current, sender))) return null
         bury(p.id, CallPayload.PHASE_DECLINE, CallPayload.REASON_TIMEOUT)
+        refused(sender, p, CallEndReason.OFF)
         log("call ${p.id} from $sender: ${if (isWalkieOnly(p)) "mesh" else "live"} calls are off; no answer")
         return listOf(Send(sender, CallPayload(id = p.id, ph = CallPayload.PHASE_DECLINE, rsn = CallPayload.REASON_TIMEOUT)))
     }
@@ -596,11 +616,13 @@ class CallManager(
         if (tomb == null && abs(sentAt - now) <= timings.staleOfferMs) return false
         // C-3.3-7: a kind switched off here is no missed call, however late it lands.
         val withdrawn = tomb != null && (tomb.ph != CallPayload.PHASE_CANCEL || tomb.rsn == CallPayload.REASON_USER)
-        if (!withdrawn && takesIncoming(isWalkieOnly(p))) {
+        val missed = !withdrawn && takesIncoming(isWalkieOnly(p))
+        if (missed) {
             val at = minOf(sentAt, now)
             missedCalls.trySend(MissedCall(sender, at))
             loggedCalls.trySend(CallLogged(sender, at, CallRecord(id = p.id, outgoing = false, walkie = isWalkieOnly(p), missed = true)))
         }
+        refused(sender, p, CallEndReason.STALE, missed = missed)
         if (tomb == null) bury(p.id, CallPayload.PHASE_OFFER, null)
         log("call ${p.id} from $sender: ${if (tomb == null) "stale offer" else "offer after its end"}")
         return true
@@ -625,6 +647,7 @@ class CallManager(
     ): List<Send> {
         if (!isGlare(current, sender)) {
             bury(p.id, CallPayload.PHASE_DECLINE, CallPayload.REASON_BUSY)
+            refused(sender, p, CallEndReason.BUSY)
             return listOf(Send(sender, CallPayload(id = p.id, ph = CallPayload.PHASE_DECLINE, rsn = CallPayload.REASON_BUSY)))
         }
         if (me < sender) {
@@ -637,10 +660,15 @@ class CallManager(
         // of order — and answer theirs at once, without alerting. Both users asked to talk.
         log("call ${p.id} from $sender: glare, answering theirs over ours (${current.id})")
         drop(current)
+        field.record(
+            endLine(current, CallPayload.REASON_USER, current.phase, clock(), unreached = false).copy(reason = CallEndReason.GLARE),
+        )
         val l = Live(p.id, sender, outgoing = false, startedAt = now, phase = CallPhase.Connecting, remoteOffer = sdp)
         live = l
+        l.answeredAt = now
         // The surviving offer's kind is the call's (§3.11): a walkie one connects at once, there being no media to wait on.
         takeKind(l, p)
+        began(l)
         if (l.walkie) {
             connectWalkie(l)
             setup(l) { answerWalkie(l) }
@@ -662,6 +690,7 @@ class CallManager(
         if (l.phase == CallPhase.Ended) return emptyList()
         if (l.phase == CallPhase.Calling) {
             l.phase = CallPhase.Ringing
+            l.ringingAt = clock()
             stopReachWatch(l)
             publish()
         }
@@ -679,6 +708,9 @@ class CallManager(
         if (l.phase != CallPhase.Calling && l.phase != CallPhase.Ringing) return emptyList()
         // An ANSWER whose RINGING was lost proves the peer reachable just the same.
         stopReachWatch(l)
+        val now = clock()
+        if (l.ringingAt == null) l.ringingAt = now
+        l.answeredAt = now
         l.peerCastTicketed = p.ct
         if (l.walkie) {
             if (p.m and CallPayload.MEDIA_WALKIE == 0) return finish(l, CallPayload.REASON_MEDIA, CallPayload.PHASE_END)
@@ -986,6 +1018,9 @@ class CallManager(
                 if (!current(l)) return@withLock false
                 l.session = session
                 l.relay = relay
+                // C-7.6-20's shape: TURN entries carry a credential, the one STUN entry carries its URLs and none.
+                l.turnServers = servers.count { it.user.isNotEmpty() }
+                l.stunUrls = servers.filter { it.user.isEmpty() }.sumOf { it.urls.size }
                 session.setMuted(l.muted)
                 true
             }
@@ -1108,6 +1143,7 @@ class CallManager(
     ): List<Send> =
         when {
             l.phase == CallPhase.Connected -> {
+                l.drops += 1
                 reconnect(l)
                 emptyList()
             }
@@ -1339,6 +1375,7 @@ class CallManager(
         val tell = tellPhase?.let { CallPayload(id = l.id, ph = it, rsn = reason) }
         // C-3.3-5/6: withdrawn before any RINGING or ANSWER — nothing reached the peer, or nothing came back from it.
         val unreached = l.outgoing && l.phase == CallPhase.Calling && reason == CallPayload.REASON_NO_ROUTE
+        val endedFrom = l.phase
         drop(l, tell)
         l.phase = CallPhase.Ended
         l.reason = reason
@@ -1346,6 +1383,7 @@ class CallManager(
         l.missed = missed
         publish()
         if (missed) missedCalls.trySend(MissedCall(l.peerId, l.startedAt))
+        val endedAt = clock()
         val record =
             CallRecord(
                 id = l.id,
@@ -1355,10 +1393,11 @@ class CallManager(
                 byPeer = byPeer,
                 missed = missed,
                 connectedAt = l.connectedAt,
-                endedAt = clock(),
+                endedAt = endedAt,
                 unreached = unreached,
             )
         loggedCalls.trySend(CallLogged(l.peerId, l.startedAt, record))
+        field.record(endLine(l, reason, endedFrom, endedAt, unreached))
         log("call ${l.id}: ended ($reason${tellPhase?.let { ", telling the peer with $it" }.orEmpty()})")
         return tell?.let { listOf(Send(l.peerId, it)) }.orEmpty()
     }
@@ -1382,6 +1421,60 @@ class CallManager(
         direct.end(l.id, terminal)
         if (l.id !in tombstones) bury(l.id, CallPayload.PHASE_END, null)
     }
+
+    /** [l] began on this phone: its field-log line (ADR 2026-10.a239's amendment). */
+    private fun began(l: Live) = field.record(FieldEvent.CallStart(peer = l.peerId, outgoing = l.outgoing, walkie = l.walkie))
+
+    /** The field log's line for [l], ended at [endedAt] from [endedFrom] for [reason]; every time from its start here. */
+    private fun endLine(
+        l: Live,
+        reason: Int,
+        endedFrom: CallPhase,
+        endedAt: Long,
+        unreached: Boolean,
+    ): FieldEvent.CallEnd =
+        FieldEvent.CallEnd(
+            peer = l.peerId,
+            outgoing = l.outgoing,
+            walkie = l.walkie,
+            reason = CallEndReason.of(reason),
+            lastPhase = endedFrom,
+            lifeMs = endedAt - l.startedAt,
+            byPeer = l.byPeer,
+            missed = l.missed,
+            degraded = l.degraded,
+            ringMs = l.ringingAt?.let { it - l.startedAt },
+            answerMs = l.answeredAt?.let { it - l.startedAt },
+            setupMs = l.connectedAt?.let { it - l.startedAt },
+            talkMs = l.connectedAt?.let { endedAt - it },
+            restarts = l.gen,
+            drops = l.drops,
+            relayOnly = l.relay,
+            directOffered = l.invite != null,
+            directTaken = l.directCommitted,
+            turn = l.turnServers,
+            stun = l.stunUrls,
+            unreached = unreached,
+            unproven = l.unproven,
+        )
+
+    /** An offer [p] from [sender] that never became a call here, for [reason]: its one field-log line, of no length. */
+    private fun refused(
+        sender: String,
+        p: CallPayload,
+        reason: CallEndReason,
+        missed: Boolean = false,
+    ) = field.record(
+        FieldEvent.CallEnd(
+            peer = sender,
+            outgoing = false,
+            walkie = isWalkieOnly(p),
+            reason = reason,
+            lastPhase = null,
+            lifeMs = 0,
+            missed = missed,
+        ),
+    )
 
     /** Remembers the terminal phase [ph] of the call [id] (C-3.4-3), for this process and, through [tombs], the next. */
     private fun bury(

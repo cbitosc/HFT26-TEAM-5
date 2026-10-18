@@ -379,6 +379,268 @@ sealed interface FieldEvent {
     }
 
     /**
+     * A voice call began on this phone (docs/VOICE_CALLS.md §3): dialled, or an offer that alerts (or a glare offer
+     * answered at once). With no [CallEnd] after it, the process died in the call.
+     */
+    data class CallStart(
+        val peer: String,
+        val outgoing: Boolean,
+        val walkie: Boolean,
+    ) : FieldEvent {
+        override val kind get() = "call_start"
+
+        override fun write(out: FieldWriter) {
+            out.peer("peer", peer)
+            out.flag("out", outgoing)
+            out.flag("walkie", walkie)
+        }
+    }
+
+    /**
+     * A voice call ended on this phone, one line for every call it saw — an offer refused on arrival or one that never
+     * rang included, with [lastPhase] null since it never had a phase here. [reason] is a `CallEndReason`, [lastPhase] the
+     * `CallPhase` it ended from. The times run from the call's start on this phone: [ringMs] to the caller's first
+     * proof the peer heard it (a RINGING, else the ANSWER), [answerMs] to the answer (heard by the caller, tapped by the
+     * callee), [setupMs] to connected, and [talkMs] from connected to the end. [restarts] counts §3.8's ICE restarts,
+     * [drops] the times a connected call lost its path. [turn] and [stun] are the TURN servers and STUN URLs its media
+     * gathered from, null for a walkie.
+     */
+    @Suppress("LongParameterList") // one field per column of the line; a holder would only rename the list
+    data class CallEnd(
+        val peer: String,
+        val outgoing: Boolean,
+        val walkie: Boolean,
+        val reason: Enum<*>,
+        val lastPhase: Enum<*>?,
+        val lifeMs: Long,
+        val byPeer: Boolean = false,
+        val missed: Boolean = false,
+        val degraded: Boolean = false,
+        val ringMs: Long? = null,
+        val answerMs: Long? = null,
+        val setupMs: Long? = null,
+        val talkMs: Long? = null,
+        val restarts: Int = 0,
+        val drops: Int = 0,
+        val relayOnly: Boolean = false,
+        val directOffered: Boolean = false,
+        val directTaken: Boolean = false,
+        val turn: Int? = null,
+        val stun: Int? = null,
+        val unreached: Boolean = false,
+        val unproven: Boolean = false,
+    ) : FieldEvent {
+        override val kind get() = "call_end"
+
+        override fun write(out: FieldWriter) {
+            out.peer("peer", peer)
+            out.flag("out", outgoing)
+            out.flag("walkie", walkie)
+            out.enum("reason", reason)
+            lastPhase?.let { out.enum("last", it) }
+            out.num("life", lifeMs)
+            out.flag("byPeer", byPeer)
+            out.flag("missed", missed)
+            out.flag("degraded", degraded)
+            ringMs?.let { out.num("ring", it) }
+            answerMs?.let { out.num("answer", it) }
+            setupMs?.let { out.num("setup", it) }
+            talkMs?.let { out.num("talk", it) }
+            out.num("restarts", restarts.toLong())
+            out.num("drops", drops.toLong())
+            out.flag("relay", relayOnly)
+            out.flag("direct", directOffered)
+            out.flag("directUp", directTaken)
+            turn?.let { out.num("turn", it.toLong()) }
+            stun?.let { out.num("stun", it.toLong()) }
+            out.flag("unreached", unreached)
+            out.flag("unproven", unproven)
+        }
+    }
+
+    /**
+     * A live call's media chose a candidate pair (§3.7), the [seq]th of its session: each end's `IceType`, the local
+     * candidate's transport and network (`IceProtocol`, `IceNetwork`, null where the candidate does not say), and
+     * whether the pair rides the call's Wi-Fi Direct group (§3.10). Types only, never an address.
+     */
+    data class CallRoute(
+        val local: Enum<*>,
+        val remote: Enum<*>,
+        val protocol: Enum<*>?,
+        val network: Enum<*>?,
+        val direct: Boolean,
+        val seq: Int,
+    ) : FieldEvent {
+        override val kind get() = "call_route"
+
+        override fun write(out: FieldWriter) {
+            out.enum("local", local)
+            out.enum("remote", remote)
+            protocol?.let { out.enum("proto", it) }
+            network?.let { out.enum("net", it) }
+            out.flag("direct", direct)
+            out.num("seq", seq.toLong())
+        }
+    }
+
+    /**
+     * One reading of a live call's media, from libwebrtc's stats, while it is up (`CallMediaSampler`): [reconnecting]
+     * when §3.8's window is open. Times in ms; loss in tenths of a percent — [lossIn10] what this phone failed to hear
+     * since the last reading, [lossOut10] what the peer last reported failing to hear from it, [lossCall10] the whole
+     * call's receive loss; [packets] heard since the last reading (zero with the media up is a peer no longer heard);
+     * the two audio levels in ‰ of full scale. The selected pair as in [CallRoute], plus the relay's leg to its TURN
+     * server, and the answered and unanswered pairs. [micPath] is the `CaptureProfile` the call records on and
+     * [micHealth] the watch's `CaptureWatch.Health` (C-3.13-13). Null where the report does not carry it yet.
+     */
+    @Suppress("LongParameterList") // one field per column of the line; a holder would only rename the list
+    data class CallSample(
+        val reconnecting: Boolean,
+        val rttMs: Long? = null,
+        val jitterMs: Long? = null,
+        val bufferMs: Long? = null,
+        val lossIn10: Long? = null,
+        val lossOut10: Long? = null,
+        val lossCall10: Long? = null,
+        val sendKbps: Long? = null,
+        val receiveKbps: Long? = null,
+        val packets: Long? = null,
+        val micPermille: Long? = null,
+        val heardPermille: Long? = null,
+        val local: Enum<*>? = null,
+        val remote: Enum<*>? = null,
+        val protocol: Enum<*>? = null,
+        val relayProtocol: Enum<*>? = null,
+        val network: Enum<*>? = null,
+        val direct: Boolean = false,
+        val pairs: Int = 0,
+        val pending: Int = 0,
+        val micPath: Enum<*>? = null,
+        val micHealth: Enum<*>? = null,
+    ) : FieldEvent {
+        override val kind get() = "call_media"
+
+        @Suppress("CyclomaticComplexMethod") // one optional column per line, each its own null check
+        override fun write(out: FieldWriter) {
+            out.flag("lost", reconnecting)
+            rttMs?.let { out.num("rtt", it) }
+            jitterMs?.let { out.num("jitter", it) }
+            bufferMs?.let { out.num("buffer", it) }
+            lossIn10?.let { out.num("lossIn10", it) }
+            lossOut10?.let { out.num("lossOut10", it) }
+            lossCall10?.let { out.num("lossCall10", it) }
+            sendKbps?.let { out.num("send", it) }
+            receiveKbps?.let { out.num("recv", it) }
+            packets?.let { out.num("pkts", it) }
+            micPermille?.let { out.num("mic", it) }
+            heardPermille?.let { out.num("heard", it) }
+            local?.let { out.enum("local", it) }
+            remote?.let { out.enum("remote", it) }
+            protocol?.let { out.enum("proto", it) }
+            relayProtocol?.let { out.enum("relayProto", it) }
+            network?.let { out.enum("net", it) }
+            out.flag("direct", direct)
+            out.num("pairs", pairs.toLong())
+            out.num("pending", pending.toLong())
+            micPath?.let { out.enum("micPath", it) }
+            micHealth?.let { out.enum("micHealth", it) }
+        }
+    }
+
+    /**
+     * A call's Wi-Fi Direct leg ended (§3.10): this phone [hosting] or joining, how it ended (`DirectLegEnd`), and from
+     * the leg's start the group up ([groupMs]) and the lane up ([laneMs]) — null for a step it never reached — and the
+     * whole leg ([lifeMs]). [joinTries] are the joiner's attempts (0 on the host).
+     */
+    data class CallDirectLeg(
+        val hosting: Boolean,
+        val end: Enum<*>,
+        val groupMs: Long?,
+        val laneMs: Long?,
+        val lifeMs: Long,
+        val joinTries: Int,
+    ) : FieldEvent {
+        override val kind get() = "call_direct"
+
+        override fun write(out: FieldWriter) {
+            out.flag("host", hosting)
+            out.enum("end", end)
+            groupMs?.let { out.num("group", it) }
+            laneMs?.let { out.num("lane", it) }
+            out.num("life", lifeMs)
+            out.num("tries", joinTries.toLong())
+        }
+    }
+
+    /**
+     * One walkie burst (§3.11). [TalkDirection.OUT]: [audioMs] of speech in [chunks], [sent] of them sealed onto a link,
+     * the way to the peer at its end (`TalkPath`) and whether the call held its Wi-Fi Aware link. [TalkDirection.IN],
+     * played to its end: [chunks] heard, [lost] skipped as never come, [waitMs] from the first chunk's arrival to its
+     * playing, and [spreadMs] from the first chunk's arrival to the last's.
+     */
+    data class Talk(
+        val direction: TalkDirection,
+        val chunks: Int,
+        val audioMs: Long? = null,
+        val sent: Int? = null,
+        val path: Enum<*>? = null,
+        val held: Boolean? = null,
+        val lost: Int? = null,
+        val waitMs: Long? = null,
+        val spreadMs: Long? = null,
+    ) : FieldEvent {
+        override val kind get() = "talk"
+
+        override fun write(out: FieldWriter) {
+            out.enum("dir", direction)
+            out.num("chunks", chunks.toLong())
+            audioMs?.let { out.num("ms", it) }
+            sent?.let { out.num("sent", it.toLong()) }
+            path?.let { out.enum("path", it) }
+            held?.let { out.flag("held", it) }
+            lost?.let { out.num("lost", it.toLong()) }
+            waitMs?.let { out.num("wait", it) }
+            spreadMs?.let { out.num("spread", it) }
+        }
+    }
+
+    /**
+     * A walkie session's totals as it ends (§3.11, `WalkieMeter`): bursts and chunks each way, the chunks no link took
+     * and the ones skipped as never come, and the medians of the latest chunks — [transitMs] by the two phones' clocks
+     * (their skew is in it), [jitterMs] from the sender's stamps (no skew), [handMs] from a chunk's cut to the radio
+     * taking it — and the average `talk` frame each way.
+     */
+    @Suppress("LongParameterList") // one field per column of the line; a holder would only rename the list
+    data class WalkieEnd(
+        val burstsOut: Int,
+        val burstsIn: Int,
+        val chunksOut: Int,
+        val chunksFailed: Int,
+        val chunksIn: Int,
+        val chunksLost: Int,
+        val transitMs: Long? = null,
+        val jitterMs: Long? = null,
+        val handMs: Long? = null,
+        val frameOut: Int? = null,
+        val frameIn: Int? = null,
+    ) : FieldEvent {
+        override val kind get() = "walkie_end"
+
+        override fun write(out: FieldWriter) {
+            out.num("burstsOut", burstsOut.toLong())
+            out.num("burstsIn", burstsIn.toLong())
+            out.num("chunksOut", chunksOut.toLong())
+            out.num("failed", chunksFailed.toLong())
+            out.num("chunksIn", chunksIn.toLong())
+            out.num("lost", chunksLost.toLong())
+            transitMs?.let { out.num("transit", it) }
+            jitterMs?.let { out.num("jitter", it) }
+            handMs?.let { out.num("hand", it) }
+            frameOut?.let { out.num("frameOut", it.toLong()) }
+            frameIn?.let { out.num("frameIn", it.toLong()) }
+        }
+    }
+
+    /**
      * How long messages took, worked out at export from the database (never journaled). [direction] is
      * `IN` (a message reaching this phone: our arrival clock minus the author's `sentAt`, so the two
      * clocks' skew is in it) or `ACK` (a receipt for one of ours reaching us: both ends on our clock).
@@ -437,3 +699,6 @@ enum class BtDownReason {
 
 /** Which way a [FieldEvent.Latency] summary measures. */
 enum class LatencyDirection { IN, ACK }
+
+/** Which way a [FieldEvent.Talk] burst went: spoken here, or heard from the peer. */
+enum class TalkDirection { OUT, IN }
