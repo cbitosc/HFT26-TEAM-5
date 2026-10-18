@@ -163,24 +163,34 @@ private fun relayFit(
     val uploads = status.uploads
     return when {
         host == null -> Fit.None
-
-        // Down, its gates are unknown until the next hello: judged as a locked one, by what this phone holds for its host.
-        !status.connected -> lockedFit(host, facts)
-
+        !status.connected -> downFit(status, host, facts)
         status.entGates and SpoolTicket.FL_FILES == 0L -> Fit.Whole
-
         uploads == SpoolUploads.Open -> status.uploadLimitChunks?.let(Fit::Chunks) ?: Fit.Whole
-
         uploads is SpoolUploads.Locked && uploads.reason in WAITING -> lockedFit(host, facts)
-
         else -> Fit.None
     }
 }
 
 /**
- * A relay locked for want of a ticket, or down: the last held ticket's `am`; else, under a customer key, any size (its ticket's
- * `am` is unknown, and the hint is a free ticket's, contract revision 4); else, with a free key or none and a free
- * account not turned down, the hint; else nothing.
+ * A relay that is down, by what its last hello in this process said: one that carried no attachments takes nothing,
+ * one that left files ungated takes the photo whole, and a files-gated one, or one never heard from, is judged as a
+ * locked one ([lockedFit]).
+ */
+private fun downFit(
+    status: SpoolStatus,
+    host: String,
+    facts: FitFacts,
+): Fit =
+    when {
+        status.seenAttachments == false -> Fit.None
+        status.seenGates?.let { it and SpoolTicket.FL_FILES == 0L } == true -> Fit.Whole
+        else -> lockedFit(host, facts)
+    }
+
+/**
+ * A relay locked for want of a ticket, or down: the last held ticket's `am`; else, under a customer key, any size (its
+ * ticket's `am` is unknown, and the hint is a free ticket's, contract revision 4); else, with a free key or none and a
+ * free account not turned down, the hint; else nothing.
  */
 private fun lockedFit(
     host: String,

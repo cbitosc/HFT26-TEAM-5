@@ -68,17 +68,21 @@ an issuer only from an invite's `i`.
   Not now are answers, a tap outside only puts it off for the visit. The relay row's `FreeUploadsSwitch` turns it on
   or off later; off forgets the free key and its ticket. Nothing reaches an issuer without a yes. Copy went through the
   product-language-editor skill: no product, price, shop, "Get" or "Upgrade".
-- **Fitting a photo** (`AttachmentStore.fitted`, `FreeUploads.photoChunks`, `photoFitBytes`). A free key asks only
-  once an upload waits, so a phone's first photo is staged before it has held a ticket; re-encoding later would change
-  the hash its sent frame names. So a still photo is fitted at staging to the smallest chunk limit among the relays it
-  goes to, connected or not (a relay that is down is judged by what this phone holds for its host, so a photo staged
-  offline is fitted too — the device run's step 5, 2026-10-17), unless one would take it as it is: the live ticket's `am`, else the last held ticket's
-  (even lapsed), else the seeded hint `free_issuer_am` (`https://anywhere.getknit.app 262144`), only where the phone
-  holds a free key or none and a free account could be made (contract revision 4) — never under a customer key, which
-  goes to the same origin. The ladder (`FIT_STEPS`) is quality first, then size: 1280 px q75, q65, q55, then 1024 px
-  q60, 800 px q55, 640 px q50. Measured with libjpeg on five Pixel camera originals: 219–361 KB at the default 1280 px
-  q85 (four over the 245,732 B a five-chunk `am` admits), 162–272 KB at q75, 134–227 KB at q65. A photo no step fits
-  keeps its best and goes nearby; GIFs, animations and videos are never squeezed for `am`.
+- **Fitting a photo** (`AttachmentStore.fitted`, `FreeUploads.photoChunks`, `photoFitBytes`). A free key asks only once
+  an upload waits, so a phone's first photo is staged before it has held a ticket; re-encoding later would change the
+  hash its sent frame names. So a still photo is fitted at staging to the smallest chunk limit among the relays it goes
+  to, connected or not (a relay that is down is judged by its last hello in this process — `SpoolStatus.seenAttachments`
+  / `seenGates`: one that carried no attachments does not count, one that left files ungated takes the photo whole — and
+  otherwise, or never heard from, by what this phone holds for its host, so a photo staged offline is fitted too: the
+  device run's step 5, 2026-10-17; a parked relay is no relay the photo goes to), unless one would take it as it is: the
+  live ticket's `am`, else the last held ticket's (even lapsed), else the seeded hint `free_issuer_am`
+  (`https://anywhere.getknit.app 262144`), only where the phone holds a free key or none and a free account could be
+  made (contract revision 4) — never under a customer key, which goes to the same origin. The ladder (`FIT_STEPS`) is
+  quality first, then size: 1280 px q75, q65, q55, then 1024 px q60, 800 px q55, 640 px q50. Measured with libjpeg on
+  five Pixel camera originals: 219–361 KB at the default 1280 px q85 (four over the 245,732 B a five-chunk `am` admits),
+  162–272 KB at q75, 134–227 KB at q65. A photo no step fits keeps its best and goes nearby; GIFs, animations and videos
+  are never squeezed for `am`. A customer key that replaces a free one forgets the free ticket
+  (`TicketKeyStore.putKey`), so its `am` never sizes a customer's photo.
 
 **What it costs, and what it does not cover.**
 
@@ -95,11 +99,11 @@ an issuer only from an invite's `i`.
   sooner than an hour after its 200; every answer of both routes; the forgotten key's next day; the customer fallback),
   `FreeTicketsTest` (the stamp vectors copied from knit-spool-coordinator `feat/free-tickets` @ `05b7ec4`, every answer,
   the backoff), `SpoolTicketRecordsTest` (`tkFilesAm`, `sigFilesAm`, `tkAmOnly`, `sigAmOnly`, copied from knit-spool
-  `feat/free-tickets` @ `061bad2`), `OkHttpTicketIssuerTest` (the route on a socket), `ScopeSyncTest` (never `aput` over `am`; `size` locks
-  nothing; the wake; the whole loop across a reconnect), `RelayReachTest`, `FreeUploadsTest` (the offers and the fit,
-  revision 4's three cases), `TicketKeyStoreTest`, `AttachmentStoreIngestTest` and `FreeTicketLabTest`'s
-  `anUnticketedPhoneGetsAFreeTicketAndItsSmallPhotoReachesThePeerByRelay` (a `LabFreeIssuer` beside a files-gated
-  `FakeSpool`, which now refuses `size` in the spool's order).
+  `feat/free-tickets` @ `061bad2`), `OkHttpTicketIssuerTest` (the route on a socket), `ScopeSyncTest` (never `aput` over
+  `am`; `size` locks nothing; the wake; the whole loop across a reconnect), `RelayReachTest`, `FreeUploadsTest` (the
+  offers and the fit, revision 4's three cases), `TicketKeyStoreTest`, `AttachmentStoreIngestTest` and
+  `FreeTicketLabTest`'s `anUnticketedPhoneGetsAFreeTicketAndItsSmallPhotoReachesThePeerByRelay` (a `LabFreeIssuer`
+  beside a files-gated `FakeSpool`, which now refuses `size` in the spool's order).
 - **What the iOS port must copy:** the C-7.6-32 check before any `ahave`, `size` as no lock; the waiting-upload ask and
   the free key's rule (no margin, the floor kept); the account exchange and its backoff; the one slot per host, the
   free key out of every backup; the notice before any request; fitting the first photo.

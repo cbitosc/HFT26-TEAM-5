@@ -118,6 +118,22 @@ class TicketKeyStoreTest {
         }
 
     @Test
+    fun aCustomerKeyReplacingAFreeOneForgetsTheFreeTicketAndAnotherCustomerKeyKeepsItsOwn() =
+        runTest {
+            val (keys, settings) = stores()
+            val tickets = SpoolTickets(settings)
+            val url = "wss://$HOST/spool/v1"
+            keys.putKey(HOST, free)
+            tickets.import(url, SpoolTicketsTest.TEXT)
+            // Its `am` must not size the customer's photos while the customer's own ticket is fetched.
+            keys.putKey(HOST, HeldKey(ISSUER, KEY))
+            assertNull(tickets.view(url))
+            tickets.import(url, SpoolTicketsTest.TEXT)
+            keys.putKey(HOST, HeldKey(ISSUER, OTHER_KEY))
+            assertTrue(tickets.view(url) != null)
+        }
+
+    @Test
     fun aFreeKeyNeverRidesABackupAndACustomerKeyStillDoes() {
         // C-7.6-37: every free-half key is backup-transient; the customer key's slot is not.
         assertTrue(SettingsKeys.TRANSIENT_PREFIXES.any { SettingsKeys.spoolFreeKeyKey(HOST).name.startsWith(it) })

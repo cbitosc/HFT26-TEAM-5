@@ -207,6 +207,13 @@ class SpoolStatus(
      * ([SpoolConnection.uploadLimitChunks]), or null for no limit beyond [maxAttachBytes]. Null while disconnected.
      */
     val uploadLimitChunks: Int? = null,
+    /**
+     * What this relay's last hello in this process said about attachments, kept while it is down: whether it carried
+     * them ([seenAttachments]) and which `fl` bits it gated ([seenGates]). Null before the first hello. What a photo
+     * staged while the relay is down is sized by (`data/relay/FreeUploads`).
+     */
+    val seenAttachments: Boolean? = null,
+    val seenGates: Long? = null,
 )
 
 /**
@@ -753,6 +760,13 @@ class ScopeSync(
         @Volatile
         private var uploadRefusal: String? = null
 
+        // What the last hello said about attachments ([SpoolStatus.seenAttachments]); kept across sessions.
+        @Volatile
+        private var seenAttachments: Boolean? = null
+
+        @Volatile
+        private var seenGates: Long? = null
+
         // scopeHex → the one pending re-look for an attachment a round could not finish (the spool has no
         // chunks yet, an upload half done, a deferral in force) — the old 15 s reconcile's cadence, paid
         // only by a scope that has such an attachment.
@@ -1087,6 +1101,8 @@ class ScopeSync(
                 entGates = connection?.takeIf { it.isReady }?.gates ?: 0L,
                 uploads = connection?.takeIf { it.isReady }?.let(::uploadsOn) ?: SpoolUploads.Open,
                 uploadLimitChunks = connection?.takeIf { it.isReady }?.uploadLimitChunks(),
+                seenAttachments = seenAttachments,
+                seenGates = seenGates,
                 scopes =
                     mine(all, connection).map { scope ->
                         ScopeStatus(
@@ -1187,6 +1203,9 @@ class ScopeSync(
             // relabel a transport death as this fault.
             if (!ready && conn.isOpen && socket.closeReason == null) conn.abort(NO_HELLO)
             if (ready) {
+                // Kept past this session, for a photo staged while the relay is down.
+                seenAttachments = conn.limits?.attachments == true
+                seenGates = conn.gates
                 // Paired with the dialer's "spool socket failed" line: together they bound when a frame could reach
                 // the spool (a call offer queued in between went out on the next hello, possibly after its end).
                 log("${SpoolUrl.host(url)}: connected (hello ${clock() - dialedAt} ms after the dial)")

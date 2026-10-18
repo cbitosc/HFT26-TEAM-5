@@ -64,6 +64,12 @@ class TicketKeyStore(
                 it.remove(SettingsKeys.spoolFreeStateKey(host))
             } else {
                 it[SettingsKeys.spoolKeyKey(host)] = encodeKey(key)
+                // A free key's ticket goes with it: its `am` must not size the photos a customer key sends, and the
+                // refresher asks for the customer's own ticket at once.
+                if (it.contains(SettingsKeys.spoolFreeKeyKey(host))) {
+                    it.remove(SettingsKeys.spoolTicketKey(host))
+                    it.remove(SettingsKeys.spoolTicketVerdictKey(host))
+                }
                 it.remove(SettingsKeys.spoolFreeKeyKey(host))
             }
             it.remove(SettingsKeys.spoolKeyStateKey(host))

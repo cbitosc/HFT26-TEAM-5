@@ -172,6 +172,23 @@ class FreeUploadsTest {
     }
 
     @Test
+    fun aRelayThatIsDownIsJudgedByItsLastHello() {
+        // Last seen with no attachments (lax today): it takes no photo, so it sizes nothing — up or down, the same.
+        assertNull(chunks(down.copyDown(seenAttachments = false, seenGates = 0L)))
+        // Last seen with files ungated: it takes the photo whole.
+        assertNull(chunks(down.copyDown(seenAttachments = true, seenGates = 0L)))
+        // Last seen files-gated: judged as a locked one, here the hint.
+        assertEquals(5, chunks(down.copyDown(seenAttachments = true, seenGates = SpoolTicket.FL_FILES)))
+        // Never heard from in this process: today's guess.
+        assertEquals(5, chunks(down))
+    }
+
+    private fun SpoolStatus.copyDown(
+        seenAttachments: Boolean,
+        seenGates: Long,
+    ) = SpoolStatus(url, false, 0, lastError, emptyList(), seenAttachments = seenAttachments, seenGates = seenGates)
+
+    @Test
     fun aConnectedRelayThatTakesThePhotoWholeStillWinsOverOneThatIsDown() {
         val other = SpoolStatus("wss://open.example/spool/v1", true, 0, null, emptyList(), maxAttachBytes = 16 shl 20)
         assertNull(photoChunks(listOf(down, other), emptyMap(), issuers, emptyMap(), emptyMap(), expected))

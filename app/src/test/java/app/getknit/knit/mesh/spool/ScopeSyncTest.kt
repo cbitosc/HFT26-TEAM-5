@@ -2605,6 +2605,25 @@ class ScopeSyncTest {
         }
 
     @Test
+    fun `the last hello's attachments and gates are kept for a photo staged while the relay is down`() =
+        runTest {
+            val spool = FakeSpool(ent = true, entGates = SpoolTicket.FL_FILES)
+            val phone = member(spool, alice, bob, urls = listOf(filesUrl))
+            assertNull(
+                phone.sync
+                    .status()
+                    .singleOrNull()
+                    ?.seenGates,
+            )
+            phone.sync.start(backgroundScope)
+            pump(rounds = 8)
+            val seen = phone.sync.status().single()
+            assertEquals(true, seen.seenAttachments)
+            assertEquals(SpoolTicket.FL_FILES, seen.seenGates)
+            phone.sync.stop()
+        }
+
+    @Test
     fun `a size refusal settles that attachment without locking uploads or spending the ticket`() =
         runTest {
             val spool = FakeSpool(ent = true, entGates = SpoolTicket.FL_FILES).apply { refuseSizeOver = 1 }
