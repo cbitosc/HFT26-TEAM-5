@@ -6,12 +6,14 @@ import app.getknit.knit.mesh.MeshMetrics
 import app.getknit.knit.mesh.PRESENCE_FRESH_MS
 import app.getknit.knit.mesh.SPOOL_COVER_MS
 import app.getknit.knit.mesh.crypto.scope.ScopeCrypto
+import app.getknit.knit.mesh.protocol.FrameId
 import app.getknit.knit.mesh.protocol.FrameType
 import app.getknit.knit.mesh.protocol.RatchetHeader
 import app.getknit.knit.mesh.protocol.RatchetInit
 import app.getknit.knit.mesh.protocol.RelayEnvelope
 import app.getknit.knit.mesh.protocol.WireCodec
 import app.getknit.knit.mesh.protocol.WireEnvelope
+import app.getknit.knit.mesh.protocol.frameIdOf
 import app.getknit.knit.mesh.sha256Hex
 import com.google.crypto.tink.subtle.X25519
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -42,8 +44,12 @@ import org.junit.Test
 @Suppress("LargeClass") // cohesive single-SUT suite over one shared member()/pump() harness, as InboundPipelineTest
 class ScopeSyncTest {
     private val alice = "aaaaaaaaaaaaaaaaaaaaaaaaaa"
-    private val bob = "bbbbbbbbbbbbbbbbbbbbbbbbbb"
-    private val carol = "cccccccccccccccccccccccccc"
+    private val bob = "bbbbbbbbbbbbbbbbbbbbbbbbbe"
+    private val carol = "ccccccccccccccccccccccccce"
+
+    /** A frame id the spool door admits ([FrameId.admits]), named by a label. */
+    private fun fid(label: String) = frameIdOf(label)
+
     private val pairwiseRoot = ByteArray(32) { it.toByte() }
     private val groupRoot = ByteArray(32) { (it + 30).toByte() }
     private val now = 1_000L
@@ -274,15 +280,15 @@ class ScopeSyncTest {
             val spool = FakeSpool()
             val sender = member(spool, alice, bob)
             val receiver = member(spool, bob, alice)
-            sender.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
+            sender.custody.store(dmFrame(fid("m1"), from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
 
             sender.sync.start(backgroundScope)
             receiver.sync.start(backgroundScope)
             pump()
 
             assertEquals("the sender pushed its custody", 1, spool.pushed.size)
-            assertEquals(listOf("m1"), receiver.delivered.map { it.id })
-            assertTrue("the bridged frame lands in the receiver's custody", receiver.custody.has("m1"))
+            assertEquals(listOf(fid("m1")), receiver.delivered.map { it.id })
+            assertTrue("the bridged frame lands in the receiver's custody", receiver.custody.has(fid("m1")))
             assertEquals(1, sender.metrics.spool().spoolPushed)
             assertEquals(1, receiver.metrics.spool().spoolBridged)
             sender.sync.stop()
@@ -517,11 +523,11 @@ class ScopeSyncTest {
                     .peerSeenAt,
             )
 
-            sender.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
+            sender.custody.store(dmFrame(fid("m1"), from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
             sender.sync.start(backgroundScope)
             pump()
 
-            assertEquals(listOf("m1"), receiver.delivered.map { it.id })
+            assertEquals(listOf(fid("m1")), receiver.delivered.map { it.id })
             assertEquals(
                 "alice's own fresh frame is what makes the scope a live path",
                 now,
@@ -605,13 +611,13 @@ class ScopeSyncTest {
             // so a scope yields old frames as a matter of course. Bob comes back long after alice wrote.
             val late = now + PRESENCE_FRESH_MS + 1
             val receiver = member(spool, bob, alice, clock = { late })
-            sender.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
+            sender.custody.store(dmFrame(fid("m1"), from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
 
             sender.sync.start(backgroundScope)
             receiver.sync.start(backgroundScope)
             pump()
 
-            assertEquals("the frame still bridges — presence is never a delivery gate", listOf("m1"), receiver.delivered.map { it.id })
+            assertEquals("the frame still bridges — presence is never a delivery gate", listOf(fid("m1")), receiver.delivered.map { it.id })
             assertNull(
                 "but a frame alice wrote before she left does not put her back on the plane",
                 receiver.sync
@@ -640,7 +646,7 @@ class ScopeSyncTest {
             pump()
             assertTrue("a connected, converged scope says nothing about its peer", seen.none { alice in it })
 
-            sender.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
+            sender.custody.store(dmFrame(fid("m1"), from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
             sender.sync.start(backgroundScope)
             pump()
             assertEquals("alice's fresh frame puts her on the plane, once", listOf(setOf(alice)), seen.filter { it.isNotEmpty() })
@@ -665,7 +671,7 @@ class ScopeSyncTest {
             var relays = listOf(url)
             val sender = member(spool, alice, bob)
             val receiver = member(spool, bob, alice, presence = { seen += it }, liveUrls = { relays })
-            sender.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
+            sender.custody.store(dmFrame(fid("m1"), from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
             receiver.sync.start(backgroundScope)
             sender.sync.start(backgroundScope)
             pump()
@@ -706,7 +712,7 @@ class ScopeSyncTest {
                     clock = { now },
                     jitter = { 0L },
                 )
-            sender.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
+            sender.custody.store(dmFrame(fid("m1"), from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
             sender.sync.start(backgroundScope)
             receiverSync.start(backgroundScope)
             pump()
@@ -731,13 +737,13 @@ class ScopeSyncTest {
             receiver.sync.start(backgroundScope)
             pump()
 
-            val tick = dmFrame("tick-1", from = alice, to = bob, sentAt = now)
+            val tick = dmFrame(fid("tick-1"), from = alice, to = bob, sentAt = now)
             assertTrue(sender.sync.pushDirect(bob, tick.envelope, tickWire(tick)))
             pump()
 
-            assertEquals("the peer has it", listOf("tick-1"), receiver.delivered.map { it.id })
+            assertEquals("the peer has it", listOf(fid("tick-1")), receiver.delivered.map { it.id })
             assertEquals(1, spool.pushed.size)
-            assertFalse("the pusher never custodied it", sender.custody.has("tick-1"))
+            assertFalse("the pusher never custodied it", sender.custody.has(fid("tick-1")))
             assertEquals(1, sender.metrics.spool().spoolPushed)
 
             // The pusher's own heal loop must neither pull it back nor list on its account: many ticks, then
@@ -773,7 +779,7 @@ class ScopeSyncTest {
         runTest {
             val spool = FakeSpool()
             val sender = member(spool, alice, bob)
-            val tick = dmFrame("tick-1", from = alice, to = bob, sentAt = now)
+            val tick = dmFrame(fid("tick-1"), from = alice, to = bob, sentAt = now)
             assertFalse("not started: nothing is connected", sender.sync.pushDirect(bob, tick.envelope, tickWire(tick)))
 
             sender.sync.start(backgroundScope)
@@ -791,9 +797,9 @@ class ScopeSyncTest {
             val sender = member(spool, alice, bob)
             sender.sync.start(backgroundScope)
             pump()
-            val stray = dmFrame("stray", from = alice, to = "carol", sentAt = now)
+            val stray = dmFrame(fid("stray"), from = alice, to = "carol", sentAt = now)
             assertFalse(sender.sync.pushDirect(bob, stray.envelope, tickWire(stray)))
-            val stale = dmFrame("stale", from = alice, to = bob, sentAt = now - ScopeRegistry.DEFAULT_TTL_MS)
+            val stale = dmFrame(fid("stale"), from = alice, to = bob, sentAt = now - ScopeRegistry.DEFAULT_TTL_MS)
             assertFalse("dead on arrival at the spool's own TTL", sender.sync.pushDirect(bob, stale.envelope, tickWire(stale)))
             assertTrue(spool.pushed.isEmpty())
             sender.sync.stop()
@@ -818,9 +824,9 @@ class ScopeSyncTest {
             val sender = member(spool, alice, bob, roots = { emptyList() }, pairs = { alicePairs })
             val receiver = member(spool, bob, alice, roots = { emptyList() }, pairs = { bobPairs })
             // Alice custodies her own profile plus the intro — a sealed DM-form ctl to Bob; Bob only his profile.
-            sender.custody.store(profileFrame("pa", from = alice, sentAt = now), ForwardStore.ORIGIN_SELF, now)
-            sender.custody.store(dmFrame("intro", from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
-            receiver.custody.store(profileFrame("pb", from = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
+            sender.custody.store(profileFrame(FrameId.profileId(alice, now), from = alice, sentAt = now), ForwardStore.ORIGIN_SELF, now)
+            sender.custody.store(dmFrame(fid("intro"), from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
+            receiver.custody.store(profileFrame(FrameId.profileId(bob, now), from = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
 
             sender.sync.start(backgroundScope)
             receiver.sync.start(backgroundScope)
@@ -828,8 +834,8 @@ class ScopeSyncTest {
 
             val pairHex = hex(ScopeCrypto.pairScopeId(secretAtAlice, alice, bob))
             assertEquals("both sides derive one pair scope", pairHex, hex(ScopeCrypto.pairScopeId(secretAtBob, bob, alice)))
-            assertEquals(setOf("pb"), sender.delivered.map { it.id }.toSet())
-            assertEquals(setOf("pa", "intro"), receiver.delivered.map { it.id }.toSet())
+            assertEquals(setOf(FrameId.profileId(bob, now)), sender.delivered.map { it.id }.toSet())
+            assertEquals(setOf(FrameId.profileId(alice, now), fid("intro")), receiver.delivered.map { it.id }.toSet())
             assertEquals(3, spool.liveIds(pairHex).size)
 
             // Both sessions confirmed and the grace lapsed: the driver stops naming the peer and reports it
@@ -897,17 +903,17 @@ class ScopeSyncTest {
             // A chat from carol that alice merely CARRIES: the bridge is a custody property, not an
             // authorship one, so a third member's frame crosses the Internet through either of the two.
             sender.custody.store(
-                groupChatFrame("gc1", from = carol, groupId = groupId, members = roster.toList(), sentAt = now),
+                groupChatFrame(fid("gc1"), from = carol, groupId = groupId, members = roster.toList(), sentAt = now),
                 ForwardStore.ORIGIN_RELAY,
                 now,
             )
-            sender.custody.store(groupLeaveFrame("gl1", from = carol, groupId = groupId, sentAt = now), ForwardStore.ORIGIN_RELAY, now)
+            sender.custody.store(groupLeaveFrame(fid("gl1"), from = carol, groupId = groupId, sentAt = now), ForwardStore.ORIGIN_RELAY, now)
 
             sender.sync.start(backgroundScope)
             receiver.sync.start(backgroundScope)
             pump()
 
-            assertEquals(setOf("gc1", "gl1"), receiver.delivered.map { it.id }.toSet())
+            assertEquals(setOf(fid("gc1"), fid("gl1")), receiver.delivered.map { it.id }.toSet())
             assertEquals(2, spool.liveIds(hex(ScopeCrypto.groupScopeId(groupRoot, groupId, 1))).size)
             sender.sync.stop()
             receiver.sync.stop()
@@ -936,7 +942,7 @@ class ScopeSyncTest {
                 )
             val holder = member(spool, alice, bob, groups = listOf(rotated))
             holder.custody.store(
-                groupChatFrame("gc1", from = bob, groupId = groupId, members = roster.toList(), sentAt = now),
+                groupChatFrame(fid("gc1"), from = bob, groupId = groupId, members = roster.toList(), sentAt = now),
                 ForwardStore.ORIGIN_RELAY,
                 now,
             )
@@ -985,12 +991,12 @@ class ScopeSyncTest {
                 )
             val init = RatchetInit(eph = eph, pkid = 1, at = now)
             val header = { flags: Int -> RatchetHeader(se = 1, ek = ByteArray(32) { 7 }, pe = 0, n = 0, init = init, flags = flags) }
-            val reset = dmFrame("reset", from = alice, to = bob, sentAt = now, header = header(RatchetHeader.FLAG_RESET))
-            val after = dmFrame("after", from = alice, to = bob, sentAt = now, header = header(0))
+            val reset = dmFrame(fid("reset"), from = alice, to = bob, sentAt = now, header = header(RatchetHeader.FLAG_RESET))
+            val after = dmFrame(fid("after"), from = alice, to = bob, sentAt = now, header = header(0))
             resetting.custody.store(reset, ForwardStore.ORIGIN_SELF, now)
             resetting.custody.store(after, ForwardStore.ORIGIN_SELF, now)
             val away = member(spool, bob, alice)
-            away.custody.store(dmFrame("old-era", from = bob, to = alice, sentAt = now), ForwardStore.ORIGIN_SELF, now)
+            away.custody.store(dmFrame(fid("old-era"), from = bob, to = alice, sentAt = now), ForwardStore.ORIGIN_SELF, now)
 
             resetting.sync.start(backgroundScope)
             away.sync.start(backgroundScope)
@@ -1010,8 +1016,8 @@ class ScopeSyncTest {
                 "everything of alice's goes to the new scope",
                 spool.liveIds(fresh).containsAll(listOf(blob(newRoot, reset), blob(newRoot, after))),
             )
-            assertTrue("bob pulled the reset", "reset" in away.delivered.map { it.id })
-            assertTrue("bob's old-era DM still drains to alice", "old-era" in resetting.delivered.map { it.id })
+            assertTrue("bob pulled the reset", fid("reset") in away.delivered.map { it.id })
+            assertTrue("bob's old-era DM still drains to alice", fid("old-era") in resetting.delivered.map { it.id })
             resetting.sync.stop()
             away.sync.stop()
         }
@@ -1044,7 +1050,11 @@ class ScopeSyncTest {
                     init = RatchetInit(eph, 1, now),
                     flags = RatchetHeader.FLAG_RESET,
                 )
-            member.custody.store(dmFrame("reset", from = alice, to = bob, sentAt = now, header = header), ForwardStore.ORIGIN_SELF, now)
+            member.custody.store(
+                dmFrame(fid("reset"), from = alice, to = bob, sentAt = now, header = header),
+                ForwardStore.ORIGIN_SELF,
+                now,
+            )
             member.sync.onCustodyChanged() // the round runs on the old table and refuses the reset
             pump(2)
             assertEquals("the stale-table round refused it", 0, spool.liveIds(old).size)
@@ -1065,7 +1075,7 @@ class ScopeSyncTest {
             val spool = FakeSpool()
             val holder = member(spool, alice, bob)
             listOf("m1", "m2", "m3").forEach {
-                holder.custody.store(dmFrame(it, from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
+                holder.custody.store(dmFrame(fid(it), from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
             }
 
             holder.sync.start(backgroundScope)
@@ -1086,7 +1096,7 @@ class ScopeSyncTest {
             val two = member(spool, bob, alice)
             // The same frame in both custodies: a naive random-nonce seal would upload it twice under two
             // ids and the digests would never converge.
-            val frame = dmFrame("m1", from = alice, to = bob, sentAt = now)
+            val frame = dmFrame(fid("m1"), from = alice, to = bob, sentAt = now)
             one.custody.store(frame, ForwardStore.ORIGIN_SELF, now)
             two.custody.store(frame, ForwardStore.ORIGIN_RELAY, now)
 
@@ -1117,7 +1127,7 @@ class ScopeSyncTest {
             val sender = member(spool, alice, bob)
             val receiver = member(spool, bob, alice)
             listOf("m1", "m2", "m3").forEach {
-                sender.custody.store(dmFrame(it, from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
+                sender.custody.store(dmFrame(fid(it), from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
             }
 
             sender.sync.start(backgroundScope)
@@ -1139,7 +1149,7 @@ class ScopeSyncTest {
         runTest {
             val spool = FakeSpool()
             val holder = member(spool, alice, bob)
-            holder.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
+            holder.custody.store(dmFrame(fid("m1"), from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
             holder.sync.start(backgroundScope)
             pump()
             assertEquals("pushed and converged first", 1, spool.pushed.size)
@@ -1148,7 +1158,7 @@ class ScopeSyncTest {
             // delivered gets swept locally while the spool keeps it for another day. From then on it is
             // absent from `local` forever and our digest can never match — and re-pulling it achieves
             // nothing, because the custody store refuses it as dead on arrival every single time.
-            holder.custody.sweep("m1")
+            holder.custody.sweep(fid("m1"))
             pump(rounds = 120) // several 60 s heal ticks
             val afterFirstSweep = spool.pulled.size
             pump(rounds = 120)
@@ -1163,10 +1173,10 @@ class ScopeSyncTest {
         runTest {
             val spool = FakeSpool()
             val holder = member(spool, alice, bob)
-            holder.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
+            holder.custody.store(dmFrame(fid("m1"), from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
             holder.sync.start(backgroundScope)
             pump()
-            holder.custody.sweep("m1")
+            holder.custody.sweep(fid("m1"))
             pump(rounds = 120)
             val afterSweep = spool.pulled.size
             assertEquals("pulled once after the sweep", 1, afterSweep)
@@ -1190,10 +1200,10 @@ class ScopeSyncTest {
         runTest {
             val spool = FakeSpool()
             val holder = member(spool, alice, bob)
-            holder.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
+            holder.custody.store(dmFrame(fid("m1"), from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
             holder.sync.start(backgroundScope)
             pump()
-            holder.custody.sweep("m1")
+            holder.custody.sweep(fid("m1"))
             pump(rounds = 120)
 
             // The whole point of §9.6: a blob custody can never hold again is folded in as if held, so the
@@ -1217,11 +1227,11 @@ class ScopeSyncTest {
         runTest {
             val spool = FakeSpool()
             val holder = member(spool, alice, bob)
-            holder.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
+            holder.custody.store(dmFrame(fid("m1"), from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
             holder.sync.start(backgroundScope)
             pump()
             val blobId = spool.pushed.single()
-            holder.custody.sweep("m1")
+            holder.custody.sweep(fid("m1"))
             pump(rounds = 120)
 
             // The mirror of the bug: an accounted id the spool has since aged out would leave our fold
@@ -1353,7 +1363,7 @@ class ScopeSyncTest {
             // wake ran a full custody read per scope: four rounds a minute on a converged, idle relay.
             val spool = FakeSpool()
             val member = member(spool, alice, bob)
-            member.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
+            member.custody.store(dmFrame(fid("m1"), from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
             member.sync.start(backgroundScope)
             pump(rounds = 8)
             assertTrue(
@@ -1398,7 +1408,7 @@ class ScopeSyncTest {
         runTest {
             val spool = FakeSpool()
             val member = member(spool, alice, bob)
-            member.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
+            member.custody.store(dmFrame(fid("m1"), from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
             member.sync.start(backgroundScope)
             pump(rounds = 8)
             val reads = member.custody.liveFramesReads
@@ -1946,7 +1956,7 @@ class ScopeSyncTest {
             val spool = FakeSpool()
             val sender = member(spool, alice, bob)
             val receiver = member(spool, bob, alice, carryGate = { _, _ -> false })
-            sender.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
+            sender.custody.store(dmFrame(fid("m1"), from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
 
             // Pushed before the receiver connects, so m1 reaches it by SUB → LIST → pull: the pull path is
             // the one C-9.3-1 quarantines on. (Arriving as a live event instead, it is released and dropped.)
@@ -1956,9 +1966,41 @@ class ScopeSyncTest {
             pump()
 
             assertTrue(receiver.delivered.isEmpty())
-            assertFalse(receiver.custody.has("m1"))
+            assertFalse(receiver.custody.has(fid("m1")))
             assertTrue(receiver.metrics.spool().spoolInvalid >= 1)
             sender.sync.stop()
+            receiver.sync.stop()
+        }
+
+    @Test
+    fun `a blob whose frame id is not canonical is quarantined, never accounted and never pulled again`() =
+        runTest {
+            // #178: on Android the twin's id binds as the real one's, so had it reached custody, `store.has` would answer
+            // for the real frame, §9.6 would never account the blob and every connection would pull it again. It is
+            // refused at the open instead, before the carry gate, and quarantined.
+            val spool = FakeSpool()
+            val sender = member(spool, alice, bob)
+            val receiver = member(spool, bob, alice)
+            sender.custody.store(dmFrame("\uFEFF" + fid("m1"), from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
+            sender.custody.store(dmFrame(fid("m1"), from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
+            sender.sync.start(backgroundScope)
+            pump()
+            sender.sync.stop()
+
+            receiver.sync.start(backgroundScope)
+            pump()
+            assertEquals("each blob pulled once", 2, spool.pulled.size)
+            assertEquals(listOf(fid("m1")), receiver.delivered.map { it.id })
+            assertEquals(1, receiver.metrics.spool().spoolInvalid)
+            assertEquals("only the real frame bridged", 1, receiver.metrics.spool().spoolBridged)
+            assertEquals("the twin is never accounted", 0, receiver.metrics.spool().spoolAccounted)
+
+            repeat(3) {
+                spool.dropSockets()
+                pump(rounds = 120)
+            }
+            assertEquals("the quarantine outlives every reconnect", 2, spool.pulled.size)
+            assertEquals(listOf(fid("m1")), receiver.delivered.map { it.id })
             receiver.sync.stop()
         }
 
@@ -2006,7 +2048,7 @@ class ScopeSyncTest {
         runTest {
             val spool = FakeSpool()
             val victim = member(spool, bob, alice)
-            val frame = dmFrame("m1", from = alice, to = bob, sentAt = now)
+            val frame = dmFrame(fid("m1"), from = alice, to = bob, sentAt = now)
             val blob =
                 ScopeCrypto.seal(
                     ScopeCrypto.dmSealKeys(pairwiseRoot, alice, bob),
@@ -2029,7 +2071,7 @@ class ScopeSyncTest {
             spool.announce(scopeHex(bob, alice))
             pump()
 
-            assertEquals(listOf("m1"), victim.delivered.map { it.id })
+            assertEquals(listOf(fid("m1")), victim.delivered.map { it.id })
             assertEquals(1, victim.metrics.spool().spoolBridged)
             assertEquals(0, victim.metrics.spool().spoolInvalid)
             victim.sync.stop()
@@ -2042,7 +2084,7 @@ class ScopeSyncTest {
             val sender = member(spool, alice, bob)
             val receiver = member(spool, bob, alice)
             val scope = unhex(scopeHex(bob, alice))
-            sender.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
+            sender.custody.store(dmFrame(fid("m1"), from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
             sender.sync.start(backgroundScope)
             pump()
             receiver.sync.start(backgroundScope)
@@ -2056,7 +2098,7 @@ class ScopeSyncTest {
                 spool.gossip(SpoolCodec.encode(SpoolEvent(t = SpoolRecordType.EVENT, scope = scope, blobId = sha256(junk), data = junk)))
             }
             pump()
-            receiver.custody.sweep("m1")
+            receiver.custody.sweep(fid("m1"))
             pump(rounds = 120)
 
             assertEquals("m1 stayed guarded — bridged once, not once more after the sweep", 1, receiver.metrics.spool().spoolBridged)
@@ -2177,11 +2219,11 @@ class ScopeSyncTest {
             val sender = member(spool, alice, bob, custody = FakeCustody(ttlMs = Long.MAX_VALUE / 2))
             // Held locally (the custody TTL here is generous) but already past the scope's 48 h horizon.
             sender.custody.store(
-                dmFrame("old", from = alice, to = bob, sentAt = now - ScopeRegistry.DEFAULT_TTL_MS),
+                dmFrame(fid("old"), from = alice, to = bob, sentAt = now - ScopeRegistry.DEFAULT_TTL_MS),
                 ForwardStore.ORIGIN_SELF,
                 now,
             )
-            sender.custody.store(dmFrame("fresh", from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
+            sender.custody.store(dmFrame(fid("fresh"), from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
 
             sender.sync.start(backgroundScope)
             pump()
@@ -2196,9 +2238,9 @@ class ScopeSyncTest {
         runTest {
             val spool = FakeSpool()
             val sender = member(spool, alice, bob)
-            val carol = "cccccccccccccccccccccccccc"
-            sender.custody.store(dmFrame("mine", from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
-            sender.custody.store(dmFrame("theirs", from = alice, to = carol, sentAt = now), ForwardStore.ORIGIN_SELF, now)
+            val carol = "ccccccccccccccccccccccccce"
+            sender.custody.store(dmFrame(fid("mine"), from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
+            sender.custody.store(dmFrame(fid("theirs"), from = alice, to = carol, sentAt = now), ForwardStore.ORIGIN_SELF, now)
 
             sender.sync.start(backgroundScope)
             pump()
@@ -2213,13 +2255,13 @@ class ScopeSyncTest {
             val spool = FakeSpool()
             val sender = member(spool, alice, bob)
             val receiver = member(spool, bob, alice)
-            sender.custody.store(profileFrame("p1", from = alice, sentAt = now), ForwardStore.ORIGIN_SELF, now)
+            sender.custody.store(profileFrame(FrameId.profileId(alice, now), from = alice, sentAt = now), ForwardStore.ORIGIN_SELF, now)
 
             sender.sync.start(backgroundScope)
             receiver.sync.start(backgroundScope)
             pump()
 
-            assertEquals(listOf("p1"), receiver.delivered.map { it.id })
+            assertEquals(listOf(FrameId.profileId(alice, now)), receiver.delivered.map { it.id })
             sender.sync.stop()
             receiver.sync.stop()
         }
@@ -2235,13 +2277,13 @@ class ScopeSyncTest {
             val group = GroupScopeRoots(groupId, roster, groupRoot, rootVersion = 1)
             val holder = member(spool, alice, bob, groups = listOf(group))
             val reader = member(spool, bob, alice, groups = listOf(group))
-            holder.custody.store(profileFrame("p2", from = carol, sentAt = now), ForwardStore.ORIGIN_RELAY, now)
+            holder.custody.store(profileFrame(FrameId.profileId(carol, now), from = carol, sentAt = now), ForwardStore.ORIGIN_RELAY, now)
 
             holder.sync.start(backgroundScope)
             reader.sync.start(backgroundScope)
             pump()
 
-            assertEquals(listOf("p2"), reader.delivered.map { it.id })
+            assertEquals(listOf(FrameId.profileId(carol, now)), reader.delivered.map { it.id })
             holder.sync.stop()
             reader.sync.stop()
         }
@@ -2251,7 +2293,7 @@ class ScopeSyncTest {
         runTest {
             val spool = FakeSpool(maxPull = 2)
             val holder = member(spool, alice, bob)
-            val ids = (1..5).map { "m$it" }
+            val ids = (1..5).map { fid("m$it") }
             ids.forEach { holder.custody.store(dmFrame(it, from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now) }
             holder.sync.start(backgroundScope)
             pump()
@@ -2384,7 +2426,7 @@ class ScopeSyncTest {
             val sender = member(spool, alice, bob, blobs = FakeBlobs(aHash to bytes))
             val receiver = member(spool, bob, alice)
             sender.custody.store(
-                dmFrame("m1", from = alice, to = bob, sentAt = now, attachmentHash = aHash),
+                dmFrame(fid("m1"), from = alice, to = bob, sentAt = now, attachmentHash = aHash),
                 ForwardStore.ORIGIN_SELF,
                 now,
             )
@@ -2399,7 +2441,7 @@ class ScopeSyncTest {
             assertEquals(3, sender.metrics.spool().spoolAttachPushed)
 
             // The receiver got the frame, then the bytes it names — verified against that same address.
-            assertEquals(listOf("m1"), receiver.delivered.map { it.id })
+            assertEquals(listOf(fid("m1")), receiver.delivered.map { it.id })
             assertTrue("the image landed locally", receiver.blobs.stored.containsKey(aHash))
             assertTrue(bytes.contentEquals(receiver.blobs.stored.getValue(aHash)))
             assertEquals(listOf(aHash), receiver.obtained)
@@ -2426,12 +2468,12 @@ class ScopeSyncTest {
             val bobTickets = filesTickets(SpoolTicketsTest.ticket(fl = SpoolTicket.FL_FILES))
             val bobPhone = member(spool, bob, alice, blobs = FakeBlobs(theirs to theirBytes), urls = listOf(filesUrl), tickets = bobTickets)
             alicePhone.custody.store(
-                dmFrame("m1", from = alice, to = bob, sentAt = now, attachmentHash = mine),
+                dmFrame(fid("m1"), from = alice, to = bob, sentAt = now, attachmentHash = mine),
                 ForwardStore.ORIGIN_SELF,
                 now,
             )
             bobPhone.custody.store(
-                dmFrame("m2", from = bob, to = alice, sentAt = now, attachmentHash = theirs),
+                dmFrame(fid("m2"), from = bob, to = alice, sentAt = now, attachmentHash = theirs),
                 ForwardStore.ORIGIN_SELF,
                 now,
             )
@@ -2468,7 +2510,7 @@ class ScopeSyncTest {
             // Still nothing of hers went up, and the text plane is untouched by the gate.
             assertTrue(spool.aputs.none { it.startsWith(mineAid) })
             assertTrue(spool.aputRefusals.isEmpty())
-            assertEquals(listOf("m2"), alicePhone.delivered.map { it.id })
+            assertEquals(listOf(fid("m2")), alicePhone.delivered.map { it.id })
             alicePhone.sync.stop()
             bobPhone.sync.stop()
         }
@@ -2491,8 +2533,16 @@ class ScopeSyncTest {
                     urls = listOf(filesUrl),
                     tickets = tickets,
                 )
-            phone.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now, attachmentHash = first), ForwardStore.ORIGIN_SELF, now)
-            phone.custody.store(dmFrame("m2", from = alice, to = bob, sentAt = now, attachmentHash = second), ForwardStore.ORIGIN_SELF, now)
+            phone.custody.store(
+                dmFrame(fid("m1"), from = alice, to = bob, sentAt = now, attachmentHash = first),
+                ForwardStore.ORIGIN_SELF,
+                now,
+            )
+            phone.custody.store(
+                dmFrame(fid("m2"), from = alice, to = bob, sentAt = now, attachmentHash = second),
+                ForwardStore.ORIGIN_SELF,
+                now,
+            )
             phone.sync.start(backgroundScope)
             pump(rounds = 16)
 
@@ -2544,7 +2594,11 @@ class ScopeSyncTest {
             val (aHash, bytes) = image()
             val tickets = filesTickets(SpoolTicketsTest.ticket(fl = SpoolTicket.FL_FILES))
             val phone = member(spool, alice, bob, blobs = FakeBlobs(aHash to bytes), urls = listOf(filesUrl), tickets = tickets)
-            phone.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now, attachmentHash = aHash), ForwardStore.ORIGIN_SELF, now)
+            phone.custody.store(
+                dmFrame(fid("m1"), from = alice, to = bob, sentAt = now, attachmentHash = aHash),
+                ForwardStore.ORIGIN_SELF,
+                now,
+            )
             phone.sync.start(backgroundScope)
             pump(rounds = 16)
             assertEquals(
@@ -2589,8 +2643,16 @@ class ScopeSyncTest {
                     urls = listOf(filesUrl),
                     tickets = tickets,
                 )
-            phone.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now, attachmentHash = big), ForwardStore.ORIGIN_SELF, now)
-            phone.custody.store(dmFrame("m2", from = alice, to = bob, sentAt = now, attachmentHash = small), ForwardStore.ORIGIN_SELF, now)
+            phone.custody.store(
+                dmFrame(fid("m1"), from = alice, to = bob, sentAt = now, attachmentHash = big),
+                ForwardStore.ORIGIN_SELF,
+                now,
+            )
+            phone.custody.store(
+                dmFrame(fid("m2"), from = alice, to = bob, sentAt = now, attachmentHash = small),
+                ForwardStore.ORIGIN_SELF,
+                now,
+            )
             phone.sync.start(backgroundScope)
             pump(rounds = 16)
             val status = phone.sync.status().single()
@@ -2653,7 +2715,11 @@ class ScopeSyncTest {
                     urls = listOf(filesUrl),
                     tickets = filesTickets(ticket),
                 )
-            phone.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now, attachmentHash = big), ForwardStore.ORIGIN_SELF, now)
+            phone.custody.store(
+                dmFrame(fid("m1"), from = alice, to = bob, sentAt = now, attachmentHash = big),
+                ForwardStore.ORIGIN_SELF,
+                now,
+            )
             phone.sync.start(backgroundScope)
             pump(rounds = 16)
             assertEquals(listOf("size"), spool.aputRefusals)
@@ -2670,7 +2736,11 @@ class ScopeSyncTest {
             pump(rounds = 40)
             assertEquals("the refused attachment is not tried again", tried, spool.aputs.size)
             // The next attachment goes up under the same ticket.
-            phone.custody.store(dmFrame("m2", from = alice, to = bob, sentAt = now, attachmentHash = small), ForwardStore.ORIGIN_SELF, now)
+            phone.custody.store(
+                dmFrame(fid("m2"), from = alice, to = bob, sentAt = now, attachmentHash = small),
+                ForwardStore.ORIGIN_SELF,
+                now,
+            )
             pump(rounds = 16)
             assertEquals(1, spool.chunkCount(scopeHex(alice, bob), aidHex(alice, bob, small)))
             assertEquals(listOf("size"), spool.aputRefusals)
@@ -2686,7 +2756,11 @@ class ScopeSyncTest {
             val bare = FakeSpool(ent = true, entGates = SpoolTicket.FL_FILES)
             val phone =
                 member(bare, alice, bob, blobs = FakeBlobs(aHash to bytes), urls = listOf(filesUrl), onUploadWanted = { wanted += it })
-            phone.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now, attachmentHash = aHash), ForwardStore.ORIGIN_SELF, now)
+            phone.custody.store(
+                dmFrame(fid("m1"), from = alice, to = bob, sentAt = now, attachmentHash = aHash),
+                ForwardStore.ORIGIN_SELF,
+                now,
+            )
             phone.sync.start(backgroundScope)
             pump(rounds = 16)
             assertTrue(wanted.isNotEmpty())
@@ -2706,7 +2780,11 @@ class ScopeSyncTest {
                     tickets = filesTickets(SpoolTicketsTest.ticket(fl = SpoolTicket.FL_FILES)),
                     onUploadWanted = { waiting += it },
                 )
-            other.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now, attachmentHash = aHash), ForwardStore.ORIGIN_SELF, now)
+            other.custody.store(
+                dmFrame(fid("m1"), from = alice, to = bob, sentAt = now, attachmentHash = aHash),
+                ForwardStore.ORIGIN_SELF,
+                now,
+            )
             other.sync.start(backgroundScope)
             pump(rounds = 16)
             assertEquals(
@@ -2738,7 +2816,11 @@ class ScopeSyncTest {
                     holdsForProof = { _, _ -> testScheduler.currentTime < roundEnds },
                     onUploadWanted = { wanted += it },
                 )
-            phone.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now, attachmentHash = aHash), ForwardStore.ORIGIN_SELF, now)
+            phone.custody.store(
+                dmFrame(fid("m1"), from = alice, to = bob, sentAt = now, attachmentHash = aHash),
+                ForwardStore.ORIGIN_SELF,
+                now,
+            )
             phone.sync.start(backgroundScope)
             pump(rounds = 3)
             // However often the scope is passed inside the round, none of them locks it or wakes anything.
@@ -2780,7 +2862,11 @@ class ScopeSyncTest {
                     holdsForProof = { _, _ -> testScheduler.currentTime < start + AttachmentDeferPolicy.PROOF_WAIT_MS },
                     onUploadWanted = { wanted += it },
                 )
-            phone.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now, attachmentHash = aHash), ForwardStore.ORIGIN_SELF, now)
+            phone.custody.store(
+                dmFrame(fid("m1"), from = alice, to = bob, sentAt = now, attachmentHash = aHash),
+                ForwardStore.ORIGIN_SELF,
+                now,
+            )
             phone.sync.start(backgroundScope)
             pump(rounds = 2)
             assertTrue("held while unproved", phone.metrics.spool().spoolAttachDeferred > 0)
@@ -2818,7 +2904,11 @@ class ScopeSyncTest {
                     tickets = tickets,
                     onUploadWanted = refresher::uploadWanted,
                 )
-            phone.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now, attachmentHash = aHash), ForwardStore.ORIGIN_SELF, now)
+            phone.custody.store(
+                dmFrame(fid("m1"), from = alice, to = bob, sentAt = now, attachmentHash = aHash),
+                ForwardStore.ORIGIN_SELF,
+                now,
+            )
             phone.sync.start(backgroundScope)
             pump(rounds = 16)
             assertEquals(
@@ -3002,7 +3092,7 @@ class ScopeSyncTest {
             val sender = member(spool, alice, bob, blobs = FakeBlobs(aHash to bytes))
             val receiver = member(spool, bob, alice)
             sender.custody.store(
-                dmFrame("m1", from = alice, to = bob, sentAt = now, attachmentHash = aHash),
+                dmFrame(fid("m1"), from = alice, to = bob, sentAt = now, attachmentHash = aHash),
                 ForwardStore.ORIGIN_SELF,
                 now,
             )
@@ -3012,7 +3102,7 @@ class ScopeSyncTest {
             pump(rounds = 16)
 
             // The frame plane is unaffected — that is what makes attachments additive.
-            assertEquals(listOf("m1"), receiver.delivered.map { it.id })
+            assertEquals(listOf(fid("m1")), receiver.delivered.map { it.id })
             // Not one attachment record went out. A v1 spool would have skipped it without answering,
             // stalling that q until the request timeout.
             assertEquals(emptyList<String>(), spool.skippedRecords)
@@ -3029,7 +3119,7 @@ class ScopeSyncTest {
             val (aHash, bytes) = image()
             val sender = member(spool, alice, bob, blobs = FakeBlobs(aHash to bytes))
             sender.custody.store(
-                dmFrame("m1", from = alice, to = bob, sentAt = now, attachmentHash = aHash),
+                dmFrame(fid("m1"), from = alice, to = bob, sentAt = now, attachmentHash = aHash),
                 ForwardStore.ORIGIN_SELF,
                 now,
             )
@@ -3059,7 +3149,7 @@ class ScopeSyncTest {
             val sender = member(spool, alice, bob, blobs = FakeBlobs(aHash to bytes))
             val receiver = member(spool, bob, alice)
             sender.custody.store(
-                dmFrame("m1", from = alice, to = bob, sentAt = now, attachmentHash = aHash),
+                dmFrame(fid("m1"), from = alice, to = bob, sentAt = now, attachmentHash = aHash),
                 ForwardStore.ORIGIN_SELF,
                 now,
             )
@@ -3093,7 +3183,7 @@ class ScopeSyncTest {
             val scope = scopeHex(alice, bob)
             val aid = aidHex(alice, bob, aHash)
             sender.custody.store(
-                dmFrame("m1", from = alice, to = bob, sentAt = now, attachmentHash = aHash),
+                dmFrame(fid("m1"), from = alice, to = bob, sentAt = now, attachmentHash = aHash),
                 ForwardStore.ORIGIN_SELF,
                 now,
             )
@@ -3138,7 +3228,7 @@ class ScopeSyncTest {
             // references the image. Custody still holds it (its own TTL is longer than this gap).
             val stale = now - ScopeRegistry.DEFAULT_TTL_MS
             sender.custody.store(
-                dmFrame("m1", from = alice, to = bob, sentAt = stale, attachmentHash = aHash),
+                dmFrame(fid("m1"), from = alice, to = bob, sentAt = stale, attachmentHash = aHash),
                 ForwardStore.ORIGIN_SELF,
                 now,
             )
@@ -3158,7 +3248,7 @@ class ScopeSyncTest {
             val (aHash, bytes) = image()
             val sender = member(spool, alice, bob, blobs = FakeBlobs(aHash to bytes), deferAttachment = { _, _ -> true })
             sender.custody.store(
-                dmFrame("m1", from = alice, to = bob, sentAt = now, attachmentHash = aHash),
+                dmFrame(fid("m1"), from = alice, to = bob, sentAt = now, attachmentHash = aHash),
                 ForwardStore.ORIGIN_SELF,
                 now,
             )
@@ -3184,7 +3274,7 @@ class ScopeSyncTest {
             var deferring = true
             val sender = member(spool, alice, bob, blobs = FakeBlobs(aHash to bytes), deferAttachment = { _, _ -> deferring })
             sender.custody.store(
-                dmFrame("m1", from = alice, to = bob, sentAt = now, attachmentHash = aHash),
+                dmFrame(fid("m1"), from = alice, to = bob, sentAt = now, attachmentHash = aHash),
                 ForwardStore.ORIGIN_SELF,
                 now,
             )
@@ -3218,7 +3308,7 @@ class ScopeSyncTest {
                     provedAttachment = { _, ref -> ref.aHash == aHash },
                 )
             sender.custody.store(
-                dmFrame("m1", from = alice, to = bob, sentAt = now, attachmentHash = aHash),
+                dmFrame(fid("m1"), from = alice, to = bob, sentAt = now, attachmentHash = aHash),
                 ForwardStore.ORIGIN_SELF,
                 now,
             )
@@ -3245,7 +3335,7 @@ class ScopeSyncTest {
             // must not starve a member of an image it is missing.
             val receiver = member(spool, bob, alice, deferAttachment = { _, _ -> true })
             sender.custody.store(
-                dmFrame("m1", from = alice, to = bob, sentAt = now, attachmentHash = aHash),
+                dmFrame(fid("m1"), from = alice, to = bob, sentAt = now, attachmentHash = aHash),
                 ForwardStore.ORIGIN_SELF,
                 now,
             )
@@ -3277,7 +3367,7 @@ class ScopeSyncTest {
                     clock = { receiverClock },
                 )
             sender.custody.store(
-                dmFrame("m1", from = alice, to = bob, sentAt = now, attachmentHash = aHash),
+                dmFrame(fid("m1"), from = alice, to = bob, sentAt = now, attachmentHash = aHash),
                 ForwardStore.ORIGIN_SELF,
                 now,
             )
@@ -3321,7 +3411,7 @@ class ScopeSyncTest {
                 member(spool, alice, bob, blobs = held, deferAttachment = { _, ref -> ref.aHash != wanted })
             images.forEachIndexed { index, (aHash, _) ->
                 sender.custody.store(
-                    dmFrame("m$index", from = alice, to = bob, sentAt = now, attachmentHash = aHash),
+                    dmFrame(fid("m$index"), from = alice, to = bob, sentAt = now, attachmentHash = aHash),
                     ForwardStore.ORIGIN_SELF,
                     now,
                 )
@@ -3350,7 +3440,14 @@ class ScopeSyncTest {
             val sender = member(spool, alice, bob, groups = listOf(group), blobs = FakeBlobs(photoHash to bytes))
             val receiver = member(spool, bob, alice, groups = listOf(group))
             sender.custody.store(
-                groupUpdateFrame("gu1", from = alice, groupId = groupId, members = roster.toList(), sentAt = now, photoHash = photoHash),
+                groupUpdateFrame(
+                    fid("gu1"),
+                    from = alice,
+                    groupId = groupId,
+                    members = roster.toList(),
+                    sentAt = now,
+                    photoHash = photoHash,
+                ),
                 ForwardStore.ORIGIN_SELF,
                 now,
             )
@@ -3359,7 +3456,7 @@ class ScopeSyncTest {
             receiver.sync.start(backgroundScope)
             pump(rounds = 16)
 
-            assertEquals(listOf("gu1"), receiver.delivered.map { it.id })
+            assertEquals(listOf(fid("gu1")), receiver.delivered.map { it.id })
             assertTrue("the group photo landed", receiver.blobs.stored.containsKey(photoHash))
             assertTrue(bytes.contentEquals(receiver.blobs.stored.getValue(photoHash)))
             // GroupInfo carries no mime, so the fetcher's fallback names it.
@@ -3466,7 +3563,7 @@ class ScopeSyncTest {
             assertTrue(sender.sync.canCast(bob, peerTicketed = false))
             assertFalse("subscribed and converged says nothing about bob", sender.sync.castCovers(bob, peerTicketed = false))
 
-            receiver.custody.store(dmFrame("m1", from = bob, to = alice, sentAt = now), ForwardStore.ORIGIN_SELF, now)
+            receiver.custody.store(dmFrame(fid("m1"), from = bob, to = alice, sentAt = now), ForwardStore.ORIGIN_SELF, now)
             receiver.sync.onCustodyChanged()
             pump()
             assertTrue("bob's own fresh frame came through this spool", sender.sync.castCovers(bob, peerTicketed = false))
@@ -3510,7 +3607,7 @@ class ScopeSyncTest {
             pump()
 
             spool.mute()
-            sender.custody.store(dmFrame("m1", from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
+            sender.custody.store(dmFrame(fid("m1"), from = alice, to = bob, sentAt = now), ForwardStore.ORIGIN_SELF, now)
             sender.sync.onCustodyChanged()
             pump(2)
             assertTrue("the round is waiting on a request the spool swallowed", spool.swallowed.isNotEmpty())
@@ -3534,7 +3631,7 @@ class ScopeSyncTest {
 
             assertEquals(1, sender.castTalk(talk(id = "forged"), sig = ByteArray(ScopeCrypto.SIG_BYTES)))
             // A chat frame is not cast, whatever the caller asks: the outward set refuses it before the seal.
-            assertEquals(0, sender.sync.cast(bob, false, dmFrame("c1", alice, bob).envelope, castSig, ByteArray(8)))
+            assertEquals(0, sender.sync.cast(bob, false, dmFrame(fid("c1"), alice, bob).envelope, castSig, ByteArray(8)))
             assertEquals(1, sender.castTalk(talk(id = "real")))
             pump(1)
             assertEquals(listOf("real"), receiver.delivered.map { it.id })

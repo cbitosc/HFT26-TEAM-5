@@ -2,6 +2,7 @@ package app.getknit.knit.mesh.lab
 
 import app.getknit.knit.call.TalkChunk
 import app.getknit.knit.call.TalkWire
+import app.getknit.knit.mesh.protocol.FrameId
 import app.getknit.knit.mesh.protocol.FrameType
 import app.getknit.knit.mesh.protocol.WireCodec
 import app.getknit.knit.mesh.spool.FakeSpool
@@ -187,7 +188,7 @@ class WalkieTalkLabTest {
             assertEquals(2, bob.decrypted(bob.dmWith(alice)).size)
             for (node in listOf(alice, bob)) {
                 val gained = node.custodyIds() - heldBefore.getValue(node)
-                assertTrue("${node.name} custodies a talk frame: $gained", gained.none { it.length == TALK_ID_CHARS })
+                assertTrue("${node.name} custodies a talk frame: $gained", gained.none { it.length == FrameId.TALK_LENGTH })
             }
         }
 
@@ -253,8 +254,6 @@ class WalkieTalkLabTest {
         // A relay that carries casts, at the rate an honest walkie needs (VOICE_CALLS.md §2.7).
         val CAST_BOUNDS = SpoolCastInfo(maxBytes = 2_048, rate = 4)
 
-        // A talk frame's id is this long (`MeshManager.TALK_ID_CHARS`, private there); every other frame's is longer.
-        const val TALK_ID_CHARS = 11
         const val CHUNKS = 6
 
         // The send log names a peer by this much of its node id (`LabTransport.NODE_ID_CHARS`).

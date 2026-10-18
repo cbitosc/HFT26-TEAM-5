@@ -269,7 +269,11 @@ a frame under someone else's id first still owns that id on that phone, so the r
 unbound ones, which is what closes the squat, partitions every build that still mints random ids.
 
 **At the break.** Mint bound ids everywhere (Android, iOS, the spool's own records if any name frames), and
-drop a frame whose id does not derive from its signed `senderId` at `verifyInbound`, before dedup.
+drop a frame whose id does not derive from its signed `senderId` at `verifyInbound`, before dedup. The shape half
+is already in: every door refuses an id that is not the shape its type is minted with (`FrameId.admits`, ADR
+2026-10.9qr4), and a profile's id is already bound to its sender that way. Keep a bound id in the `FrameId` form,
+16 derived bytes as `FrameId.forMeshPost` derives its own, and every fielded gate admits it, so minting stays
+additive; any other form is a new shape that every build before it drops.
 
 **Watch out.** Locally minted ids are not frame ids and keep their own shapes: status notices
 (`leave:…`, `rejoin:…`), `FrameId.forMeshPost` for heard Meshtastic posts. The quote check already requires the
@@ -284,8 +288,6 @@ quoted author to match, so a bound id changes nothing there except that a squatt
   makes recycling them *technically* safe, and it is still the wrong move: the registries are append-only so
   that no one ever has to reason about which build's meaning applies, and a spare bit costs nothing. Keep
   spending new numbers.
-- **`FrameId` format changes.** Not a wire break at all — every node treats an id as an opaque string
-  (`mesh/protocol/FrameId.kt` says so). It does not need to wait for anything.
 - **Anything reachable additively.** The `CTL_SCOPE_CONFIG = 7` ctl the spool plane still owes, new frame
   types, new nullable fields, a `DICT_V2` under a fresh `dictId` — all of these ship without a break, and
   putting them here would be a category error. If an item on this list turns out to be one of these, that is

@@ -1,10 +1,12 @@
 package app.getknit.knit
 
+import app.getknit.knit.identity.NodeId
 import app.getknit.knit.mesh.FakeLoopTransport
 import app.getknit.knit.mesh.InboundFrame
 import app.getknit.knit.mesh.KeyExchange
 import app.getknit.knit.mesh.MeshRouter
 import app.getknit.knit.mesh.Peer
+import app.getknit.knit.mesh.protocol.FrameId
 import app.getknit.knit.mesh.protocol.FrameType
 import app.getknit.knit.mesh.protocol.KeyReqContent
 import app.getknit.knit.mesh.protocol.ProfileContent
@@ -147,7 +149,7 @@ class KeyExchangeTest {
             // Topology: a — b — c. b holds a's profile (it's a's direct neighbor); c, two hops from a, is
             // missing a's key — the exact field gap this recovers.
             var clock = 0L
-            val a = Node("a", backgroundScope) { clock }
+            val a = Node(A, backgroundScope) { clock }
             val b = Node("b", backgroundScope) { clock }
             val c = Node("c", backgroundScope) { clock }
             a.transport.connect(b.transport)
@@ -156,11 +158,11 @@ class KeyExchangeTest {
             b.start(backgroundScope)
             c.start(backgroundScope)
 
-            b.exchange.onProfilePinned("a", profileWire("a", "KEY_A"))
+            b.exchange.onProfilePinned(A, profileWire(A, "KEY_A"))
 
-            c.exchange.want("a")
+            c.exchange.want(A)
 
-            assertEquals("KEY_A", pinnedKeyOf(c, "a"))
+            assertEquals("KEY_A", pinnedKeyOf(c, A))
         }
 
     @Test
@@ -169,8 +171,8 @@ class KeyExchangeTest {
             // a — b — c again, but b has restarted since it pinned a: nothing in its cache, only the signed
             // frame its pin came from. c's request is answered from there, and b asks nobody else for it.
             var clock = 0L
-            val a = Node("a", backgroundScope) { clock }
-            val b = Node("b", backgroundScope, stored = mapOf("a" to profileWire("a", "KEY_A"))) { clock }
+            val a = Node(A, backgroundScope) { clock }
+            val b = Node("b", backgroundScope, stored = mapOf(A to profileWire(A, "KEY_A"))) { clock }
             val c = Node("c", backgroundScope) { clock }
             a.transport.connect(b.transport)
             b.transport.connect(c.transport)
@@ -178,9 +180,9 @@ class KeyExchangeTest {
             b.start(backgroundScope)
             c.start(backgroundScope)
 
-            c.exchange.want("a")
+            c.exchange.want(A)
 
-            assertEquals("KEY_A", pinnedKeyOf(c, "a"))
+            assertEquals("KEY_A", pinnedKeyOf(c, A))
             assertEquals("b answered from its store, so recursed to no one", 0, a.keyRequestsReceived().size)
         }
 
@@ -188,19 +190,19 @@ class KeyExchangeTest {
     fun serveKeyHandsTheStoredProfileOverPointToPointAndNothingWhenNoneIsHeld() =
         runTest(UnconfinedTestDispatcher()) {
             var clock = 0L
-            val b = Node("b", backgroundScope, stored = mapOf("a" to profileWire("a", "KEY_A"))) { clock }
+            val b = Node("b", backgroundScope, stored = mapOf(A to profileWire(A, "KEY_A"))) { clock }
             val c = Node("c", backgroundScope) { clock }
             b.transport.connect(c.transport)
             b.start(backgroundScope)
             c.start(backgroundScope)
 
-            assertTrue(b.exchange.serveKey("a", Peer("c")))
+            assertTrue(b.exchange.serveKey(A, Peer("c")))
             assertFalse("no key held for z", b.exchange.serveKey("z", Peer("c")))
 
             val served = c.received.filter { it.envelope.type == FrameType.PROFILE }
-            assertEquals(listOf("a"), served.map { it.envelope.senderId })
+            assertEquals(listOf(A), served.map { it.envelope.senderId })
             assertFalse("a served key must never be flooded", served.single().wire.relay)
-            assertEquals("KEY_A", pinnedKeyOf(c, "a"))
+            assertEquals("KEY_A", pinnedKeyOf(c, A))
         }
 
     @Test
@@ -209,7 +211,7 @@ class KeyExchangeTest {
             // Topology: a — b — c — d. Only b holds a's profile; d (three hops away, via c which also lacks it)
             // recovers it through the same hop-by-hop recursion as a blob pull.
             var clock = 0L
-            val a = Node("a", backgroundScope) { clock }
+            val a = Node(A, backgroundScope) { clock }
             val b = Node("b", backgroundScope) { clock }
             val c = Node("c", backgroundScope) { clock }
             val d = Node("d", backgroundScope) { clock }
@@ -221,12 +223,12 @@ class KeyExchangeTest {
             c.start(backgroundScope)
             d.start(backgroundScope)
 
-            b.exchange.onProfilePinned("a", profileWire("a", "KEY_A"))
+            b.exchange.onProfilePinned(A, profileWire(A, "KEY_A"))
 
-            d.exchange.want("a")
+            d.exchange.want(A)
 
-            assertEquals("d recovers a's key via c→b", "KEY_A", pinnedKeyOf(d, "a"))
-            assertEquals("c caches a's key in transit", "KEY_A", pinnedKeyOf(c, "a"))
+            assertEquals("d recovers a's key via c→b", "KEY_A", pinnedKeyOf(d, A))
+            assertEquals("c caches a's key in transit", "KEY_A", pinnedKeyOf(c, A))
         }
 
     @Test
@@ -425,7 +427,7 @@ class KeyExchangeTest {
         val env =
             RelayEnvelope(
                 type = FrameType.PROFILE,
-                id = "profile-$nodeId",
+                id = FrameId.profileId(nodeId, 0L),
                 senderId = nodeId,
                 payload = WireCodec.encodePayload(ProfileContent(name = nodeId, status = "", pubKey = pubKey)),
             )
@@ -434,5 +436,9 @@ class KeyExchangeTest {
 
     private companion object {
         const val SIG_MARKER: Byte = 0x5A
+
+        // The node whose key is asked for, under a real node id: a profile frame from any other id is refused at the
+        // router's door (`FrameId.admits`, #178).
+        val A = NodeId.derive("a")
     }
 }

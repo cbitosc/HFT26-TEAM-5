@@ -4,6 +4,7 @@ import app.getknit.knit.mesh.crypto.scope.ScopeCrypto
 import app.getknit.knit.mesh.protocol.ChatContent
 import app.getknit.knit.mesh.protocol.CommonsPost
 import app.getknit.knit.mesh.protocol.EncEnvelope
+import app.getknit.knit.mesh.protocol.FrameId
 import app.getknit.knit.mesh.protocol.FrameType
 import app.getknit.knit.mesh.protocol.GroupLeaveContent
 import app.getknit.knit.mesh.protocol.RatchetHeader
@@ -304,9 +305,10 @@ object ScopeFrames {
 
     /**
      * Runs §4.4's ordered validation over a pulled or evented blob: the content address, the AEAD (which
-     * also enforces the seal version and the scope-bound aad), the envelope decode, and the frame-set
-     * rule. Returns null for **any** failure — the caller quarantines the blob id in its invalid set
-     * (§9.3) rather than retrying it, because the fault is always the uploader's and never the spool's.
+     * also enforces the seal version and the scope-bound aad), the envelope decode, the id's shape
+     * (C-4.4-14, [FrameId.admits]), and the frame-set rule. Returns null for **any** failure — the caller
+     * quarantines the blob id in its invalid set (§9.3) rather than retrying it, because the fault is always
+     * the uploader's and never the spool's.
      *
      * The returned [Opened.wire] is the custody re-serve shape: the same `signed`/`sig` bytes under a
      * fresh wrapper with a full hop budget (ttl default, hops 0), exactly what
@@ -324,6 +326,10 @@ object ScopeFrames {
         // AEAD exception on a wrong key/scope/tamper; both mean "quarantine", so collapse them here.
         val unsealed = runCatching { ScopeCrypto.open(scope.keys, scope.id, blob) }.getOrNull() ?: return null
         val env = WireCodec.decodeEnvelope(unsealed.signed) ?: return null
+        // The router refuses the same frame, but only a quarantine here keeps it from being pulled again on every
+        // connection: custody holds its unmarked twin, so §9.6 would never account it (#178). It is also the commons
+        // door's only gate, since a commons post never meets the router.
+        if (!FrameId.admits(env)) return null
         if (!eligibleFor(env, selfId, scope)) return null
         return Opened(WireEnvelope(sig = unsealed.sig, signed = unsealed.signed), env)
     }

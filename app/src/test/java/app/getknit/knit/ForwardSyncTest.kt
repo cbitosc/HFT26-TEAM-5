@@ -22,6 +22,7 @@ import app.getknit.knit.mesh.protocol.ReceiptContent
 import app.getknit.knit.mesh.protocol.RelayEnvelope
 import app.getknit.knit.mesh.protocol.WireCodec
 import app.getknit.knit.mesh.protocol.WireEnvelope
+import app.getknit.knit.mesh.protocol.frameIdOf
 import app.getknit.knit.mesh.protocol.isStorable
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -919,7 +920,7 @@ class ForwardSyncTest {
             val ack =
                 RelayEnvelope(
                     type = FrameType.RECEIPT,
-                    id = "ack-${env.id}-$id",
+                    id = frameIdOf("ack-${env.id}-$id"),
                     senderId = id,
                     // Mirrors InboundPipeline.acknowledge: sentAt = clock() (this rig's clock is fixed at 0) —
                     // custody derives the frame-global expiry from it (work item #16).
@@ -964,10 +965,10 @@ class ForwardSyncTest {
             a.start(backgroundScope)
             b.start(backgroundScope)
 
-            a.send(dm("dm1", sender = "a", recipient = "c"))
+            a.send(dm(frameIdOf("dm1"), sender = "a", recipient = "c"))
             advanceUntilIdle()
 
-            assertTrue("b carries the DM while c is away", b.store.has("dm1"))
+            assertTrue("b carries the DM while c is away", b.store.has(frameIdOf("dm1")))
 
             // c appears later, connecting only to b (a is no longer relevant).
             val c = Node("c", backgroundScope)
@@ -975,9 +976,9 @@ class ForwardSyncTest {
             b.transport.connect(c.transport)
             advanceUntilIdle()
 
-            assertEquals("c receives the carried DM exactly once", listOf("dm1"), c.delivered)
-            assertEquals("and notifies once", listOf("dm1"), c.notified)
-            assertFalse("c's ack vaccinates the carrier b", b.store.has("dm1"))
+            assertEquals("c receives the carried DM exactly once", listOf(frameIdOf("dm1")), c.delivered)
+            assertEquals("and notifies once", listOf(frameIdOf("dm1")), c.notified)
+            assertFalse("c's ack vaccinates the carrier b", b.store.has(frameIdOf("dm1")))
         }
 
     @Test
@@ -992,10 +993,10 @@ class ForwardSyncTest {
             b.start(backgroundScope)
             d.start(backgroundScope)
 
-            a.send(dm("dm1", sender = "a", recipient = "c"))
+            a.send(dm(frameIdOf("dm1"), sender = "a", recipient = "c"))
             advanceUntilIdle()
-            assertTrue("b carries the DM while c is away", b.store.has("dm1"))
-            assertTrue("d carries the DM while c is away", d.store.has("dm1"))
+            assertTrue("b carries the DM while c is away", b.store.has(frameIdOf("dm1")))
+            assertTrue("d carries the DM while c is away", d.store.has(frameIdOf("dm1")))
 
             // d wanders off before the recipient appears, so it misses the live ack flood entirely.
             a.transport.disconnect(d.transport)
@@ -1005,8 +1006,8 @@ class ForwardSyncTest {
             b.transport.connect(c.transport)
             advanceUntilIdle()
 
-            assertEquals("c receives the carried DM", listOf("dm1"), c.delivered)
-            assertFalse("the live ack vaccinates b", b.store.has("dm1"))
+            assertEquals("c receives the carried DM", listOf(frameIdOf("dm1")), c.delivered)
+            assertFalse("the live ack vaccinates b", b.store.has(frameIdOf("dm1")))
 
             // d meets b much later. The receipt is custodied like any flood frame, so b re-serves it and it
             // purges d's carried copy — the delay-tolerant half work item #16 restored (an uncustodied
@@ -1014,7 +1015,7 @@ class ForwardSyncTest {
             b.transport.connect(d.transport)
             advanceUntilIdle()
 
-            assertFalse("the custodied receipt vaccinates the late carrier d", d.store.has("dm1"))
+            assertFalse("the custodied receipt vaccinates the late carrier d", d.store.has(frameIdOf("dm1")))
         }
 
     @Test
@@ -1027,10 +1028,10 @@ class ForwardSyncTest {
             a.start(backgroundScope)
             b.start(backgroundScope)
 
-            a.send(groupMsg("g1", sender = "a", members = members))
+            a.send(groupMsg(frameIdOf("g1"), sender = "a", members = members))
             advanceUntilIdle()
 
-            assertTrue("b carries the group message while c is away", b.store.has("g1"))
+            assertTrue("b carries the group message while c is away", b.store.has(frameIdOf("g1")))
 
             // c appears later, connecting only to b (a is gone).
             val c = Node("c", backgroundScope)
@@ -1038,9 +1039,9 @@ class ForwardSyncTest {
             b.transport.connect(c.transport)
             advanceUntilIdle()
 
-            assertEquals("c receives the carried group message exactly once", listOf("g1"), c.delivered)
-            assertEquals("and notifies once", listOf("g1"), c.notified)
-            assertTrue("groups aren't vaccine-purged — b keeps carrying it until TTL", b.store.has("g1"))
+            assertEquals("c receives the carried group message exactly once", listOf(frameIdOf("g1")), c.delivered)
+            assertEquals("and notifies once", listOf(frameIdOf("g1")), c.notified)
+            assertTrue("groups aren't vaccine-purged — b keeps carrying it until TTL", b.store.has(frameIdOf("g1")))
         }
 
     @Test
@@ -1054,10 +1055,10 @@ class ForwardSyncTest {
             val bytes = "an-image-blob".toByteArray()
             a.blobStore.seed("H", "image/jpeg", bytes)
 
-            a.send(dmWithAttachment("dm1", sender = "a", recipient = "c", hash = "H"))
+            a.send(dmWithAttachment(frameIdOf("dm1"), sender = "a", recipient = "c", hash = "H"))
             advanceUntilIdle()
 
-            assertTrue("b carries the DM while c is away", b.store.has("dm1"))
+            assertTrue("b carries the DM while c is away", b.store.has(frameIdOf("dm1")))
             assertTrue("b eager-pulled + holds the image, so it can serve a late joiner", b.blobStore.has("H"))
 
             // The sender leaves entirely: a is gone, so the ONLY in-range holder for c is the carrier b. Without
@@ -1069,7 +1070,7 @@ class ForwardSyncTest {
             b.transport.connect(c.transport)
             advanceUntilIdle()
 
-            assertEquals("c receives the carried DM", listOf("dm1"), c.delivered)
+            assertEquals("c receives the carried DM", listOf(frameIdOf("dm1")), c.delivered)
             assertTrue("c pulls the custodied image from the carrier b (the sender is gone)", c.blobStore.has("H"))
             assertArrayEquals("and the bytes are intact", bytes, c.blobStore.fileFor("H")!!.readBytes())
         }

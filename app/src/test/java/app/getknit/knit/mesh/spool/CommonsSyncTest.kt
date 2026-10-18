@@ -7,9 +7,11 @@ import app.getknit.knit.mesh.ForwardStore
 import app.getknit.knit.mesh.MeshMetrics
 import app.getknit.knit.mesh.crypto.scope.ScopeCrypto
 import app.getknit.knit.mesh.protocol.ChatContent
+import app.getknit.knit.mesh.protocol.FrameId
 import app.getknit.knit.mesh.protocol.FrameType
 import app.getknit.knit.mesh.protocol.RelayEnvelope
 import app.getknit.knit.mesh.protocol.WireEnvelope
+import app.getknit.knit.mesh.protocol.frameIdOf
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
@@ -29,8 +31,12 @@ import org.junit.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class CommonsSyncTest {
     private val alice = "aaaaaaaaaaaaaaaaaaaaaaaaaa"
-    private val bob = "bbbbbbbbbbbbbbbbbbbbbbbbbb"
-    private val carol = "cccccccccccccccccccccccccc"
+    private val bob = "bbbbbbbbbbbbbbbbbbbbbbbbbe"
+    private val carol = "ccccccccccccccccccccccccce"
+
+    /** A frame id the spool door admits ([FrameId.admits]), named by a label. */
+    private fun fid(label: String) = frameIdOf(label)
+
     private val secret = ByteArray(32) { (it + 5).toByte() }
     private val otherSecret = ByteArray(32) { (it + 77).toByte() }
     private val now = 1_000L
@@ -136,9 +142,9 @@ class CommonsSyncTest {
 
     private suspend fun Member.seedOwnProfile(
         self: String,
-        id: String = "profile-$self",
+        id: String = FrameId.profileId(self, now),
     ) {
-        custody.store(profileFrame(id, self), ForwardStore.ORIGIN_SELF, now)
+        custody.store(profileFrame(id, self, sentAt = now), ForwardStore.ORIGIN_SELF, now)
     }
 
     private fun Member.post(frame: CarriedFrame) {
@@ -188,22 +194,22 @@ class CommonsSyncTest {
             val b = member(spool, bob)
             a.seedOwnProfile(alice)
             b.seedOwnProfile(bob)
-            a.post(commonsFrame("p1", alice, scopeId))
+            a.post(commonsFrame(fid("p1"), alice, scopeId))
             a.sync.start(backgroundScope)
             b.sync.start(backgroundScope)
             pump()
 
             // The profile rode the ordinary door: delivered, pinned, custodied. The post rode its own.
-            assertEquals(listOf("profile-$alice"), b.delivered.map { it.id })
-            assertTrue(b.custody.has("profile-$alice"))
-            assertEquals(listOf("p1"), b.posts.map { it.first.id })
+            assertEquals(listOf(FrameId.profileId(alice, now)), b.delivered.map { it.id })
+            assertTrue(b.custody.has(FrameId.profileId(alice, now)))
+            assertEquals(listOf(fid("p1")), b.posts.map { it.first.id })
             assertEquals(
                 "hello room",
                 b.posts
                     .single()
                     .second.body,
             )
-            assertFalse(b.custody.has("p1"))
+            assertFalse(b.custody.has(fid("p1")))
             assertTrue(alice in b.pinned)
             // Both frames named Alice a member; Bob's own profile did not name Bob one on his own device.
             assertEquals(setOf(conversationId to alice), b.commons.members.toSet())
@@ -221,7 +227,7 @@ class CommonsSyncTest {
         runTest {
             val spool = spool()
             // Alice's post lands on the spool first, then her profile — the order a listing hands Bob.
-            val (postHex, blob) = sealedPost("p1", alice)
+            val (postHex, blob) = sealedPost(fid("p1"), alice)
             spool.plantGarbage(scopeHex, blob)
             val a = member(spool, alice)
             a.seedOwnProfile(alice)
@@ -233,7 +239,7 @@ class CommonsSyncTest {
             b.sync.start(backgroundScope)
             pump()
 
-            assertEquals(listOf("p1"), b.posts.map { it.first.id })
+            assertEquals(listOf(fid("p1")), b.posts.map { it.first.id })
             assertEquals(0, b.status().invalidCount)
             // The diagnostics fold is recomputed at the start of a round, so one quiet tick reads the truth.
             tick()
@@ -246,7 +252,7 @@ class CommonsSyncTest {
     fun `a post whose author never shows a profile is given up on after a bounded wait`() =
         runTest {
             val spool = spool()
-            val (postHex, blob) = sealedPost("p1", carol)
+            val (postHex, blob) = sealedPost(fid("p1"), carol)
             spool.plantGarbage(scopeHex, blob)
             val b = member(spool, bob)
             b.seedOwnProfile(bob)
@@ -273,7 +279,7 @@ class CommonsSyncTest {
             val b = member(spool, bob)
             a.seedOwnProfile(alice)
             b.seedOwnProfile(bob)
-            a.post(commonsFrame("p1", alice, scopeId))
+            a.post(commonsFrame(fid("p1"), alice, scopeId))
             a.sync.start(backgroundScope)
             b.sync.start(backgroundScope)
             pump()
@@ -364,7 +370,7 @@ class CommonsSyncTest {
             val b = member(spool, bob)
             b.seedOwnProfile(bob)
             b.sync.start(backgroundScope)
-            repeat(6) { i -> a.post(commonsFrame("p$i", alice, scopeId, sentAt = now + i)) }
+            repeat(6) { i -> a.post(commonsFrame(fid("p$i"), alice, scopeId, sentAt = now + i)) }
             pump(16)
             assertTrue(b.status().converged)
             assertEquals(5, spool.liveIds(scopeHex).size)
@@ -375,11 +381,11 @@ class CommonsSyncTest {
         runTest {
             val spool = spool()
             // Carol is in this room and another; she re-seals a post she signed for the other room into this one.
-            val (crossHex, crossBlob) = sealedPost("x1", carol, scope = ScopeCrypto.commonsScopeId(otherSecret))
+            val (crossHex, crossBlob) = sealedPost(fid("x1"), carol, scope = ScopeCrypto.commonsScopeId(otherSecret))
             spool.plantGarbage(scopeHex, crossBlob)
-            val b = member(spool, bob, pinned = mutableSetOf(bob, carol, alice), refuse = setOf("bad1"))
+            val b = member(spool, bob, pinned = mutableSetOf(bob, carol, alice), refuse = setOf(fid("bad1")))
             b.seedOwnProfile(bob)
-            val (badHex, badBlob) = sealedPost("bad1", alice)
+            val (badHex, badBlob) = sealedPost(fid("bad1"), alice)
             spool.plantGarbage(scopeHex, badBlob)
             b.sync.start(backgroundScope)
             pump()
@@ -389,6 +395,28 @@ class CommonsSyncTest {
             tick(times = 2)
             assertEquals(1, spool.pulled.count { it == crossHex })
             assertEquals(1, spool.pulled.count { it == badHex })
+        }
+
+    @Test
+    fun `a post whose id is not canonical is quarantined and never reaches the room`() =
+        runTest {
+            // #178: the commons door never meets the router, so the spool's own gate is the only one. Android's
+            // database would file this post under the real one's message row, the mark dropped.
+            val spool = spool()
+            val (realHex, realBlob) = sealedPost(fid("p1"), alice)
+            val (twinHex, twinBlob) = sealedPost("\uFEFF" + fid("p1"), alice)
+            spool.plantGarbage(scopeHex, twinBlob)
+            spool.plantGarbage(scopeHex, realBlob)
+            val b = member(spool, bob, pinned = mutableSetOf(bob, alice))
+            b.seedOwnProfile(bob)
+            b.sync.start(backgroundScope)
+            pump()
+
+            assertEquals(listOf(fid("p1")), b.posts.map { it.first.id })
+            assertEquals(1, b.status().invalidCount)
+            tick(times = 2)
+            assertEquals("quarantined, so never pulled again", 1, spool.pulled.count { it == twinHex })
+            assertEquals(1, spool.pulled.count { it == realHex })
         }
 
     @Test
@@ -415,7 +443,7 @@ class CommonsSyncTest {
             val a = member(spool, alice)
             a.seedOwnProfile(alice)
             // Carol's profile sits in Alice's custody from the radios; it must not be re-published into the room.
-            a.custody.store(profileFrame("profile-$carol", carol), ForwardStore.ORIGIN_RELAY, now)
+            a.custody.store(profileFrame(FrameId.profileId(carol, now), carol, sentAt = now), ForwardStore.ORIGIN_RELAY, now)
             a.sync.start(backgroundScope)
             pump()
             assertEquals(1, spool.pushed.size)
@@ -435,10 +463,10 @@ class CommonsSyncTest {
             pump()
             assertTrue(b.posts.isEmpty())
 
-            a.post(commonsFrame("p1", alice, scopeId))
+            a.post(commonsFrame(fid("p1"), alice, scopeId))
             pump(2)
 
-            assertEquals(listOf("p1"), b.posts.map { it.first.id })
+            assertEquals(listOf(fid("p1")), b.posts.map { it.first.id })
             assertTrue(b.status().converged)
         }
 
@@ -446,7 +474,7 @@ class CommonsSyncTest {
     fun `leaving drops the subscription at the next reconcile, and rejoining pulls the room again`() =
         runTest {
             val spool = spool()
-            val (postHex, blob) = sealedPost("p1", alice)
+            val (postHex, blob) = sealedPost(fid("p1"), alice)
             spool.plantGarbage(scopeHex, blob)
             val rooms = mutableListOf(CommonsRoots(conversationId, url, secret))
             val b = member(spool, bob, rooms = rooms, pinned = mutableSetOf(bob, alice))
@@ -460,7 +488,7 @@ class CommonsSyncTest {
                     .single()
                     .scopes.size,
             )
-            assertEquals(listOf("p1"), b.posts.map { it.first.id })
+            assertEquals(listOf(fid("p1")), b.posts.map { it.first.id })
 
             rooms.clear()
             b.sync.onScopeTableChanged()
@@ -474,17 +502,17 @@ class CommonsSyncTest {
             )
             // A post landing while we are out is not delivered: the connection is still subscribed (no
             // `unsub` exists), so the spool fans it out, and the worker must drop it on the floor.
-            val (lateHex, lateBlob) = sealedPost("p2", alice)
+            val (lateHex, lateBlob) = sealedPost(fid("p2"), alice)
             spool.plantGarbage(scopeHex, lateBlob)
             pump(2)
-            assertEquals(listOf("p1"), b.posts.map { it.first.id })
+            assertEquals(listOf(fid("p1")), b.posts.map { it.first.id })
 
             // Rejoin on the same connection: leaving deleted the history, so the room is pulled afresh —
             // including the post this worker had already accounted before the leave.
             rooms.add(CommonsRoots(conversationId, url, secret))
             b.sync.onScopeTableChanged()
             pump(4)
-            assertEquals(listOf("p1", "p1", "p2"), b.posts.map { it.first.id })
+            assertEquals(listOf(fid("p1"), fid("p1"), fid("p2")), b.posts.map { it.first.id })
             assertEquals(2, spool.pulled.count { it == postHex })
             assertEquals(1, spool.pulled.count { it == lateHex })
             tick()

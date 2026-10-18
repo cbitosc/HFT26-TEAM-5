@@ -1,6 +1,7 @@
 package app.getknit.knit.mesh
 
 import app.getknit.knit.mesh.protocol.DEFAULT_TTL
+import app.getknit.knit.mesh.protocol.FrameId
 import app.getknit.knit.mesh.protocol.RelayEnvelope
 import app.getknit.knit.mesh.protocol.WireEnvelope
 import app.getknit.knit.mesh.spool.ScopeSync
@@ -89,6 +90,13 @@ class MeshRouter(
         fromNodeId: String,
         kind: TransportKind = TransportKind.Other,
     ) {
+        // Before the dedup, the meter and the verify: Android's database drops a leading U+FEFF from every id it binds,
+        // so a twin under "\uFEFF" + X would pass the in-memory SeenSet and then take X's custody and message rows
+        // (#178). Not marked seen, never relayed.
+        if (!FrameId.admits(envelope)) {
+            metrics.onDropped(DropReason.NONCANONICAL_ID)
+            return
+        }
         // The ingress meter sits between the dedup *check* and the dedup *add*: a duplicate is never metered
         // (it is evidence of propagation, not a cost — see countOverheard), and a refused frame is never
         // marked seen, so the custody re-serve can bring it through later. The gap between the two lets the

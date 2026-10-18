@@ -4,12 +4,14 @@ import app.getknit.knit.mesh.crypto.scope.ScopeCrypto
 import app.getknit.knit.mesh.protocol.ChatContent
 import app.getknit.knit.mesh.protocol.CommonsPost
 import app.getknit.knit.mesh.protocol.EncEnvelope
+import app.getknit.knit.mesh.protocol.FrameId
 import app.getknit.knit.mesh.protocol.FrameType
 import app.getknit.knit.mesh.protocol.GroupInfo
 import app.getknit.knit.mesh.protocol.RatchetHeader
 import app.getknit.knit.mesh.protocol.RatchetInit
 import app.getknit.knit.mesh.protocol.RelayEnvelope
 import app.getknit.knit.mesh.protocol.WireCodec
+import app.getknit.knit.mesh.protocol.frameIdOf
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -25,8 +27,8 @@ import org.junit.Test
  */
 class ScopeFramesTest {
     private val alice = "aaaaaaaaaaaaaaaaaaaaaaaaaa"
-    private val bob = "bbbbbbbbbbbbbbbbbbbbbbbbbb"
-    private val carol = "cccccccccccccccccccccccccc"
+    private val bob = "bbbbbbbbbbbbbbbbbbbbbbbbbe"
+    private val carol = "ccccccccccccccccccccccccce"
     private val mallory = "mmmmmmmmmmmmmmmmmmmmmmmmmm"
     private val root = ByteArray(32) { it.toByte() }
 
@@ -106,13 +108,13 @@ class ScopeFramesTest {
 
     @Test
     fun `opens a well-formed blob back into its verbatim custody unit`() {
-        val frame = dmFrame("m1", from = bob, to = alice)
+        val frame = dmFrame(frameIdOf("m1"), from = bob, to = alice)
         val sealed = ScopeFrames.seal(scope(), frame.sig, frame.signed)
         val opened = ScopeFrames.open(scope(), alice, sealed.blobId, sealed.blob)
         assertNotNull(opened)
         assertArrayEquals(frame.sig, opened!!.wire.sig)
         assertArrayEquals(frame.signed, opened.wire.signed)
-        assertEquals("m1", opened.env.id)
+        assertEquals(frameIdOf("m1"), opened.env.id)
         // §9.4's re-serve shape: a fresh wrapper with a full hop budget, not the sender's counters.
         assertEquals(0, opened.wire.hops)
         assertTrue(opened.wire.ttl > 0)
@@ -120,7 +122,7 @@ class ScopeFramesTest {
 
     @Test
     fun `quarantines a mismatched content address, a tampered blob, and a foreign scope`() {
-        val frame = dmFrame("m1", from = bob, to = alice)
+        val frame = dmFrame(frameIdOf("m1"), from = bob, to = alice)
         val sealed = ScopeFrames.seal(scope(), frame.sig, frame.signed)
 
         val wrongId = ScopeCrypto.blobId(byteArrayOf(9, 9, 9))
@@ -142,9 +144,27 @@ class ScopeFramesTest {
     fun `a blob whose frame fails the frame-set rule is refused even though it opens`() {
         // A blob sealed correctly into the scope but carrying a frame addressed to someone else: the
         // uploader is a scope member, so only the frame-set rule catches this.
-        val foreign = dmFrame("m9", from = alice, to = mallory)
+        val foreign = dmFrame(frameIdOf("m9"), from = alice, to = mallory)
         val sealed = ScopeFrames.seal(scope(), foreign.sig, foreign.signed)
         assertNull(ScopeFrames.open(scope(), alice, sealed.blobId, sealed.blob))
+    }
+
+    @Test
+    fun `a blob whose frame id is not canonical is refused even though it opens and its frame is eligible`() {
+        // #178: the router refuses the same frame, but only refusing it here quarantines the blob. Android's database
+        // drops the mark, so custody would hold its unmarked twin and §9.6 would never account it: re-pulled forever.
+        val real = frameIdOf("m1")
+        for (crafted in listOf("\uFEFF$real", "m1")) {
+            val frame = dmFrame(crafted, from = bob, to = alice)
+            assertTrue(ScopeFrames.eligibleFor(frame.envelope, alice, scope()))
+            val sealed = ScopeFrames.seal(scope(), frame.sig, frame.signed)
+            assertNull(crafted, ScopeFrames.open(scope(), alice, sealed.blobId, sealed.blob))
+        }
+        // The commons door's only gate: a post never meets the router.
+        val scope = commonsScope()
+        val post = commonsFrame("\uFEFF$real", alice, commonsId)
+        val blob = ScopeCrypto.seal(scope.keys, scope.id, post.sig, post.signed)
+        assertNull(ScopeFrames.open(scope, alice, ScopeCrypto.blobId(blob), blob))
     }
 
     @Test
@@ -253,11 +273,11 @@ class ScopeFramesTest {
 
     @Test
     fun `a profile blob round-trips through the seal and the frame-set rule`() {
-        val frame = profileFrame("p5", from = bob)
+        val frame = profileFrame(FrameId.profileId(bob, 1_000L), from = bob, sentAt = 1_000L)
         val sealed = ScopeFrames.seal(scope(), frame.sig, frame.signed)
         val opened = ScopeFrames.open(scope(), alice, sealed.blobId, sealed.blob)
         assertNotNull(opened)
-        assertEquals("p5", opened!!.env.id)
+        assertEquals(FrameId.profileId(bob, 1_000L), opened!!.env.id)
         assertArrayEquals(frame.signed, opened.wire.signed)
     }
 
@@ -269,12 +289,12 @@ class ScopeFramesTest {
 
     @Test
     fun `a group blob round-trips through the seal and the frame-set rule`() {
-        val frame = groupChatFrame("gc3", from = bob, groupId = groupId, members = founding.toList())
+        val frame = groupChatFrame(frameIdOf("gc3"), from = bob, groupId = groupId, members = founding.toList())
         val sealed = ScopeFrames.seal(groupScope(), frame.sig, frame.signed)
         val opened = ScopeFrames.open(groupScope(), alice, sealed.blobId, sealed.blob)
         assertNotNull(opened)
         assertArrayEquals(frame.signed, opened!!.wire.signed)
-        assertEquals("gc3", opened.env.id)
+        assertEquals(frameIdOf("gc3"), opened.env.id)
         // A rotated scope (fresh root, bumped version) cannot open the old lineage's blob — the aad binds
         // the scope id, and §3.3 says old blobs are never migrated.
         assertNull(ScopeFrames.open(groupScope(secret = ByteArray(32) { 99 }, version = 2), alice, sealed.blobId, sealed.blob))
@@ -473,10 +493,10 @@ class ScopeFramesTest {
     fun `open refuses a post re-sealed from another room even under the right key`() {
         val scope = commonsScope()
         val otherRoom = ScopeCrypto.commonsScopeId(ByteArray(32) { (it + 41).toByte() })
-        val foreign = commonsFrame("x1", alice, otherRoom)
+        val foreign = commonsFrame(frameIdOf("x1"), alice, otherRoom)
         val blob = ScopeCrypto.seal(scope.keys, scope.id, foreign.sig, foreign.signed)
         assertNull(ScopeFrames.open(scope, alice, ScopeCrypto.blobId(blob), blob))
-        val own = commonsFrame("p1", alice, commonsId)
+        val own = commonsFrame(frameIdOf("p1"), alice, commonsId)
         val good = ScopeCrypto.seal(scope.keys, scope.id, own.sig, own.signed)
         assertNotNull(ScopeFrames.open(scope, alice, ScopeCrypto.blobId(good), good))
     }

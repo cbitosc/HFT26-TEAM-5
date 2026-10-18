@@ -18,6 +18,7 @@ import app.getknit.knit.mesh.protocol.GroupInfo
 import app.getknit.knit.mesh.protocol.RelayEnvelope
 import app.getknit.knit.mesh.protocol.WireCodec
 import app.getknit.knit.mesh.protocol.WireEnvelope
+import app.getknit.knit.mesh.protocol.frameIdOf
 import app.getknit.knit.mesh.spool.ScopeSync
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -72,9 +73,9 @@ class MeshRouterTest {
         ): Boolean = true
     }
 
-    /** Builds a (wrapper, envelope) pair for an addressed-or-broadcast frame, chat by default. */
+    /** Builds a (wrapper, envelope) pair for an addressed-or-broadcast frame, chat by default, under [label]'s id. */
     private fun frame(
-        id: String,
+        label: String,
         ttl: Int = DEFAULT_TTL,
         hops: Int = 0,
         recipientId: String? = null,
@@ -85,7 +86,7 @@ class MeshRouterTest {
         val env =
             RelayEnvelope(
                 type = type,
-                id = id,
+                id = frameIdOf(label),
                 senderId = "a",
                 sentAt = 0L,
                 recipientId = recipientId,
@@ -335,7 +336,7 @@ class MeshRouterTest {
             router.handleInbound(wire, env, fromNodeId = "c") // a duplicate is never a second hand-on
             advanceUntilIdle()
 
-            assertEquals(listOf("tick1" to setOf("z")), relayed)
+            assertEquals(listOf(frameIdOf("tick1") to setOf("z")), relayed)
         }
 
     @Test
@@ -360,7 +361,7 @@ class MeshRouterTest {
             ra.originate(wire, env.id)
             advanceUntilIdle() // let b's jittered relay fire so the frame reaches c
 
-            assertEquals(listOf("m1"), deliveredAtC)
+            assertEquals(listOf(frameIdOf("m1")), deliveredAtC)
         }
 
     /**
@@ -380,7 +381,7 @@ class MeshRouterTest {
             router.handleInbound(wire, env, fromNodeId = "b")
             advanceUntilIdle()
 
-            assertEquals(listOf("m1" to setOf("c", "d")), relayed)
+            assertEquals(listOf(frameIdOf("m1") to setOf("c", "d")), relayed)
         }
 
     @Test
@@ -617,7 +618,7 @@ class MeshRouterTest {
             router.handleInbound(w2, e2, fromNodeId = "b") // refused: not delivered, not relayed, not seen
             advanceUntilIdle()
 
-            assertEquals(listOf("m1"), delivered)
+            assertEquals(listOf(frameIdOf("m1")), delivered)
             assertEquals(1, transport.sent.size)
             assertEquals(1L, metrics.frames().dropsByReason[DropReason.INGRESS_REFUSED])
 
@@ -626,7 +627,7 @@ class MeshRouterTest {
             now += 1_000L
             router.handleInbound(w2, e2, fromNodeId = "b")
             advanceUntilIdle()
-            assertEquals(listOf("m1", "m2"), delivered)
+            assertEquals(listOf(frameIdOf("m1"), frameIdOf("m2")), delivered)
         }
 
     @Test
@@ -658,8 +659,38 @@ class MeshRouterTest {
             router.handleInbound(wd, ed, fromNodeId = "b")
             advanceUntilIdle()
 
-            assertEquals(listOf("m1", "dm1"), delivered)
+            assertEquals(listOf(frameIdOf("m1"), frameIdOf("dm1")), delivered)
             assertEquals(null, metrics.frames().dropsByReason[DropReason.INGRESS_REFUSED])
             assertEquals(2L, metrics.frames().framesDeduped)
+        }
+
+    @Test
+    fun aFrameWhoseIdIsNotCanonicalIsRefusedBeforeDeliveryRelayAndDedup() =
+        runTest {
+            // #178: SQLite drops a leading U+FEFF from every id Android binds, so this twin would pass the in-memory
+            // dedup and then take the real frame's custody and message rows. The door refuses it first.
+            val transport = RecordingTransport(setOf("b", "c"))
+            val metrics = MeshMetrics()
+            val delivered = mutableListOf<String>()
+            val router = MeshRouter(transport, this, metrics = metrics, jitter = { 0L }) { _, env, _, _ -> delivered += env.id }
+            val (wire, env) = frame("m1")
+            val twin = RelayEnvelope(type = env.type, id = "\uFEFF" + env.id, senderId = "a", payload = ByteArray(0))
+            val twinWire = WireEnvelope(sig = ByteArray(0), signed = WireCodec.encodeEnvelope(twin))
+
+            router.handleInbound(twinWire, twin, fromNodeId = "b")
+            advanceUntilIdle()
+            assertEquals(emptyList<String>(), delivered)
+            assertTrue("a refused frame is never relayed", transport.sent.isEmpty())
+            assertEquals(1L, metrics.frames().dropsByReason[DropReason.NONCANONICAL_ID])
+
+            // Refused, not seen: the real frame behind it is delivered and relayed as if the twin had never come, and
+            // the twin is refused again, not deduplicated.
+            router.handleInbound(wire, env, fromNodeId = "b")
+            router.handleInbound(twinWire, twin, fromNodeId = "c")
+            advanceUntilIdle()
+            assertEquals(listOf(env.id), delivered)
+            assertEquals(setOf("c"), transport.sent.mapNotNull { it.second?.nodeId }.toSet())
+            assertEquals(2L, metrics.frames().dropsByReason[DropReason.NONCANONICAL_ID])
+            assertEquals(0L, metrics.frames().framesDeduped)
         }
 }

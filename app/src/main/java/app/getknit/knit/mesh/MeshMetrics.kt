@@ -106,6 +106,13 @@ enum class DropReason {
     INGRESS_REFUSED,
 
     /**
+     * A frame whose id is not the shape its type is minted with (`FrameId.admits`, ADR 2026-10.9qr4) — refused in
+     * [MeshRouter] before verify, custody, delivery and relay, and never marked seen. No build mints one, so a count
+     * here is a crafted frame or a port that mints a new shape, which every build before it drops.
+     */
+    NONCANONICAL_ID,
+
+    /**
      * A verified frame whose `payload` wouldn't decode into its type's content: a field of the wrong CBOR type, a
      * missing required one, text that isn't UTF-8. Counted where the pipeline reads the payload, so a regressed
      * encoder on another port shows here instead of vanishing (the interop audit's AND-12).

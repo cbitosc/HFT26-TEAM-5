@@ -90,6 +90,7 @@ import app.getknit.knit.mesh.lora.LoraConfig
 import app.getknit.knit.mesh.lora.LoraGossipPolicy
 import app.getknit.knit.mesh.lora.LoraMeshTransport
 import app.getknit.knit.mesh.lora.LoraPacePolicy
+import app.getknit.knit.mesh.protocol.ChatContent
 import app.getknit.knit.mesh.protocol.FrameType
 import app.getknit.knit.mesh.protocol.PrekeyInfo
 import app.getknit.knit.mesh.protocol.ProfileContent
@@ -1594,6 +1595,26 @@ class LabNode internal constructor(
         val signed = WireCodec.encodeEnvelope(env)
         transport.send(WireEnvelope(sig = messageCrypto.signRaw(signed), signed = signed), null)
         return phantom
+    }
+
+    /**
+     * Floods over this node's links a Nearby-room post signed by this node under an id it chose, [id], rather than one
+     * it minted — what a modified client can send (#178). Nothing is stored here: the post goes straight to the air.
+     */
+    suspend fun floodRoomPostUnder(
+        id: String,
+        text: String,
+    ) {
+        val env =
+            RelayEnvelope(
+                type = FrameType.CHAT,
+                id = id,
+                senderId = nodeId,
+                sentAt = now(),
+                payload = WireCodec.encodePayload(ChatContent(body = text)),
+            )
+        val signed = WireCodec.encodeEnvelope(env)
+        transport.send(WireEnvelope(sig = messageCrypto.signRaw(signed), signed = signed), null)
     }
 
     /** Sends into a group this node holds, quoting [replyTo] when given; the frame the chat screen's composer would send. */

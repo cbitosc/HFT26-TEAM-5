@@ -3349,7 +3349,7 @@ class MeshManager(
      *    cannot carry);
      *  - it is unsigned, because the seal authenticates it to its addressee (the ADR 059 argument), and a relay never
      *    needs to read it;
-     *  - its id is [TALK_ID_CHARS] of a fresh one: it is a dedup key for minutes and nothing else.
+     *  - its id is [FrameId.TALK_LENGTH] characters of a fresh one: it is a dedup key for minutes and nothing else.
      * No node custodies it, and it never rides LoRa. A live neighbour takes it alone, over its quickest link
      * ([MeshTransport.sendLive]), and relays it nowhere (ttl 0); anyone further gets a flood of at most [TALK_TTL] relays.
      *
@@ -3377,7 +3377,7 @@ class MeshManager(
         val peer = peers.find(peerId)
         val bundle = peer?.pubKey?.let { PublicKeyBundle.decode(it) } ?: return null
         val me = identity.nodeId()
-        val id = FrameId.new().take(TALK_ID_CHARS)
+        val id = FrameId.new().take(FrameId.TALK_LENGTH)
         val now = clock()
         val aad = MessageCrypto.header(id, me, now, peerId)
         val scheme = if (peer.readsCryptoV3()) EncEnvelope.VERSION_DM_V3 else EncEnvelope.VERSION_RATCHET
@@ -3538,7 +3538,7 @@ class MeshManager(
             )
         return RelayEnvelope(
             type = FrameType.PROFILE,
-            id = "profile-$me-$publishedAt",
+            id = FrameId.profileId(me, publishedAt),
             senderId = me,
             sentAt = publishedAt,
             payload = WireCodec.encodePayload(content),
@@ -4119,9 +4119,6 @@ class MeshManager(
 
         /** Relays a walkie chunk to a peer that is not a neighbour may take: reach of four hops, not the mesh's whole. */
         const val TALK_TTL = 3
-
-        /** A walkie chunk's id: 66 random bits, ample for a dedup key that lives minutes, and 11 bytes off every chunk. */
-        const val TALK_ID_CHARS = 11
 
         /** Payload for a frame whose content lives entirely in the routing envelope (e.g. a group update). */
         val EMPTY_PAYLOAD = ByteArray(0)

@@ -15,7 +15,9 @@ can evolve *additively* without another break. The three layers:
   bomb). `sig`/`signed`/`payload` are `@ByteString ByteArray` (opaque), never nested objects.
 - `RelayEnvelope` (what `signed` decodes to): the cleartext routing fields a relay/carrier needs —
   `type` (a plain **string** discriminator, so an unknown future type decodes instead of throwing),
-  `id`, `senderId`, `sentAt`, `recipientId`, `group` — plus the opaque per-type `payload`.
+  `id`, `senderId`, `sentAt`, `recipientId`, `group` — plus the opaque per-type `payload`. The `id` is not opaque
+  on the way in: every door refuses one that is not the shape its type is minted with (`FrameId.admits`, ADR
+  2026-10.9qr4; `docs/WIRE_COMPAT.md` rule 7).
 - Per-type content (`ChatContent`, `ProfileContent`, `GroupLeaveContent`, `ReceiptContent`,
   `ReactionContent`, `BlobReqContent`, `BlobHaveContent`, `BlobHasContent`, `KeyReqContent`, `TypingContent`) lives
   inside `payload`; only endpoints parse it. Current `type`s: `chat`, `groupupdate`, `profile`, `receipt`, `reaction`,

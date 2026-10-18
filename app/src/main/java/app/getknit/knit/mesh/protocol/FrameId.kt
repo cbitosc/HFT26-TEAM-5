@@ -1,5 +1,6 @@
 package app.getknit.knit.mesh.protocol
 
+import app.getknit.knit.identity.NodeId
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Base64
@@ -10,8 +11,13 @@ import java.util.Base64
  * hyphens — for the same entropy). The id is opaque and forwarded verbatim (it is the dedup key, the
  * custody key, and what a receipt/reaction references), so only uniqueness matters; a tighter encoding
  * just trims every chat/reaction/receipt frame that carries one. base64url (`[A-Za-z0-9_-]`, no padding)
- * keeps it CBOR-text-, URL-, and filename-safe. Changing this format is *not* a wire break — every node
- * treats the id as an opaque string — as long as it stays collision-resistantly unique.
+ * keeps it CBOR-text-, URL-, and filename-safe.
+ *
+ * **Not opaque on the way in** (ADR 2026-10.9qr4, #178). Every inbound door refuses a frame whose id is not one of the
+ * three shapes [admits] names, so changing this format, or minting any other shape, is a wire break: every build
+ * that ships before the change drops the new ids. The gate exists because Android's database binds every string as
+ * UTF-16, and SQLite drops one leading U+FEFF there (and byte-swaps the rest after a leading U+FFFE): an id that is
+ * opaque to Kotlin and an iPhone is one custody and message row with its unmarked twin on this phone.
  */
 object FrameId {
     /** The raw width of an id minted here. */
@@ -19,6 +25,14 @@ object FrameId {
 
     /** The text width of an id minted here (`ceil(128 / 6)`, unpadded). */
     const val LENGTH = 22
+
+    /**
+     * A walkie chunk's id width: the first characters of a fresh id, 66 random bits — ample for a dedup key that lives
+     * minutes, and 11 bytes off every chunk (`MeshManager.sendCallTalk`).
+     */
+    const val TALK_LENGTH = 11
+
+    private const val BASE64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
 
     private val rng = SecureRandom()
     private val encoder = Base64.getUrlEncoder().withoutPadding()
@@ -41,6 +55,32 @@ object FrameId {
         val bytes = runCatching { decoder.decode(id) }.getOrNull() ?: return null
         return bytes.takeIf { it.size == ID_BYTES && encoder.encodeToString(it) == id }
     }
+
+    /**
+     * Whether an inbound [env] carries an id of the shape its type is minted with — the gate every door asks before
+     * anything dedups, custodies, stores or relays the frame (`MeshRouter.handleInbound`, `ScopeFrames.open`):
+     *  - a `profile`: exactly `profile-<senderId>-<sentAt>`, the sender a canonical node id and the stamp in decimal,
+     *    which is what every build and the iOS port mint (`MeshManager.ownProfile`). Bound to the sender, so nobody
+     *    can file a frame under another node's profile id;
+     *  - a `talk`: [TALK_LENGTH] base64url characters, the prefix of a fresh id a walkie chunk carries;
+     *  - anything else, an unknown type included: exactly what [new] mints ([toBytesOrNull]).
+     *
+     * Every shape is ASCII, so no id this admits has a leading U+FEFF or U+FFFE for SQLite to drop or swap: two ids
+     * that differ in Kotlin differ in every table. It does not stop a frame filed under another frame's exact id
+     * (`docs/NEXT_WIRE_BREAK.md` §10): that needs ids bound to their author.
+     */
+    fun admits(env: RelayEnvelope): Boolean =
+        when (env.type) {
+            FrameType.PROFILE -> NodeId.toBytesOrNull(env.senderId) != null && env.id == profileId(env.senderId, env.sentAt)
+            FrameType.TALK -> env.id.length == TALK_LENGTH && env.id.all { it in BASE64URL }
+            else -> toBytesOrNull(env.id) != null
+        }
+
+    /** The id of [senderId]'s profile published at [publishedAt] — the frame's `sentAt` is the same stamp. */
+    fun profileId(
+        senderId: String,
+        publishedAt: Long,
+    ): String = "profile-$senderId-$publishedAt"
 
     /** The id string for [bytes] (inverse of [toBytesOrNull]; [bytes] must be [ID_BYTES] wide). */
     fun fromBytes(bytes: ByteArray): String {

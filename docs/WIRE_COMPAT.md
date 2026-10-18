@@ -81,6 +81,12 @@ Each evolves independently; bump the right one:
    an empty map as `null` for a nullable nested field, while iOS reads it as an object with its defaults,
    or fails the whole payload. A nested type whose every field is defaulted can encode as `{}` and then
    means two things. A required field keeps the map non-empty. `IosPayloadShapesTest` pins the quirk.
+7. **An envelope `id` has the shape its type is minted with** (`FrameId.admits`, ADR 2026-10.9qr4): a `profile`
+   is `profile-<senderId>-<sentAt>`, a `talk` is 11 base64url characters, and every other type, an unknown one
+   included, is a `FrameId.new` id (22 base64url characters that round-trip through 16 bytes). Every inbound door
+   refuses any other id before dedup, custody or relay, because Android's database drops a leading U+FEFF from
+   every id it binds and would file the frame under another's row. A new frame type mints a `FrameId`; a new
+   id shape is a break.
 
 ## Vectors other ports test against
 
@@ -97,7 +103,8 @@ the iOS port fails the same day.
 `SERVICE_NAME` *and* BLE `SERVICE_UUID` — plus the DB version) if it: removes, renames, re-types, or
 repurposes a field or a `type`; changes `WireCodec`'s config or the `@ByteString` opacity of
 `signed`/`sig`/`payload`; changes what `signed` is signed over, the AEAD `header`, the `NodeId`
-derivation, or a discovery marker; or makes `RelayEnvelope.type` polymorphic.
+derivation, or a discovery marker; makes `RelayEnvelope.type` polymorphic; or mints an envelope `id` of a shape
+rule 7 does not name (every build before it drops the frame at the door).
 
 **Additive** (safe) if it only adds a nullable/defaulted field to a content/envelope type, a new `type`
 string with its own content class, or a new capability bit — and rule 4 holds.

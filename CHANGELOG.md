@@ -83,6 +83,8 @@ document:
 - A modified copy of Knit nearby could make yours close when you wrote to it, or stop your phone noticing new
   phones until Knit restarted. Knit now stays open and sends to that copy with its older encryption, or holds
   the message back.
+- A modified copy of Knit nearby could hold a message back from your phone for up to a day by sending a fake
+  of it first. Knit now turns the fake away, so the real message arrives.
 - If you read more than 128 of someone's Nearby room posts before you next met, their phone showed your double
   tick on only 128 of them. It now shows on all of them.
 
