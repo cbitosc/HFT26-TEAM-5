@@ -2608,19 +2608,29 @@ class ScopeSyncTest {
     fun `the last hello's attachments and gates are kept for a photo staged while the relay is down`() =
         runTest {
             val spool = FakeSpool(ent = true, entGates = SpoolTicket.FL_FILES)
-            val phone = member(spool, alice, bob, urls = listOf(filesUrl))
-            assertNull(
-                phone.sync
-                    .status()
-                    .singleOrNull()
-                    ?.seenGates,
-            )
-            phone.sync.start(backgroundScope)
+            var down = false
+            val dialer =
+                object : SpoolDialer {
+                    override suspend fun dial(url: String): SpoolSocket? = if (down) null else spool.dial(url)
+                }
+            val phone = lone(dialer, urls = listOf(filesUrl))
+            assertNull(phone.status().singleOrNull()?.seenGates)
+            phone.start(backgroundScope)
             pump(rounds = 8)
-            val seen = phone.sync.status().single()
-            assertEquals(true, seen.seenAttachments)
-            assertEquals(SpoolTicket.FL_FILES, seen.seenGates)
-            phone.sync.stop()
+            val up = phone.status().single()
+            assertTrue(up.connected)
+            assertEquals(true, up.seenAttachments)
+            assertEquals(SpoolTicket.FL_FILES, up.seenGates)
+            // The relay goes away and stays away: the status forgets the live hello, not what it said.
+            down = true
+            spool.dropSockets()
+            pump(rounds = 8)
+            val gone = phone.status().single()
+            assertFalse(gone.connected)
+            assertNull(gone.maxAttachBytes)
+            assertEquals(true, gone.seenAttachments)
+            assertEquals(SpoolTicket.FL_FILES, gone.seenGates)
+            phone.stop()
         }
 
     @Test
