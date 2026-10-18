@@ -89,6 +89,7 @@ internal class RatchetGroupVectors(
             add(groupRoot())
             add(groupRestoreRemint())
             add(groupRetiredChain())
+            add(groupSkippedPerMint())
         }
 
     private val firstSendAlice =
@@ -381,6 +382,98 @@ internal class RatchetGroupVectors(
             openCtl("bob", founded.seedDms.getValue("bob"), t0 + 41 * SECOND, note = "then the earlier one: another epoch, adopted")
             groupOpen("bob", after.frame, t0 + 42 * SECOND, OPENED, message(after.frame))
             groupOpen("bob", founded.frame, t0 + 43 * SECOND, OPENED, message(founded.frame))
+        }.t
+            .json()
+
+    private val perMintAlice: List<Draw> =
+        listOf(Draw.Key(235), Draw.Key(236), Draw.Iv(237)) +
+            listOf(Draw.GroupSeed(238), Draw.Iv(239), Draw.Iv(240), Draw.Key(241), Draw.Key(242), Draw.Iv(243)) +
+            (244..246).map { Draw.Iv(it) } +
+            listOf(Draw.Key(247), Draw.Key(248), Draw.Iv(249), Draw.Key(250), Draw.Key(251), Draw.Iv(252)) +
+            listOf(Draw.GroupSeed(253), Draw.Iv(254), Draw.Iv(255), Draw.Iv(256)) +
+            (257..259).map { Draw.Iv(it) }
+
+    /**
+     * [groupSkippedPerMint]'s two eras: Bob adopts Alice's first mint of epoch 1, she sends four frames, restores, resets
+     * him and re-mints with four more, and he adopts the re-mint too. Returns each era's frames, n 0 to 3.
+     */
+    private suspend fun GroupWorld.twoMints(): Pair<List<TranscriptFrame>, List<TranscriptFrame>> {
+        val hi = t.seal("alice", "bob", "Hi Bob", t0, v3 = false)
+        t.open("bob", hi, t0 + SECOND, OPENED, applies = dmMessage(hi))
+        val firstOld = groupSend("alice", MessageContent(body = "Old 0"), t0 + 10 * SECOND, note = "mints epoch 1")
+        val old =
+            listOf(firstOld.frame) +
+                (1..3).map {
+                    groupSend(
+                        "alice",
+                        MessageContent(body = "Old $it"),
+                        t0 + (10 + it) * SECOND,
+                        note = "held: Bob hears it late",
+                    ).frame
+                }
+        openCtl("bob", firstOld.seedDms.getValue("bob"), t0 + 15 * SECOND, note = "the first mint: adopted")
+        restore("alice", t0 + 60 * SECOND)
+        val resets =
+            listOf("bob", "carol").associateWith {
+                checkNotNull(
+                    t.reset(
+                        "alice",
+                        it,
+                        t0 + 61 * SECOND,
+                        ResetCause.AFTER_WIPE,
+                        "REROOT",
+                        decidedBy = "state.session is null: the restore emptied it",
+                    ),
+                )
+            }
+        val firstNew =
+            groupSend("alice", MessageContent(body = "New 0"), t0 + 70 * SECOND, note = "epoch 1 again, a newer mintedAt")
+        val new =
+            listOf(firstNew.frame) +
+                (1..3).map { groupSend("alice", MessageContent(body = "New $it"), t0 + (70 + it) * SECOND).frame }
+        t.open("bob", resets.getValue("bob"), t0 + 80 * SECOND, OPENED, applies = resetApplies())
+        openCtl(
+            "bob",
+            firstNew.seedDms.getValue("bob"),
+            t0 + 81 * SECOND,
+            note = "the re-mint: adopted beside the first, whose rows drain for 48 h",
+        )
+        return old to new
+    }
+
+    private suspend fun groupSkippedPerMint(): JsonObject =
+        world(
+            "groupSkippedPerMint",
+            "#177 (commit 458c2eee, GroupRatchetEngine.OpenDelta.consumedSkippedMintedAt): a skipped key is spent by its " +
+                "mint, never by its index alone. Bob adopts Alice's epoch 1 and she sends four frames he does not hear yet; " +
+                "she restores a backup (ADR 2026-09.6mj7), resets him, and mints epoch 1 again under a newer mintedAt, with " +
+                "four more frames. Bob adopts the re-mint too, so he holds both eras' chains for the epoch (GFS §4 rule 5: " +
+                "receivers key rows by (group, sender, epoch, mintedAt)). Each era's n 3 opens on its own chain and banks n " +
+                "0 to 2 as skipped keys under its own mint: two keys at each index. n 1 opens the new era's first, then the " +
+                "old era's; n 2 the other way round. Every open spends only its own mint's key: before #177 spending one " +
+                "deleted both, and the other era's frame at that index read as DUPLICATE for good, since both chains are " +
+                "past it and a re-sent seed never rewinds a chain. A re-serve of either n 1 past SeenSet.DEFAULT_TTL_MS is " +
+                "then DUPLICATE at the group engine.",
+            mapOf("alice" to perMintAlice),
+            holdsAtStart = setOf("alice"),
+        ).apply {
+            val (old, new) = twoMints()
+            groupOpen("bob", old[3], t0 + 90 * SECOND, OPENED, message(old[3]), note = "the old era's n 3: its n 0 to 2 banked")
+            groupOpen("bob", new[3], t0 + 91 * SECOND, OPENED, message(new[3]), note = "the new era's n 3: a second key at each index")
+            groupOpen("bob", new[1], t0 + 92 * SECOND, OPENED, message(new[1]), note = "spends the new mint's key at n 1, only")
+            groupOpen("bob", old[1], t0 + 93 * SECOND, OPENED, message(old[1]), note = "the old mint's key at n 1 is still there")
+            groupOpen("bob", old[2], t0 + 94 * SECOND, OPENED, message(old[2]), note = "the other order at n 2")
+            groupOpen("bob", new[2], t0 + 95 * SECOND, OPENED, message(new[2]))
+            for ((i, frame) in listOf(old[1], new[1]).withIndex()) {
+                groupOpen(
+                    "bob",
+                    frame,
+                    t0 + 95 * SECOND + SeenSet.DEFAULT_TTL_MS + (i + 1) * SECOND,
+                    DUPLICATE,
+                    null,
+                    note = "engine layer only: each spent key went with its own frame",
+                )
+            }
         }.t
             .json()
 
