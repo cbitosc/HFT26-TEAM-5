@@ -33,7 +33,9 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   value (see the example).
 - `…debug.SENDIMG` — sends a real **image attachment** with no UI (a locked device can't drive the photo
   picker): `--es path <file the app can read>` plus the same `conv`/`to` targeting as SEND and optional
-  `--es text`. Stage the file into the app's own storage first (scoped storage — the app can't read
+  `--es text`. `--ez fit true` fits a photo to the relays' ticket `am` as the composer does (ADR 2026-10.s3ep); the
+  reply's `plainBytes` is the staged plaintext and `fitBytes` the size it was fitted to (null when not asked or
+  nothing to fit to). Stage the file into the app's own storage first (scoped storage — the app can't read
   /sdcard paths): `adb push img.jpg /data/local/tmp/ && adb shell "cat /data/local/tmp/img.jpg | run-as
   app.getknit.knit sh -c 'cat > files/img.jpg'"`, then pass `--es path /data/data/app.getknit.knit/files/img.jpg`.
   Runs the production pipeline (AttachmentStore.ingest → sendChat), and the reply carries the attachment

@@ -55,6 +55,8 @@ import app.getknit.knit.data.message.hiddenByFilter
 import app.getknit.knit.data.message.quoteHasAttachment
 import app.getknit.knit.data.message.quoteSnippet
 import app.getknit.knit.data.peer.PeerEntity
+import app.getknit.knit.data.relay.FreeUploads
+import app.getknit.knit.data.relay.photoFitBytes
 import app.getknit.knit.data.settings.BadgeStore
 import app.getknit.knit.data.settings.KnitBoardSetup
 import app.getknit.knit.data.settings.LowPowerSwitch
@@ -334,6 +336,7 @@ class DebugBridgeReceiver :
     KoinComponent {
     private val mesh: MeshController by inject()
     private val attachments: AttachmentStore by inject()
+    private val freeUploads: FreeUploads by inject()
     private val messages: MessageRepository by inject()
     private val reactions: ReactionRepository by inject()
     private val receipts: MessageReceiptRepository by inject()
@@ -712,7 +715,16 @@ class DebugBridgeReceiver :
         // sent. A file:// Uri offers no display name, so a non-image falls back to the file's own name, as a
         // document provider would give it.
         val asFile = intent.getBooleanExtra(EXTRA_FILE, false)
-        val picked = if (asFile) attachments.ingestFile(Uri.fromFile(file)) else attachments.ingest(Uri.fromFile(file))
+        // `--ez fit true` fits a photo to the relays' ticket `am` exactly as the composer does (ADR 2026-10.s3ep): the
+        // same `FreeUploads.photoChunks`, the same `photoFitBytes`. Off by default, so every older script is unchanged.
+        val fitBytes =
+            if (intent.getBooleanExtra(EXTRA_FIT, false) && conv != Conversations.NEARBY) {
+                freeUploads.photoChunks.first()?.let(::photoFitBytes)
+            } else {
+                null
+            }
+        val picked =
+            if (asFile) attachments.ingestFile(Uri.fromFile(file)) else attachments.ingest(Uri.fromFile(file), fitBytes = fitBytes)
         val ingested =
             when (picked) {
                 is AttachmentStore.IngestResult.Success -> {
@@ -756,6 +768,9 @@ class DebugBridgeReceiver :
         }.put("conversation", conv)
             .put("hash", ingested.hash)
             .put("mime", ingested.mime)
+            // The plaintext as staged, and the size it was fitted to (null: not asked, or nothing to fit to).
+            .put("plainBytes", ingested.sizeBytes)
+            .put("fitBytes", fitBytes ?: JSONObject.NULL)
             // The identity this pick reused (ADR 2026-10.mptm): the hash the frame names, null for a fresh seal.
             .put("reused", ingested.reuse?.hash ?: JSONObject.NULL)
     }
@@ -3345,6 +3360,7 @@ class DebugBridgeReceiver :
         const val EXTRA_FREE_ISSUER = "freeIssuer"
         const val EXTRA_FREE_CONSENT = "freeConsent"
         const val EXTRA_MINE = "mine"
+        const val EXTRA_FIT = "fit"
         const val EXTRA_RESET_PEER = "reset"
         const val EXTRA_PREFIX = "prefix"
         const val EXTRA_DRY = "dry"
