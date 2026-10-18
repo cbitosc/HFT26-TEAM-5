@@ -1,6 +1,7 @@
 package app.getknit.knit.call
 
 import app.getknit.knit.data.message.CallOutcome
+import app.getknit.knit.data.settings.CallIntake
 import app.getknit.knit.mesh.protocol.CallPayload
 import app.getknit.knit.mesh.protocol.DirectInvite
 import kotlinx.coroutines.CompletableDeferred
@@ -260,6 +261,10 @@ class CallManagerTest {
         // What this side's connected spools advertise as STUN in their HELLOs (C-7.6-20).
         var stun: List<String> = emptyList()
 
+        // C-3.3-7: the Calls screen's two incoming switches.
+        var takesLive = true
+        var takesWalkie = true
+
         val state: CallState? get() = manager.state.value
 
         fun phases(): List<Int> = synchronized(sent) { sent.map { it.ph } }
@@ -310,6 +315,7 @@ class CallManagerTest {
                 relayAll = { side.relay },
                 tombs = tombs,
                 reach = { side.reachable },
+                takesIncoming = { CallIntake(live = side.takesLive, walkie = side.takesWalkie).takes(it) },
             )
         side = Side(name, manager, media, sent, missed, logged, turnAsks, direct, walkie)
         net.nodes[name] = manager
@@ -564,6 +570,93 @@ class CallManagerTest {
             assertEquals(CallPhase.Ended, alice.state!!.phase)
             assertTrue(bob.missed.isEmpty())
             assertEquals(CallRefusal.BUSY, carol.manager.start(ALICE))
+        }
+
+    /** C-3.3-7: live calls switched off here never ring, leave nothing, and read as "No answer" to the caller. */
+    @Test
+    fun aLiveCallToACalleeTakingNoLiveCallsIsAnsweredNoAnswerWithoutRinging() =
+        runTest {
+            val (_, alice, bob) = pair()
+            bob.takesLive = false
+            assertNull(alice.manager.start(BOB))
+            runCurrent()
+            assertNull(bob.state)
+            assertEquals(CallPayload.PHASE_DECLINE, bob.sent.single().ph)
+            assertEquals(CallPayload.REASON_TIMEOUT, bob.sent.single().rsn)
+            assertTrue(bob.media.sessions.isEmpty() && bob.turnAsks.isEmpty())
+            assertTrue(bob.missed.isEmpty() && bob.logged.isEmpty())
+            assertEquals(CallPhase.Ended, alice.state!!.phase)
+            assertEquals(CallPayload.REASON_TIMEOUT, alice.state!!.reason)
+            assertEquals(CallOutcome.NoAnswer, alice.onlyOutcome())
+        }
+
+    /** C-3.3-7 over C-3.4-1: a stale offer of a kind switched off never rings and leaves no missed call either. */
+    @Test
+    fun aStaleOfferOfASwitchedOffKindIsNoMissedCall() =
+        runTest {
+            val (_, _, bob) = pair()
+            bob.takesLive = false
+            val offer = CallPayload(id = "c1", ph = CallPayload.PHASE_OFFER, sdp = SDP)
+            bob.manager.onSignal(ALICE, offer, sentAt = testScheduler.currentTime - TIMINGS.staleOfferMs - 1)
+            runCurrent()
+            assertNull(bob.state)
+            assertTrue(bob.sent.isEmpty())
+            assertTrue(bob.missed.isEmpty() && bob.logged.isEmpty())
+        }
+
+    /** The two switches are separate: mesh calls off still rings a live call, and live calls off still rings a walkie. */
+    @Test
+    fun eachIncomingSwitchRefusesItsOwnKindOnly() =
+        runTest {
+            val (_, alice, bob) = walkies(live = false)
+            bob.takesWalkie = false
+            alice.manager.start(BOB, CallKind.WALKIE)
+            runCurrent()
+            assertNull(bob.state)
+            assertEquals(CallPayload.REASON_TIMEOUT, alice.state!!.reason)
+            assertTrue(bob.missed.isEmpty())
+
+            alice.manager.start(BOB, CallKind.LIVE)
+            runCurrent()
+            assertEquals(CallPhase.Alerting, bob.state!!.phase)
+            bob.manager.decline(bob.state!!.id)
+            runCurrent()
+
+            bob.takesWalkie = true
+            bob.takesLive = false
+            alice.manager.start(BOB, CallKind.WALKIE)
+            runCurrent()
+            assertEquals(CallPhase.Alerting, bob.state!!.phase)
+            assertTrue(bob.state!!.walkie)
+        }
+
+    /** A refused kind reads as "No answer" even mid-call, so the switch says nothing about a call in progress. */
+    @Test
+    fun aRefusedKindIsNoAnswerEvenWhileBusy() =
+        runTest {
+            val (net, alice, bob) = pair()
+            val carol = side(CAROL, net)
+            carol.manager.start(BOB)
+            runCurrent()
+            bob.takesLive = false
+            alice.manager.start(BOB)
+            runCurrent()
+            assertEquals(CAROL, bob.state!!.peerId)
+            assertEquals(CallPayload.REASON_TIMEOUT, alice.state!!.reason)
+        }
+
+    /** Glare is still taken with the kind off: this phone was calling that peer when the peer's offer crossed it. */
+    @Test
+    fun glareIsTakenWithTheKindSwitchedOff() =
+        runTest {
+            val (_, alice, bob) = pair()
+            bob.takesLive = false
+            alice.manager.start(BOB)
+            bob.manager.start(ALICE)
+            runCurrent()
+            assertEquals(alice.state!!.id, bob.state!!.id)
+            assertEquals(CallPhase.Connecting, bob.state!!.phase)
+            assertEquals(CallPayload.PHASE_ANSWER, bob.sent.last().ph)
         }
 
     @Test

@@ -13,6 +13,7 @@ import app.getknit.knit.data.forward.ForwardRepository
 import app.getknit.knit.data.relay.FreeUploads
 import app.getknit.knit.data.relay.RelayStatusRepository
 import app.getknit.knit.data.settings.BadgeStore
+import app.getknit.knit.data.settings.IncomingCallStore
 import app.getknit.knit.data.settings.OwnIceStore
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.data.settings.TicketKeyStore
@@ -157,6 +158,9 @@ val uiModule =
                 get<OwnIceStore>().ownIce,
                 get(),
                 get<LowPowerSource>().posture,
+                intake = get<IncomingCallStore>().intake,
+                liveCalls = LIVE_CALLS_WIRED,
+                meshCalls = WALKIE_WIRED,
             )
         }
         viewModel { BackupViewModel(androidContext(), get(), get()) }

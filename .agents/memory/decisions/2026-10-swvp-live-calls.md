@@ -35,7 +35,8 @@ once in `di/`, and `-Pcalls=` sets both call kinds at once.
 `CALLS_WIRED` is either call kind. It wires the call graph, the call screen, the bar and `CallController`, and it
 packages core-telecom and `src/calls/AndroidManifest.xml`, since every call of either kind is a self-managed Telecom
 call (ADR 2026-10.wbua). `STT_WIRED` is false wherever `CALLS_WIRED` is. The Calls screen and its Settings row exist
-where live calls or speech do (`CALL_SETTINGS_WIRED`): a build with mesh calls alone has nothing on it to set.
+where either call kind does (`CALL_SETTINGS_WIRED`): since ADR 2026-10.fcrd every such build has its incoming switches
+to set.
 
 - **A build may take mesh calls alone.** Without live calls, `di/CallWiring` hands `CallManager` `CallMedia.None`, so
   `liveEnabled` is false.

@@ -57,16 +57,18 @@ import app.getknit.knit.call.OwnIceServers
 import app.getknit.knit.call.ProbeResult
 import app.getknit.knit.call.ProbeVerdict
 import app.getknit.knit.call.SttModelState
+import app.getknit.knit.data.settings.CallIntake
 import app.getknit.knit.ui.call.mb
 import app.getknit.knit.ui.components.noAutofillMenu
 import app.getknit.knit.ui.preview.KnitPreview
 import org.koin.androidx.compose.koinViewModel
 
 /**
- * Calls (experimental, docs/VOICE_CALLS.md §3.14, ADR 2026-10.mr88): "Relay all calls", and the person's own STUN and
+ * Calls (experimental, docs/VOICE_CALLS.md §3.14, ADR 2026-10.mr88): whether this phone takes incoming live and mesh
+ * calls (C-3.3-7), a switch per kind the build wires; "Relay all calls", and the person's own STUN and
  * TURN servers, each replacing what the relays supply, where live calls are wired (`LIVE_CALLS_WIRED`); the transcripts
- * and captions switch and their speech model (C-3.11-9, C-3.7-5) where speech is (`STT_WIRED`). Reached only where
- * either is (`CALL_SETTINGS_WIRED`): the route is not registered otherwise.
+ * and captions switch and their speech model (C-3.11-9, C-3.7-5) where speech is (`STT_WIRED`). Reached only where a
+ * call kind is wired (`CALL_SETTINGS_WIRED`): the route is not registered otherwise.
  */
 @Composable
 fun CallSettingsScreen(
@@ -76,6 +78,7 @@ fun CallSettingsScreen(
     val state by viewModel.state.collectAsStateWithLifecycle()
     val loaded by viewModel.loaded.collectAsStateWithLifecycle()
     val transcripts by viewModel.transcripts.collectAsStateWithLifecycle()
+    val intake by viewModel.intake.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     val saved = stringResource(R.string.call_settings_saved)
     val busy = stringResource(R.string.call_settings_test_busy)
@@ -92,6 +95,10 @@ fun CallSettingsScreen(
     CallSettingsScreenContent(
         state = state,
         live = viewModel.live,
+        walkie = viewModel.walkie,
+        intake = intake,
+        onToggleTakeLive = viewModel::setTakeLive,
+        onToggleTakeWalkie = viewModel::setTakeWalkie,
         loaded = loaded,
         snackbarHostState = snackbarHostState,
         onBack = onBack,
@@ -116,6 +123,11 @@ internal fun CallSettingsScreenContent(
     onBack: () -> Unit,
     // The live calls' rows: "Relay all calls", the own servers, their Test and Save. Off where live calls are not wired.
     live: Boolean = true,
+    // Whether mesh calls are wired, so "Incoming calls" has a mesh switch.
+    walkie: Boolean = false,
+    intake: CallIntake = CallIntake(),
+    onToggleTakeLive: (Boolean) -> Unit = {},
+    onToggleTakeWalkie: (Boolean) -> Unit = {},
     loaded: Boolean = true,
     snackbarHostState: SnackbarHostState = remember { SnackbarHostState() },
     onToggleRelayAll: (Boolean) -> Unit = {},
@@ -161,7 +173,9 @@ internal fun CallSettingsScreenContent(
                     .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
+            IncomingCallRows(live, walkie, intake, onToggleTakeLive, onToggleTakeWalkie)
             if (live) {
+                HorizontalDivider()
                 ToggleRow(
                     title = stringResource(R.string.settings_relay_calls_title),
                     subtitle = stringResource(R.string.settings_relay_calls_subtitle),
@@ -193,7 +207,7 @@ internal fun CallSettingsScreenContent(
                 TestRow(state, onTest)
             }
             if (transcripts != null) {
-                if (live) HorizontalDivider()
+                HorizontalDivider()
                 ToggleRow(
                     title = stringResource(R.string.call_settings_transcripts_title),
                     subtitle = stringResource(R.string.call_settings_transcripts_subtitle),
@@ -205,6 +219,35 @@ internal fun CallSettingsScreenContent(
                 SpeechModelRow(transcripts, onDownloadSpeechModel, onCancelSpeechModel, onRemoveSpeechModel)
             }
         }
+    }
+}
+
+/** C-3.3-7: one switch per kind this build wires. Off, a call of that kind never rings and its caller hears "No answer". */
+@Composable
+private fun IncomingCallRows(
+    live: Boolean,
+    walkie: Boolean,
+    intake: CallIntake,
+    onToggleTakeLive: (Boolean) -> Unit,
+    onToggleTakeWalkie: (Boolean) -> Unit,
+) {
+    if (live) {
+        ToggleRow(
+            title = stringResource(R.string.call_settings_take_live_title),
+            subtitle = stringResource(R.string.call_settings_take_live_subtitle),
+            enabled = intake.live,
+            onToggle = onToggleTakeLive,
+            modifier = Modifier.testTag("call_settings_take_live"),
+        )
+    }
+    if (walkie) {
+        ToggleRow(
+            title = stringResource(R.string.call_settings_take_walkie_title),
+            subtitle = stringResource(R.string.call_settings_take_walkie_subtitle),
+            enabled = intake.walkie,
+            onToggle = onToggleTakeWalkie,
+            modifier = Modifier.testTag("call_settings_take_walkie"),
+        )
     }
 }
 
@@ -424,6 +467,19 @@ private fun ToggleRow(
 fun CallSettingsScreenPreview() =
     KnitPreview {
         CallSettingsScreenContent(state = CallSettingsUiState(), onBack = {})
+    }
+
+// A build with both call kinds, the person taking mesh calls but no live ones.
+@Preview(showBackground = true)
+@Composable
+fun CallSettingsScreenIncomingPreview() =
+    KnitPreview {
+        CallSettingsScreenContent(
+            state = CallSettingsUiState(),
+            onBack = {},
+            walkie = true,
+            intake = CallIntake(live = false, walkie = true),
+        )
     }
 
 // A build with speech: transcripts on, the speech model not yet on the phone, and the phone on mobile data.

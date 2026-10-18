@@ -631,7 +631,21 @@ private fun CallsRow(
         )
     NavigatingRow(
         title = stringResource(R.string.settings_calls_title),
-        subtitle = if (summary.relayAll) stringResource(R.string.settings_calls_summary_relayed, servers) else servers,
+        subtitle =
+            when {
+                summary.refusesAll -> stringResource(R.string.settings_calls_summary_none)
+
+                summary.refusesLive -> stringResource(R.string.settings_calls_summary_no_live)
+
+                summary.refusesWalkie -> stringResource(R.string.settings_calls_summary_no_walkie)
+
+                // A build with mesh calls alone uses no servers to name.
+                !summary.live -> stringResource(R.string.settings_calls_summary_walkie)
+
+                summary.relayAll -> stringResource(R.string.settings_calls_summary_relayed, servers)
+
+                else -> servers
+            },
         onClick = onClick,
         modifier = Modifier.testTag("settings_calls"),
     )

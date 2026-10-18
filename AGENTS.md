@@ -112,6 +112,10 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   one elsewhere), so R8 drops what a build does not wire; a build without live calls hands `CallManager`
   `CallMedia.None`, which places every call as a walkie and declines a live offer, and `CAP_CALL` means "takes a live
   call".
+  The Calls screen's "Take live calls" / "Take mesh calls" (`data/settings/IncomingCallStore`, `CallManager`'s
+  `takesIncoming`) answer a switched-off kind `DECLINE rsn=timeout` — the caller's "No answer" — without ringing, busy
+  or not; a blocked contact's offer never reaches the manager, since every DM of theirs drops before decrypt (ADR
+  2026-10.fcrd).
   `CallManager.onSignal` runs on the inbound path — never make it wait on TURN or the media — and a TURN credential is
   never logged or put in a frame. A call's line in its thread (`data/message/CallRecord`, `MessageEntity.KIND_CALL`,
   `call/CallLog`) is §3.12: a record this phone writes when the call ends, never sent, saved off the inbound path.

@@ -710,6 +710,10 @@
     <string name="settings_calls_summary_own_stun">Your own STUN server</string>
     <string name="settings_calls_summary_own_turn">Your own TURN server</string>
     <string name="settings_calls_summary_own_both">Your own STUN and TURN servers</string>
+    <string name="settings_calls_summary_none">Not taking incoming calls</string>
+    <string name="settings_calls_summary_no_live">Not taking live calls</string>
+    <string name="settings_calls_summary_no_walkie">Not taking mesh calls</string>
+    <string name="settings_calls_summary_walkie">Taking mesh calls</string>
     <string name="settings_calls_summary_relayed">%1$s · every call relayed</string>
 
     <!-- Calls settings (docs/VOICE_CALLS.md §3.14) -->
@@ -744,6 +748,10 @@
     <string name="call_settings_saved">Saved</string>
     <string name="call_settings_test_busy">Can\'t test during a call</string>
     <!-- The Calls screen's walkie transcripts (docs/VOICE_CALLS.md C-3.11-9): the switch, and the speech model, fetched here or from a walkie call's card. -->
+    <string name="call_settings_take_live_title">Take live calls</string>
+    <string name="call_settings_take_live_subtitle">Calls over the internet or Wi-Fi Direct. When this is off, they don\'t ring here and the caller sees \"No answer\".</string>
+    <string name="call_settings_take_walkie_title">Take mesh calls</string>
+    <string name="call_settings_take_walkie_subtitle">Walkie-talkie calls over the mesh radios. When this is off, they don\'t ring here and the caller sees \"No answer\".</string>
     <string name="call_settings_transcripts_title">Transcripts and captions</string>
     <string name="call_settings_transcripts_subtitle">Turn what you hear on a call into text, on this phone: walkie-talkie bursts as they play, and live calls when you turn on CC. The text never leaves the phone.</string>
     <string name="call_settings_speech_model_title">Speech model</string>

@@ -159,6 +159,10 @@ data class CallTimings(
  * call it places is a walkie ([CallRefusal.NO_LIVE] where that cannot be) and a live offer is declined as media it
  * cannot play, as a build with no walkie declines a walkie offer.
  *
+ * **The person may take no incoming calls of a kind** ([takesIncoming], C-3.3-7): an offer of a kind they switched
+ * off is answered `DECLINE rsn=timeout`, the caller's "No answer", without ringing, a record or a missed call — busy or
+ * not, so it says nothing about a call in progress. A glare offer is still taken: this phone was calling that peer.
+ *
  * **A call to a peer nothing reaches says so** ([reach], C-3.3-5): until a RINGING comes back, the caller looks every
  * [CallTimings.reachLookMs] at whether any link, mesh path, Wi-Fi Aware sighting or shared spool reaches the peer, flags
  * the call [CallState.unreachable] while none does, and withdraws it with `CANCEL no_route` once none has for
@@ -188,6 +192,7 @@ class CallManager(
     private val relayAll: () -> Boolean = { false },
     private val tombs: CallTombJournal = CallTombJournal.None,
     private val reach: CallReach = CallReach.Assumed,
+    private val takesIncoming: (walkie: Boolean) -> Boolean = { true },
 ) : CallControl {
     private class Live(
         val id: String,
@@ -481,7 +486,9 @@ class CallManager(
             bury(p.id, CallPayload.PHASE_DECLINE, CallPayload.REASON_MEDIA)
             return listOf(Send(sender, CallPayload(id = p.id, ph = CallPayload.PHASE_DECLINE, rsn = CallPayload.REASON_MEDIA)))
         }
-        live?.takeIf { it.phase != CallPhase.Ended }?.let { return onOfferWhileLive(it, sender, p, sdp, me, now) }
+        val current = live?.takeIf { it.phase != CallPhase.Ended }
+        switchedOff(sender, p, current)?.let { return it }
+        current?.let { return onOfferWhileLive(it, sender, p, sdp, me, now) }
         val l = Live(p.id, sender, outgoing = false, startedAt = now, phase = CallPhase.Alerting, remoteOffer = sdp)
         live = l
         takeKind(l, p)
@@ -497,6 +504,21 @@ class CallManager(
         publish()
         log("call ${p.id} from $sender: alerting${if (joining) ", joining its group" else ""}${if (l.walkie) " (walkie)" else ""}")
         return listOf(Send(sender, CallPayload(id = p.id, ph = CallPayload.PHASE_RINGING, dx = directVerdict(l))))
+    }
+
+    /**
+     * C-3.3-7: the no-answer DECLINE for an offer of a kind the person switched off, or null to go on. Busy or not, so
+     * the answer says nothing about a call in progress; a glare offer ([current] our own call to [sender]) is taken.
+     */
+    private fun switchedOff(
+        sender: String,
+        p: CallPayload,
+        current: Live?,
+    ): List<Send>? {
+        if (takesIncoming(isWalkieOnly(p)) || (current != null && isGlare(current, sender))) return null
+        bury(p.id, CallPayload.PHASE_DECLINE, CallPayload.REASON_TIMEOUT)
+        log("call ${p.id} from $sender: ${if (isWalkieOnly(p)) "mesh" else "live"} calls are off; no answer")
+        return listOf(Send(sender, CallPayload(id = p.id, ph = CallPayload.PHASE_DECLINE, rsn = CallPayload.REASON_TIMEOUT)))
     }
 
     /** §3.11: an offer with the walkie bit and no audio is a walkie session; with both, a live call that may drop to one. */
@@ -572,7 +594,9 @@ class CallManager(
     ): Boolean {
         val tomb = tombstones[p.id]
         if (tomb == null && abs(sentAt - now) <= timings.staleOfferMs) return false
-        if (tomb == null || (tomb.ph == CallPayload.PHASE_CANCEL && tomb.rsn != CallPayload.REASON_USER)) {
+        // C-3.3-7: a kind switched off here is no missed call, however late it lands.
+        val withdrawn = tomb != null && (tomb.ph != CallPayload.PHASE_CANCEL || tomb.rsn == CallPayload.REASON_USER)
+        if (!withdrawn && takesIncoming(isWalkieOnly(p))) {
             val at = minOf(sentAt, now)
             missedCalls.trySend(MissedCall(sender, at))
             loggedCalls.trySend(CallLogged(sender, at, CallRecord(id = p.id, outgoing = false, walkie = isWalkieOnly(p), missed = true)))
@@ -581,6 +605,14 @@ class CallManager(
         log("call ${p.id} from $sender: ${if (tomb == null) "stale offer" else "offer after its end"}")
         return true
     }
+
+    /** C-3.5-1: [current] is our own unanswered call to [sender], whose offer crossed it. */
+    private fun isGlare(
+        current: Live,
+        sender: String,
+    ): Boolean =
+        current.outgoing && current.peerId == sender &&
+            (current.phase == CallPhase.Calling || current.phase == CallPhase.Ringing)
 
     /** An offer while [current] is live: busy (C-3.3-2), or glare with the same peer (C-3.5-1). */
     private fun onOfferWhileLive(
@@ -591,10 +623,7 @@ class CallManager(
         me: String,
         now: Long,
     ): List<Send> {
-        val glare =
-            current.outgoing && current.peerId == sender &&
-                (current.phase == CallPhase.Calling || current.phase == CallPhase.Ringing)
-        if (!glare) {
+        if (!isGlare(current, sender)) {
             bury(p.id, CallPayload.PHASE_DECLINE, CallPayload.REASON_BUSY)
             return listOf(Send(sender, CallPayload(id = p.id, ph = CallPayload.PHASE_DECLINE, rsn = CallPayload.REASON_BUSY)))
         }

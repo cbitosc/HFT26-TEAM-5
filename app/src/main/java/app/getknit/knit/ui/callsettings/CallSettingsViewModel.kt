@@ -8,6 +8,8 @@ import app.getknit.knit.call.ProbeResult
 import app.getknit.knit.call.SttModelState
 import app.getknit.knit.call.StunServers
 import app.getknit.knit.call.TurnUrls
+import app.getknit.knit.data.settings.CallIntake
+import app.getknit.knit.data.settings.IncomingCallStore
 import app.getknit.knit.data.settings.OwnIceStore
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.data.settings.TranscriptStore
@@ -118,7 +120,8 @@ sealed interface CallSettingsEvent {
 }
 
 /**
- * The Calls screen (docs/VOICE_CALLS.md §3.14, ADR 2026-10.mr88): "Relay all calls", the person's own STUN and TURN
+ * The Calls screen (docs/VOICE_CALLS.md §3.14, ADR 2026-10.mr88): which incoming calls this phone takes (C-3.3-7),
+ * one switch per kind the build wires, "Relay all calls", the person's own STUN and TURN
  * servers and the walkie's transcripts and live calls' captions with their speech model (C-3.11-9, C-3.7-5). The switches write as they
  * are touched, as every Settings switch does; the fields are a draft, loaded once and written by Save, and a Test tries
  * the draft before it is saved.
@@ -131,9 +134,17 @@ class CallSettingsViewModel(
     // The speech model and the transcripts switch; null, and no section, where they are not wired.
     private val stt: SttModelStore? = null,
     private val transcriptStore: TranscriptStore? = null,
+    // C-3.3-7's switches; null, and no "Incoming calls" section, in a test that does not reach them.
+    private val incoming: IncomingCallStore? = null,
+    /** Whether mesh calls are wired, so "Incoming calls" has a mesh switch. */
+    val walkie: Boolean = false,
 ) : ViewModel() {
     /** Whether the live calls' rows show: "Relay all calls", the own servers and their Test. */
     val live: Boolean = probe != null
+
+    /** "Incoming calls": what each switch holds, on until the store's first read. */
+    val intake: StateFlow<CallIntake> =
+        (incoming?.intake ?: flowOf(CallIntake())).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CallIntake())
 
     private val draft = MutableStateFlow(CallServerDraft())
     private val testing = MutableStateFlow(false)
@@ -169,6 +180,16 @@ class CallSettingsViewModel(
             draft.value = CallServerDraft.of(ownIce.ownIce.first())
             _loaded.value = true
         }
+    }
+
+    fun setTakeLive(value: Boolean) {
+        val store = incoming ?: return
+        viewModelScope.launch { store.setLive(value) }
+    }
+
+    fun setTakeWalkie(value: Boolean) {
+        val store = incoming ?: return
+        viewModelScope.launch { store.setWalkie(value) }
     }
 
     fun setRelayAll(value: Boolean) {

@@ -29,8 +29,10 @@ import app.getknit.knit.call.TurnSource
 import app.getknit.knit.call.WalkieTranscriber
 import app.getknit.knit.data.MessageRepository
 import app.getknit.knit.data.PeerRepository
+import app.getknit.knit.data.settings.CallIntake
 import app.getknit.knit.data.settings.CallTombStore
 import app.getknit.knit.data.settings.CaptureStore
+import app.getknit.knit.data.settings.IncomingCallStore
 import app.getknit.knit.data.settings.OwnIceStore
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.data.settings.TranscriptStore
@@ -119,8 +121,8 @@ const val CALLS_WIRED: Boolean = LIVE_CALLS_WIRED || WALKIE_WIRED
  */
 const val STT_WIRED: Boolean = CALLS_WIRED && BuildConfig.STT
 
-/** The Calls screen's route and Settings row: its live rows, its speech section, or both. */
-const val CALL_SETTINGS_WIRED: Boolean = LIVE_CALLS_WIRED || STT_WIRED
+/** The Calls screen's route and Settings row: which incoming calls it takes, then its live rows and speech section. */
+const val CALL_SETTINGS_WIRED: Boolean = CALLS_WIRED
 
 /** The call graph, or null in a build without calls ([CALLS_WIRED]). */
 fun callModule(): Module? = if (CALLS_WIRED) callGraph() else null
@@ -157,10 +159,13 @@ private fun callGraph(): Module =
                     probe = if (LIVE_CALLS_WIRED) get<IceProbe>() else null,
                     stt = if (STT_WIRED) get<SttModelStore>() else null,
                     transcriptStore = if (STT_WIRED) get<TranscriptStore>() else null,
+                    incoming = get(),
+                    walkie = WALKIE_WIRED,
                 )
             }
         }
         single { CallTombStore(get()) }
+        single { IncomingCalls(get(), get<CoroutineScope>()) }
         single {
             CallManager(
                 signals = CallSignals { peerId, payload -> get<MeshManager>().sendCallSignal(peerId, payload) },
@@ -174,6 +179,7 @@ private fun callGraph(): Module =
                 relayAll = if (LIVE_CALLS_WIRED) get<RelayAllCalls>().read else ({ true }),
                 tombs = get<CallTombStore>(),
                 reach = callReach(),
+                takesIncoming = get<IncomingCalls>()::takes,
             )
         }
         if (STT_WIRED) speechGraph()
@@ -203,6 +209,19 @@ private fun Module.recordGraph() {
             alertMs = CallTimings().alertMs,
         )
     }
+}
+
+/**
+ * C-3.3-7's two switches, held as a state on the app scope for [CallManager] to read as an offer lands. Until the
+ * store's first read they read as on, the default: a wanted call is never refused for a read still in flight.
+ */
+private class IncomingCalls(
+    store: IncomingCallStore,
+    scope: CoroutineScope,
+) {
+    private val intake = store.intake.stateIn(scope, SharingStarted.Eagerly, CallIntake())
+
+    fun takes(walkie: Boolean): Boolean = intake.value.takes(walkie)
 }
 
 /** C-3.7-3's "Relay all calls", held as a state on the app scope for [CallManager] to read as each call opens its media. */

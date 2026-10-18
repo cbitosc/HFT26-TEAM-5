@@ -230,6 +230,7 @@ carries; never renumber an old one.
 | [2026-10.d62w](decisions/2026-10-d62w-identity-slurs-are-blocked-by-a-word-list-in-every-conversation.md) | Identity slurs are blocked by a word list in every conversation, not only the Nearby room | moderation, privacy |
 | [2026-10.dmgw](decisions/2026-10-dmgw-a-reset-s-re-seal-goes-out-twice.md) | A reset's re-seal goes out twice, the second past the routers' dedup window | crypto, custody |
 | [2026-10.f7gg](decisions/2026-10-f7gg-a-blob-is-asked-of-the-likeliest-holder-first.md) | A blob is asked of the likeliest holder first, then of every neighbour | mesh, attachments, blob-exchange, wifi-aware |
+| [2026-10.fcrd](decisions/2026-10-fcrd-a-switched-off-call-kind-is-answered-no-answer.md) | A switched-off call kind is answered no answer, and blocking already silences a call | calls, settings |
 | [2026-10.fw8g](decisions/2026-10-fw8g-relayed-radio-mesh-traffic-is-indirect-reach.md) | Relayed radio-mesh traffic is indirect reach | mesh, ui |
 | [2026-10.fzsy](decisions/2026-10-fzsy-anrs-the-platform-recorded-are-imported-into-the-crash-store-with-their-thread-d.md) | ANRs the platform recorded are imported into the crash store with their thread dumps | crash-reports, reliability, android |
 | [2026-10.g24x](decisions/2026-10-g24x-a-picture-goes-to-its-linked-recipient-first.md) | A picture goes to its linked recipient first, one Bluetooth copy at a time | ble, mesh, blobs |

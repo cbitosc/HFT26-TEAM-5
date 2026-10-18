@@ -3692,6 +3692,37 @@ class InboundPipelineTest {
             coVerify(exactly = 0) { rig.notifier.notify(any(), any(), any(), any(), any()) }
         }
 
+    /** A blocked contact's call never reaches the call layer, accepted or not: every DM of theirs drops before decrypt. */
+    @Test
+    fun aCallFromABlockedContactNeverReachesTheHook() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.pin(alice)
+            rig.settings.accepted.value = setOf(alice.nodeId)
+            rig.settings.blocked.value = setOf(alice.nodeId)
+            val author = V2Author(alice, rig)
+
+            rig.deliver(
+                alice,
+                author.dm(
+                    "cl-3",
+                    "",
+                    ctl = MessageContent.CTL_CALL,
+                    cl = CallPayload(id = "c3", ph = CallPayload.PHASE_OFFER, sdp = "v=0"),
+                ),
+            )
+
+            assertTrue(rig.callSignals.isEmpty())
+            coVerify(exactly = 0) { rig.notifier.notify(any(), any(), any(), any(), any()) }
+
+            // The control: the same contact unblocked rings.
+            rig.settings.blocked.value = emptySet()
+            val offer = CallPayload(id = "c4", ph = CallPayload.PHASE_OFFER, sdp = "v=0")
+            rig.deliver(alice, author.dm("cl-4", "", ctl = MessageContent.CTL_CALL, cl = offer, sentAt = 8L))
+            assertEquals(listOf(offer), rig.callSignals.map { it.second })
+        }
+
     // --- Message Requests: a stranger's DM/group is delivered + acked but silent until "accepted" ---
 
     @Test

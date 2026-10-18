@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import app.getknit.knit.call.OwnIceServers
 import app.getknit.knit.data.relay.RelayFacts
 import app.getknit.knit.data.settings.BluetoothDownloadLimit
+import app.getknit.knit.data.settings.CallIntake
 import app.getknit.knit.data.settings.LowPowerSwitch
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.identity.Alias
@@ -21,6 +22,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -35,12 +37,27 @@ data class LoraSummary(
     val battery: BoardBattery? = null,
 )
 
-/** The Calls row's subtitle (docs/VOICE_CALLS.md §3.14): which of the person's own servers a call uses, and relay-all. */
+/**
+ * The Calls row's subtitle (docs/VOICE_CALLS.md §3.14): which of the person's own servers a call uses, relay-all, and
+ * which wired kinds of incoming call ([live], [walkie]) the person switched off (C-3.3-7).
+ */
 data class CallsSummary(
     val relayAll: Boolean = false,
     val ownStun: Boolean = false,
     val ownTurn: Boolean = false,
-)
+    val live: Boolean = true,
+    val walkie: Boolean = false,
+    val intake: CallIntake = CallIntake(),
+) {
+    /** Live calls are wired and switched off here. */
+    val refusesLive: Boolean get() = live && !intake.live
+
+    /** Mesh calls are wired and switched off here. */
+    val refusesWalkie: Boolean get() = walkie && !intake.walkie
+
+    /** No wired kind rings. */
+    val refusesAll: Boolean get() = (!live || refusesLive) && (!walkie || refusesWalkie)
+}
 
 /**
  * Low-power mode as its Settings row shows it (ADR 2026-10.d44b): the user's own [switchOn], and the [reason] the
@@ -89,6 +106,10 @@ class SettingsViewModel(
     private val lowPowerSwitch: LowPowerSwitch,
     // `LowPowerSource.posture`: the switch with Battery Saver and the charger applied.
     lowPowerPosture: Flow<LowPowerPosture>,
+    // C-3.3-7: which incoming calls the person takes, and the kinds this build wires, for the Calls row.
+    intake: Flow<CallIntake> = flowOf(CallIntake()),
+    private val liveCalls: Boolean = true,
+    private val meshCalls: Boolean = false,
 ) : ViewModel() {
     private val nodeId = MutableStateFlow("")
     private val alias = MutableStateFlow("")
@@ -121,13 +142,20 @@ class SettingsViewModel(
 
     /**
      * What the Calls row says: "Relay all calls" (C-3.7-3) and the own servers a call actually uses — switched on and
-     * valid, as [app.getknit.knit.call.OwnIceServers.effective] reads them.
+     * valid, as [app.getknit.knit.call.OwnIceServers.effective] reads them — and the incoming calls switched off.
      */
     val callsSummary: StateFlow<CallsSummary> =
-        combine(settings.callsRelayAll, ownIce) { relayAll, own ->
+        combine(settings.callsRelayAll, ownIce, intake) { relayAll, own, intake ->
             val ice = own.effective()
-            CallsSummary(relayAll = relayAll, ownStun = ice.stun.isNotEmpty(), ownTurn = ice.turn != null)
-        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CallsSummary())
+            CallsSummary(
+                relayAll = relayAll,
+                ownStun = ice.stun.isNotEmpty(),
+                ownTurn = ice.turn != null,
+                live = liveCalls,
+                walkie = meshCalls,
+                intake = intake,
+            )
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CallsSummary(live = liveCalls, walkie = meshCalls))
 
     /** Whether to colour the app from the wallpaper. Off by default; hidden entirely below API 31. */
     val dynamicColor: StateFlow<Boolean> =
