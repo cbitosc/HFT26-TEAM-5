@@ -80,6 +80,31 @@ candidate address, TURN credential or caption: types, counts and times only.
 Owed, once nsr7 lands: `feed_end` (sender: size, PHY, budget share, measured drain, first ETA, outcome),
 `rx_end` (receiver: size, resume offset, time, progress reports), park waits and ETA promises.
 
+## Reading two phones together
+
+`python3 scripts/fieldlog.py pair LOG LOG [LOG …]` lines testers' logs up without anyone's notes. A log's `t` counts
+from its own first line and its header gives only that hour, so two logs differ by an offset the reader works out.
+For any two logs, it tries each pairing of one log's outgoing call with the other's incoming one as an anchor and keeps
+the offset most of the other events agree with:
+
+- **Calls.** The two sides begin within a signal's transit (20 s), connect within a round trip (3 s) and end within a
+  transit (20 s), one to one.
+- **Radio links.** `bt_up`, `bt_down`, `nan_up` and `nan_down` between the two phones fall within 3 s of each other.
+  These line two logs up even with no call in common.
+- **Confirmations.** These are matched calls whose sides also give the same end reason, and whose first selected pairs
+  mirror each other. A pairing that rests on one call with neither, and no link, is marked weak: two unrelated calls
+  of one length, placed at one moment, would look the same.
+
+Each phone names the other by one pseudonym for the whole log. A match therefore also says which pseudonym is which
+tester, and with several logs no pseudonym goes to two pairings: the better-evidenced pairing keeps it. The search
+stays within an hour of the headers' difference, and widens when nothing fits there, for a phone whose clock is set
+wrong. A pairing found that way is flagged.
+
+For each pairing it prints the offset, both pseudonyms, and one merged timeline per shared call: both sides' call,
+route, media, leg and walkie lines, and the links between the two phones. For a call the other phone never logged, it
+says which of two things happened. Either that phone was recording then (a line within 6 min each side), so the offer
+never arrived, or it was not recording. A call with a start line and no end line is shown as one where the app died.
+
 ## Adding an event
 
 1. Add a `FieldEvent` that writes only through `FieldWriter`.

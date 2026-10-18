@@ -389,6 +389,15 @@ verify:btsnoop-drain:
   script:
     - python3 -m unittest scripts/test_btsnoop_drain.py
 
+# The field log's reader (scripts/fieldlog.py): `pair` lines two testers' logs up from what both phones logged, with no
+# notes from anyone; stdlib only. Mirrors GitHub's `fieldlog` job.
+verify:fieldlog:
+  image: python:3.13-alpine
+  stage: verify
+  needs: []
+  script:
+    - python3 -m unittest scripts/test_fieldlog.py
+
 # --------------- verify (advisory) -------
 # detekt/ktlint run as Gradle plugins now (was: a downloaded detekt-cli jar). Both are advisory
 # (allow_failure) to mirror the prior detekt job and keep the pass/fail test signal clean; locally they

@@ -112,6 +112,14 @@ The call graph resolves the field log at each record, never as the graph builds 
 every mesh seam. The words a call's code and libwebrtc spell become constants in `call/CallFieldLog.kt`
 (`CallEndReason`, `IceType`, `IceProtocol`, `IceNetwork`, `DirectLegEnd`).
 
+**Lining two logs up needs no notes.** `scripts/fieldlog.py pair` puts two testers' logs on one clock from what both
+phones logged at the same moments. A call's two sides begin, connect and end together, and a link between the two
+phones comes up and goes down on both at once. Each phone's one pseudonym for the other then follows. The search
+needs no call id and no tester's note. It never matches a pseudonym by value: the base text's "two people's logs
+cannot be joined" holds for the pseudonyms, not for timing, since anyone holding both logs can line them up. That is
+what the alpha needs, and it adds nothing a single log reveals. `docs/FIELD_LOG.md` gives the tolerances, the weak
+flag and the clock fallback; `scripts/test_fieldlog.py` is in both CIs.
+
 **What it costs.** About 120 `call_media` lines an hour of calling, each about 400 bytes: some 50 KiB of the 4 MiB.
 `walkie_end`'s `transit` carries the two clocks' skew, as `IN` latency does. A `call_media` reading taken while
 libwebrtc's report has no selected pair yet leaves the pair fields out. Tests: `FieldEventSchemaTest`'s call and

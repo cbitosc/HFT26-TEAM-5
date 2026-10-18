@@ -374,6 +374,16 @@ jobs:
       - name: Analyser unit tests
         run: python3 -m unittest scripts/test_btsnoop_drain.py
 
+  fieldlog:
+    name: Field log reader tests
+    runs-on: ubuntu-latest
+    # scripts/fieldlog.py reads the logs testers share; `pair` lines two phones' logs up with no notes from anyone.
+    # Stdlib only, so its tests need nothing but Python.
+    steps:
+      - uses: actions/checkout@v7
+      - name: Reader unit tests
+        run: python3 -m unittest scripts/test_fieldlog.py
+
   generated-assets:
     name: Generated assets are in sync
     runs-on: ubuntu-latest
