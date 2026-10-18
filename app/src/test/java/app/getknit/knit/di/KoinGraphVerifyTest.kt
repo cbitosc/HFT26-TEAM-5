@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.Context
 import app.getknit.knit.call.CallSignals
 import app.getknit.knit.call.CallWalkie
+import app.getknit.knit.call.TonePlayer
 import app.getknit.knit.call.TurnSource
 import app.getknit.knit.data.crypto.KeystoreSecret
 import app.getknit.knit.data.settings.ContributionJournal
@@ -89,6 +90,8 @@ class KoinGraphVerifyTest {
                 StateFlow::class,
                 // The walkie's seam over the same late-bound reads (§3.11).
                 CallWalkie::class,
+                // The caller's tones' player (C-3.13-14), a ToneGeneratorPlayer built in CallToneSync's definition.
+                TonePlayer::class,
             )
     }
 }
