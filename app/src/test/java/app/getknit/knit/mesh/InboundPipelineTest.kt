@@ -6225,6 +6225,55 @@ class InboundPipelineTest {
             }
         }
 
+    // The iPhone's ratchet profile (`ios-emitted-v1.json`, companion change A10) through the same door, straight after
+    // her plain one: her prekey, her capabilities and her presentation land as an Android profile's would.
+    @Test
+    fun theIphoneRatchetProfilePinsItsPrekeyAfterItsPlainProfile() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val file = VectorFiles.read("ios-emitted-v1.json")
+            val frames = file.getValue("frames").jsonObject
+            val carol = VectorParty.identity(file, "carol")
+            val delivered =
+                listOf("carolProfile", "carolRatchetProfile").map { name ->
+                    val wire =
+                        checkNotNull(
+                            WireCodec.decodeWire(
+                                frames
+                                    .getValue(name)
+                                    .jsonObject
+                                    .getValue("wire")
+                                    .jsonPrimitive.content
+                                    .fromHex(),
+                            ),
+                        )
+                    wire to checkNotNull(WireCodec.decodeEnvelope(wire.signed))
+                }
+            rig.nowMs = delivered.maxOf { it.second.sentAt }
+            for ((wire, env) in delivered) rig.pipeline.onDeliver(wire, env, env.senderId, TransportKind.Other)
+            val env = delivered.last().second
+            val profile = checkNotNull(WireCodec.decodePayload<ProfileContent>(env.payload))
+            val entry = frames.getValue("carolRatchetProfile").jsonObject
+            val spk =
+                file
+                    .getValue("ratchet")
+                    .jsonObject
+                    .getValue("prekeys")
+                    .jsonObject
+                    .getValue(entry.getValue("prekey").jsonPrimitive.content)
+                    .jsonObject
+            val row = checkNotNull(rig.peerMap[carol.nodeId]) { "carol pinned no row" }
+            assertEquals(carol.bundle.encoded, row.pubKey)
+            assertEquals(entry.getValue("capabilities").jsonPrimitive.long, row.capabilities)
+            assertEquals(spk.getValue("id").jsonPrimitive.int, row.prekeyId)
+            assertEquals(b64(spk.hex("pub")), row.prekeyPub)
+            assertEquals(b64(checkNotNull(profile.prekey).sig), row.prekeySig)
+            // The prekey watermark is the profile's own stamp, its version, as the presentation's is.
+            assertEquals(entry.getValue("version").jsonPrimitive.long, row.prekeyProfileAt)
+            assertEquals(profile.name, row.name)
+            assertEquals(profile.status, row.status)
+        }
+
     /**
      * `ratchet-v1.json`'s `negative` cases with no setup on the receiver's side, through the real pipeline as Bob: each
      * frame is signed by Alice, whom Bob has pinned as ratchet-capable, and must leave exactly the drop the file
