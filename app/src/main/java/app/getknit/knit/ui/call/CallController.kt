@@ -23,6 +23,7 @@ import app.getknit.knit.call.CallPhase
 import app.getknit.knit.call.CallState
 import app.getknit.knit.call.MissedCall
 import app.getknit.knit.data.PeerRepository
+import app.getknit.knit.di.STT_WIRED
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 
@@ -165,7 +166,7 @@ internal object CallNotifications {
     const val CHANNEL_RING = "knit_calls"
     const val CHANNEL_STATUS = "knit_call_status"
 
-    // The walkie transcript's speech-model download (`SttDownloadService`): progress only, never a sound.
+    // The speech model's download (`SttDownloadService`, where `STT_WIRED`): progress only, never a sound.
     const val CHANNEL_DOWNLOAD = "knit_stt_download"
     const val TAG_RING = "call:ring"
     const val TAG_MISSED = "call:missed:"
@@ -195,12 +196,14 @@ internal object CallNotifications {
                 .setName("Call status (experimental)")
                 .build(),
         )
-        manager.createNotificationChannel(
-            NotificationChannelCompat
-                .Builder(CHANNEL_DOWNLOAD, NotificationManagerCompat.IMPORTANCE_LOW)
-                .setName("Speech model download (experimental)")
-                .build(),
-        )
+        if (STT_WIRED) {
+            manager.createNotificationChannel(
+                NotificationChannelCompat
+                    .Builder(CHANNEL_DOWNLOAD, NotificationManagerCompat.IMPORTANCE_LOW)
+                    .setName("Speech model download (experimental)")
+                    .build(),
+            )
+        }
     }
 
     fun post(

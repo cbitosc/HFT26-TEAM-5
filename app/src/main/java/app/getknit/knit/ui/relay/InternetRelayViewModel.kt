@@ -208,9 +208,10 @@ class InternetRelayViewModel(
     // forgets them (C-7.6-29). Null in the screen tests' rig, which removes the row alone.
     private val ticketKeys: TicketKeyJournal? = null,
     // Where a relay's held ticket and its verdict live (`SettingsStore`), and the one seam for a row's call details:
-    // production passes it only where calls are wired (`CALLS_WIRED`), and without it no row shows any, nor the key.
+    // production passes it only where calls or Knit Anywhere are wired (`CALLS_WIRED`, `ANYWHERE_WIRED`), and without it
+    // no row shows any, nor the key.
     private val spoolTickets: SpoolTicketJournal? = null,
-    // Free tickets' switch (C-7.6-34), only where calls are wired; without it no row offers one.
+    // Free tickets' switch (C-7.6-34), only where Knit Anywhere is wired; without it no row offers one.
     private val freeUploads: FreeUploads? = null,
     private val clock: () -> Long = System::currentTimeMillis,
 ) : ViewModel() {

@@ -98,12 +98,20 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
 - **When touching `call/`, `MessageContent.CTL_CALL` / `cl`, `CallPayload`, `Protocol.CAP_CALL`,
   `MeshManager.extraCapabilities`, the spool's `turnreq`/`turncred` (`SpoolConnection.turnCredential`,
   `ScopeSync.turnCredentials`), `di/CallWiring`, `data/settings/CallTombStore`, `SettingsStore.callsRelayAll`,
-  `ui/call/`, `app/src/calls/` or the `calls` flag in `app/build.gradle.kts`:** READ `docs/VOICE_CALLS.md` and ADR
-  2026-10.3tee (its 2026-10-07 amendment is this branch's minimal build; its 2026-10-14 one is the flag).
-  Experimental, behind `BuildConfig.CALLS` (on in debug, off in release, `-Pcalls=` overrides), read once as
-  `CallWiring.CALLS_WIRED`: WebRTC and core-telecom are `compileOnly`, and only a build with calls packages them,
-  `app/src/calls/AndroidManifest.xml` and `app/src/calls/keepRules` — so release ships no call code, no `libjingle`,
-  no call permission and advertises no `CAP_CALL`. Never make either library `implementation`.
+  `ui/call/`, `app/src/calls/`, `app/src/liveCalls/`, `app/src/stt/`, `di/AnywhereWiring` or the `liveCalls` /
+  `meshCalls` / `stt` / `knitAnywhere` flags in `app/build.gradle.kts`:** READ `docs/VOICE_CALLS.md`, ADR 2026-10.3tee
+  (its 2026-10-07 amendment is this branch's minimal build; its 2026-10-14 one is the first flag) and ADR 2026-10.swvp
+  (the four flags). Experimental, behind four flags, each on in debug, off in release and overridden by its own `-P`
+  (`-Pcalls=` sets both call kinds), each read once in `di/`: `LIVE_CALLS_WIRED` (`BuildConfig.LIVE_CALLS`),
+  `WALKIE_WIRED` (`BuildConfig.MESH_CALLS`), `STT_WIRED` (`BuildConfig.STT`, only with a call kind) and
+  `ANYWHERE_WIRED` (`BuildConfig.KNIT_ANYWHERE`); `CALLS_WIRED` is either call kind. WebRTC, core-telecom and Moonshine
+  are `compileOnly`; a build packages WebRTC and `app/src/liveCalls/keepRules` only with live calls, core-telecom and
+  `app/src/calls/AndroidManifest.xml` with either kind, and Moonshine with `app/src/stt/` only with speech — so release
+  ships no call code, no `libjingle`, no call permission and advertises no `CAP_CALL`. Never make any of the three
+  `implementation`. A kind's or speech's own definitions sit behind its constant in `di/CallWiring` (and every lookup of
+  one elsewhere), so R8 drops what a build does not wire; a build without live calls hands `CallManager`
+  `CallMedia.None`, which places every call as a walkie and declines a live offer, and `CAP_CALL` means "takes a live
+  call".
   `CallManager.onSignal` runs on the inbound path — never make it wait on TURN or the media — and a TURN credential is
   never logged or put in a frame. A call's line in its thread (`data/message/CallRecord`, `MessageEntity.KIND_CALL`,
   `call/CallLog`) is §3.12: a record this phone writes when the call ends, never sent, saved off the inbound path.
@@ -132,11 +140,11 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   `CallPayload.MEDIA_WALKIE`, `FrameType.TALK`, `mesh/protocol/TalkSeal`, `MeshManager.sendCallTalk`,
   `InboundPipeline.handleTalk` / `isTalkShape`, `Protocol.CAP_WALKIE`, `CallManager`'s `fallback` / `walkieOk` /
   `onTalk`, `MeshTransport.sendLive` / `holdLink`, `mesh/wifiaware/NanLinkHold` (the hold in `superviseLink`), `TalkLink`,
-  `ui/call/WalkieTalk` / `TalkRecorder` / `TalkPlayer` or `BuildConfig.WALKIE`:** READ ADR 2026-10.79yb and
+  `ui/call/WalkieTalk` / `TalkRecorder` / `TalkPlayer` or `BuildConfig.MESH_CALLS`:** READ ADR 2026-10.79yb and
   `docs/VOICE_CALLS.md` §3.11 — a call with no live path is a media-less walkie session whose bursts stream as Opus in
   unsigned, compactly sealed `talk` frames nobody custodies, sized for Coded PHY (a pin in `TalkSealTest`), so nothing
   lands in the thread; a live call drops to one, without a frame, only when both OFFER and ANSWER carried the walkie
-  bit (parked since 2026-10-09: `CallManager.dropToWalkie` is off, so a lost live call ends `no_route`); the flag is read once, as `CallWiring.WALKIE_WIRED`.
+  bit (parked since 2026-10-09: `CallManager.dropToWalkie` is off, so a lost live call ends `no_route`); the flag is read once, as `CallWiring.WALKIE_WIRED`, and needs no live calls.
   **Before touching `call/CaptureHealth` (`CaptureProfile`, `CapturePolicy`, `CaptureWatch`), `ui/call/CaptureTap`,
   the audio module in `WebRtcCallMedia` or the `call_capture_` keys:** READ ADR 2026-10.kw29 and `docs/VOICE_CALLS.md`
   C-3.13-12/13 — a generic image (and a phone where a call went silent) records calls from `VOICE_RECOGNITION` with
@@ -161,7 +169,7 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   `SttDownloadService`), the Calls screen's transcripts section (`data/settings/TranscriptStore`), `TalkPlayer`'s `TalkPcmTap`,
   `WalkieTranscriptCard`, `ModelLoadGuard.STT`, the `moonshineVoice` pin or `scripts/stt-model.py`:** READ ADR
   2026-10.nz3g and `docs/VOICE_CALLS.md` C-3.11-9 and C-3.7-5 — the receiver writes each heard burst, and with CC on a
-  live call's peer, out as text while it plays, behind `BuildConfig.CALLS` and never on the wire (a live call's streams
+  live call's peer, out as text while it plays, behind `BuildConfig.STT` (`STT_WIRED`) and never on the wire (a live call's streams
   always split at pauses, stop 8 s behind, and this phone's own voice is never captioned); the model (Moonshine v2 Small Streaming alone, through
   Moonshine's own runtime, called by its `JNI` class alone and taken without its transitive dependencies) is a
   tap-to-download from getknit.app (the walkie card, whose offer can be dismissed for good, or the Calls screen, held
@@ -588,7 +596,8 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   `entGates` (C-7.6-30); an attachment of ours on a connection the files gate locks is settled with no `ahave` and no
   `aput` while fetching is untouched; a `budget` spends the ticket's pseudonym per relay host in memory, never in the
   verdict journal; and the sender's "Nearby only" reads `Locked` only when no connected relay takes this phone's
-  uploads. The gate reading and the marker ship in every build; the readouts stay behind `CALLS_WIRED`.
+  uploads. The gate reading and the marker ship in every build; getting a ticket and the readouts stay behind
+  `ANYWHERE_WIRED` (ADR 2026-10.swvp).
   Before touching a ticket's `am` (`SpoolTicket.am` / `maxChunks`, `SpoolConnection.uploadLimitChunks`,
   `LocalPass.TOO_LARGE`, `ChunkPut`, `RelayFacts.uploadRooms` / `UploadRoom`), free tickets (`mesh/spool/FreeTickets`,
   `TicketRefresher.uploadWanted` / `freeDueAt`, `data/relay/FreeUploads`, `FreeUploadsNotice`, the `spool_free_` keys,

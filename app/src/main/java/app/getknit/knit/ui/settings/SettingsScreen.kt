@@ -62,7 +62,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.getknit.knit.BuildConfig
 import app.getknit.knit.R
 import app.getknit.knit.data.settings.BluetoothDownloadLimit
-import app.getknit.knit.di.CALLS_WIRED
+import app.getknit.knit.di.CALL_SETTINGS_WIRED
 import app.getknit.knit.mesh.lora.BoardBattery
 import app.getknit.knit.mesh.lora.LoraPlane
 import app.getknit.knit.mesh.power.LowPowerReason
@@ -215,8 +215,9 @@ internal fun SettingsScreenContent(
     showInternetRelays: Boolean = BuildConfig.INTERNET_PLANE,
     // Same, for the LoRa plane.
     showLoraRadio: Boolean = BuildConfig.LORA_PLANE,
-    // Same, for calls (experimental): only a build that wires them (`CALLS_WIRED`) has a Calls screen.
-    showCalls: Boolean = CALLS_WIRED,
+    // Same, for calls (experimental): only a build that wires live calls or speech (`CALL_SETTINGS_WIRED`) has a Calls
+    // screen.
+    showCalls: Boolean = CALL_SETTINGS_WIRED,
     // Whether the platform can do wallpaper colours at all (API 31+). A parameter for the same reason as
     // the two above: the hidden case stays previewable and testable rather than depending on the device.
     showDynamicColor: Boolean = DYNAMIC_COLOR_SUPPORTED,
@@ -963,7 +964,7 @@ fun SettingsScreenPreview() =
             onToggleContentFiltering = {},
             onOpenRelays = {},
             onAllowBattery = {},
-            // The screen a shipped build shows: it has no calls (`CALLS_WIRED` off), and so no Calls row.
+            // The screen a shipped build shows: it has no calls (`CALL_SETTINGS_WIRED` off), and so no Calls row.
             showCalls = false,
         )
     }

@@ -344,14 +344,16 @@ val meshModule =
             OkHttpSpoolDialer(allowCleartext = BuildConfig.DEBUG, clientFor = OkHttpSpoolDialer.clientFor(get<InternetGate>()::routeKind))
         }
         // The ticket key swap (experimental, ADR 2026-10.3sk7): one POST to the issuer an invite named, bound to the
-        // validated default network as the link-preview fetch is. Resolved only where tickets are wired (CALLS_WIRED).
-        single<TicketIssuer> {
-            val gate = get<AndroidInternetGate>()
-            val base = OkHttpTicketIssuer.baseClient()
-            OkHttpTicketIssuer(
-                clientFor = { gate.currentNetwork()?.let { OkHttpTicketIssuer.bound(base, it) } },
-                allowCleartext = BuildConfig.DEBUG,
-            )
+        // validated default network as the link-preview fetch is. Defined only where Knit Anywhere is (ANYWHERE_WIRED).
+        if (ANYWHERE_WIRED) {
+            single<TicketIssuer> {
+                val gate = get<AndroidInternetGate>()
+                val base = OkHttpTicketIssuer.baseClient()
+                OkHttpTicketIssuer(
+                    clientFor = { gate.currentNetwork()?.let { OkHttpTicketIssuer.bound(base, it) } },
+                    allowCleartext = BuildConfig.DEBUG,
+                )
+            }
         }
         // Constructor order: transport, messages, receipts, groups, reactions, peers, metPeers, identity,
         // settings, blobs, imageScreening, blobStore, partials, forwardStore, notifier, textModeration,
@@ -395,26 +397,31 @@ val meshModule =
                 publicChannel = { body -> get<PublicChannelSink>().postToPublicChannel(body) },
                 onTransferSignal = { sender, payload, sentAt -> get<TransferManager>().onSignal(sender, payload, sentAt) },
                 // Voice calls (experimental, `CALLS_WIRED` — di/CallWiring): resolved late like the transfer hook, and
-                // never allowed to throw into the inbound path (rules/mesh.md). Null in a build that wires no calls.
+                // never allowed to throw into the inbound path (rules/mesh.md). Nothing in a build that wires no calls.
                 onCallSignal = { sender, payload, sentAt ->
-                    runCatching { getKoin().getOrNull<CallManager>()?.onSignal(sender, payload, sentAt) }
-                        .onFailure { Log.w("KnitCall", "call signal dropped: ${it.javaClass.simpleName}") }
+                    if (CALLS_WIRED) {
+                        runCatching { getKoin().getOrNull<CallManager>()?.onSignal(sender, payload, sentAt) }
+                            .onFailure { Log.w("KnitCall", "call signal dropped: ${it.javaClass.simpleName}") }
+                    }
                 },
-                // A walkie chunk (§3.11) goes the same late-bound, never-throwing way.
+                // A walkie chunk (§3.11) goes the same late-bound, never-throwing way, where the walkie is wired.
                 onCallTalk = { sender, chunk, sentAt, frameBytes ->
-                    runCatching { getKoin().getOrNull<CallManager>()?.onTalk(sender, chunk, sentAt, frameBytes) }
-                        .onFailure { Log.w("KnitCall", "walkie chunk dropped: ${it.javaClass.simpleName}") }
+                    if (WALKIE_WIRED) {
+                        runCatching { getKoin().getOrNull<CallManager>()?.onTalk(sender, chunk, sentAt, frameBytes) }
+                            .onFailure { Log.w("KnitCall", "walkie chunk dropped: ${it.javaClass.simpleName}") }
+                    }
                 },
-                extraCapabilities = (if (CALLS_WIRED) Protocol.CAP_CALL else 0L) or (if (WALKIE_WIRED) Protocol.CAP_WALKIE else 0L),
-                // Tickets buy TURN and casts, which only a build with calls has: release holds no key and asks no issuer.
-                ticketKeys = if (CALLS_WIRED) get<TicketKeyStore>() else null,
-                ticketIssuer = if (CALLS_WIRED) get<TicketIssuer>() else null,
-                freeKeys = if (CALLS_WIRED) get<TicketKeyStore>() else null,
-                accountIssuer = if (CALLS_WIRED) get<TicketIssuer>() as? AccountIssuer else null,
+                // Each kind's bit where that kind is wired (ADR 2026-10.swvp): CAP_CALL now means "takes a live call".
+                extraCapabilities = (if (LIVE_CALLS_WIRED) Protocol.CAP_CALL else 0L) or (if (WALKIE_WIRED) Protocol.CAP_WALKIE else 0L),
+                // Getting tickets is Knit Anywhere's (ANYWHERE_WIRED): without it this phone holds no key and asks no issuer.
+                ticketKeys = if (ANYWHERE_WIRED) get<TicketKeyStore>() else null,
+                ticketIssuer = if (ANYWHERE_WIRED) get<TicketIssuer>() else null,
+                freeKeys = if (ANYWHERE_WIRED) get<TicketKeyStore>() else null,
+                accountIssuer = if (ANYWHERE_WIRED) get<TicketIssuer>() as? AccountIssuer else null,
                 allowCleartext = BuildConfig.DEBUG,
                 // The supporter badge (ADR 2026-10.r99s): the journal in every build, the issuer beside the ticket swap's.
                 badgeJournal = get<BadgeStore>(),
-                badgeIssuer = if (CALLS_WIRED) get<TicketIssuer>() as? BadgeIssuer else null,
+                badgeIssuer = if (ANYWHERE_WIRED) get<TicketIssuer>() as? BadgeIssuer else null,
                 badgePins = BadgeKeys.forBuild(BuildConfig.DEBUG),
                 identities = get(),
                 quotes = get(),
@@ -464,15 +471,17 @@ val meshModule =
         // One place that turns settings + `spoolStatus()` into the relay facts the chat indicator, the
         // relay settings screen and Diagnostics all read.
         single { RelayStatusRepository(get(), get()) }
-        // Free accounts' notice and switch (docs/VOICE_CALLS.md C-7.6-34): read only where tickets are wired.
-        single {
-            FreeUploads(
-                get<RelayStatusRepository>().statuses,
-                get<TicketKeyStore>(),
-                get<TicketKeyStore>(),
-                get<SettingsStore>(),
-                FreeIssuers.expectedAm(androidContext().resources.getStringArray(R.array.free_issuer_am)),
-            )
+        // Free accounts' notice and switch (docs/VOICE_CALLS.md C-7.6-34): defined only where Knit Anywhere is.
+        if (ANYWHERE_WIRED) {
+            single {
+                FreeUploads(
+                    get<RelayStatusRepository>().statuses,
+                    get<TicketKeyStore>(),
+                    get<TicketKeyStore>(),
+                    get<SettingsStore>(),
+                    FreeIssuers.expectedAm(androidContext().resources.getStringArray(R.array.free_issuer_am)),
+                )
+            }
         }
         // The LoRa plane's UI face: the transport itself when the build ships the plane, a dark stand-in
         // otherwise — so the chat header's repository (resolved by every open chat) never instantiates the

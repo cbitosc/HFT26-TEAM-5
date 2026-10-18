@@ -220,3 +220,10 @@ The moved previews are screenshot tests now (`CallScreenshots.kt`), and detekt c
 moved to `src/test`. The two that build `org.webrtc` objects stay in `testDebug`, where the library runs.
 
 Guards: `KoinGraphVerifyTest`, the `ui.call` tests, and the call screenshots.
+
+## Amendment (2026-10-18): four flags instead of one
+
+`BuildConfig.CALLS` is gone. Live calls, mesh calls, speech and Knit Anywhere each have a flag of their own (ADR
+2026-10.swvp). WebRTC and `src/liveCalls/keepRules` follow `-PliveCalls`. Core-telecom and `src/calls/AndroidManifest.xml`
+follow either call kind. A build without live calls declines a live offer for its media, and `CAP_CALL` now means
+"takes a live call".

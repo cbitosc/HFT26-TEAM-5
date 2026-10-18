@@ -37,6 +37,7 @@ class CallSettingsScreenContentTest {
 
     private fun render(
         state: CallSettingsUiState,
+        live: Boolean = true,
         onToggleRelayAll: (Boolean) -> Unit = {},
         onToggleTurn: (Boolean) -> Unit = {},
         onTest: () -> Unit = {},
@@ -51,6 +52,7 @@ class CallSettingsScreenContentTest {
                 CallSettingsScreenContent(
                     state = state,
                     onBack = {},
+                    live = live,
                     onToggleRelayAll = onToggleRelayAll,
                     onToggleTurn = onToggleTurn,
                     onTest = onTest,
@@ -124,6 +126,18 @@ class CallSettingsScreenContentTest {
             .assertIsEnabled()
             .performClick()
         assertEquals(true, tested)
+    }
+
+    // A build with mesh calls and speech but no live calls (ADR 2026-10.swvp): the transcripts section alone, no relay,
+    // server or Test row and no Save.
+    @Test
+    fun aBuildWithoutLiveCallsShowsTheTranscriptsAlone() {
+        render(CallSettingsUiState(), live = false, transcripts = TranscriptsUi(on = true, bytes = 1_000_000))
+        compose.onNodeWithTag("call_settings_transcripts").assertIsDisplayed()
+        val liveRows = listOf("call_settings_relay_all", "call_settings_stun_switch", "call_settings_turn_switch", "call_settings_test")
+        for (tag in liveRows + "call_settings_save") {
+            compose.onNodeWithTag(tag).assertDoesNotExist()
+        }
     }
 
     // The walkie transcripts (docs/VOICE_CALLS.md C-3.11-9): their switch, and the speech model they need.

@@ -490,3 +490,10 @@ step if this one falls short.
 
 Owed: a by-ear and transcript A/B in a noisy room on the P9 and the P7, using `…debug.CALL --es op ns --ez on false`
 for the "before" bursts.
+
+## Amendment 2026-10-18 (11): the walkie needs no live calls
+
+`BuildConfig.WALKIE` is now `BuildConfig.MESH_CALLS` (`-PmeshCalls=`), still read once as `WALKIE_WIRED`, and it is no
+longer off wherever live calls are (ADR 2026-10.swvp). A build with mesh calls alone packages no WebRTC and advertises
+`CAP_WALKIE` without `CAP_CALL`. Its `CallManager` places every call as a walkie. A caller asks for `CAP_WALKIE` alone
+to place one, and `liveLikely` is false toward a peer without `CAP_CALL`.

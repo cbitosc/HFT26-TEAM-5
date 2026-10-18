@@ -229,3 +229,10 @@ C-3.11-9). It is debug-only, as the walkie is, and nothing reaches the wire.
   was tried. The trial also found two deadlocks in `WebRtcSession`, fixed: a stats read held the session's lock across
   `pc.getStats`, which waits on the signaling thread, where both the captions' `listen` and the existing
   `onIceCandidate` took that lock. Calls into the connection now hold `pcLock`, which the signaling thread never takes.
+
+## Amendment (2026-10-18): speech has its own flag
+
+The speech graph moved again, from `CALLS_WIRED` to `STT_WIRED` (`BuildConfig.STT`, `-Pstt=`), which is on only where
+a call kind is (ADR 2026-10.swvp). Moonshine, `SttDownloadService` and `FOREGROUND_SERVICE_DATA_SYNC` are packaged from
+`src/stt/` only there, and `moonshine.keep` moved there with them. The transcriber is built only with the walkie, the
+captioner only with live calls.

@@ -23,8 +23,8 @@ import kotlinx.coroutines.flow.first
  * second door, not a second consent.
  *
  * [commons] is null while the commons is dark (`BuildConfig.COMMONS` off): the room half of a link is
- * then ignored without comment, and the relay half still applies. [keys] is null in a build without tickets
- * (release: `CALLS_WIRED` off, ADR 2026-10.3sk7), and the issuer and customer key a link carries are ignored the same
+ * then ignored without comment, and the relay half still applies. [keys] is null in a build without Knit Anywhere
+ * (release: `ANYWHERE_WIRED` off, ADR 2026-10.3sk7), and the issuer and customer key a link carries are ignored the same
  * way; with it, the key is held for the relay's host in the same confirmation, and the ticket refresher trades it.
  */
 class RelayInviteApplier(

@@ -39,7 +39,7 @@ data class FreeUploadChoice(
 
 /**
  * The person's side of free accounts (C-7.6-34): the offers the chat's notice asks about, the choice each relay row's
- * switch shows, and the one write both make. Built only where tickets are wired (`CALLS_WIRED`); null elsewhere, and
+ * switch shows, and the one write both make. Built only where Knit Anywhere is wired (`ANYWHERE_WIRED`); null elsewhere, and
  * then nothing asks.
  */
 class FreeUploads(

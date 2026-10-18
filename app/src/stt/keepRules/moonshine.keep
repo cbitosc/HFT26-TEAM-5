@@ -1,4 +1,5 @@
-# The walkie transcript's speech runtime (moonshine-voice; docs/VOICE_CALLS.md C-3.11-9) in a minified build with calls.
+# The speech runtime of transcripts and captions (moonshine-voice; docs/VOICE_CALLS.md C-3.11-9) in a minified build
+# with `BuildConfig.STT` on: the build adds this directory to a variant only there.
 # Its native half binds `ai.moonshine.voice.JNI`'s methods by name and builds `Transcript`, `TranscriptLine` and their
 # fields itself (and reads `TranscriberOption`'s), so renaming or dropping any of them fails inside native code, not in a
 # test. The AAR ships no consumer rules; the package is pinned whole.

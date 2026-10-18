@@ -261,6 +261,7 @@ class ProfileDetailsViewModelTest {
     fun callIsOfferedOnlyToACallCapablePeerInABuildThatWiresCalls() =
         runTest {
             val calls = mockk<CallManager>(relaxed = true)
+            every { calls.liveEnabled } returns true
             val vm = vm(calls)
             backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.state.collect {} }
             peersFlow.value = listOf(peer(nodeId, name = "Ada"))
@@ -278,6 +279,27 @@ class ProfileDetailsViewModelTest {
             blockedFlow.value = setOf(nodeId)
             advanceUntilIdle()
             assertFalse("blocked", vm.state.value.canCall)
+        }
+
+    /**
+     * A build that takes mesh calls alone (ADR 2026-10.swvp) offers Call to a peer whose profile carries CAP_WALKIE,
+     * and to none that carries only CAP_CALL: its call would be a walkie, which that peer cannot take.
+     */
+    @Test
+    fun aBuildWithMeshCallsAloneOffersCallToAWalkieCapablePeerOnly() =
+        runTest {
+            val calls = mockk<CallManager>(relaxed = true)
+            every { calls.liveEnabled } returns false
+            every { calls.walkieEnabled } returns true
+            val vm = vm(calls)
+            backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.state.collect {} }
+            peersFlow.value = listOf(peer(nodeId, name = "Ada", capabilities = Protocol.CAP_CALL))
+            advanceUntilIdle()
+            assertFalse("a live-only peer", vm.state.value.canCall)
+
+            peersFlow.value = listOf(peer(nodeId, name = "Ada", capabilities = Protocol.CAP_WALKIE))
+            advanceUntilIdle()
+            assertTrue(vm.state.value.canCall)
         }
 
     @Test

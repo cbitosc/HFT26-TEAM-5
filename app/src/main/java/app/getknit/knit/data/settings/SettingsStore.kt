@@ -143,7 +143,7 @@ class SettingsStore(
     /**
      * Relay all calls (experimental, docs/VOICE_CALLS.md C-3.7-3): every call goes through a relay's TURN server and
      * nothing this phone sends a callee names its own address, so the peer never learns it. Off by default, read by
-     * `CallManager` as each call opens its media, and shown only by a build that wires calls (`CALLS_WIRED`). A choice
+     * `CallManager` as each call opens its media, and shown only by a build that wires live calls (`LIVE_CALLS_WIRED`). A choice
      * the person made, so it rides a backup.
      */
     val callsRelayAll: Flow<Boolean> = dataStore.data.map { it[KEY_CALLS_RELAY_ALL] ?: false }

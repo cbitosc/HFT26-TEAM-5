@@ -126,11 +126,15 @@ sealed interface CallSettingsEvent {
 class CallSettingsViewModel(
     private val settings: SettingsStore,
     private val ownIce: OwnIceStore,
-    private val probe: IceProbe,
+    // The live calls' Test; null, and no relay, server or Test rows, where live calls are not wired.
+    private val probe: IceProbe? = null,
     // The speech model and the transcripts switch; null, and no section, where they are not wired.
     private val stt: SttModelStore? = null,
     private val transcriptStore: TranscriptStore? = null,
 ) : ViewModel() {
+    /** Whether the live calls' rows show: "Relay all calls", the own servers and their Test. */
+    val live: Boolean = probe != null
+
     private val draft = MutableStateFlow(CallServerDraft())
     private val testing = MutableStateFlow(false)
     private val result = MutableStateFlow<ProbeResult?>(null)
@@ -218,6 +222,7 @@ class CallSettingsViewModel(
 
     /** Tries what is typed, whether or not it is saved or switched on. */
     fun test() {
+        val probe = probe ?: return
         val current = state.value.copy(draft = draft.value, testing = testing.value)
         if (!current.canTest) return
         val turn = if (current.testTurn) draft.value.asServers(OwnIceServers()).turnServer() else null

@@ -1,7 +1,0 @@
-# What a minified build with voice calls (`-Pcalls=true` on a release-shaped build; docs/VOICE_CALLS.md) adds to R8's
-# rules. The build adds this directory to a variant only where `BuildConfig.CALLS` is on, so a shipped artifact never
-# reads it. The webrtc-sdk AAR ships no consumer rules, yet libwebrtc's native half finds its Java half by name: it
-# calls `@CalledByNative` methods, constructs `org.webrtc` classes and dispatches to observers we implement (the peer
-# connection's, `DirectNetworkDetector`'s). Renaming or dropping any of them fails inside native code, not in a test,
-# so the whole package is pinned, as upstream's own sample app does.
--keep class org.webrtc.** { *; }

@@ -23,6 +23,13 @@ interface TurnSource {
      * private addresses, which a paying peer's relay cannot permit.
      */
     fun stunUrls(): List<String>
+
+    /** A build that takes no live calls (`LIVE_CALLS_WIRED` off): nothing ever asks it, and it has nothing to give. */
+    object None : TurnSource {
+        override suspend fun turnServers(peerId: String): List<TurnServer> = emptyList()
+
+        override fun stunUrls(): List<String> = emptyList()
+    }
 }
 
 /**

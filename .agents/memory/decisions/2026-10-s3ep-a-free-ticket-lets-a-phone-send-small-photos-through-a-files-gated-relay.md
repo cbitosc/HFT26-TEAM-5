@@ -112,3 +112,9 @@ an issuer only from an invite's `i`.
   a ~1 MB PDF that stays "Nearby only" with no `aput`, `budget` after about five, an offline photo that goes up after
   reconnect, and the P9's paid ticket unchanged. Mining time at 22 bits on the P7 and the P9 (`…debug.SPOOL --ei mine
   22`).
+
+## Amendment (2026-10-18): Knit Anywhere has its own flag
+
+Getting tickets moved from `CALLS_WIRED` to `ANYWHERE_WIRED` (`BuildConfig.KNIT_ANYWHERE`, `-PknitAnywhere=`, ADR
+2026-10.swvp), which needs no calls. That covers the issuer, free uploads, an invite's customer key, the own badge's
+switch and the relay rows' free switch. Reading a relay's gates still ships in every build.

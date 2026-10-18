@@ -71,6 +71,8 @@ import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.data.settings.TicketKeyStore
 import app.getknit.knit.data.settings.TranscriptStore
 import app.getknit.knit.data.webp.WebpTranscode
+import app.getknit.knit.di.LIVE_CALLS_WIRED
+import app.getknit.knit.di.WALKIE_WIRED
 import app.getknit.knit.identity.Identity
 import app.getknit.knit.identity.displayNameFor
 import app.getknit.knit.mesh.ForwardStore
@@ -353,7 +355,6 @@ class DebugBridgeReceiver :
     KoinComponent {
     private val mesh: MeshController by inject()
     private val attachments: AttachmentStore by inject()
-    private val freeUploads: FreeUploads by inject()
     private val messages: MessageRepository by inject()
     private val reactions: ReactionRepository by inject()
     private val receipts: MessageReceiptRepository by inject()
@@ -740,7 +741,12 @@ class DebugBridgeReceiver :
         // same `FreeUploads.photoChunks`, the same `photoFitBytes`. Off by default, so every older script is unchanged.
         val fitBytes =
             if (intent.getBooleanExtra(EXTRA_FIT, false) && conv != Conversations.NEARBY) {
-                freeUploads.photoChunks.first()?.let(::photoFitBytes)
+                // Null where Knit Anywhere is not wired (`-PknitAnywhere=false`): no free ticket fits anything there.
+                getKoin()
+                    .getOrNull<FreeUploads>()
+                    ?.photoChunks
+                    ?.first()
+                    ?.let(::photoFitBytes)
             } else {
                 null
             }
@@ -2524,6 +2530,7 @@ class DebugBridgeReceiver :
             }
 
             "capture" -> {
+                if (!LIVE_CALLS_WIRED) return reply("error", "this build wires no live calls")
                 val health = getKoin().get<CaptureHealth>()
                 val set = intent.getStringExtra("set")
                 if (set == "reset") {
@@ -2559,6 +2566,7 @@ class DebugBridgeReceiver :
             }
 
             "dropgroup" -> {
+                if (!LIVE_CALLS_WIRED) return reply("error", "this build wires no live calls")
                 val dropped = getKoin().get<DirectCallPath>().dropGroup()
                 return reply(if (dropped) "ok" else "error", if (dropped) "lane closed; the radio goes back" else "no live leg")
             }
@@ -2705,7 +2713,7 @@ class DebugBridgeReceiver :
      */
     @Suppress("CyclomaticComplexMethod", "ReturnCount") // a flat dispatch over the ops
     private suspend fun handleStt(intent: Intent): JSONObject {
-        val store = getKoin().getOrNull<SttModelStore>() ?: return reply("error", "this build wires no calls")
+        val store = getKoin().getOrNull<SttModelStore>() ?: return reply("error", "this build wires no speech")
         val speech = getKoin().get<MoonshineSpeech>()
         // A broadcast can wake a fresh process before its own start has read the disk.
         withContext(Dispatchers.IO) { store.start() }
@@ -2769,6 +2777,7 @@ class DebugBridgeReceiver :
             "clips" -> {
                 // Diagnostics' "Save walkie clips": `--ez on true|false` sets the persisted switch, `--ez clear true`
                 // deletes what was saved; either way the reply says where they are and how many.
+                if (!WALKIE_WIRED) return reply("error", "this build wires no walkie")
                 val clips = getKoin().get<WalkieClipFiles>()
                 if (intent.hasExtra("on")) getKoin().get<SettingsStore>().setDebugWalkieClips(intent.getBooleanExtra("on", false))
                 if (intent.getBooleanExtra("clear", false)) clips.clear()
@@ -2781,6 +2790,7 @@ class DebugBridgeReceiver :
             }
 
             "loop" -> {
+                if (!WALKIE_WIRED) return reply("error", "this build wires no walkie")
                 val file = intent.getStringExtra(EXTRA_PATH)?.let(::File) ?: return reply("error", "missing 'path' extra")
                 if (!file.canRead()) return reply("error", "can't read $file")
                 if (getKoin()

@@ -158,11 +158,12 @@ object Protocol {
     const val CAP_BLOB_HAVE = 0x2000L
 
     /**
-     * Voice calls (experimental, docs/VOICE_CALLS.md): this build answers a sealed `CTL_CALL` offer
-     * (`MessageContent.cl`) by ringing, and carries the call's media over WebRTC.
+     * Live voice calls (experimental, docs/VOICE_CALLS.md): this build answers a sealed `CTL_CALL` live offer
+     * (`MessageContent.cl`) by ringing, and carries the call's media over WebRTC. A build may take walkie calls alone
+     * ([CAP_WALKIE] without this bit, ADR 2026-10.swvp), so a walkie offer never asks for it.
      *
-     * **Never in [LOCAL_CAPABILITIES]:** only a build that wires the call media (`di/CallWiring`, debug today)
-     * advertises it, OR-ed into its own profile by `MeshManager`. A send-time input like [CAP_DIRECT_TRANSFER] — an
+     * **Never in [LOCAL_CAPABILITIES]:** only a build that wires the call media (`di/CallWiring`'s `LIVE_CALLS_WIRED`,
+     * debug today) advertises it, OR-ed into its own profile by `MeshManager`. A send-time input like [CAP_DIRECT_TRANSFER] — an
      * offer goes only toward a pinned profile carrying this bit (C-3.1-2), since a build without it consumes the ctl
      * as a silent no-op and the caller would ring out for nothing. Above the 8 bits a BLE advert carries.
      */
@@ -171,7 +172,7 @@ object Protocol {
     /**
      * Walkie-talkie calls (experimental, docs/VOICE_CALLS.md §3.11, ADR 2026-10.79yb): this build answers a walkie
      * offer (`CallPayload.MEDIA_WALKIE`) and plays a session's voice notes as they arrive. Like [CAP_CALL], never in
-     * [LOCAL_CAPABILITIES] — OR-ed in by a build that wires it (`di/CallWiring`, `BuildConfig.WALKIE`) — and a
+     * [LOCAL_CAPABILITIES] — OR-ed in by a build that wires it (`di/CallWiring`, `BuildConfig.MESH_CALLS`) — and a
      * send-time input only: a caller offers a walkie, or the drop to one, only toward a profile carrying it.
      */
     const val CAP_WALKIE = 0x8000L

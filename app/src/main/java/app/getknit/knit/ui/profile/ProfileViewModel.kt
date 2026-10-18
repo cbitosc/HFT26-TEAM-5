@@ -43,7 +43,8 @@ class ProfileViewModel(
      */
     private val appScope: CoroutineScope,
     // The supporter badge's toggle (docs/SUPPORTER_BADGE.md §5): the holder's journal, the customer keys whose presence
-    // offers it, and the keys a held badge must verify under. Null in tests that don't exercise it, which hides the row.
+    // offers it, and the keys a held badge must verify under. Null in tests that don't exercise it and in a build without
+    // Knit Anywhere (`ANYWHERE_WIRED`), which hides the row.
     private val badges: BadgeJournal? = null,
     ticketKeys: TicketKeyJournal? = null,
     pins: List<PinnedBadgeKey> = emptyList(),

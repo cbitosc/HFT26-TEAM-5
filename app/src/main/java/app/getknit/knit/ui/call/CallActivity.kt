@@ -121,6 +121,9 @@ import app.getknit.knit.data.PeerRepository
 import app.getknit.knit.data.message.MessageEntity
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.data.settings.TranscriptStore
+import app.getknit.knit.di.LIVE_CALLS_WIRED
+import app.getknit.knit.di.STT_WIRED
+import app.getknit.knit.di.WALKIE_WIRED
 import app.getknit.knit.identity.Identity
 import app.getknit.knit.mesh.protocol.CallPayload
 import app.getknit.knit.notifications.MessageNotifier
@@ -158,17 +161,22 @@ class CallActivity :
     private val groups: GroupRepository by inject()
     private val settings: SettingsStore by inject()
     private val identity: Identity by inject()
-    private val media: WebRtcCallMedia by inject()
     private val system: SystemCallSync by inject()
 
-    // Null in a build with the walkie off (`di/CallWiring.WALKIE_WIRED`): no call is ever a walkie there.
-    private val walkie: WalkieTalk? = getKoin().getOrNull()
+    // Each kind's and speech's own objects, looked up only where the build wires them (`di/CallWiring`, ADR
+    // 2026-10.swvp), so a build without one never reaches its classes. Null in a build without live calls: no call is
+    // ever live there.
+    private val media: WebRtcCallMedia? by lazy { if (LIVE_CALLS_WIRED) getKoin().get<WebRtcCallMedia>() else null }
 
-    // The walkie's transcript, null where the walkie is; a live call's captions and the speech model both use.
-    private val transcriber: WalkieTranscriber? = getKoin().getOrNull()
-    private val captioner: CallCaptioner? = getKoin().getOrNull()
-    private val stt: SttModelStore? = getKoin().getOrNull()
-    private val transcriptStore: TranscriptStore? = getKoin().getOrNull()
+    // Null in a build with the walkie off (`di/CallWiring.WALKIE_WIRED`): no call is ever a walkie there.
+    private val walkie: WalkieTalk? = if (WALKIE_WIRED) getKoin().get<WalkieTalk>() else null
+
+    // The walkie's transcript (null where the walkie is off) and a live call's captions (null where live calls are),
+    // and the speech model both use: all null where speech is off (`STT_WIRED`).
+    private val transcriber: WalkieTranscriber? = if (STT_WIRED && WALKIE_WIRED) getKoin().get<WalkieTranscriber>() else null
+    private val captioner: CallCaptioner? = if (STT_WIRED && LIVE_CALLS_WIRED) getKoin().get<CallCaptioner>() else null
+    private val stt: SttModelStore? = if (STT_WIRED) getKoin().get<SttModelStore>() else null
+    private val transcriptStore: TranscriptStore? = if (STT_WIRED) getKoin().get<TranscriptStore>() else null
     private var pendingAnswer: String? = null
     private var serviceStarted = false
 
@@ -252,8 +260,8 @@ class CallActivity :
         LaunchedEffect(mediaUp) {
             while (mediaUp) {
                 route = calls.route()
-                stats = media.stats()
-                capture = media.captureStatus()
+                stats = media?.stats()
+                capture = media?.captureStatus()
                 quality = judge.next(stats)
                 delay(POLL_MS)
             }
@@ -295,7 +303,8 @@ class CallActivity :
             onAnswer = { state?.id?.let(::answer) },
             onDecline = { state?.id?.let { id -> lifecycleScope.launch { calls.decline(id) } } },
             onHangUp = { lifecycleScope.launch { calls.hangUp() } },
-            onCallBack = { peerId?.let { peer -> lifecycleScope.launch { calls.start(peer, CallKind.LIVE) } } },
+            // A live call back where the build takes one, else a mesh call.
+            onCallBack = { peerId?.let { peer -> lifecycleScope.launch { calls.start(peer, callBackKind(calls)) } } },
             onClose = ::finish,
             onMute = { on -> lifecycleScope.launch { calls.setMuted(on) } },
             routing = routing,
@@ -387,6 +396,10 @@ private val AvatarSize = 144.dp
 private val CompactAvatarSize = 104.dp
 private val CompactRingReach = 16.dp
 private val InlineAvatarSize = 72.dp
+
+/** The kind a Call back places: a live call where the build takes one, else a mesh call (ADR 2026-10.swvp). */
+private fun callBackKind(calls: CallManager): CallKind = if (calls.liveEnabled) CallKind.LIVE else CallKind.WALKIE
+
 private val StackedMinHeight = 760.dp
 private val RingReach = 40.dp
 private val ActionSize = 72.dp

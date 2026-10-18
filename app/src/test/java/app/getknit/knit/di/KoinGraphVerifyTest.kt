@@ -2,6 +2,7 @@ package app.getknit.knit.di
 
 import android.app.Application
 import android.content.Context
+import app.getknit.knit.call.CallMedia
 import app.getknit.knit.call.CallSignals
 import app.getknit.knit.call.CallWalkie
 import app.getknit.knit.call.SpeechToText
@@ -42,12 +43,17 @@ class KoinGraphVerifyTest {
     @OptIn(KoinExperimentalAPI::class)
     @Test
     fun everyDefinitionResolves() {
-        // Plus the voice calls' graph where this variant wires one (di/CallWiring; unit tests build the debug one).
+        // Plus the voice calls' graph where this variant wires one (di/CallWiring; unit tests build the debug one, and
+        // `-PliveCalls=false`, `-PmeshCalls=false`, `-Pstt=false` or `-PknitAnywhere=false` checks that build's).
         val calls = listOfNotNull(callModule()).toTypedArray()
-        module { includes(appModule, meshModule, moderationModule, uiModule, *calls) }.verify(extraTypes = extraTypes)
+        module { includes(appModule, meshModule, moderationModule, uiModule, *calls) }.verify(extraTypes = extraTypes + noLiveCalls)
     }
 
     private companion object {
+        // A build without live calls hands CallManager `CallMedia.None` and `TurnSource.None` inline (ADR 2026-10.swvp);
+        // one with them must resolve both to their definitions, so only that build excuses them.
+        val noLiveCalls = if (LIVE_CALLS_WIRED) emptyList() else listOf(CallMedia::class, TurnSource::class)
+
         val extraTypes =
             listOf(
                 // androidContext() — supplied by startKoin, not a definition.
@@ -87,7 +93,6 @@ class KoinGraphVerifyTest {
                 // The voice calls' seams, written inline over MeshManager so building the call graph builds nothing
                 // else (di/CallWiring), and the ring's alert timeout.
                 CallSignals::class,
-                TurnSource::class,
                 Long::class,
                 // The direct leg's link, handed to the media as a field of the DirectCallPath it already holds.
                 StateFlow::class,

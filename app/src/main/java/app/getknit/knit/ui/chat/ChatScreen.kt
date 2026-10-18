@@ -754,7 +754,7 @@ internal fun ChatScreenContent(
     onDownloadAttachment: (hash: String) -> Unit = {},
     // A large file over a direct Wi-Fi link (DM only): the menu item, and the card's answers.
     onSendFileDirectly: () -> Unit = {},
-    // A voice call (experimental; DM only, in a build that wires calls — [ChatUiState.canCall]).
+    // A live voice call (experimental; DM only, in a build that takes them — [ChatUiState.canCall]).
     onStartCall: () -> Unit = {},
     // A mesh call — a walkie-talkie over the mesh (§3.11, [ChatUiState.canMeshCall]) — and whether it is the one the top
     // bar shows, the live call going to the overflow; else the other way round.
@@ -1131,9 +1131,10 @@ internal fun ChatScreenContent(
                     // block — its authors are not peers, and blocking the gateway would silence a contact over
                     // somebody else's post.
                     // The call this chat puts first sits in the bar and the other in the overflow (§3.11): the live one
-                    // while a live path looks possible, the mesh one while none does.
-                    val callGate = if (state.canCall) rememberCallMicGate() else null
-                    val meshFirst = state.canMeshCall && meshCallFirst
+                    // while a live path looks possible, the mesh one while none does — or always, in a build that takes
+                    // mesh calls only.
+                    val callGate = if (state.canCall || state.canMeshCall) rememberCallMicGate() else null
+                    val meshFirst = state.canMeshCall && (meshCallFirst || !state.canCall)
                     if (callGate != null) {
                         if (meshFirst) {
                             CallButton(callGate, Icons.Filled.SpeakerPhone, R.string.chat_mesh_call, "chat_mesh_call", onStartMeshCall)
@@ -1179,8 +1180,8 @@ internal fun ChatScreenContent(
                                         },
                                     )
                                 } else if (!state.isRoom) {
-                                    // The call the top bar does not show (§3.11).
-                                    if (callGate?.hasMicrophone == true && state.canMeshCall) {
+                                    // The call the top bar does not show (§3.11), where the build offers both.
+                                    if (callGate?.hasMicrophone == true && state.canCall && state.canMeshCall) {
                                         DropdownMenuItem(
                                             text = { Text(stringResource(if (meshFirst) R.string.chat_call else R.string.chat_mesh_call)) },
                                             leadingIcon = {

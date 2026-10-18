@@ -310,7 +310,7 @@ class ScopeSync(
     // The entitlement tickets this device holds (experimental, docs/VOICE_CALLS.md §2.6, ADR 2026-10.xkp4): each
     // connection to an `ent` spool presents its host's ticket right after the hello, and again the moment a different
     // one is imported. Null presents nothing, for the tests that do not ask. Every build passes the store, release
-    // included: there nothing imports into it (the import doors and the refresher sit behind `CALLS_WIRED`), so a
+    // included: there nothing imports into it (the import doors and the refresher sit behind `ANYWHERE_WIRED`), so a
     // release phone holds no ticket and is locked out of uploads on a files-gated spool, as an unticketed one is.
     private val tickets: SpoolTickets? = null,
     // A relay URL where an upload of this phone's was just settled as locked `missing` or `expired` behind the files

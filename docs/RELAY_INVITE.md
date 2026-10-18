@@ -96,7 +96,7 @@ without a sheet, and the sheet is built around one question — *do you trust th
   different key for the same relay replaces the held one, and the sheet says so (an `account rotate-key`); an invite
   without `i` and `k` over a relay that holds a key keeps the key, as an untokened invite never downgrades a stored
   token. The key goes only to the origin it arrived with, only in an `Authorization` header (C-7.6-29).
-- A build without tickets (release today: no calls, `CALLS_WIRED` off) applies the relay and room halves and
+- A build without tickets (release today: no Knit Anywhere, `ANYWHERE_WIRED` off) applies the relay and room halves and
   ignores `i` and `k` without mentioning them.
 
 ## 4. Minting

@@ -470,11 +470,11 @@ data class ChatUiState(
     // one side has updated. The capability is enforced where it can explain itself instead, in
     // [ChatViewModel.attachFile].
     val canSendFile: Boolean = false,
-    // Whether the top bar offers a voice call (experimental, docs/VOICE_CALLS.md): a 1:1 thread in a build that wires
-    // calls. Not gated on the peer's CAP_CALL, for [canSendFile]'s reason; [ChatViewModel.startCall] explains instead.
+    // Whether the top bar offers a live voice call (experimental, docs/VOICE_CALLS.md): a 1:1 thread in a build that
+    // takes them. Not gated on the peer's CAP_CALL, for [canSendFile]'s reason; [ChatViewModel.startCall] explains instead.
     val canCall: Boolean = false,
-    // Whether it offers a mesh call too — a walkie-talkie over the mesh (docs/VOICE_CALLS.md §3.11) — in a build that
-    // runs one. Which of the two the top bar shows, and which the overflow, is [ChatViewModel.meshCallFirst].
+    // Whether it offers a mesh call — a walkie-talkie over the mesh (docs/VOICE_CALLS.md §3.11) — in a build that runs
+    // one. Where both are offered, which the top bar shows and which the overflow is [ChatViewModel.meshCallFirst].
     val canMeshCall: Boolean = false,
     // True when this thread is the **Meshtastic room** — the paired radio's primary channel, mirrored into a
     // room on this phone. It is a public room like Nearby, and shares its glyph and its "no attachments"
@@ -1293,7 +1293,7 @@ class ChatViewModel(
                 publicChannelKeyIsPublic = mesh.lora.facts.primaryKeyIsPublic,
                 needsPublicConsent = isBridged && !publicConsented,
                 isBlocked = isPeerThread && conversationId in blocked,
-                canCall = calls != null && isPeerThread && conversationId !in blocked,
+                canCall = calls?.liveEnabled == true && isPeerThread && conversationId !in blocked,
                 canMeshCall = calls?.walkieEnabled == true && isPeerThread && conversationId !in blocked,
                 verified = isPeerThread && peersByNode[conversationId]?.verified == true,
                 isGroup = isGroup,
@@ -2253,10 +2253,11 @@ class ChatViewModel(
         val calls = calls ?: return
         viewModelScope.launch {
             val refusal =
-                refusalForCall() ?: refusalForMeshCall(kind) ?: when (calls.start(conversationId, kind)) {
+                refusalForCall(kind) ?: refusalForMeshCall(kind) ?: when (calls.start(conversationId, kind)) {
                     null -> null
                     CallRefusal.BUSY -> R.string.chat_call_busy
                     CallRefusal.SELF -> R.string.chat_call_needs_dm
+                    CallRefusal.NO_LIVE -> R.string.chat_mesh_call_peer_too_old
                 }
             refusal?.let { _events.tryEmit(it) }
         }
@@ -2269,14 +2270,17 @@ class ChatViewModel(
         }
 
     /**
-     * Why this thread cannot be called, or null when it can: a DM only, toward a pinned profile carrying
-     * [Protocol.CAP_CALL] (C-3.1-2) — a build without it would swallow the offer and the call would ring out unheard.
-     * No nearness test: a call rides the Internet plane as readily as the radios.
+     * Why this thread cannot be called, or null when it can: a DM only, and a live call toward a pinned profile carrying
+     * [Protocol.CAP_CALL] (C-3.1-2) — a build without it would swallow the offer and the call would ring out unheard. A
+     * mesh call needs [Protocol.CAP_WALKIE] alone ([refusalForMeshCall]): a build may take that kind only. No nearness
+     * test: a call rides the Internet plane as readily as the radios.
      */
-    private suspend fun refusalForCall(): Int? {
+    private suspend fun refusalForCall(kind: CallKind): Int? {
         val members = groups.find(conversationId)?.let { GroupMembersStore.decode(it.members) }.orEmpty()
         if (isRoom || conversationId == Conversations.MESHTASTIC || members.isNotEmpty()) return R.string.chat_call_needs_dm
-        if ((peers.find(conversationId)?.capabilities ?: 0L) and Protocol.CAP_CALL == 0L) return R.string.chat_call_peer_too_old
+        if (kind == CallKind.LIVE && (peers.find(conversationId)?.capabilities ?: 0L) and Protocol.CAP_CALL == 0L) {
+            return R.string.chat_call_peer_too_old
+        }
         return null
     }
 

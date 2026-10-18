@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- What a build with voice calls adds to the manifest (experimental, docs/VOICE_CALLS.md). Not a source set: the build
-     adds this file to a variant only where `BuildConfig.CALLS` is on (`-Pcalls=`; on in debug, off in a shipped
-     artifact), so a build without calls declares neither the components nor the permissions below. RECORD_AUDIO is
-     already main's, for voice notes. The microphone foreground service keeps a call's audio while Knit is off screen;
-     the full-screen intent rings it over the lock screen. -->
+     adds this file to a variant only where `BuildConfig.LIVE_CALLS` or `BuildConfig.MESH_CALLS` is on (`-PliveCalls=`,
+     `-PmeshCalls=`; on in debug, off in a shipped artifact), so a build without calls declares neither the components
+     nor the permissions below. RECORD_AUDIO is already main's, for voice notes. The microphone foreground service
+     keeps a call's audio while Knit is off screen; the full-screen intent rings it over the lock screen. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
@@ -13,8 +13,6 @@
          the service holding the microphone holds the phone-call type with it. -->
     <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
-    <!-- The walkie transcript's speech model downloads on a dataSync service, so it outlasts the call it was started on. -->
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
     <application>
         <activity
@@ -30,10 +28,6 @@
             android:name="app.getknit.knit.ui.call.CallService"
             android:exported="false"
             android:foregroundServiceType="microphone|phoneCall" />
-        <service
-            android:name="app.getknit.knit.ui.call.stt.SttDownloadService"
-            android:exported="false"
-            android:foregroundServiceType="dataSync" />
         <receiver
             android:name="app.getknit.knit.ui.call.CallActionReceiver"
             android:exported="false" />

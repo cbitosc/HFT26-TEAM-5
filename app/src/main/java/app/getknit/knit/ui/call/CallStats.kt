@@ -3,7 +3,7 @@ package app.getknit.knit.ui.call
 import kotlin.math.roundToLong
 
 /**
- * One reading of a call's media, as the call screen's diagnostics card draws it (experimental, `CALLS_WIRED`). Read from
+ * One reading of a call's media, as the call screen's diagnostics card draws it (experimental, `LIVE_CALLS_WIRED`). Read from
  * libwebrtc's standard stats report ([CallStatsReader]); every field is null until the report carries it. No address
  * is ever kept: the route is candidate types and the network's kind, the same rule the media's log follows.
  */

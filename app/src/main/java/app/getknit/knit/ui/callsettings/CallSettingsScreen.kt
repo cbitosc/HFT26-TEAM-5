@@ -64,8 +64,9 @@ import org.koin.androidx.compose.koinViewModel
 
 /**
  * Calls (experimental, docs/VOICE_CALLS.md §3.14, ADR 2026-10.mr88): "Relay all calls", and the person's own STUN and
- * TURN servers, each replacing what the relays supply; the transcripts and captions switch and their speech model
- * (C-3.11-9, C-3.7-5). Reached only where calls are wired (`CALLS_WIRED`): the route is not registered otherwise.
+ * TURN servers, each replacing what the relays supply, where live calls are wired (`LIVE_CALLS_WIRED`); the transcripts
+ * and captions switch and their speech model (C-3.11-9, C-3.7-5) where speech is (`STT_WIRED`). Reached only where
+ * either is (`CALL_SETTINGS_WIRED`): the route is not registered otherwise.
  */
 @Composable
 fun CallSettingsScreen(
@@ -90,6 +91,7 @@ fun CallSettingsScreen(
     }
     CallSettingsScreenContent(
         state = state,
+        live = viewModel.live,
         loaded = loaded,
         snackbarHostState = snackbarHostState,
         onBack = onBack,
@@ -112,6 +114,8 @@ fun CallSettingsScreen(
 internal fun CallSettingsScreenContent(
     state: CallSettingsUiState,
     onBack: () -> Unit,
+    // The live calls' rows: "Relay all calls", the own servers, their Test and Save. Off where live calls are not wired.
+    live: Boolean = true,
     loaded: Boolean = true,
     snackbarHostState: SnackbarHostState = remember { SnackbarHostState() },
     onToggleRelayAll: (Boolean) -> Unit = {},
@@ -139,8 +143,10 @@ internal fun CallSettingsScreenContent(
                 },
                 title = { Text(stringResource(R.string.settings_calls_title)) },
                 actions = {
-                    TextButton(onClick = onSave, enabled = state.canSave, modifier = Modifier.testTag("call_settings_save")) {
-                        Text(stringResource(R.string.action_save))
+                    if (live) {
+                        TextButton(onClick = onSave, enabled = state.canSave, modifier = Modifier.testTag("call_settings_save")) {
+                            Text(stringResource(R.string.action_save))
+                        }
                     }
                 },
             )
@@ -155,37 +161,39 @@ internal fun CallSettingsScreenContent(
                     .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            ToggleRow(
-                title = stringResource(R.string.settings_relay_calls_title),
-                subtitle = stringResource(R.string.settings_relay_calls_subtitle),
-                enabled = state.relayAll,
-                onToggle = onToggleRelayAll,
-                modifier = Modifier.testTag("call_settings_relay_all"),
-            )
-            HorizontalDivider()
-            ToggleRow(
-                title = stringResource(R.string.call_settings_stun_title),
-                subtitle = stringResource(R.string.call_settings_stun_subtitle),
-                enabled = state.saved.stunOn,
-                onToggle = onToggleStun,
-                modifier = Modifier.testTag("call_settings_stun_switch"),
-            )
-            // Hidden until the draft holds what was stored, so a field never flashes empty over a saved server.
-            if (loaded && state.saved.stunOn) StunFields(state, onEdit)
-            HorizontalDivider()
-            ToggleRow(
-                title = stringResource(R.string.call_settings_turn_title),
-                subtitle = stringResource(R.string.call_settings_turn_subtitle),
-                enabled = state.saved.turnOn,
-                onToggle = onToggleTurn,
-                modifier = Modifier.testTag("call_settings_turn_switch"),
-            )
-            if (loaded && state.saved.turnOn) TurnFields(state, onEdit)
-            Note(stringResource(R.string.call_settings_turn_disclosure))
-            HorizontalDivider()
-            TestRow(state, onTest)
-            if (transcripts != null) {
+            if (live) {
+                ToggleRow(
+                    title = stringResource(R.string.settings_relay_calls_title),
+                    subtitle = stringResource(R.string.settings_relay_calls_subtitle),
+                    enabled = state.relayAll,
+                    onToggle = onToggleRelayAll,
+                    modifier = Modifier.testTag("call_settings_relay_all"),
+                )
                 HorizontalDivider()
+                ToggleRow(
+                    title = stringResource(R.string.call_settings_stun_title),
+                    subtitle = stringResource(R.string.call_settings_stun_subtitle),
+                    enabled = state.saved.stunOn,
+                    onToggle = onToggleStun,
+                    modifier = Modifier.testTag("call_settings_stun_switch"),
+                )
+                // Hidden until the draft holds what was stored, so a field never flashes empty over a saved server.
+                if (loaded && state.saved.stunOn) StunFields(state, onEdit)
+                HorizontalDivider()
+                ToggleRow(
+                    title = stringResource(R.string.call_settings_turn_title),
+                    subtitle = stringResource(R.string.call_settings_turn_subtitle),
+                    enabled = state.saved.turnOn,
+                    onToggle = onToggleTurn,
+                    modifier = Modifier.testTag("call_settings_turn_switch"),
+                )
+                if (loaded && state.saved.turnOn) TurnFields(state, onEdit)
+                Note(stringResource(R.string.call_settings_turn_disclosure))
+                HorizontalDivider()
+                TestRow(state, onTest)
+            }
+            if (transcripts != null) {
+                if (live) HorizontalDivider()
                 ToggleRow(
                     title = stringResource(R.string.call_settings_transcripts_title),
                     subtitle = stringResource(R.string.call_settings_transcripts_subtitle),
@@ -418,7 +426,7 @@ fun CallSettingsScreenPreview() =
         CallSettingsScreenContent(state = CallSettingsUiState(), onBack = {})
     }
 
-// A walkie build: transcripts on, the speech model not yet on the phone, and the phone on mobile data.
+// A build with speech: transcripts on, the speech model not yet on the phone, and the phone on mobile data.
 @Preview(showBackground = true, heightDp = 1000)
 @Composable
 fun CallSettingsScreenTranscriptsPreview() =

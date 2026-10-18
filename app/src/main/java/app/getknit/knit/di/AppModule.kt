@@ -221,14 +221,14 @@ val appModule =
         // customer keys, and every peer's received badges verified at display time against this build's pinned keys.
         single { BadgeStore(get()) }
         single { PeerBadges(get<PeerRepository>().observeBadges(), get<CoroutineScope>(), BadgeKeys.forBuild(BuildConfig.DEBUG)) }
-        // A build without tickets (release: CALLS_WIRED off) hands the applier no key store, so an invite's issuer and
-        // key are ignored without a word, as the room half is with the commons dark.
+        // A build without Knit Anywhere (release: ANYWHERE_WIRED off) hands the applier no key store, so an invite's
+        // issuer and key are ignored without a word, as the room half is with the commons dark.
         single {
             RelayInviteApplier(
                 get(),
                 if (BuildConfig.COMMONS) get<CommonsRepository>() else null,
                 get(),
-                keys = if (CALLS_WIRED) get<TicketKeyStore>() else null,
+                keys = if (ANYWHERE_WIRED) get<TicketKeyStore>() else null,
             )
         }
         // Single-shot signal that the rate/review prompt should show (drained by KnitApp).

@@ -34,7 +34,7 @@ import java.util.Locale
 import kotlin.math.log10
 
 /**
- * The call screen's diagnostics card (experimental, `CALLS_WIRED`): the live numbers of the media — round trip, jitter,
+ * The call screen's diagnostics card (experimental, `LIVE_CALLS_WIRED`): the live numbers of the media — round trip, jitter,
  * loss, both bitrates, the jitter buffer — over the path, the codec, the DTLS-SRTP suite and the ICE candidates. Drawn
  * for demos and for a tester's eye; nothing here is a call decision.
  */

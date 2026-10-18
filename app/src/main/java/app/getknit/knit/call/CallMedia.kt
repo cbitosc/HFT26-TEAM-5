@@ -18,6 +18,19 @@ fun interface CallMedia {
         direct: Boolean,
         events: (MediaEvent) -> Unit,
     ): CallSession
+
+    /**
+     * A build that takes no live calls (`LIVE_CALLS_WIRED` off, ADR 2026-10.swvp): [CallManager] places every call as a
+     * walkie and declines a live offer, so this is never opened.
+     */
+    object None : CallMedia {
+        override fun open(
+            servers: List<TurnServer>,
+            relayOnly: Boolean,
+            direct: Boolean,
+            events: (MediaEvent) -> Unit,
+        ): CallSession = error("this build takes no live calls")
+    }
 }
 
 /** One call's media: the SDP exchange, then audio. Every call is safe after [close] (a no-op or a null). */

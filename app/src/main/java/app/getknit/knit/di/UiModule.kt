@@ -3,6 +3,7 @@ package app.getknit.knit.di
 import app.getknit.knit.BuildConfig
 import app.getknit.knit.badge.BadgeKeys
 import app.getknit.knit.call.CallManager
+import app.getknit.knit.call.CaptureHealth
 import app.getknit.knit.data.AttachmentIdentities
 import app.getknit.knit.data.KnitDatabase
 import app.getknit.knit.data.LinkCardStore
@@ -79,8 +80,8 @@ val uiModule =
                 get<TransferManager>(),
                 get<CommonsRepository>(),
                 get<AttachmentIdentities>(),
-                getOrNull<CallManager>(),
-                freeUploads = if (CALLS_WIRED) get<FreeUploads>() else null,
+                if (CALLS_WIRED) get<CallManager>() else null,
+                freeUploads = if (ANYWHERE_WIRED) get<FreeUploads>() else null,
             )
         }
         viewModel {
@@ -125,7 +126,7 @@ val uiModule =
                 radios = RadioSupport.probe(androidContext()),
                 loraFacts = get<LoraStatusRepository>().facts,
                 hostGuard = get(),
-                captureHealth = getOrNull(),
+                captureHealth = if (LIVE_CALLS_WIRED) get<CaptureHealth>() else null,
             )
         }
         viewModel { CrashLogViewModel(get()) }
@@ -140,7 +141,8 @@ val uiModule =
                 get(),
                 get(),
                 get<CoroutineScope>(),
-                badges = get<BadgeStore>(),
+                // The own badge's switch, only where Knit Anywhere is wired: elsewhere no key or badge is ever held.
+                badges = if (ANYWHERE_WIRED) get<BadgeStore>() else null,
                 ticketKeys = get<TicketKeyStore>(),
                 pins = BadgeKeys.forBuild(BuildConfig.DEBUG),
             )
@@ -172,7 +174,7 @@ val uiModule =
                 get(),
                 get<RelayStatusRepository>().statuses,
                 androidContext(),
-                calls = getOrNull<CallManager>(),
+                calls = if (CALLS_WIRED) get<CallManager>() else null,
             )
         }
         // MessageDetailsViewModel takes the long-pressed message's id as a runtime param.
@@ -196,9 +198,10 @@ val uiModule =
                 gate = get(),
                 // In every build: removing a relay forgets a ticket the debug bridge imported even where no key exists.
                 ticketKeys = get<TicketKeyStore>(),
-                // A row's call details (TURN, STUN, casts, the ticket and its key) only where calls are wired.
-                spoolTickets = if (CALLS_WIRED) get<SettingsStore>() else null,
-                freeUploads = if (CALLS_WIRED) get<FreeUploads>() else null,
+                // A row's call details (TURN, STUN, casts, the ticket and its key) only where calls or Knit Anywhere are
+                // wired, and its free tickets' switch only where Knit Anywhere is.
+                spoolTickets = if (CALLS_WIRED || ANYWHERE_WIRED) get<SettingsStore>() else null,
+                freeUploads = if (ANYWHERE_WIRED) get<FreeUploads>() else null,
             )
         }
         viewModel { LoraRadioViewModel(get(), get(), get(), get()) }

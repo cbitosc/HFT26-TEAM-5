@@ -144,24 +144,36 @@ val bleFeedWindow = (project.findProperty("bleFeedWindow") as? String)?.toBoolea
 // `if (WEAR_STATUS)` branch), and the defaults live in source so F-Droid's -P-free rebuild stays identical.
 val wearStatus = (project.findProperty("wearStatus") as? String)?.toBoolean()
 
-// Voice calls (docs/VOICE_CALLS.md, ADR 2026-10.3tee) — an experiment: ON in debug, OFF in a shipped artifact,
-// overridable with `-Pcalls=true|false`. Unlike the switches above it decides what is packaged, not only what is wired:
-// libwebrtc is ~48 MB of native code across the four ABIs, and core-telecom's manifest brings an exported
-// ConnectionService and MANAGE_OWN_CALLS. So the code lives in main and compiles everywhere against `compileOnly`
-// WebRTC and core-telecom, and a variant gets their runtime, `src/calls/AndroidManifest.xml` (the call screen, its
-// service, receiver and permissions) and `src/calls/keepRules` only where the flag is on. Off, `di/CallWiring` builds
-// nothing and R8 drops every `ui/call` class. The debug build keeps the runtime even under `-Pcalls=false` (it is
-// locked); a release-shaped build under `-Pcalls=true` is a maintainer's, so its runtime classpaths go unlocked
-// (`dependencyLocking` below). The defaults live in source so F-Droid's -P-free rebuild stays identical.
+// Voice calls (docs/VOICE_CALLS.md) and Knit Anywhere — four experiments, each ON in debug and OFF in a shipped
+// artifact, and each overridable on its own (ADR 2026-10.swvp):
+//  - `-PliveCalls=true|false`: live calls over WebRTC (ADR 2026-10.3tee). The only one that packages libwebrtc, ~48 MB
+//    of native code across the four ABIs, with `src/liveCalls/keepRules`.
+//  - `-PmeshCalls=true|false`: the walkie-talkie over the mesh (§3.11, ADR 2026-10.79yb). Its Opus is the platform's
+//    MediaCodec, so a build with it and without live calls packages no WebRTC at all.
+//  - `-Pstt=true|false`: walkie transcripts and live captions (ADR 2026-10.nz3g). It listens to a call, so it is off
+//    wherever both call kinds are; on, it packages Moonshine and `src/stt/` (the model's download service, its keep rule).
+//  - `-PknitAnywhere=true|false`: getting and keeping Knit Anywhere tickets, free tickets and the supporter badge
+//    (ADR 2026-10.s3ep, 2026-10.r99s). No library of its own, so it decides only what is wired.
+// `-Pcalls=true|false` sets both call kinds at once (each kind's own flag still wins). Either kind brings core-telecom
+// (every call is a self-managed Telecom call, ADR 2026-10.wbua) and `src/calls/AndroidManifest.xml` (the call screen,
+// its service, receiver and permissions). Main compiles in every variant against `compileOnly` WebRTC, core-telecom and
+// Moonshine; off, `di/CallWiring` builds none of a feature's graph and R8 drops the classes only that graph reached. The
+// debug build packages all three libraries whatever the flags say (it is locked); a release-shaped build with any of
+// them is a maintainer's, so its runtime classpaths go unlocked (`dependencyLocking` below). The defaults live in source
+// so F-Droid's -P-free rebuild stays identical.
 val calls = (project.findProperty("calls") as? String)?.toBoolean()
-val callsInDebug = calls ?: true
-val callsInRelease = calls ?: false
-
-// The walkie-talkie (docs/VOICE_CALLS.md §3.11, ADR 2026-10.79yb): a call with no live path becomes hold-to-talk voice
-// notes over the mesh — ON in debug, OFF in a shipped artifact, overridable with `-Pwalkie=true|false` (say, to keep it
-// out of a marketing build). It gates the one seam, `di/CallWiring.WALKIE_WIRED`, which is off wherever calls are
-// (`calls` above). Not a code strip, and the defaults live in source so F-Droid's -P-free rebuild stays identical.
-val walkie = (project.findProperty("walkie") as? String)?.toBoolean()
+val liveCalls = (project.findProperty("liveCalls") as? String)?.toBoolean() ?: calls
+val meshCalls = (project.findProperty("meshCalls") as? String)?.toBoolean() ?: calls
+val stt = (project.findProperty("stt") as? String)?.toBoolean()
+val knitAnywhere = (project.findProperty("knitAnywhere") as? String)?.toBoolean()
+val liveCallsInDebug = liveCalls ?: true
+val liveCallsInRelease = liveCalls ?: false
+val meshCallsInDebug = meshCalls ?: true
+val meshCallsInRelease = meshCalls ?: false
+val callsInDebug = liveCallsInDebug || meshCallsInDebug
+val callsInRelease = liveCallsInRelease || meshCallsInRelease
+val sttInDebug = (stt ?: true) && callsInDebug
+val sttInRelease = (stt ?: false) && callsInRelease
 
 // ABIs packaged into the **debug** APK. Debug is unminified and carries both tflite models, so it is
 // ~150 MB before native libs; the four-ABI default adds ~28 MB more, of which the two 32-bit slices are
@@ -316,10 +328,11 @@ android {
         buildConfigField("boolean", "BLE_FEED_WINDOW", (bleFeedWindow ?: true).toString())
         // The Wear OS status service is ON in debug so a lab phone serves a paired watch; see `wearStatus` above.
         buildConfigField("boolean", "WEAR_STATUS", (wearStatus ?: true).toString())
-        // Voice calls are ON in debug so a lab build can call; see `calls` above.
-        buildConfigField("boolean", "CALLS", callsInDebug.toString())
-        // The walkie-talkie is ON in debug so a lab build can talk over the mesh; see `walkie` above.
-        buildConfigField("boolean", "WALKIE", (walkie ?: true).toString())
+        // Live calls, mesh calls, speech and Knit Anywhere are ON in debug so a lab build runs them; see `calls` above.
+        buildConfigField("boolean", "LIVE_CALLS", liveCallsInDebug.toString())
+        buildConfigField("boolean", "MESH_CALLS", meshCallsInDebug.toString())
+        buildConfigField("boolean", "STT", sttInDebug.toString())
+        buildConfigField("boolean", "KNIT_ANYWHERE", (knitAnywhere ?: true).toString())
         // Fault injection for the model poison-pill's acceptance test (ADR 037):
         // `-PmodelFaultOnLoad=segv` raises SIGSEGV, `=kill` sends SIGKILL, inside ModelLoadGuard right
         // after the in-flight marker is durably written. They test opposite things: only `segv` produces
@@ -428,10 +441,12 @@ android {
             buildConfigField("boolean", "BLE_FEED_WINDOW", (bleFeedWindow ?: true).toString())
             // The Wear OS status service is a prototype: dark in a shipped artifact.
             buildConfigField("boolean", "WEAR_STATUS", (wearStatus ?: false).toString())
-            // Voice calls are an experiment: dark in a shipped artifact, and not packaged there (see `calls` above).
-            buildConfigField("boolean", "CALLS", callsInRelease.toString())
-            // The walkie-talkie is an experiment on calls: dark in a shipped artifact.
-            buildConfigField("boolean", "WALKIE", (walkie ?: false).toString())
+            // Live calls, mesh calls, speech and Knit Anywhere are experiments: dark in a shipped artifact, and none of
+            // their libraries is packaged there (see `calls` above).
+            buildConfigField("boolean", "LIVE_CALLS", liveCallsInRelease.toString())
+            buildConfigField("boolean", "MESH_CALLS", meshCallsInRelease.toString())
+            buildConfigField("boolean", "STT", sttInRelease.toString())
+            buildConfigField("boolean", "KNIT_ANYWHERE", (knitAnywhere ?: false).toString())
             // Never ship a fault injector, whatever `-PmodelFaultOnLoad` said.
             buildConfigField("String", "MODEL_FAULT_ON_LOAD", "\"\"")
             // Unsigned when no keystore.properties / KNIT_UPLOAD_* creds are present (see signingConfigs).
@@ -690,12 +705,20 @@ androidComponents {
             gitShortSha.map { BuildConfigField("String", "\"$it\"", "Short commit of the checkout; debug only") },
         )
     }
-    // What a build with voice calls adds beyond main (see `calls` up top): the call screen's manifest entries and the
-    // keep rules libwebrtc's native half needs. The runtime is the dependencies block's; these follow the same flag.
+    // What a build with voice calls adds beyond main (see `calls` up top): the call screen's manifest entries, the keep
+    // rules libwebrtc's native half needs, and the speech model's download service and Moonshine's keep rule. The
+    // runtime is the dependencies block's; these follow the same flags.
     onVariants { variant ->
-        if (if (variant.buildType == "debug") callsInDebug else callsInRelease) {
-            variant.sources.manifests.addStaticManifestFile("src/calls/AndroidManifest.xml")
-            variant.sources.keepRules?.addStaticSourceDirectory("src/calls/keepRules")
+        val debug = variant.buildType == "debug"
+        if (if (debug) callsInDebug else callsInRelease) variant.sources.manifests.addStaticManifestFile("src/calls/AndroidManifest.xml")
+        if (if (debug) liveCallsInDebug else liveCallsInRelease) {
+            variant.sources.keepRules?.addStaticSourceDirectory(
+                "src/liveCalls/keepRules",
+            )
+        }
+        if (if (debug) sttInDebug else sttInRelease) {
+            variant.sources.manifests.addStaticManifestFile("src/stt/AndroidManifest.xml")
+            variant.sources.keepRules?.addStaticSourceDirectory("src/stt/keepRules")
         }
     }
 }
@@ -982,9 +1005,9 @@ dependencyLocking {
     lockAllConfigurations()
 }
 
-// A release-shaped build with voice calls (`-Pcalls=true`) is a maintainer's: it adds WebRTC and core-telecom to the
-// runtime classpaths a shipped artifact's lock state omits, so those go unlocked rather than lock a second runtime.
-// The versions still come from the catalog; a -P-free build is never affected.
+// A release-shaped build with voice calls (`-PliveCalls=true`, `-PmeshCalls=true`) is a maintainer's: it adds WebRTC,
+// core-telecom or Moonshine to the runtime classpaths a shipped artifact's lock state omits, so those go unlocked rather
+// than lock a second runtime. The versions still come from the catalog; a -P-free build is never affected.
 if (callsInRelease) {
     configurations.configureEach {
         if (name.endsWith("RuntimeClasspath") && !name.startsWith("debug")) resolutionStrategy.deactivateDependencyLocking()
@@ -1109,20 +1132,20 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     debugImplementation(libs.androidx.compose.ui.tooling)
     // Experimental voice calls' media (docs/VOICE_CALLS.md) and the Telecom integration that owns a call's audio route
-    // (§3.13): compiled against everywhere, packaged only where `calls` is on (see the flag up top). Debug carries them
-    // whatever the flag says, so its lock state never moves.
+    // (§3.13): compiled against everywhere, packaged only where `liveCalls` (WebRTC) or either call kind (core-telecom)
+    // is on (see the flags up top). Debug carries them whatever the flags say, so its lock state never moves.
     compileOnly(libs.webrtc.android)
     compileOnly(libs.androidx.core.telecom)
     debugImplementation(libs.webrtc.android)
     debugImplementation(libs.androidx.core.telecom)
-    // The walkie transcript's speech runtime (docs/VOICE_CALLS.md C-3.11-9), packaged beside the walkie it serves. Not
+    // The speech runtime of transcripts and captions (docs/VOICE_CALLS.md C-3.11-9), packaged only where `stt` is on. Not
     // transitive: its appcompat/material/okhttp/WorkManager serve wrappers we never call (libs.versions.toml).
     compileOnly(libs.moonshine.voice) { isTransitive = false }
     debugImplementation(libs.moonshine.voice) { isTransitive = false }
-    if (callsInRelease) {
-        android.buildTypes.names.filter { it != "debug" }.forEach { buildType ->
-            add("${buildType}RuntimeOnly", libs.webrtc.android)
-            add("${buildType}RuntimeOnly", libs.androidx.core.telecom)
+    android.buildTypes.names.filter { it != "debug" }.forEach { buildType ->
+        if (liveCallsInRelease) add("${buildType}RuntimeOnly", libs.webrtc.android)
+        if (callsInRelease) add("${buildType}RuntimeOnly", libs.androidx.core.telecom)
+        if (sttInRelease) {
             addProvider<MinimalExternalModuleDependency, ExternalModuleDependency>("${buildType}RuntimeOnly", libs.moonshine.voice) {
                 isTransitive = false
             }

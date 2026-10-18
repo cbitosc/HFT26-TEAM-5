@@ -71,8 +71,11 @@ class TalkIn(
     val frameBytes: Int = 0,
 )
 
-/** Why [CallManager.start] dialled nothing. */
-enum class CallRefusal { BUSY, SELF }
+/**
+ * Why [CallManager.start] dialled nothing. [NO_LIVE]: this build takes no live calls ([CallMedia.None]) and the call
+ * could not be a walkie — the peer runs none, or this build runs none either.
+ */
+enum class CallRefusal { BUSY, SELF, NO_LIVE }
 
 /** A call that rang out unanswered, or never rang because its offer arrived stale (C-3.4-2). */
 class MissedCall(
@@ -151,6 +154,10 @@ data class CallTimings(
  * came) drops to one instead of ending — when both sides said they can, by the walkie bit on the OFFER and the ANSWER.
  * That drop is parked behind [dropToWalkie] (off): a peer off every radio got a session that could carry nothing, so
  * a lost live call ends no_route, and neither OFFER nor ANSWER carries the bit.
+ *
+ * **A build may take one kind only** (ADR 2026-10.swvp): with [media] [CallMedia.None] it takes no live calls, so every
+ * call it places is a walkie ([CallRefusal.NO_LIVE] where that cannot be) and a live offer is declined as media it
+ * cannot play, as a build with no walkie declines a walkie offer.
  *
  * **A call to a peer nothing reaches says so** ([reach], C-3.3-5): until a RINGING comes back, the caller looks every
  * [CallTimings.reachLookMs] at whether any link, mesh path, Wi-Fi Aware sighting or shared spool reaches the peer, flags
@@ -319,6 +326,7 @@ class CallManager(
                 CallKind.WALKIE -> walkie.enabled
                 CallKind.AUTO -> prefersWalkie(peerId)
             }
+        if (!asWalkie && !liveEnabled) return CallRefusal.NO_LIVE
         val l =
             mutex.withLock {
                 if (live?.phase?.let { it != CallPhase.Ended } == true) return CallRefusal.BUSY
@@ -338,11 +346,16 @@ class CallManager(
     /** Whether this build runs the walkie at all (§3.11): the chat offers a mesh call beside the live one. */
     val walkieEnabled: Boolean get() = walkie.enabled
 
+    /** Whether this build takes live calls at all (ADR 2026-10.swvp): the chat offers a live call beside the mesh one. */
+    val liveEnabled: Boolean get() = media !== CallMedia.None
+
     /**
      * Whether a call to [peerId] is better placed as a walkie right now (§3.11): the peer runs one and no live path
-     * looks possible. What [CallKind.AUTO] decides on, and which call the chat puts first.
+     * looks possible — none ever does in a build without live calls. What [CallKind.AUTO] decides on, and which call
+     * the chat puts first.
      */
-    suspend fun prefersWalkie(peerId: String): Boolean = walkie.enabled && walkie.capable(peerId) && !walkie.liveLikely(peerId)
+    suspend fun prefersWalkie(peerId: String): Boolean =
+        walkie.enabled && walkie.capable(peerId) && (!liveEnabled || !walkie.liveLikely(peerId))
 
     /** Answers the call [id] is alerting for; false when it no longer is. */
     override suspend fun answer(id: String): Boolean {
@@ -456,8 +469,14 @@ class CallManager(
         val now = clock()
         if (neverRings(sender, p, sentAt, now)) return emptyList()
         val sdp = p.sdp
-        // §3.11: a walkie offer carries no media to vet; a build that runs no walkie declines it as one it cannot play.
-        val media = if (isWalkieOnly(p)) walkie.enabled else p.m and CallPayload.MEDIA_AUDIO != 0 && sdp != null && SdpGuard.accepts(sdp)
+        // §3.11: a walkie offer carries no media to vet; a build that runs no walkie declines it as one it cannot play, and
+        // a build that takes no live calls declines a live offer the same way.
+        val media =
+            if (isWalkieOnly(p)) {
+                walkie.enabled
+            } else {
+                liveEnabled && p.m and CallPayload.MEDIA_AUDIO != 0 && sdp != null && SdpGuard.accepts(sdp)
+            }
         if (!media) {
             bury(p.id, CallPayload.PHASE_DECLINE, CallPayload.REASON_MEDIA)
             return listOf(Send(sender, CallPayload(id = p.id, ph = CallPayload.PHASE_DECLINE, rsn = CallPayload.REASON_MEDIA)))

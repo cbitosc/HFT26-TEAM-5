@@ -237,7 +237,8 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   - A force-stop mid-transfer really does strand a group on air (`dumpsys wifip2p` shows
     `curState=GroupCreatedState` with the app dead). `--ez sweep true` is the same sweep the app runs 8 s into
     launch, on demand — the way to prove a leftover is gone without waiting out a restart.
-- `…debug.CALL` — drives an **experimental voice call** (`call/CallManager`, a debug build with `BuildConfig.CALLS`;
+- `…debug.CALL` — drives an **experimental voice call** (`call/CallManager`, a debug build with a call kind on,
+  `BuildConfig.LIVE_CALLS` / `MESH_CALLS`; `op capture` and `op dropgroup` need live calls;
   `docs/VOICE_CALLS.md`). `--es op state` (the default) dumps the call, its phase, `reason` and the selected
   candidate pair as `route` (`host/host`, `relay/srflx`…), plus `relayOnly`. `--es op start --es peer <nodeId>`
   dials; `answer` opens the call screen, which answers; `decline` and `hangup` end it; `--es op relay --ez on true`
@@ -276,8 +277,8 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
     allocations gathered N, pruned M, held K` (with pruning on, a relay pruned the moment it was ready never surfaces,
     so `gathered` is a floor and `held` exact). Logcat lines: `the peer is joining; hosting the group`, `group up on …`,
     `lane up`, `lane over (…)`, `direct leg over; radio back to the mesh`, `webrtc: the group is a network …`.
-  - **The walkie-talkie** (§3.11, ADR 2026-10.79yb). Both ends need `CAP_WALKIE` pinned (`BuildConfig.WALKIE`, on in
-    debug).
+  - **The walkie-talkie** (§3.11, ADR 2026-10.79yb). Both ends need `CAP_WALKIE` pinned (`BuildConfig.MESH_CALLS`, on
+    in debug).
     - `start --es kind auto|live|walkie`: `auto` is what the Call button does. It picks a walkie only with no Internet
       route here and no Wi-Fi Direct leg to a neighbour, so `walkie` is how a lab phone on Wi-Fi gets one.
     - `--es op talk --ei ms 500-8000`: holds the talk button that long in a connected walkie session, streaming the
@@ -350,9 +351,9 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
       what the last burst's microphone had: `on`, `off`, `unavailable` (the phone implements none) or `refused`. The
       `walkie in:` logcat line says the same per burst. A `--es pcm` burst bypasses the microphone, and with it this.
     - `state`'s `walkie` block also carries `transcript` and `stt`, as `…debug.STT` reports them (below).
-- `…debug.STT` — the **walkie transcript** (C-3.11-9, ADR 2026-10.nz3g; debug builds only). `--es op status` (the
-  default) replies with the model's id and size, `stt` (`absent`, `downloading` with `done`/`total`, `ready`, or
-  `failed` with its `reason`), `resident` (a model in memory) and `transcript`: the session's lines, each
+- `…debug.STT` — the **walkie transcript** (C-3.11-9, ADR 2026-10.nz3g; debug builds with `BuildConfig.STT`, and
+  `loop` and `clips` need the walkie too). `--es op status` (the default) replies with the model's id and size, `stt`
+  (`absent`, `downloading` with `done`/`total`, `ready`, or `failed` with its `reason`), `resident` (a model in memory) and `transcript`: the session's lines, each
   `burst`, `heardAt`, `state` (`Listening`, `Pending`, `Text`, `NoSpeech`, `NoModel`, `Failed`), `text`, `live` (the
   words so far while it streams), `audioMs`, `tookMs` (its end to its final text), `looks` and `modelMs` (the model's
   time over the burst). The text appears here and on screen only, never in logcat.

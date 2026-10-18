@@ -3552,4 +3552,46 @@ class ChatViewModelTest {
             advanceUntilIdle()
             coVerify(exactly = 1) { calls.start(PEER_CALL, CallKind.WALKIE) }
         }
+
+    /**
+     * A build may take mesh calls alone (ADR 2026-10.swvp): a mesh call asks for the peer's CAP_WALKIE and nothing else,
+     * a live one for CAP_CALL, and the chat offers each kind only where this build takes it.
+     */
+    @Test
+    fun aMeshCallNeedsOnlyTheWalkieBitAndEachKindIsOfferedWhereTheBuildTakesIt() =
+        runTest {
+            val calls = mockk<CallManager>(relaxed = true).also { calls = it }
+            every { calls.liveEnabled } returns false
+            every { calls.walkieEnabled } returns true
+            coEvery { calls.start(any(), any()) } returns null
+            coEvery { groups.find(PEER_CALL) } returns null
+            coEvery { peers.find(PEER_CALL) } returns peer(PEER_CALL, capabilities = Protocol.CAP_WALKIE)
+            stubDm(PEER_CALL)
+            val vm = vm(PEER_CALL)
+            backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.state.collect {} }
+            val events = mutableListOf<Int>()
+            backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.events.collect { events += it } }
+            peersFlow.value = listOf(peer(PEER_CALL, capabilities = Protocol.CAP_WALKIE))
+            advanceUntilIdle()
+            assertFalse(vm.state.value.canCall)
+            assertTrue(vm.state.value.canMeshCall)
+
+            vm.startMeshCall()
+            advanceUntilIdle()
+            coVerify(exactly = 1) { calls.start(PEER_CALL, CallKind.WALKIE) }
+            assertEquals(emptyList<Int>(), events)
+
+            vm.startCall()
+            advanceUntilIdle()
+            coVerify(exactly = 0) { calls.start(PEER_CALL, CallKind.LIVE) }
+            assertEquals(listOf(R.string.chat_call_peer_too_old), events)
+
+            // The same thread in a build that takes live calls offers one.
+            every { calls.liveEnabled } returns true
+            val live = vm(PEER_CALL)
+            backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { live.state.collect {} }
+            advanceUntilIdle()
+            assertTrue(live.state.value.canCall)
+            assertTrue(live.state.value.canMeshCall)
+        }
 }

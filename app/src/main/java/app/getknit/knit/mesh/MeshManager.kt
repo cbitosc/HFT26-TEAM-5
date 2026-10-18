@@ -282,8 +282,8 @@ class MeshManager(
     // quarter-hourly movement. Null — every test — keeps none.
     private val fieldLog: FieldLog? = null,
     // The ticket key swap (experimental, docs/VOICE_CALLS.md §2.6, ADR 2026-10.3sk7): the customer keys invites handed
-    // this phone and the issuer they are traded with. Both null in a build without tickets (release: di/CallWiring's
-    // `CALLS_WIRED`), and then nothing ever asks an issuer for anything.
+    // this phone and the issuer they are traded with. Both null in a build without Knit Anywhere (release:
+    // `di/AnywhereWiring`'s `ANYWHERE_WIRED`), and then nothing ever asks an issuer for anything.
     private val ticketKeys: TicketKeyJournal? = null,
     private val ticketIssuer: TicketIssuer? = null,
     // The free half of the swap (docs/VOICE_CALLS.md C-7.6-33 to C-7.6-38): the free issuers, the person's answer to

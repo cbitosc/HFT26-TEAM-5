@@ -165,9 +165,10 @@ data class ProfileDetailsUiState(
     val inCommon: InCommon = InCommon.EMPTY,
     // What "Remove contact" would do, and whether the overflow offers it at all.
     val removal: ContactRemoval = ContactRemoval.NotOffered,
-    // Whether a Call button sits beside Message (experimental, docs/VOICE_CALLS.md): a build that wires calls, a peer
-    // whose pinned profile carries CAP_CALL, and nobody we block. Unlike the chat's button, which shows in any DM and
-    // explains a refusal on the press, this one is offered only to a peer we know can answer.
+    // Whether a Call button sits beside Message (experimental, docs/VOICE_CALLS.md): a build that takes a kind of call
+    // whose bit the peer's pinned profile carries (CAP_CALL for a live one, CAP_WALKIE for a mesh one), and nobody we
+    // block. Unlike the chat's button, which shows in any DM and explains a refusal on the press, this one is offered
+    // only to a peer we know can answer.
     val canCall: Boolean = false,
 )
 
@@ -362,7 +363,7 @@ class ProfileDetailsViewModel(
                     calls != null &&
                         nodeId !in blocked &&
                         nodeId != myId?.nodeId &&
-                        (peer?.capabilities ?: 0L) and Protocol.CAP_CALL != 0L,
+                        callable(calls, peer?.capabilities ?: 0L),
             )
         }.stateIn(
             viewModelScope,
@@ -398,6 +399,7 @@ class ProfileDetailsViewModel(
                 null -> Unit
                 CallRefusal.BUSY -> _events.tryEmit(R.string.chat_call_busy)
                 CallRefusal.SELF -> _events.tryEmit(R.string.chat_call_needs_dm)
+                CallRefusal.NO_LIVE -> _events.tryEmit(R.string.chat_mesh_call_peer_too_old)
             }
         }
     }
@@ -454,3 +456,11 @@ class ProfileDetailsViewModel(
         _scanResult.value = null
     }
 }
+
+/** Whether a peer advertising [capabilities] can take a call of a kind this build places (ADR 2026-10.swvp). */
+private fun callable(
+    calls: CallManager,
+    capabilities: Long,
+): Boolean =
+    (calls.liveEnabled && capabilities and Protocol.CAP_CALL != 0L) ||
+        (calls.walkieEnabled && capabilities and Protocol.CAP_WALKIE != 0L)

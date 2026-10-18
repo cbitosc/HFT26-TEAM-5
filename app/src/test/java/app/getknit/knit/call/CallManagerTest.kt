@@ -270,6 +270,8 @@ class CallManagerTest {
         net: Net,
         dropToWalkie: Boolean = false,
         tombs: CallTombJournal = CallTombJournal.None,
+        // False is a build that takes no live calls (ADR 2026-10.swvp): its manager holds [CallMedia.None].
+        live: Boolean = true,
     ): Side {
         val sent = Collections.synchronizedList(mutableListOf<CallPayload>())
         val missed = Collections.synchronizedList(mutableListOf<MissedCall>())
@@ -297,7 +299,7 @@ class CallManagerTest {
 
                         override fun stunUrls(): List<String> = side.stun
                     },
-                media = media,
+                media = if (live) media else CallMedia.None,
                 scope = backgroundScope,
                 selfId = { name },
                 clock = { testScheduler.currentTime },
@@ -1719,6 +1721,67 @@ class CallManagerTest {
             runCurrent()
             assertEquals(CallPayload.MEDIA_AUDIO, alice.sent.last { it.ph == CallPayload.PHASE_OFFER }.m)
             assertFalse(alice.state!!.walkie)
+        }
+
+    // ---- ADR 2026-10.swvp: a build that takes mesh calls only ----
+
+    /** Alice and Bob both run the walkie, and [aliceLive] / [bobLive] say whose build takes live calls too. */
+    private fun TestScope.meshOnly(
+        aliceLive: Boolean = false,
+        bobLive: Boolean = false,
+    ): Triple<Net, Side, Side> {
+        val net = Net(backgroundScope) { testScheduler.currentTime }
+        val alice = side(ALICE, net, live = aliceLive)
+        val bob = side(BOB, net, live = bobLive)
+        for (side in listOf(alice, bob)) side.walkie.enabled = true
+        return Triple(net, alice, bob)
+    }
+
+    /** With no live calls, AUTO is a walkie even where a live path looks possible, and the session connects as one. */
+    @Test
+    fun aBuildWithoutLiveCallsPlacesEveryCallAsAWalkie() =
+        runTest {
+            val (_, alice, bob) = meshOnly()
+            alice.walkie.live = true
+            assertFalse(alice.manager.liveEnabled)
+            assertTrue(alice.manager.prefersWalkie(BOB))
+            assertNull(alice.manager.start(BOB))
+            runCurrent()
+            assertEquals(CallPayload.MEDIA_WALKIE, alice.offer().m)
+            assertTrue(bob.manager.answer(bob.state!!.id))
+            runCurrent()
+            for (side in listOf(alice, bob)) {
+                assertEquals(CallPhase.Connected, side.state!!.phase)
+                assertTrue(side.state!!.walkie)
+                assertTrue(side.turnAsks.isEmpty())
+            }
+        }
+
+    /** A live call asked for, or an AUTO one toward a peer with no walkie, is refused before anything is sent. */
+    @Test
+    fun aBuildWithoutLiveCallsRefusesACallItCannotPlaceAsAWalkie() =
+        runTest {
+            val (_, alice, _) = meshOnly()
+            assertEquals(CallRefusal.NO_LIVE, alice.manager.start(BOB, CallKind.LIVE))
+            alice.walkie.peerCapable = false
+            assertFalse(alice.manager.prefersWalkie(BOB))
+            assertEquals(CallRefusal.NO_LIVE, alice.manager.start(BOB))
+            runCurrent()
+            assertNull(alice.state)
+            assertTrue(alice.sent.isEmpty())
+        }
+
+    /** A live offer to a build that takes none never rings: it is declined for its media, as a walkie one is elsewhere. */
+    @Test
+    fun aLiveOfferToABuildWithoutLiveCallsIsDeclinedForItsMedia() =
+        runTest {
+            val (_, alice, bob) = meshOnly(aliceLive = true)
+            assertNull(alice.manager.start(BOB, CallKind.LIVE))
+            runCurrent()
+            assertNull(bob.state)
+            assertEquals(CallPayload.REASON_MEDIA, bob.sent.single().rsn)
+            assertEquals(CallPhase.Ended, alice.state!!.phase)
+            assertEquals(CallPayload.REASON_MEDIA, alice.state!!.reason)
         }
 
     @Test

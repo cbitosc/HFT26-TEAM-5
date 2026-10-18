@@ -70,10 +70,28 @@ class CallSettingsViewModelTest {
         Dispatchers.resetMain()
     }
 
-    private fun kotlinx.coroutines.test.TestScope.vm(speech: SttModelStore? = null): CallSettingsViewModel =
-        CallSettingsViewModel(settings, store, probe, speech, transcriptStore.takeIf { speech != null }).also { vm ->
+    private fun kotlinx.coroutines.test.TestScope.vm(
+        speech: SttModelStore? = null,
+        live: Boolean = true,
+    ): CallSettingsViewModel =
+        CallSettingsViewModel(settings, store, probe.takeIf { live }, speech, transcriptStore.takeIf { speech != null }).also { vm ->
             backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.state.collect {} }
             backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.transcripts.collect {} }
+        }
+
+    /** A build without live calls (ADR 2026-10.swvp) hands no probe: the live rows are off and a Test asks nothing. */
+    @Test
+    fun withoutLiveCallsThereAreNoLiveRowsAndNoTest() =
+        runTest {
+            assertTrue(vm().live)
+            val vm = vm(stt, live = false)
+            advanceUntilIdle()
+            assertFalse(vm.live)
+            vm.editDraft { it.copy(turnPass = "new") }
+            vm.test()
+            advanceUntilIdle()
+            assertNull(probed)
+            assertFalse(vm.state.value.testing)
         }
 
     @Test

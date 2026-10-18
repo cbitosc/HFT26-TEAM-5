@@ -6,6 +6,7 @@ import androidx.compose.runtime.Composable
 import app.getknit.knit.BuildConfig
 import app.getknit.knit.call.CallCaptioner
 import app.getknit.knit.call.CallControl
+import app.getknit.knit.call.CallDirect
 import app.getknit.knit.call.CallLog
 import app.getknit.knit.call.CallManager
 import app.getknit.knit.call.CallMedia
@@ -87,19 +88,39 @@ import org.koin.core.scope.Scope
 import org.koin.dsl.module
 
 /**
- * Voice calls (experimental, docs/VOICE_CALLS.md): the one read of `BuildConfig.CALLS` — on in debug, off in a shipped
- * artifact, `-Pcalls=` overrides. Off, [callModule] is null, nothing starts, no bar is drawn and the profile carries no
- * `CAP_CALL`; the build also packages neither WebRTC nor core-telecom nor the call screen's manifest entries, so every
- * `ui/call` class is unreachable and R8 drops it (ADR 2026-10.3tee, the 2026-10-14 amendment).
+ * Live calls (experimental, docs/VOICE_CALLS.md §3.5–3.10, ADR 2026-10.3tee): the one read of `BuildConfig.LIVE_CALLS`
+ * — on in debug, off in a shipped artifact, `-PliveCalls=` overrides (ADR 2026-10.swvp). Off, [CallManager] gets
+ * [CallMedia.None] and declines every live offer, no WebRTC media, Wi-Fi Direct leg, TURN source or capture watch is
+ * built and the profile carries no `CAP_CALL`; the build packages no WebRTC either, so every class only the live graph
+ * reaches is unreachable and R8 drops it.
  */
-const val CALLS_WIRED: Boolean = BuildConfig.CALLS
+const val LIVE_CALLS_WIRED: Boolean = BuildConfig.LIVE_CALLS
 
 /**
- * The walkie-talkie (docs/VOICE_CALLS.md §3.11, ADR 2026-10.79yb): a call with no live path is hold-to-talk bursts
- * streamed over the mesh. The one read of `BuildConfig.WALKIE`, and only where calls are wired — off, [CallManager] gets
- * [CallWalkie.None], no [WalkieTalk] is built and the profile carries no `CAP_WALKIE`, so every call is a live one.
+ * The walkie-talkie, a "mesh call" on screen (docs/VOICE_CALLS.md §3.11, ADR 2026-10.79yb): a call that streams
+ * hold-to-talk bursts over the mesh. The one read of `BuildConfig.MESH_CALLS` — on in debug, off in a shipped artifact,
+ * `-PmeshCalls=` overrides (ADR 2026-10.swvp). Off, [CallManager] gets [CallWalkie.None], no [WalkieTalk] is built and
+ * the profile carries no `CAP_WALKIE`, so every call is a live one. It needs no live calls: its Opus is the platform's.
  */
-const val WALKIE_WIRED: Boolean = CALLS_WIRED && BuildConfig.WALKIE
+const val WALKIE_WIRED: Boolean = BuildConfig.MESH_CALLS
+
+/**
+ * Voice calls of either kind: the call graph, its surfaces and core-telecom (every call, live or walkie, is a
+ * self-managed Telecom call, §3.13). Off, [callModule] is null, nothing starts, no bar is drawn and the build packages
+ * neither the call screen's manifest entries nor core-telecom (ADR 2026-10.3tee, the 2026-10-14 amendment).
+ */
+const val CALLS_WIRED: Boolean = LIVE_CALLS_WIRED || WALKIE_WIRED
+
+/**
+ * Speech (docs/VOICE_CALLS.md C-3.11-9, C-3.7-5, ADR 2026-10.nz3g): the walkie's transcripts and a live call's
+ * captions, from a model the user downloads. The one read of `BuildConfig.STT`, and only where a call kind is wired — a
+ * transcript needs [WALKIE_WIRED], a caption [LIVE_CALLS_WIRED]. Off, no model store, speech runtime or feed is built,
+ * the call screen shows no transcript, captions or CC button, and the build packages no Moonshine.
+ */
+const val STT_WIRED: Boolean = CALLS_WIRED && BuildConfig.STT
+
+/** The Calls screen's route and Settings row: its live rows, its speech section, or both. */
+const val CALL_SETTINGS_WIRED: Boolean = LIVE_CALLS_WIRED || STT_WIRED
 
 /** The call graph, or null in a build without calls ([CALLS_WIRED]). */
 fun callModule(): Module? = if (CALLS_WIRED) callGraph() else null
@@ -107,9 +128,9 @@ fun callModule(): Module? = if (CALLS_WIRED) callGraph() else null
 /**
  * [CallManager]'s seams are late-bound over [MeshManager], so building the graph builds nothing else — the mesh graph
  * is the service's to build, off the main thread (ADR 2026-09.vztn). The direct leg's radio lease is late-bound the
- * same way: it wraps the Wi-Fi Direct radio, which holds the mesh transport.
+ * same way: it wraps the Wi-Fi Direct radio, which holds the mesh transport. Each kind's own definitions sit behind its
+ * constant ([liveGraph], [walkieGraph], [speechGraph]), so a build without one never reaches its classes.
  */
-@Suppress("LongMethod") // the whole call graph in one module, a definition per seam, as the other wiring files keep theirs
 private fun callGraph(): Module =
     module {
         // §3.13: every call, live or walkie, is a self-managed Telecom call, which owns its audio route. The peers are
@@ -127,126 +148,179 @@ private fun callGraph(): Module =
         single<SystemCalls> { get<TelecomCalls>() }
         single<CallControl> { get<CallManager>() }
         single { SystemCallSync(calls = get(), system = get(), scope = get<CoroutineScope>(), log = { Log.i(TAG, it) }) }
-        // C-3.13-14: the caller's ringback, busy and end tones, which the system plays none of for a self-managed call.
-        single {
-            val scope = get<CoroutineScope>()
-            CallToneSync(calls = get(), player = ToneGeneratorPlayer(scope, log = { Log.w(TAG, it) }), scope = scope)
-        }
-        // §3.10 (ADR 2026-10.kxnw): a call between neighbours rides a Wi-Fi Direct group, on the radio the transfer
-        // shares through one lease. "Directly linked" is the transfer's own gate, a mesh neighbour now.
-        single {
-            // Read synchronously by `canJoin`, so held as a state on the app scope from the first call on.
-            val directOff = get<SettingsStore>().debugDirectCallsOff.stateIn(get<CoroutineScope>(), SharingStarted.Eagerly, false)
-            DirectCallPath(
-                leaseOf = { get<DirectWifiLease>() },
-                scope = get<CoroutineScope>(),
-                nearby = { id -> get<MeshController>().neighbors.value.any { it.nodeId == id } },
-                capable = { id -> (get<PeerRepository>().find(id)?.capabilities ?: 0L) and Protocol.CAP_DIRECT_TRANSFER != 0L },
-                // API 29-32 refuses Wi-Fi Direct to an app off screen; 33+ gates it on NEARBY_WIFI_DEVICES alone.
-                mayJoinWhileRinging = { Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU || get<AppVisibility>().visible.value },
-                enabled = { !directOff.value },
-                log = { Log.i(TAG, it) },
-            )
-        }
-        // C-3.13-12 (ADR 2026-10.kw29): which microphone path a call records from — the fallback on a generic system
-        // image over an older vendor, or once a call here captured only zeros. Read from the store on the app scope;
-        // until then, the image's own answer.
-        single<CaptureJournal> { CaptureStore(get()) }
-        single {
-            CaptureHealth(
-                journal = get(),
-                stamp = modelGuardStamp(BuildConfig.VERSION_CODE, Build.FINGERPRINT.orEmpty()),
-                genericImage = get<DeviceImage>().genericOnOlderVendor,
-            ).also { health -> get<CoroutineScope>().launch { health.load() } }
-        }
-        single {
-            WebRtcCallMedia(
-                androidContext(),
-                get<CoroutineScope>(),
-                link = get<DirectCallPath>().link,
-                capture = get(),
-                log = { Log.i(TAG, it) },
-                captions = get(),
-            )
-        }
-        // The call screen reads the media's stats itself (its diagnostics card); the manager sees only the seam.
-        single<CallMedia> { get<WebRtcCallMedia>() }
-        // The Calls screen's Test (C-3.14-5): the same factory, and refused while a call holds it.
-        single<IceProbe> { get<WebRtcCallMedia>() }
-        viewModel {
-            CallSettingsViewModel(
-                settings = get(),
-                ownIce = get(),
-                probe = get(),
-                stt = getOrNull(),
-                transcriptStore = getOrNull(),
-            )
+        if (LIVE_CALLS_WIRED) liveGraph()
+        if (CALL_SETTINGS_WIRED) {
+            viewModel {
+                CallSettingsViewModel(
+                    settings = get(),
+                    ownIce = get(),
+                    probe = if (LIVE_CALLS_WIRED) get<IceProbe>() else null,
+                    stt = if (STT_WIRED) get<SttModelStore>() else null,
+                    transcriptStore = if (STT_WIRED) get<TranscriptStore>() else null,
+                )
+            }
         }
         single { CallTombStore(get()) }
         single {
-            // C-3.7-3's "Relay all calls", read as each call opens its media. Until the store's first read lands it
-            // reads as on: a call in that instant goes through TURN rather than showing the peer an address it hides.
-            val relayAll =
-                get<SettingsStore>()
-                    .callsRelayAll
-                    .map<Boolean, Boolean?> { it }
-                    .stateIn(get<CoroutineScope>(), SharingStarted.Eagerly, null)
-            // §3.14 (ADR 2026-10.mr88): the person's own servers, each kind replacing the spools'. Until the store's
-            // first read lands they read as none, so that instant's call asks the spools as it always did.
-            val ownIce =
-                get<OwnIceStore>()
-                    .ownIce
-                    .map { it.effective() }
-                    .stateIn(get<CoroutineScope>(), SharingStarted.Eagerly, CustomIce.NONE)
             CallManager(
                 signals = CallSignals { peerId, payload -> get<MeshManager>().sendCallSignal(peerId, payload) },
-                turn =
-                    OverridingTurnSource(
-                        custom = { ownIce.value },
-                        spool =
-                            object : TurnSource {
-                                override suspend fun turnServers(peerId: String) = get<MeshManager>().turnServers(peerId)
-
-                                override fun stunUrls() = get<MeshManager>().stunUrls()
-                            },
-                    ),
-                media = get(),
+                turn = if (LIVE_CALLS_WIRED) get<TurnSource>() else TurnSource.None,
+                media = if (LIVE_CALLS_WIRED) get<CallMedia>() else CallMedia.None,
                 scope = get<CoroutineScope>(),
                 selfId = { get<Identity>().nodeId() },
                 log = { Log.i(TAG, it) },
-                direct = get<DirectCallPath>(),
+                direct = if (LIVE_CALLS_WIRED) get<DirectCallPath>() else CallDirect.None,
                 walkie = if (WALKIE_WIRED) walkieRoute() else CallWalkie.None,
-                relayAll = { relayAll.value ?: true },
+                relayAll = if (LIVE_CALLS_WIRED) get<RelayAllCalls>().read else ({ true }),
                 tombs = get<CallTombStore>(),
                 reach = callReach(),
             )
         }
-        // The speech model (C-3.11-9, C-3.7-5): one the user downloads, writing out the walkie's bursts and a live call's
-        // peer as they play.
-        single { TranscriptStore(get()) }
-        single {
-            SttModelStore(
-                androidContext(),
-                get<AndroidInternetGate>(),
-                get<CoroutineScope>(),
-                keepAlive = { SttDownloadService.start(androidContext()) },
-                log = { Log.i(TAG, it) },
-            )
-        }
-        single { MoonshineSpeech(get(), get<ModelLoadGuard>(), get<CoroutineScope>(), log = { Log.i(TAG, it) }) }
-        // The names a call is likely to carry, for the model to listen for: read as a call begins, never logged.
-        single {
-            SttKeytermFeed(
-                calls = get<CallManager>().state,
-                speech = get(),
-                peers = get(),
-                groups = get(),
-                messages = get(),
-                settings = get(),
-                scope = get<CoroutineScope>(),
-                log = { Log.i(TAG, it) },
-            )
-        }
+        if (STT_WIRED) speechGraph()
+        if (WALKIE_WIRED) walkieGraph()
+        recordGraph()
+    }
+
+/** What every call leaves behind and rings with, of either kind: its line in the thread, its faces, its alerting. */
+private fun Module.recordGraph() {
+    // §3.12: each call's line in its thread. The repository is resolved at the first record, not here.
+    single {
+        CallLog(
+            calls = get(),
+            messages = { get<MessageRepository>() },
+            selfId = { get<Identity>().nodeId() },
+            scope = get<CoroutineScope>(),
+            log = { Log.i(TAG, it) },
+        )
+    }
+    single { CallFaces(androidContext(), peers = { get() }, blobs = { get() }, theme = { get() }) }
+    single {
+        CallController(
+            context = androidContext(),
+            calls = get(),
+            scope = get<CoroutineScope>(),
+            faces = get(),
+            alertMs = CallTimings().alertMs,
+        )
+    }
+}
+
+/** C-3.7-3's "Relay all calls", held as a state on the app scope for [CallManager] to read as each call opens its media. */
+private class RelayAllCalls(
+    val read: () -> Boolean,
+)
+
+/** A live call's media and paths (§3.5–3.10): WebRTC, the Wi-Fi Direct leg, the capture watch and the ICE servers. */
+@Suppress("LongMethod") // the live call's whole graph in one place, a definition per seam, as the other wiring files keep theirs
+private fun Module.liveGraph() {
+    // C-3.13-14: the caller's ringback, busy and end tones, which the system plays none of for a self-managed call.
+    single {
+        val scope = get<CoroutineScope>()
+        CallToneSync(calls = get(), player = ToneGeneratorPlayer(scope, log = { Log.w(TAG, it) }), scope = scope)
+    }
+    // §3.10 (ADR 2026-10.kxnw): a call between neighbours rides a Wi-Fi Direct group, on the radio the transfer
+    // shares through one lease. "Directly linked" is the transfer's own gate, a mesh neighbour now.
+    single {
+        // Read synchronously by `canJoin`, so held as a state on the app scope from the first call on.
+        val directOff = get<SettingsStore>().debugDirectCallsOff.stateIn(get<CoroutineScope>(), SharingStarted.Eagerly, false)
+        DirectCallPath(
+            leaseOf = { get<DirectWifiLease>() },
+            scope = get<CoroutineScope>(),
+            nearby = { id -> get<MeshController>().neighbors.value.any { it.nodeId == id } },
+            capable = { id -> (get<PeerRepository>().find(id)?.capabilities ?: 0L) and Protocol.CAP_DIRECT_TRANSFER != 0L },
+            // API 29-32 refuses Wi-Fi Direct to an app off screen; 33+ gates it on NEARBY_WIFI_DEVICES alone.
+            mayJoinWhileRinging = { Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU || get<AppVisibility>().visible.value },
+            enabled = { !directOff.value },
+            log = { Log.i(TAG, it) },
+        )
+    }
+    // C-3.13-12 (ADR 2026-10.kw29): which microphone path a call records from — the fallback on a generic system
+    // image over an older vendor, or once a call here captured only zeros. Read from the store on the app scope;
+    // until then, the image's own answer.
+    single<CaptureJournal> { CaptureStore(get()) }
+    single {
+        CaptureHealth(
+            journal = get(),
+            stamp = modelGuardStamp(BuildConfig.VERSION_CODE, Build.FINGERPRINT.orEmpty()),
+            genericImage = get<DeviceImage>().genericOnOlderVendor,
+        ).also { health -> get<CoroutineScope>().launch { health.load() } }
+    }
+    single {
+        WebRtcCallMedia(
+            androidContext(),
+            get<CoroutineScope>(),
+            link = get<DirectCallPath>().link,
+            capture = get(),
+            log = { Log.i(TAG, it) },
+            // C-3.7-5: a live call's captions, where speech is wired.
+            captions = if (STT_WIRED) get<CallCaptioner>() else null,
+        )
+    }
+    // The call screen reads the media's stats itself (its diagnostics card); the manager sees only the seam.
+    single<CallMedia> { get<WebRtcCallMedia>() }
+    // The Calls screen's Test (C-3.14-5): the same factory, and refused while a call holds it.
+    single<IceProbe> { get<WebRtcCallMedia>() }
+    single {
+        // C-3.7-3's "Relay all calls", read as each call opens its media. Until the store's first read lands it
+        // reads as on: a call in that instant goes through TURN rather than showing the peer an address it hides.
+        val relayAll =
+            get<SettingsStore>()
+                .callsRelayAll
+                .map<Boolean, Boolean?> { it }
+                .stateIn(get<CoroutineScope>(), SharingStarted.Eagerly, null)
+        RelayAllCalls { relayAll.value ?: true }
+    }
+    single<TurnSource> {
+        // §3.14 (ADR 2026-10.mr88): the person's own servers, each kind replacing the spools'. Until the store's
+        // first read lands they read as none, so that instant's call asks the spools as it always did.
+        val ownIce =
+            get<OwnIceStore>()
+                .ownIce
+                .map { it.effective() }
+                .stateIn(get<CoroutineScope>(), SharingStarted.Eagerly, CustomIce.NONE)
+        OverridingTurnSource(
+            custom = { ownIce.value },
+            spool =
+                object : TurnSource {
+                    override suspend fun turnServers(peerId: String) = get<MeshManager>().turnServers(peerId)
+
+                    override fun stunUrls() = get<MeshManager>().stunUrls()
+                },
+        )
+    }
+}
+
+/**
+ * The speech model (C-3.11-9, C-3.7-5): one the user downloads, writing out the walkie's bursts ([WALKIE_WIRED]) and a
+ * live call's peer ([LIVE_CALLS_WIRED]) as they play.
+ */
+@Suppress("LongMethod") // the speech graph in one place, a definition per seam, as the other wiring files keep theirs
+private fun Module.speechGraph() {
+    single { TranscriptStore(get()) }
+    single {
+        SttModelStore(
+            androidContext(),
+            get<AndroidInternetGate>(),
+            get<CoroutineScope>(),
+            keepAlive = { SttDownloadService.start(androidContext()) },
+            log = { Log.i(TAG, it) },
+        )
+    }
+    single { MoonshineSpeech(get(), get<ModelLoadGuard>(), get<CoroutineScope>(), log = { Log.i(TAG, it) }) }
+    // The names a call is likely to carry, for the model to listen for: read as a call begins, never logged.
+    single {
+        SttKeytermFeed(
+            calls = get<CallManager>().state,
+            speech = get(),
+            peers = get(),
+            groups = get(),
+            messages = get(),
+            settings = get(),
+            scope = get<CoroutineScope>(),
+            log = { Log.i(TAG, it) },
+        )
+    }
+    if (LIVE_CALLS_WIRED) {
         single {
             // A live call's captions (C-3.7-5): the Calls screen's switch and the call screen's CC button, both on.
             val store = get<TranscriptStore>()
@@ -263,87 +337,72 @@ private fun callGraph(): Module =
                 log = { Log.i(TAG, it) },
             )
         }
-        if (WALKIE_WIRED) {
-            // A debug build's lab switch, off by default (`SettingsStore.debugWalkieClips`): each burst's audio and line.
-            single {
-                WalkieClipFiles(
-                    androidContext(),
-                    get<CoroutineScope>(),
-                    switch = get<SettingsStore>().debugWalkieClips.stateIn(get<CoroutineScope>(), SharingStarted.Eagerly, false),
-                    about = { line ->
-                        mapOf(
-                            "model" to get<SttModelStore>().model.id,
-                            "lines" to get<MoonshineSpeech>().lines.name.lowercase(),
-                            "call" to get<CallManager>().state.value?.id,
-                            "suppressor" to if (line.mine) get<TalkRecorder>().suppressor else null,
-                        )
-                    },
-                    log = { Log.i(TAG, it) },
-                )
-            }
-            single {
-                // The Calls screen's "Walkie transcripts" switch, on by default, read as each burst begins.
-                val on = get<TranscriptStore>().enabled.stateIn(get<CoroutineScope>(), SharingStarted.Eagerly, true)
-                WalkieTranscriber(
-                    speech = get<MoonshineSpeech>(),
-                    ready = { get<SttModelStore>().paths() != null },
-                    scope = get<CoroutineScope>(),
-                    enabled = { on.value },
-                    // One model call at a time, in the order the audio came, off the player's and the recorder's threads.
-                    dispatcher = Dispatchers.Default.limitedParallelism(1),
-                    log = { Log.i(TAG, it) },
-                    clips = get<WalkieClipFiles>(),
-                )
-            }
-            single { TalkPlayer(tap = get<WalkieTranscriber>()) }
-            single { TalkRecorder(get<CoroutineScope>(), tap = get<WalkieTranscriber>().mic) }
-            single {
-                WalkieTalk(
-                    calls = get(),
-                    recorder = get(),
-                    player = get(),
-                    send = { peerId, chunk, peerTicketed -> get<MeshManager>().sendCallTalk(peerId, chunk, peerTicketed) },
-                    links = talkLinks(),
-                    scope = get<CoroutineScope>(),
-                    log = { Log.i(TAG, it) },
-                    // A burst is spoken into the headset that has the call (§3.13), else the phone's own microphone.
-                    headset = {
-                        get<SystemCallSync>()
-                            .routing.value
-                            ?.current
-                            ?.headset == true
-                    },
-                    transcript = get(),
-                )
-            }
-        }
-        // §3.12: each call's line in its thread. The repository is resolved at the first record, not here.
+    }
+    if (WALKIE_WIRED) {
+        // A debug build's lab switch, off by default (`SettingsStore.debugWalkieClips`): each burst's audio and line.
         single {
-            CallLog(
-                calls = get(),
-                messages = { get<MessageRepository>() },
-                selfId = { get<Identity>().nodeId() },
-                scope = get<CoroutineScope>(),
+            WalkieClipFiles(
+                androidContext(),
+                get<CoroutineScope>(),
+                switch = get<SettingsStore>().debugWalkieClips.stateIn(get<CoroutineScope>(), SharingStarted.Eagerly, false),
+                about = { line ->
+                    mapOf(
+                        "model" to get<SttModelStore>().model.id,
+                        "lines" to get<MoonshineSpeech>().lines.name.lowercase(),
+                        "call" to get<CallManager>().state.value?.id,
+                        "suppressor" to if (line.mine) get<TalkRecorder>().suppressor else null,
+                    )
+                },
                 log = { Log.i(TAG, it) },
             )
         }
-        single { CallFaces(androidContext(), peers = { get() }, blobs = { get() }, theme = { get() }) }
         single {
-            CallController(
-                context = androidContext(),
-                calls = get(),
+            // The Calls screen's "Walkie transcripts" switch, on by default, read as each burst begins.
+            val on = get<TranscriptStore>().enabled.stateIn(get<CoroutineScope>(), SharingStarted.Eagerly, true)
+            WalkieTranscriber(
+                speech = get<MoonshineSpeech>(),
+                ready = { get<SttModelStore>().paths() != null },
                 scope = get<CoroutineScope>(),
-                faces = get(),
-                alertMs = CallTimings().alertMs,
+                enabled = { on.value },
+                // One model call at a time, in the order the audio came, off the player's and the recorder's threads.
+                dispatcher = Dispatchers.Default.limitedParallelism(1),
+                log = { Log.i(TAG, it) },
+                clips = get<WalkieClipFiles>(),
             )
         }
     }
+}
+
+/** The walkie's audio and its streaming over the mesh (§3.11); each tap feeds the transcript where speech is wired. */
+private fun Module.walkieGraph() {
+    single { TalkPlayer(tap = if (STT_WIRED) get<WalkieTranscriber>() else null) }
+    single { TalkRecorder(get<CoroutineScope>(), tap = if (STT_WIRED) get<WalkieTranscriber>().mic else null) }
+    single {
+        WalkieTalk(
+            calls = get(),
+            recorder = get(),
+            player = get(),
+            send = { peerId, chunk, peerTicketed -> get<MeshManager>().sendCallTalk(peerId, chunk, peerTicketed) },
+            links = talkLinks(),
+            scope = get<CoroutineScope>(),
+            log = { Log.i(TAG, it) },
+            // A burst is spoken into the headset that has the call (§3.13), else the phone's own microphone.
+            headset = {
+                get<SystemCallSync>()
+                    .routing.value
+                    ?.current
+                    ?.headset == true
+            },
+            transcript = if (STT_WIRED) get<WalkieTranscriber>() else null,
+        )
+    }
+}
 
 /**
- * When a call is placed as a walkie (§3.11): the peer must run one, and a live call must look impossible — no Internet
- * route here (no spool, no STUN or TURN), and no Wi-Fi Direct leg, which wants a neighbour that runs the transfer's
- * radio with direct calls on, and this phone able to host it. A wrong guess costs little: a live call with no path
- * drops to a walkie anyway.
+ * When a call is placed as a walkie (§3.11): the peer must run one, and a live call must look impossible — the peer
+ * takes none (a build may take mesh calls only, ADR 2026-10.swvp), or there is no Internet route here (no spool, no STUN
+ * or TURN) and no Wi-Fi Direct leg, which wants a neighbour that runs the transfer's radio with direct calls on, and
+ * this phone able to host it. A wrong guess costs little: a live call with no path drops to a walkie anyway.
  */
 private fun Scope.walkieRoute(): CallWalkie =
     object : CallWalkie {
@@ -353,9 +412,11 @@ private fun Scope.walkieRoute(): CallWalkie =
             (get<PeerRepository>().find(peerId)?.capabilities ?: 0L) and Protocol.CAP_WALKIE != 0L
 
         override suspend fun liveLikely(peerId: String): Boolean {
+            val caps = get<PeerRepository>().find(peerId)?.capabilities ?: 0L
+            if (caps and Protocol.CAP_CALL == 0L) return false
             if (get<InternetGate>().isOnline()) return true
             val neighbour = get<MeshController>().neighbors.value.any { it.nodeId == peerId }
-            val direct = (get<PeerRepository>().find(peerId)?.capabilities ?: 0L) and Protocol.CAP_DIRECT_TRANSFER != 0L
+            val direct = caps and Protocol.CAP_DIRECT_TRANSFER != 0L
             // The caller hosts the leg, so a phone that may not host has none to offer (ADR 2026-10.w3dw).
             val hosts = get<DirectWifiLease>().mayHost()
             return neighbour && direct && hosts && !get<SettingsStore>().debugDirectCallsOff.first()
@@ -442,12 +503,14 @@ fun startCallsIfWired(koin: Koin) {
     CoroutineScope(SupervisorJob() + Dispatchers.Default).launch {
         // First: a call that rings before the system holds it has no route but the one the phone was left in.
         runCatching { koin.get<SystemCallSync>().start() }.onFailure { Log.w(TAG, "system calls not started", it) }
-        runCatching { koin.get<CallToneSync>().start() }.onFailure { Log.w(TAG, "call tones not started", it) }
+        if (LIVE_CALLS_WIRED) runCatching { koin.get<CallToneSync>().start() }.onFailure { Log.w(TAG, "call tones not started", it) }
         runCatching { koin.get<CallController>().start() }.onFailure { Log.w(TAG, "calls not started", it) }
         runCatching { koin.get<CallLog>().start() }.onFailure { Log.w(TAG, "call records not started", it) }
         if (WALKIE_WIRED) runCatching { koin.get<WalkieTalk>().start() }.onFailure { Log.w(TAG, "walkie not started", it) }
-        runCatching { koin.get<SttModelStore>().start() }.onFailure { Log.w(TAG, "speech model not started", it) }
-        runCatching { koin.get<SttKeytermFeed>().start() }.onFailure { Log.w(TAG, "speech key terms not started", it) }
+        if (STT_WIRED) {
+            runCatching { koin.get<SttModelStore>().start() }.onFailure { Log.w(TAG, "speech model not started", it) }
+            runCatching { koin.get<SttKeytermFeed>().start() }.onFailure { Log.w(TAG, "speech key terms not started", it) }
+        }
     }
 }
 

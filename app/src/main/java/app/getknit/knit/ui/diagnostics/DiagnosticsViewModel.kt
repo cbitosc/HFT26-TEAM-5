@@ -11,7 +11,8 @@ import app.getknit.knit.crash.CrashReports
 import app.getknit.knit.data.PeerRepository
 import app.getknit.knit.data.relay.RelayStatusRepository
 import app.getknit.knit.data.settings.SettingsStore
-import app.getknit.knit.di.CALLS_WIRED
+import app.getknit.knit.di.LIVE_CALLS_WIRED
+import app.getknit.knit.di.STT_WIRED
 import app.getknit.knit.di.WALKIE_WIRED
 import app.getknit.knit.identity.Identity
 import app.getknit.knit.identity.displayNameFor
@@ -237,8 +238,8 @@ class DiagnosticsViewModel(
         viewModelScope.launch { settings.setDebugNanOff(off) }
     }
 
-    /** Whether this build offers the Wi-Fi Direct calls switch — a debug build with calls. */
-    val directCallsSwitchOffered: Boolean = BuildConfig.DEBUG && CALLS_WIRED
+    /** Whether this build offers the Wi-Fi Direct calls switch — a debug build with live calls. */
+    val directCallsSwitchOffered: Boolean = BuildConfig.DEBUG && LIVE_CALLS_WIRED
 
     /** Whether the debug switch keeps calls off Wi-Fi Direct (ADR 2026-10.kxnw), so they go over STUN/TURN. */
     val directCallsOff: StateFlow<Boolean> =
@@ -250,8 +251,8 @@ class DiagnosticsViewModel(
         viewModelScope.launch { settings.setDebugDirectCallsOff(off) }
     }
 
-    /** Whether this build offers the walkie clips switch — a debug build with the walkie. */
-    val walkieClipsOffered: Boolean = BuildConfig.DEBUG && WALKIE_WIRED
+    /** Whether this build offers the walkie clips switch — a debug build with the walkie and its transcripts. */
+    val walkieClipsOffered: Boolean = BuildConfig.DEBUG && WALKIE_WIRED && STT_WIRED
 
     /** Whether the debug switch saves each walkie burst's audio and transcript for the lab's speech eval (C-3.11-9). */
     val walkieClips: StateFlow<Boolean> =

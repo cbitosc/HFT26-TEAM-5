@@ -37,7 +37,7 @@ import app.getknit.knit.R
 import app.getknit.knit.badge.PeerBadges
 import app.getknit.knit.data.message.Conversations
 import app.getknit.knit.data.settings.SettingsStore
-import app.getknit.knit.di.CALLS_WIRED
+import app.getknit.knit.di.CALL_SETTINGS_WIRED
 import app.getknit.knit.legal.License
 import app.getknit.knit.mesh.MeshController
 import app.getknit.knit.mesh.MeshService
@@ -593,8 +593,9 @@ fun KnitApp(startRoute: String? = null) {
                     LoraRadioScreen(onBack = { navController.popBackStack() })
                 }
             }
-            // Calls (experimental): only a build that wires them has the screen, or the view model it resolves.
-            if (CALLS_WIRED) {
+            // Calls (experimental): only a build that wires live calls or speech has the screen, or the view model it
+            // resolves — a build with mesh calls alone has nothing on it to set.
+            if (CALL_SETTINGS_WIRED) {
                 composable(Routes.CALLS) {
                     CallSettingsScreen(onBack = { navController.popBackStack() })
                 }

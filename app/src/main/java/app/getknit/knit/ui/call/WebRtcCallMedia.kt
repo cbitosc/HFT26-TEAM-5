@@ -49,7 +49,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.coroutines.resume
 
 /**
- * [CallMedia] over libwebrtc (experimental, `CALLS_WIRED` — the library is packaged only there): one audio-only
+ * [CallMedia] over libwebrtc (experimental, `LIVE_CALLS_WIRED` — the library is packaged only there): one audio-only
  * Unified Plan peer connection per call, Opus over DTLS-SRTP, bundled and RTCP-muxed (C-3.7-4). The factory and its
  * audio device module are built on the first call and kept for the process. Its audio goes where Telecom routes the
  * call (§3.13, [TelecomCalls]): the module plays and records on the voice-communication usage, which follows the call's

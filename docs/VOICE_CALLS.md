@@ -561,7 +561,8 @@ Each side sends an `OFFER` to the other before seeing the other's offer.
 > the phone's address, and leaves the walkie (§3.11) alone, which carries no address. A call connects only where a TURN
 > server is available: one a spool issues, or the person's own (§3.14).
 >
-> **Captions on Android (C-3.7-5; ADR 2026-10.nz3g, its 2026-10-16 amendment).** Where `BuildConfig.CALLS` is on, a
+> **Captions on Android (C-3.7-5; ADR 2026-10.nz3g, its 2026-10-16 amendment).** Where `BuildConfig.STT` and
+> `BuildConfig.LIVE_CALLS` are on (ADR 2026-10.swvp), a
 > live call's screen has a CC button beside Mute and the audio route, off until the person turns it on and remembered
 > from call to call (`TranscriptStore.liveCaptions`), drawn only while the Calls screen's "Transcripts and captions"
 > switch is on. On, the peer's words show in the card slot as they play, large, with no speaker or times: what the
@@ -699,8 +700,10 @@ When no live path exists, the call screen becomes a walkie-talkie over the mesh.
 the burst streams to the peer in small chunks while it is spoken. The peer's phone plays them as they land. Nothing is
 stored: a chunk that is lost is skipped, and no burst appears in the thread. It is not a live call: playback trails
 the speaker by a chunk and the mesh's latency, about a second between neighbours. ADR 2026-10.79yb records why. It is
-an experiment behind `BuildConfig.WALKIE` (`-Pwalkie=`, on in debug and off in release), read once as
-`di/CallWiring.WALKIE_WIRED`.
+an experiment behind `BuildConfig.MESH_CALLS` (`-PmeshCalls=`, on in debug and off in release), read once as
+`di/CallWiring.WALKIE_WIRED`. It needs no live calls (ADR 2026-10.swvp): a build may run the walkie alone, packaging no
+WebRTC, and then advertises `CAP_WALKIE` without `CAP_CALL`, places every call as a walkie and declines a live offer for
+its media (`REASON_MEDIA`).
 
 - **C-3.11-1** A build that runs the walkie advertises `CAP_WALKIE` (`0x8000`). It is never in
   `LOCAL_CAPABILITIES`. A caller offers a walkie session, or the drop to one, only toward a pinned profile that
@@ -799,7 +802,7 @@ an experiment behind `BuildConfig.WALKIE` (`-Pwalkie=`, on in debug and off in r
   - **none:** no link it can see; a warning says it is linking.
 
   With neither a link nor a relay that would cast, nothing is sealed, and the burst says it did not go.
-- **C-3.11-9** *(experimental, where `BuildConfig.CALLS` is on; ADR 2026-10.nz3g)*
+- **C-3.11-9** *(experimental, where `BuildConfig.STT` is on; ADR 2026-10.nz3g, 2026-10.swvp)*
   The receiver may write each burst it hears out as text, on the phone, as the burst plays: the words so far while it
   is still coming, settled a moment after it ends. Nothing about it is on the wire: no field, no frame, no capability
   bit, and the text is never sent, stored, logged or kept past the session.
