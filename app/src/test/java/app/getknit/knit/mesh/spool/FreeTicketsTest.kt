@@ -196,6 +196,27 @@ class FreeTicketsTest {
         )
     }
 
+    @Test
+    fun theSeededExpectedAmsAreReadAndAMalformedItemIsDropped() {
+        // What sizes the photo a phone sends before it has ever held a free ticket (C-7.6-32): only an origin a release
+        // build would ask, with a positive byte count, is believed.
+        val expected =
+            FreeIssuers.expectedAm(
+                arrayOf(
+                    "https://anywhere.getknit.app 262144",
+                    "  https://issuer.example:8443   1   ",
+                    "https://zero.example 0",
+                    "https://negative.example -49152",
+                    "https://words.example lots",
+                    "http://cleartext.example 262144",
+                    "https://port.example:70000 262144",
+                    "262144",
+                    "https://three.example 262144 bytes",
+                ),
+            )
+        assertEquals(mapOf("https://anywhere.getknit.app" to 262_144L, "https://issuer.example:8443" to 1L), expected)
+    }
+
     private fun hex(bytes: ByteArray) = bytes.joinToString("") { "%02x".format(it) }
 
     private companion object {

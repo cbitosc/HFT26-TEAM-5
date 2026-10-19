@@ -29,8 +29,9 @@ import java.security.ProviderException
 /**
  * A backup reads the secrets the live app already holds, beside the open database, so a Keystore refusal must fail
  * the backup as something worth another try — and never take the old `DatabaseKey.getOrCreate()` path, which on a
- * refusal deleted the database the mesh had open and minted a second passphrase (ADR 2026-10.47rw). Every case here
- * fails before the export, so no SQLCipher is needed.
+ * refusal deleted the database the mesh had open and minted a second passphrase (ADR 2026-10.47rw). A phone short of room
+ * for the copy fails first, before either secret is read. Every case here fails before the export, so no SQLCipher is
+ * needed.
  */
 @RunWith(AndroidJUnit4::class)
 class BackupWriterKeystoreTest {
@@ -107,6 +108,27 @@ class BackupWriterKeystoreTest {
             livePhone() // Identity has the node id cached; the writer's own read of the file is refused
             repeat(3) { identityCipher.openScript += refusal() }
             assertEquals(BackupProblem.KEYSTORE_UNAVAILABLE, problemOf(writeFailure()))
+        }
+
+    @Test
+    fun aPhoneWithoutRoomForTheDatabaseCopyFailsBeforeReadingAnySecret() =
+        runTest {
+            // The copy needs the live file plus headroom; a phone short of it says so (NO_SPACE) rather than filling up
+            // mid-export, and touches neither secret on the way.
+            livePhone()
+            val opensBefore = dbCipher.opens to identityCipher.opens
+            val tight = mockk<StorageManager>(relaxed = true) { every { getAllocatableBytes(any()) } returns 1L }
+            val full =
+                object : ContextWrapper(ApplicationProvider.getApplicationContext()) {
+                    override fun getSystemService(name: String): Any? =
+                        if (name == Context.STORAGE_SERVICE) tight else super.getSystemService(name)
+                }
+            val writer = BackupWriter(full, identity, identitySecret(), databaseKey, mockk<SettingsStore>(), mockk())
+
+            val failure = runCatching { writer.write(ByteArrayOutputStream(), BackupKeys.generate()) }.exceptionOrNull()
+
+            assertEquals(BackupProblem.NO_SPACE, (failure as? BackupException)?.problem)
+            assertEquals(opensBefore, dbCipher.opens to identityCipher.opens)
         }
 
     @Test

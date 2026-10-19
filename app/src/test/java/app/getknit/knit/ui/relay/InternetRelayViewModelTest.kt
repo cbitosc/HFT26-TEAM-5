@@ -4,10 +4,12 @@ package app.getknit.knit.ui.relay
 
 import app.getknit.knit.data.commons.CommonsEntity
 import app.getknit.knit.data.commons.CommonsRepository
+import app.getknit.knit.data.relay.FreeUploads
 import app.getknit.knit.data.relay.RelayInviteApplier
 import app.getknit.knit.data.relay.RelayStatusRepository
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.mesh.MeshController
+import app.getknit.knit.mesh.spool.CommonsInvite
 import app.getknit.knit.mesh.spool.HeldKey
 import app.getknit.knit.mesh.spool.KeyAnswer
 import app.getknit.knit.mesh.spool.KeyState
@@ -383,6 +385,174 @@ class InternetRelayViewModelTest {
         val ticketed = SpoolStatus(url = OTHER, connected = true, powBits = 0, lastError = null, scopes = emptyList(), ent = true)
         assertEquals(RelayTicket.None, relayCalls(ticketed, null, 0L)?.ticket)
     }
+
+    @Test
+    fun turningThePlaneOffWritesAtOnceWithoutTheSheet() =
+        runTest {
+            every { settings.spoolConsented } returns flowOf(false)
+            val vm = vm()
+
+            vm.onToggle(false)
+            advanceUntilIdle()
+
+            coVerify { settings.setSpoolEnabled(false) }
+            assertFalse(vm.showConsent.value)
+        }
+
+    @Test
+    fun turningThePlaneOnBeforeConsentRaisesTheSheetAndWritesNothing() =
+        runTest {
+            // ADR 063: the disclosure comes before the first socket, so the switch alone never enables the plane.
+            every { settings.spoolConsented } returns flowOf(false)
+            val vm = vm()
+
+            vm.onToggle(true)
+            advanceUntilIdle()
+
+            assertTrue(vm.showConsent.value)
+            coVerify(exactly = 0) { settings.setSpoolEnabled(any()) }
+            coVerify(exactly = 0) { settings.acceptSpoolConsent() }
+        }
+
+    @Test
+    fun acceptingTheSheetIsTheOneConsentWriteAndClosesIt() =
+        runTest {
+            // `acceptSpoolConsent` records the consent and enables the plane in one write; the sheet adds no second.
+            every { settings.spoolConsented } returns flowOf(false)
+            val vm = vm()
+            vm.onToggle(true)
+            advanceUntilIdle()
+
+            vm.acceptConsent()
+            advanceUntilIdle()
+
+            coVerify(exactly = 1) { settings.acceptSpoolConsent() }
+            assertFalse(vm.showConsent.value)
+            coVerify(exactly = 0) { settings.setSpoolEnabled(any()) }
+        }
+
+    @Test
+    fun dismissingTheSheetLeavesThePlaneOffAndUnconsented() =
+        runTest {
+            every { settings.spoolConsented } returns flowOf(false)
+            val vm = vm()
+            vm.onToggle(true)
+            advanceUntilIdle()
+            assertTrue(vm.showConsent.value)
+
+            vm.dismissConsent()
+            advanceUntilIdle()
+
+            assertFalse(vm.showConsent.value)
+            coVerify(exactly = 0) { settings.acceptSpoolConsent() }
+            coVerify(exactly = 0) { settings.setSpoolEnabled(any()) }
+        }
+
+    @Test
+    fun turningThePlaneOnOnceConsentedEnablesItWithoutTheSheet() =
+        runTest {
+            every { settings.spoolConsented } returns flowOf(true)
+            val vm = vm()
+
+            vm.onToggle(true)
+            advanceUntilIdle()
+
+            coVerify { settings.setSpoolEnabled(true) }
+            assertFalse(vm.showConsent.value)
+        }
+
+    @Test
+    fun anAddedRelayIsStoredInItsCanonicalFormAndDialedNow() =
+        runTest {
+            val vm = vm()
+
+            vm.addRelay("  WSS://Home.Example.org/spool/v1  ")
+            advanceUntilIdle()
+
+            // The scheme lowercased and the padding gone, nothing else: the host and path are the relay's own.
+            coVerify { settings.addSpoolUrl("wss://Home.Example.org/spool/v1") }
+            coVerify { mesh.refreshRelays() }
+        }
+
+    @Test
+    fun aUrlTheDialerWouldRefuseIsNeitherValidNorStored() =
+        runTest {
+            val vm = vm()
+
+            assertFalse(vm.isValidUrl("https://home.example.org/spool/v1"))
+            vm.addRelay("https://home.example.org/spool/v1")
+            vm.addRelay("home.example.org")
+            advanceUntilIdle()
+
+            assertTrue(vm.isValidUrl(" wss://home.example.org/spool/v1 "))
+            coVerify(exactly = 0) { settings.addSpoolUrl(any()) }
+            coVerify(exactly = 0) { mesh.refreshRelays() }
+        }
+
+    @Test
+    fun aCommonsInviteJoinsTheRoomAtThatRelayAndDialsNow() =
+        runTest {
+            val vm = vm()
+            val invite = CommonsInvite.encode(secret)
+            assertTrue(vm.isValidInvite(invite))
+
+            vm.joinCommons(TOKENED, invite)
+            advanceUntilIdle()
+
+            val joined = slot<ByteArray>()
+            coVerify { commons.join(TOKENED, capture(joined), null, any()) }
+            assertArrayEquals(secret, joined.captured)
+            coVerify { mesh.refreshRelays() }
+        }
+
+    @Test
+    fun textThatIsNoCommonsInviteJoinsNothing() =
+        runTest {
+            val vm = vm()
+
+            assertFalse(vm.isValidInvite("knit-commons:v1:not-a-secret"))
+            vm.joinCommons(TOKENED, "knit-commons:v1:not-a-secret")
+            advanceUntilIdle()
+
+            coVerify(exactly = 0) { commons.join(any(), any(), any(), any()) }
+        }
+
+    @Test
+    fun leavingACommonsDropsTheRoomAndDialsNow() =
+        runTest {
+            val vm = vm()
+
+            vm.leaveCommons("commons:abc")
+            advanceUntilIdle()
+
+            coVerify { commons.leave("commons:abc") }
+            coVerify { mesh.refreshRelays() }
+        }
+
+    @Test
+    fun parkingOneRelayWritesItsOwnSwitchAndNotThePlanes() =
+        runTest {
+            val vm = vm()
+
+            vm.setRelayEnabled(TOKENED, false)
+            advanceUntilIdle()
+
+            coVerify { settings.setSpoolUrlEnabled(TOKENED, false) }
+            coVerify(exactly = 0) { settings.setSpoolEnabled(any()) }
+        }
+
+    @Test
+    fun theFreeUploadsSwitchRecordsThePersonsAnswerForThatHost() =
+        runTest {
+            val uploads = mockk<FreeUploads>(relaxed = true) { every { choices } returns flowOf(emptyMap()) }
+            val vm =
+                InternetRelayViewModel(settings, relayStatus, commons, mesh, inbox = inbox, applier = applier, freeUploads = uploads)
+
+            vm.setFreeUploads("home.example.org", allowed = true)
+            advanceUntilIdle()
+
+            coVerify { uploads.answer("home.example.org", true) }
+        }
 
     private fun TestScope.collect(vm: InternetRelayViewModel): List<InternetRelayEvent> {
         val events = mutableListOf<InternetRelayEvent>()

@@ -119,6 +119,46 @@ class WearStatusPolicyTest {
     }
 
     @Test
+    fun `a board that is down and a relay that is live keep their own letters`() {
+        val s = WearStatusPolicy.of(running.copy(lora = LoraPlane.Down, relay = RelayPlane.Live), now)
+        assertEquals(Plane.Down, s.lora)
+        assertEquals(Plane.Live, s.spool)
+    }
+
+    @Test
+    fun `a nearby peer with no plane known yet is drawn as Bluetooth`() {
+        // The planes map and the nearby set arrive on separate flows; dropping the peer would make the map disagree
+        // with the count beside it.
+        val s =
+            WearStatusPolicy.of(
+                running.copy(nearby = 1, peers = WearPeers(nearby = setOf("a-new"), reachable = setOf("a-new"))),
+                now,
+            )
+        assertEquals(listOf(WearLink.BLE), s.extra!!.links)
+        assertEquals(0, s.extra.far)
+    }
+
+    @Test
+    fun `a far peer with neither a LoRa path nor a relay's evidence is not drawn`() {
+        // Reachable by the mesh's own reckoning but over no long-range plane: Diagnostics lists it under neither
+        // section, so the watch must not draw it nearer than that.
+        val s =
+            WearStatusPolicy.of(
+                running.copy(
+                    peers =
+                        WearPeers(
+                            nearby = emptySet(),
+                            reachable = setOf("d-hop", "c-lora"),
+                            planes = mapOf("d-hop" to setOf(TransportKind.Bluetooth), "c-lora" to setOf(TransportKind.LoRa)),
+                        ),
+                ),
+                now,
+            )
+        assertEquals(listOf(WearLink.LORA), s.extra!!.links)
+        assertEquals(1, s.extra.far)
+    }
+
+    @Test
     fun `the stamp is the read's clock in seconds`() {
         assertEquals(now / 1000, WearStatusPolicy.of(running, now).stampSec)
     }

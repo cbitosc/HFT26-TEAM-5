@@ -1,6 +1,7 @@
 package app.getknit.knit
 
 import app.getknit.knit.mesh.DigestTracker
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -199,5 +200,33 @@ class DigestTrackerTest {
         assertTrue("our side folded the boundary first — the skew window reads sync-wanted", t.reconcileWanted("p", 2L))
         t.onCue("p", 2L) // the peer's own fold arrives with its next cue
         assertFalse("identical digests → skip, no NDP", t.reconcileWanted("p", 2L))
+    }
+
+    @Test
+    fun clearDropsEveryPeersCooldownAndVersions() {
+        // Transport teardown of the whole plane: a peer heard again afterwards starts as a first contact, not throttled.
+        val r = ThrottleRig()
+        repeat(3) { i -> r.nonConvergentRound(i.toLong()) }
+        r.t.onCue("p", 9L)
+        assertFalse("engaged before the clear", r.t.reconcileWanted("p", 500L))
+
+        r.t.clear()
+
+        assertEquals("no peer's versions survive the clear", "", r.t.debug())
+        assertFalse("nothing heard since the clear", r.t.reconcileWanted("p", 500L))
+        r.t.onCue("p", 9L)
+        assertTrue("no cooldown survives the clear", r.t.reconcileWanted("p", 500L))
+    }
+
+    @Test
+    fun theDiagnosticNamesEachPeersVersionsAndARunningCooldown() {
+        val r = ThrottleRig()
+        repeat(3) { i -> r.nonConvergentRound(i.toLong()) } // engaged at now = 0: the last round cued 2 and synced at 1002
+        r.t.onCue("q", 7L)
+
+        assertEquals("p(pv=2,sv=1002,cd=${DigestTracker.COOLDOWN_INITIAL_MS}) q(pv=7,sv=null)", r.t.debug())
+
+        r.now += DigestTracker.COOLDOWN_INITIAL_MS
+        assertEquals("a spent cooldown is not shown", "p(pv=2,sv=1002) q(pv=7,sv=null)", r.t.debug())
     }
 }

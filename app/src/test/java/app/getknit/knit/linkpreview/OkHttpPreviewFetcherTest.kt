@@ -236,6 +236,57 @@ class OkHttpPreviewFetcherTest {
     }
 
     @Test
+    fun aPictureRedirectedPastItsShorterCapFailsAndAMissingOneFails() {
+        // A card's picture gets fewer hops than its page: one more than the cap is a failure, never a fetch.
+        repeat(OkHttpPreviewFetcher.MAX_IMAGE_HOPS + 1) { i ->
+            server.enqueue(
+                MockResponse
+                    .Builder()
+                    .code(302)
+                    .addHeader("Location", "/img${i + 1}")
+                    .build(),
+            )
+        }
+        assertEquals(ImageFetch.Failed("redirects"), image(server.url("/img0").toString()))
+        assertEquals(OkHttpPreviewFetcher.MAX_IMAGE_HOPS + 1, server.requestCount)
+
+        server.enqueue(
+            MockResponse
+                .Builder()
+                .code(404)
+                .build(),
+        )
+        assertEquals(ImageFetch.Failed("http 404"), image(server.url("/gone.jpg").toString()))
+    }
+
+    @Test
+    fun aRedirectWithoutALocationIsAFailureNotALoop() {
+        server.enqueue(
+            MockResponse
+                .Builder()
+                .code(302)
+                .build(),
+        )
+        assertEquals(PageFetch.Failed("redirect without location"), page(server.url("/nowhere").toString()))
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test
+    fun aSiteThatWillNotAnswerInTimeIsAFailureForTheDraft() {
+        // Far past the rig's 2 s read timeout, so the order is never in doubt however slow the runner.
+        server.enqueue(
+            MockResponse
+                .Builder()
+                .code(200)
+                .addHeader("Content-Type", "text/html")
+                .headersDelay(30, TimeUnit.SECONDS)
+                .body("<title>Late</title>")
+                .build(),
+        )
+        assertEquals(PageFetch.Failed("timeout"), page(server.url("/slow").toString()))
+    }
+
+    @Test
     fun withoutABoundClientEverythingIsOffline() {
         val offline = OkHttpPreviewFetcher(clientFor = { null })
         assertEquals(PageFetch.Offline, runBlocking { offline.fetchPage("https://example.com/") })
