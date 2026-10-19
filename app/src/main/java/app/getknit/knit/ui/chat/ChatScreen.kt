@@ -77,7 +77,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Reply
 import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.BrokenImage
@@ -95,6 +94,7 @@ import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SpeakerPhone
 import androidx.compose.material.icons.filled.VerifiedUser
@@ -4415,8 +4415,9 @@ private fun MessageInput(
                                     }
 
                                     SendAction.Attach -> {
+                                        // The gallery, not "add a photo": the picker behind it offers videos too.
                                         Icon(
-                                            imageVector = Icons.Filled.AddPhotoAlternate,
+                                            imageVector = Icons.Filled.PhotoLibrary,
                                             contentDescription = null,
                                             modifier = Modifier.size(24.dp),
                                         )
