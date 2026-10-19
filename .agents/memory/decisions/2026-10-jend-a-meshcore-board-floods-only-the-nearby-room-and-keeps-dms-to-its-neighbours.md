@@ -43,8 +43,8 @@ message does. The cost that matters is Knit's **automated** traffic, not people'
 **What changed** (the scope a MeshCore board kind is built to):
 
 1. **On the shared regional frequency, only two things flood:** broadcast room `chat` and broadcast `reaction` that a
-   person on this phone originated, and our own `profile`, only right before our first flooded post, at most once per
-   N hours.
+   person on this phone originated, and our own **lean** profile (amended 2026-10-19, below), only right before our
+   first flooded post, at most once per N hours.
 
    Room posts are signed, and a receiver without the author's profile parks the post (`PendingInbound`) and then
    drops it, so posts flood only as far as their author's profile did. Tying the profile to the first post, instead
@@ -96,6 +96,38 @@ Owed before release:
 - the region UX;
 - trials: the one-named-hop route through a third board as a repeater, and real-range loss outdoors. Indoors the link
   never got weak enough to lose more than one packet in 250.
+
+**Amended 2026-10-19 (the full profile goes only to a neighbour that asks for it).** The prekey is read at one
+moment only: when a session starts (`RatchetEngine.initiate`, which a reset and every reset after a restore are too).
+A confirmed session's epochs are based on the peer's own, so a contact with a working session never needs it. Room
+readers need even less: the name and the key a post verifies against. The size test measured the cost on this board
+(`CoordinationPlaneSizeBudgetTest.theLeanProfileOnTheMeshCoreHop`, ids elided by `IdElision`): the full profile is
+435 B and 3 packets, of which the prekey is 107 B and the board binding (`loraNode`, `loraKey`) 68 B, while a lean
+profile (name, key bundle, version) is 168–196 B and 2 packets at any name length. So:
+
+1. **What floods is a lean profile**: name, key bundle and version, nothing else. It is a signed object of its own
+   that never replaces a full profile and is never refused against one: a newer lean profile must not erase a
+   prekey, and an older full one fetched after it must still be taken.
+2. **The full profile goes zero-hop, and only in answer to a `keyreq`** (`KeyReqContent`, which this board kind
+   carries zero-hop although `LoraFramePolicy` refuses it on the Meshtastic plane). It is never sent unasked, on a
+   first hearing or beside a message.
+3. **A phone asks only when it is about to start a session and holds no usable prekey**: none on file, or one from a
+   profile whose `version` is more than four weeks old, since a prekey rotates weekly and is kept for the current
+   week plus four. It asks when the person opens the thread or starts typing, not on sighting, so most of the round
+   trip hides behind the typing; a fresh prekey on file starts the session with no request at all.
+4. **Only the author answers over LoRa**, or a holder answers after a random wait and stays quiet once it hears the
+   answer. Several neighbours each sending three packets for one request is the trap. Requests are rate-limited per
+   peer.
+
+The room is not served this way: a far reader cannot reach a far author zero-hop, and a flooded request plus a
+flooded answer per reader costs more than one push, so the lean profile still floods with the first post. What gives
+way is a profile edit on a LoRa-only link. The name rides the lean profile, and a contact with a session already gets
+the presentation fields sealed inside DMs. A stranger with no session does not see a status, avatar or open-to-chat
+change until it next asks for the full profile.
+
+Owed with it: the lean profile object and its replacement rules, `keyreq` on this board kind's frame policy with the
+answer suppression, the request trigger in the DM and reset paths, and a lab scenario where two neighbours start a
+session from a lean profile alone.
 
 The invariant that keeps this true is a policy test that classifies every frame type into flood, zero-hop or refused
 for this board kind, like `LoraFramePolicy`'s for the Meshtastic plane.
