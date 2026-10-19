@@ -241,6 +241,7 @@ carries; never renumber an old one.
 | [2026-10.hmfe](decisions/2026-10-hmfe-a-short-video-is-re-encoded-small-before-it-is-sent.md) | A short video is re-encoded small before it is sent | attachments, wire, moderation |
 | [2026-10.j67x](decisions/2026-10-j67x-our-unanswered-reset-keeps-the-scope-it-replaced-and-may-refill-it-with-the-rese.md) | Our unanswered reset keeps the scope it replaced and may refill it with the reset alone | crypto, pfs, spool |
 | [2026-10.jbsa](decisions/2026-10-jbsa-conversation-shortcuts-follow-the-chat-list.md) | Conversation shortcuts follow the chat list | notifications, contacts, ui |
+| [2026-10.jend](decisions/2026-10-jend-a-meshcore-board-floods-only-the-nearby-room-and-keeps-dms-to-its-neighbours.md) | A MeshCore board floods only the Nearby room and keeps DMs to its neighbours | lora, meshcore, airtime |
 | [2026-10.js2p](decisions/2026-10-js2p-ask-before-large-bluetooth-only-downloads.md) | Ask before large Bluetooth-only downloads | blobs, ui, wire |
 | [2026-10.k8ge](decisions/2026-10-k8ge-a-name-clash-fades-a-week-after-the-look-alike-was-last-heard.md) | A name clash fades a week after the look-alike was last heard | identity, ui, contacts |
 | [2026-10.kw29](decisions/2026-10-kw29-a-call-whose-microphone-captures-only-zeros-falls-back-to-the-recognition-source.md) | A call whose microphone captures only zeros falls back to the recognition source | calls, audio, reliability |

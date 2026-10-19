@@ -135,6 +135,15 @@ ADR 2026-09.2ajk), and the field log's `FieldEvent.Lora` sample and the link edg
   over a newer Disconnected is a phantom down and up (ADR 2026-10.a239's 2026-10-18 amendment). Its reason words are
   `MeshtasticSession`'s companion constants, folded onto `LoraLinkEnd` and pinned by `LoraFieldLogTest`.
 
+- **Before adding a second board kind (MeshCore) or making `MeshtasticLink` board-neutral:** READ ADR 2026-10.jend.
+  On a MeshCore board only people's room posts and reactions flood, plus our own profile right before our first
+  flooded post. Floods are scoped to the board's region when one is set, and booked as every repeater's airtime under
+  `AirBucket.PUBLIC`. Every DM-form frame, every room tick and all machine traffic stays zero-hop, or one hop through
+  a named repeater. DM-form traffic is gated on a direct-reach set (frames heard at hop count 0), never on
+  `reachable`. Every transmission carries a byte that varies per send, because MeshCore drops byte-identical packets
+  network-wide. The Meshtastic plane's ADRs above do not carry over: no signing cliff, no `hop_limit`, no
+  `BoardQuiet`.
+
 ## Adding an entry
 
 A new decision about this plane gets a bullet here — the symbols that trigger it, the ADR, and the invariant in a
