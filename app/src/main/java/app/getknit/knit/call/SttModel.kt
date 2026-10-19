@@ -1,7 +1,8 @@
 package app.getknit.knit.call
 
-import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
@@ -172,24 +173,26 @@ class SttModelInstaller(
         output: OutputStream,
         digest: MessageDigest,
         progress: (Long) -> Unit,
-    ): Long {
-        val buffer = ByteArray(BUFFER_BYTES)
-        var count = 0L
-        var reported = 0L
-        while (true) {
-            currentCoroutineContext().ensureActive()
-            val n = input.read(buffer)
-            if (n < 0) return count
-            count += n
-            refuseUnless(count <= file.bytes) { "${file.name} is larger than it should be" }
-            digest.update(buffer, 0, n)
-            output.write(buffer, 0, n)
-            if (count - reported >= REPORT_BYTES) {
-                reported = count
-                progress(count)
+    ): Long =
+        withContext(Dispatchers.IO) {
+            val buffer = ByteArray(BUFFER_BYTES)
+            var count = 0L
+            var reported = 0L
+            while (true) {
+                ensureActive()
+                val n = input.read(buffer)
+                if (n < 0) break
+                count += n
+                refuseUnless(count <= file.bytes) { "${file.name} is larger than it should be" }
+                digest.update(buffer, 0, n)
+                output.write(buffer, 0, n)
+                if (count - reported >= REPORT_BYTES) {
+                    reported = count
+                    progress(count)
+                }
             }
+            count
         }
-    }
 
     private inline fun refuseUnless(
         ok: Boolean,

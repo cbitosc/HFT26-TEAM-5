@@ -132,11 +132,13 @@ class BadgeRefresher(
         val fresh =
             (answer as? BadgeAnswer.Issued)
                 ?.badges
+                ?.asSequence()
                 ?.mapNotNull { Badges.wrapperOf(it) }
                 ?.map { HeldBadge(it, r) }
                 ?.filter { Badges.verify(it.wrapper, it.r, me, clock() / MS_PER_S, pins) != null }
                 ?.distinctBy { Badges.claimsOf(it.wrapper)?.b }
                 ?.take(MAX_HELD)
+                ?.toList()
                 .orEmpty()
         val (nextHeld, nextState) = BadgeRefreshPolicy.afterAnswer(prior, held, answer, fresh, clock())
         if (nextHeld != held) journal.putHeld(nextHeld, nextState) else journal.putAskState(nextState)

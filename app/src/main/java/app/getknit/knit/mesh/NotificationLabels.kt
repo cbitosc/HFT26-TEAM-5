@@ -25,7 +25,7 @@ data class NotificationLabels(
                 voice = "🎤 Voice message",
                 link = "🔗 Link",
                 location = "📍 Location",
-                file = "📎 %1\$s",
+                file = $$"📎 %1$s",
                 hidden = "Message hidden",
                 video = "🎬 Video",
             )

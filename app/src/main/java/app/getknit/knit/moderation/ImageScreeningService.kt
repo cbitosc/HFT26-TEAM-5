@@ -82,10 +82,7 @@ class ImageScreeningService(
     suspend fun isVideoExplicit(
         bytes: ByteArray,
         poster: ByteArray,
-    ): Boolean {
-        if (poster.isNotEmpty() && isImageExplicit(poster)) return true
-        return anyFrameExplicit(bytes, "outgoing video")
-    }
+    ): Boolean = (poster.isNotEmpty() && isImageExplicit(poster)) || anyFrameExplicit(bytes, "outgoing video")
 
     /**
      * Receive-side screen for a held video, cached under [hash] like [screenImage]: [VIDEO_SAMPLES] frames, flagged

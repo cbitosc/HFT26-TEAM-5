@@ -608,26 +608,34 @@ private fun StackedFace(
         )
         // One slot for the reason or the route, held empty otherwise so the face doesn't jump as the call moves on.
         Box(Modifier.heightIn(min = 48.dp), contentAlignment = Alignment.Center) {
-            if (phase == CallPhase.Calling && (state.unreachable || state.unproven)) {
-                Text(
-                    callingNote(state, name),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.error,
-                    textAlign = TextAlign.Center,
-                )
-            } else if (phase == CallPhase.Ended) {
-                (if (state.dropped) "The connection was lost" else endedNote(state, name))?.let {
+            when {
+                phase == CallPhase.Calling && (state.unreachable || state.unproven) -> {
                     Text(
-                        it,
+                        callingNote(state, name),
                         style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = MaterialTheme.colorScheme.error,
                         textAlign = TextAlign.Center,
                     )
                 }
-            } else if (phase == CallPhase.Connected && state.walkie) {
-                WalkiePill()
-            } else if (phase == CallPhase.Connected && route != null) {
-                RoutePill(route)
+
+                phase == CallPhase.Ended -> {
+                    (if (state.dropped) "The connection was lost" else endedNote(state, name))?.let {
+                        Text(
+                            it,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center,
+                        )
+                    }
+                }
+
+                phase == CallPhase.Connected && state.walkie -> {
+                    WalkiePill()
+                }
+
+                phase == CallPhase.Connected && route != null -> {
+                    RoutePill(route)
+                }
             }
         }
         // The note's own line under the pill, held while connected so a warning coming and going moves nothing.
@@ -673,18 +681,24 @@ private fun InlineFace(
                 style = MaterialTheme.typography.titleSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            if (state?.phase == CallPhase.Calling && (state.unreachable || state.unproven)) {
-                Text(
-                    callingNote(state, name),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            } else if (state?.phase == CallPhase.Connected && state.walkie) {
-                WalkiePill()
-            } else if (state?.phase == CallPhase.Connected && route != null) {
-                RoutePill(route)
+            when {
+                state?.phase == CallPhase.Calling && (state.unreachable || state.unproven) -> {
+                    Text(
+                        callingNote(state, name),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+
+                state?.phase == CallPhase.Connected && state.walkie -> {
+                    WalkiePill()
+                }
+
+                state?.phase == CallPhase.Connected && route != null -> {
+                    RoutePill(route)
+                }
             }
             note?.let { NoteLine(it) }
         }

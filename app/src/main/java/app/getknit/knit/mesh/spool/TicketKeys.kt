@@ -52,8 +52,7 @@ object IssuerOrigin {
         if (origin.length > MAX_CHARS) return false
         val match = PATTERN.matchEntire(origin) ?: return false
         val (scheme, _, port) = match.destructured
-        if (scheme == "http" && !allowCleartext) return false
-        return port.isEmpty() || port.toInt() <= MAX_PORT
+        return (scheme != "http" || allowCleartext) && (port.isEmpty() || port.toInt() <= MAX_PORT)
     }
 
     /** The origin without its scheme — what the invite sheet names. Only ever called on an accepted origin. */

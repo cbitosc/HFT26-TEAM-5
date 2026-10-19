@@ -87,7 +87,6 @@ object Badges {
     const val MAX_BC_BYTES = 256
     const val SIG_BYTES = 64
     const val KID_BYTES = 8
-    const val SUB_BYTES = 32
 
     /** The holder's per-request randomness: 16 bytes. */
     const val R_BYTES = 16

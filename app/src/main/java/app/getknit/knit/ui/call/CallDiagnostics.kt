@@ -193,7 +193,7 @@ private const val BPS_PER_KBPS = 1_000
 private const val WALKIE_PACKET_MS = 20
 
 /** "Opus · 8 kbps · 16 kHz · mono · 20 ms": what a walkie burst is recorded as (C-3.11-5). */
-private val WALKIE_CODEC =
+private const val WALKIE_CODEC =
     "Opus · ${WalkiePolicy.BIT_RATE / BPS_PER_KBPS} kbps · ${WalkiePolicy.SAMPLE_RATE / HZ_PER_KHZ} kHz · mono · $WALKIE_PACKET_MS ms"
 
 /** "480 ms · 42 out, 1 failed · 40 in, 2 lost": the chunks' length and how many went and came. */

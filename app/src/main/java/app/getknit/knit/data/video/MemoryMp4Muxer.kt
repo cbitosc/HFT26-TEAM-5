@@ -25,7 +25,7 @@ import java.nio.ByteBuffer
  */
 @OptIn(UnstableApi::class)
 class MemoryMp4Muxer private constructor(
-    private val output: MemoryMuxerOutput,
+    output: MemoryMuxerOutput,
 ) : Muxer {
     // Not streamable: moov goes at the end. Streamable output reserves space for moov ahead of mdat and pads what it
     // does not use with a `free` box — 373 KB of a 2.3 MB encode on the first trailer tried, 16 % of the file. A Knit

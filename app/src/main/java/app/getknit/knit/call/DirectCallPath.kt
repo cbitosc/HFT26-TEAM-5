@@ -85,7 +85,7 @@ data class DirectTimings(
  */
 class DirectCallPath(
     // Late-bound: the lease wraps the Wi-Fi Direct radio, which holds the mesh transport — the service's to build.
-    private val leaseOf: () -> DirectWifiLease,
+    leaseOf: () -> DirectWifiLease,
     private val scope: CoroutineScope,
     // Whether the peer is a mesh neighbour now — "directly linked", the transfer's own gate.
     private val nearby: (peerId: String) -> Boolean,

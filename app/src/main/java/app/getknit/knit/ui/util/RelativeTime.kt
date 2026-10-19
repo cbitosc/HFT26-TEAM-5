@@ -27,7 +27,7 @@ data class RelativeTimeLabels(
 ) {
     companion object {
         /** The English labels — the tests' default; screens pass the reader's own ([relativeTimeLabels]). */
-        val ENGLISH = RelativeTimeLabels(now = "now", minutes = "%1\$dm", hours = "%1\$dh", yesterday = "Yesterday")
+        val ENGLISH = RelativeTimeLabels(now = "now", minutes = $$"%1$dm", hours = $$"%1$dh", yesterday = "Yesterday")
     }
 }
 

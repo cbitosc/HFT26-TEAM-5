@@ -164,9 +164,9 @@ internal class BlePhyControl(
         // stretches: give-up on one RSSI read; LinkFade counts unanswered reads, so a sleep inside it is not a fade.
         val answer = if (sent) withTimeoutOrNull(RSSI_TIMEOUT_MS) { rssiReads.receive() ?: REFUSED } else null
         if (disconnected) return
-        when {
-            answer == null -> onUnanswered(if (sent) "timeout" else "not sent")
-            answer == REFUSED -> onUnanswered("refused")
+        when (answer) {
+            null -> onUnanswered(if (sent) "timeout" else "not sent")
+            REFUSED -> onUnanswered("refused")
             else -> onRssi(answer)
         }
     }

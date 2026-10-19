@@ -223,7 +223,7 @@ class MeshManager(
     private val rideHoldMs: Long = AckSync.RIDE_HOLD_MS,
     // How long the ✓✓ for a DM that arrived over the LoRa board batches ([DmAckCoalescer.HOLD_MS], ADR 054).
     // Injectable for `mesh/lab` exactly like [tickDebounceMs].
-    private val dmAckHoldMs: Long = DmAckCoalescer.HOLD_MS,
+    dmAckHoldMs: Long = DmAckCoalescer.HOLD_MS,
     // The Internet plane's timed round and attachment re-look ([ScopeSync.TICK_INTERVAL_MS],
     // [ScopeSync.ATTACHMENT_RETRY_MS]) — the waits a calendar-only transition rides, which a jumped clock
     // cannot shorten. Injectable for `mesh/lab` like [tickDebounceMs]; only [scopeSync]'s initializer reads them.
@@ -287,19 +287,19 @@ class MeshManager(
     // The ticket key swap (experimental, docs/VOICE_CALLS.md §2.6, ADR 2026-10.3sk7): the customer keys invites handed
     // this phone and the issuer they are traded with. Both null in a build without Knit Anywhere (release:
     // `di/AnywhereWiring`'s `ANYWHERE_WIRED`), and then nothing ever asks an issuer for anything.
-    private val ticketKeys: TicketKeyJournal? = null,
-    private val ticketIssuer: TicketIssuer? = null,
+    ticketKeys: TicketKeyJournal? = null,
+    ticketIssuer: TicketIssuer? = null,
     // The free half of the swap (docs/VOICE_CALLS.md C-7.6-33 to C-7.6-38): the free issuers, the person's answer to
     // the notice, and the account route. Null with the rest of tickets, so release makes no free account.
-    private val freeKeys: FreeKeyJournal? = null,
-    private val accountIssuer: AccountIssuer? = null,
+    freeKeys: FreeKeyJournal? = null,
+    accountIssuer: AccountIssuer? = null,
     private val allowCleartext: Boolean = false,
     // The supporter badge (docs/SUPPORTER_BADGE.md, ADR 2026-10.r99s): the holder's toggle and held badges, read into the
     // sealed profile, and the issuer that signs them. The journal is wired in every build (a release build simply never
     // holds a badge); the refresher runs only where tickets are wired, since earning one takes a customer key.
     private val badgeJournal: BadgeJournal? = null,
     private val badgeIssuer: BadgeIssuer? = null,
-    private val badgePins: List<PinnedBadgeKey> = emptyList(),
+    badgePins: List<PinnedBadgeKey> = emptyList(),
 ) : MeshController,
     TransferSignals,
     CallSignals,
@@ -3278,7 +3278,7 @@ class MeshManager(
      * too, and one version never carries two badge lists.
      */
     private fun watchBadgeChanges(session: CoroutineScope) {
-        val journal = badgeJournal ?: return
+        badgeJournal ?: return
         session.launch {
             shownBadges().collect { if (publishBadgesIfChanged()) broadcastSealedProfile() }
         }

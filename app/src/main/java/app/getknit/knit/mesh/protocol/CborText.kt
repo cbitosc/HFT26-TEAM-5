@@ -180,7 +180,7 @@ object CborText {
                 }
             if (i + len > s.size) return false
             val first = s[i + 1].toInt() and BYTE_MASK
-            if (first < lo || first > hi) return false
+            if (first !in lo..hi) return false
             for (k in 2 until len) if ((s[i + k].toInt() and CONTINUATION_MASK) != CONTINUATION) return false
             i += len
         }

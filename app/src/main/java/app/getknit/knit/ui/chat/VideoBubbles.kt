@@ -8,7 +8,6 @@ import android.text.format.Formatter
 import android.util.Log
 import android.view.Surface
 import android.view.TextureView
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -181,7 +180,6 @@ internal fun StagedVideoTile(video: VideoInfo) {
  *
  * A [flagged] video (its frames, or its poster) is hidden behind a tap like a flagged picture.
  */
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun VideoBubble(
     hash: String,

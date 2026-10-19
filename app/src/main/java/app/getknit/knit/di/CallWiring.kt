@@ -13,7 +13,6 @@ import app.getknit.knit.call.CallMedia
 import app.getknit.knit.call.CallMediaSampler
 import app.getknit.knit.call.CallReach
 import app.getknit.knit.call.CallReachRule
-import app.getknit.knit.call.CallSignals
 import app.getknit.knit.call.CallTimings
 import app.getknit.knit.call.CallToneSync
 import app.getknit.knit.call.CallWalkie
@@ -171,7 +170,7 @@ private fun callGraph(): Module =
         single { IncomingCalls(get(), get<CoroutineScope>()) }
         single {
             CallManager(
-                signals = CallSignals { peerId, payload -> get<MeshManager>().sendCallSignal(peerId, payload) },
+                signals = { peerId, payload -> get<MeshManager>().sendCallSignal(peerId, payload) },
                 turn = if (LIVE_CALLS_WIRED) get<TurnSource>() else TurnSource.None,
                 media = if (LIVE_CALLS_WIRED) get<CallMedia>() else CallMedia.None,
                 scope = get<CoroutineScope>(),

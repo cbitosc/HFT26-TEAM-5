@@ -737,7 +737,7 @@ class RatchetSessions(
             pe: Int,
             highestPeAcked: Int,
             lowestRetained: Int,
-        ): Boolean = pe >= 1 && pe < lowestRetained && pe < highestPeAcked
+        ): Boolean = pe in 1..<lowestRetained && pe < highestPeAcked
 
         /**
          * Whether the spool plane may derive scopes from [state]: a confirmed session, or our own reset waiting for

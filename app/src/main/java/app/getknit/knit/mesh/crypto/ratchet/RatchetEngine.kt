@@ -651,8 +651,7 @@ class RatchetEngine(
     ): Boolean {
         // Past its drain the root is no candidate either: the frame would race, as it always did.
         val prev = session.prevRoot?.takeIf { session.prevRootExpiresAt > now } ?: return false
-        if (ctx.spkPrivForInit == null) return false
-        return respond(ctx, init).contentEquals(prev)
+        return ctx.spkPrivForInit != null && respond(ctx, init).contentEquals(prev)
     }
 
     /**

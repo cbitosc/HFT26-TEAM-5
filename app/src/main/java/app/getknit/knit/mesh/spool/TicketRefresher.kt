@@ -363,12 +363,12 @@ class TicketRefresher(
         val route = accounts ?: return null
         val params = route.accountParams(origin, host)
         var (bits, day) =
-            when {
-                params is AccountAnswer.Params && params.aud == host -> {
+            when (params) {
+                is AccountAnswer.Params if params.aud == host -> {
                     params.bits to params.day
                 }
 
-                params is AccountAnswer.Params -> {
+                is AccountAnswer.Params -> {
                     return backOff(host, prior, AccountAnswer.NoAnswer("audience ${params.aud}"))
                 }
 

@@ -1466,16 +1466,16 @@ class BlobExchange(
         val idPart = content.re?.let { " #${it.take(LOG_ID_CHARS)}" } ?: ""
         log("blob proof ← $from$idPart: ${items.joinToString { itemLabel(it) }}")
         // An unknown state is never HAVE (ADR 2026-10.6e5t); FETCHING is bytes still on their way in, unchecked.
-        for (item in items.filter { it.state in HELD }) {
+        for ((hash) in items.filter { it.state in HELD }) {
             try {
-                onPeerHolds(item.hash, from)
+                onPeerHolds(hash, from)
                 onEvent(BlobEvent.ProofHeld)
             } catch (e: CancellationException) {
                 throw e
             } catch (
                 @Suppress("TooGenericExceptionCaught") e: Exception, // one hash's hook never costs the others theirs
             ) {
-                log("blob proof ${item.hash.take(LOG_HASH_CHARS)}… ← $from: hook failed: ${e.javaClass.simpleName}")
+                log("blob proof ${hash.take(LOG_HASH_CHARS)}… ← $from: hook failed: ${e.javaClass.simpleName}")
             }
         }
     }
@@ -1670,8 +1670,7 @@ class BlobExchange(
         pull: Int?,
         until: Long?,
     ) {
-        val refused = echoRefused(pull, until)
-        if (refused == null) return want(hash, asker = asker, fastOnly = fastOnly, pull = pull, until = until)
+        val refused = echoRefused(pull, until) ?: return want(hash, asker = asker, fastOnly = fastOnly, pull = pull, until = until)
         onEvent(BlobEvent.EchoDeclined)
         log("blob no-echo ${hash.take(LOG_HASH_CHARS)}… for $asker ($refused)")
     }

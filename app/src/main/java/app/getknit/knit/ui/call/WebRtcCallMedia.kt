@@ -703,7 +703,7 @@ private class WebRtcSession(
     /** One raw stats report, or null once closed or after [STATS_MS]. */
     private suspend fun report(): List<StatEntry>? =
         withTimeoutOrNull(STATS_MS) {
-            suspendCancellableCoroutine<List<StatEntry>?> { cont ->
+            suspendCancellableCoroutine { cont ->
                 val callback =
                     RTCStatsCollectorCallback { report ->
                         val entries =

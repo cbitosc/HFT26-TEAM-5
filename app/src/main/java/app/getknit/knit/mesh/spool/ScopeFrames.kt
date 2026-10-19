@@ -127,7 +127,7 @@ object ScopeFrames {
         scope: Scope,
     ): Boolean {
         val reset = if (scope.pair) null else ownResetInit(env, selfId, scope)
-        return if (reset != null) reset.contentEquals(scope.resetInit) else !scope.retiring
+        return reset?.contentEquals(scope.resetInit) ?: !scope.retiring
     }
 
     /**

@@ -44,10 +44,7 @@ data class RelayFacts(
     val coveredLabels: Set<String> = emptySet(),
     val maxAttachBytes: Int? = null,
     val uploadRooms: List<UploadRoom> = listOfNotNull(maxAttachBytes?.let { UploadRoom(it) }),
-) {
-    /** The largest budget among the relays that take this phone's uploads, or null when none does. */
-    val maxUploadBytes: Int? get() = uploadRooms.maxOfOrNull { it.maxAttachBytes }
-}
+)
 
 /**
  * One connected relay that takes this phone's uploads: its per-scope attachment budget ([maxAttachBytes], spec §6.5),

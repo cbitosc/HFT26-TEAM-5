@@ -49,7 +49,7 @@ data class QuoteLabels(
 ) {
     companion object {
         /** The English labels — the test rigs' default; the app hands the verifier the reader's own (`quoteLabels(context)`). */
-        val ENGLISH = QuoteLabels(location = "📍 Location", voice = "🎤 Voice message", fileFormat = "📎 %1\$s", gif = "🎞️ GIF")
+        val ENGLISH = QuoteLabels(location = "📍 Location", voice = "🎤 Voice message", fileFormat = $$"📎 %1$s", gif = "🎞️ GIF")
     }
 }
 

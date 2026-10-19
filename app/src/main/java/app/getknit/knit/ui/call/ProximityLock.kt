@@ -1,5 +1,6 @@
 package app.getknit.knit.ui.call
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.os.PowerManager
 import android.util.Log
@@ -27,6 +28,7 @@ internal class ProximityLock(
      * Holds the lock, or lets it go at once: a route that left the earpiece (the loudspeaker, a headset) wants the
      * screen back now, near or not.
      */
+    @SuppressLint("Wakelock", "WakelockTimeout") // held across calls, released by the next hold(false) or by [end]
     fun hold(on: Boolean) {
         val lock = lock ?: return
         if (on == lock.isHeld) return

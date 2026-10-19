@@ -45,7 +45,7 @@ class MemoryMuxerOutput(
     override fun getPosition(): Long = position.toLong()
 
     override fun setPosition(position: Long) {
-        if (position < 0 || position > maxBytes) throw IOException("seek to $position outside the output")
+        if (position !in 0..maxBytes) throw IOException("seek to $position outside the output")
         this.position = position.toInt()
     }
 

@@ -707,7 +707,9 @@ androidComponents {
     }
     // What a build with voice calls adds beyond main (see `calls` up top): the call screen's manifest entries, the keep
     // rules libwebrtc's native half needs, and the speech model's download service and Moonshine's keep rule. The
-    // runtime is the dependencies block's; these follow the same flags.
+    // runtime is the dependencies block's; these follow the same flags. `keepRules` is @Incubating in AGP 9; it is the
+    // only per-variant door for a keep-rules directory.
+    @Suppress("UnstableApiUsage")
     onVariants { variant ->
         val debug = variant.buildType == "debug"
         if (if (debug) callsInDebug else callsInRelease) variant.sources.manifests.addStaticManifestFile("src/calls/AndroidManifest.xml")

@@ -641,9 +641,9 @@ private fun accountLine(account: RelayAccount): String =
 
 @Composable
 private fun freeKeyLine(account: RelayAccount): String =
-    when {
-        account.answer == null && account.failures > 0 -> stringResource(R.string.relays_free_key_unanswered, account.issuer)
-        account.answer == null -> stringResource(R.string.relays_free_key_waiting, account.issuer)
+    when (account.answer) {
+        null if account.failures > 0 -> stringResource(R.string.relays_free_key_unanswered, account.issuer)
+        null -> stringResource(R.string.relays_free_key_waiting, account.issuer)
         else -> stringResource(R.string.relays_free_key_held, account.issuer)
     }
 
