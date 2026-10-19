@@ -6,7 +6,9 @@ import app.getknit.knit.mesh.protocol.ChatContent
 import app.getknit.knit.mesh.protocol.FrameType
 import app.getknit.knit.mesh.protocol.WireCodec
 import app.getknit.knit.mesh.protocol.WireEnvelope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -466,6 +468,13 @@ class SessionLabTest {
             val bob = lab.node("bob").apply { setDisplayName("Bob") }
             lab.link(alice, bob)
             lab.awaitAcquainted(alice, bob)
+            // The link-up's own seed planes finish before the seed exists. Acquainted is met while they still run, and
+            // one that lands after the first send — the newcomer hook's flush, or a profile still being handled —
+            // re-sends the seed into the hold, which eats it with the first, and stamps the per-(group, member) floor
+            // under Alice's root (GFS §7). When her id is the smaller she wins the race with the init on Bob's request
+            // and keeps that root, so the request meets the floor and nothing answers it (chaos seed 804399168).
+            listOf(alice, bob).forEach { it.transport.awaitNeighborsHandled() }
+            withContext(Dispatchers.Default) { listOf(alice, bob).forEach { it.transport.awaitInboundDrained() } }
 
             alice.transport.hold(bob.transport)
             val groupId = alice.createGroup(bob)

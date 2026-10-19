@@ -134,8 +134,15 @@ class LabTransport(
     private val handed = ConcurrentHashMap<Any, Long>()
 
     /**
+     * Per live collector of [neighbors], the generation whose body it last returned from — [handed]'s other end, read
+     * by [awaitNeighborsHandled]. A direct collector (`MeshManager.watchNeighbors`) returns from `emit` only once its
+     * newcomer hooks have; one behind a `combine` returns at the combine's buffer, so for it the record is early.
+     */
+    private val handledLinks = ConcurrentHashMap<Any, Long>()
+
+    /**
      * The link set, with the `StateFlow` contract kept (the current value on subscribe, distinct-until-changed,
-     * conflated) — only the hand-off to each collector is recorded on the way through.
+     * conflated) — only the hand-off to each collector, and its return, is recorded on the way through.
      */
     @OptIn(ExperimentalForInheritanceCoroutinesApi::class) // value, replayCache and collect are the whole contract
     override val neighbors: StateFlow<Set<Peer>> =
@@ -156,9 +163,11 @@ class LabTransport(
                             last = published.peers
                             collector.emit(published.peers)
                         }
+                        handledLinks[token] = published.generation
                     }
                 } finally {
                     handed.remove(token)
+                    handledLinks.remove(token)
                 }
             }
         }
@@ -514,6 +523,23 @@ class LabTransport(
         val target = links.value.generation
         val seen = withTimeoutOrNull(MeshLab.AWAIT_MS) { while (handed.values.any { it < target }) delay(1) } != null
         check(seen) { "$nodeId: a neighbor collector never observed link publish #$target (${handed.values.sorted()})" }
+    }
+
+    /**
+     * Suspends until every live collector of [neighbors] has *returned* from the link set as last published —
+     * [awaitNeighborsObserved] proves the hand-off, this proves the body ran to its end. For this node's manager
+     * that is every newcomer hook `MeshManager.watchNeighbors` runs on a link-up: the profile push, the digest, the
+     * key and tick re-offers and, last, the group-seed flush, which sends a seed only once one exists. A scenario that
+     * mints a seed next and needs the link-up to have sent none of its own waits here. Early behind a composite's
+     * `combine` (a node with a board), as [awaitInboundDrained] is behind its `merge`.
+     */
+    suspend fun awaitNeighborsHandled() {
+        val target = links.value.generation
+        val done =
+            withTimeoutOrNull(MeshLab.AWAIT_MS) {
+                while (handed.keys.any { (handledLinks[it] ?: -1L) < target }) delay(1)
+            } != null
+        check(done) { "$nodeId: a neighbor collector never returned from link publish #$target (${handledLinks.values.sorted()})" }
     }
 
     /**
