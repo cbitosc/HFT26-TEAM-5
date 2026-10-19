@@ -414,9 +414,9 @@ val meshModule =
                     }
                 },
                 // A walkie chunk (§3.11) goes the same late-bound, never-throwing way, where the walkie is wired.
-                onCallTalk = { sender, chunk, sentAt, frameBytes ->
+                onCallTalk = { sender, chunk, sentAt, frameBytes, viaRelay ->
                     if (WALKIE_WIRED) {
-                        runCatching { getKoin().getOrNull<CallManager>()?.onTalk(sender, chunk, sentAt, frameBytes) }
+                        runCatching { getKoin().getOrNull<CallManager>()?.onTalk(sender, chunk, sentAt, frameBytes, viaRelay) }
                             .onFailure { Log.w("KnitCall", "walkie chunk dropped: ${it.javaClass.simpleName}") }
                     }
                 },

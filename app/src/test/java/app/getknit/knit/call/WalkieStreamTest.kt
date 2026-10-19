@@ -80,22 +80,39 @@ class WalkieStreamTest {
 
     @Test
     fun aPeersLinkIsDirectThroughTheMeshOrNone() {
-        assertEquals(TalkLink.DIRECT, TalkLink.of("p", neighbours = setOf("p", "r"), heardIndirectly = setOf("p")))
-        assertEquals(TalkLink.MESH, TalkLink.of("p", neighbours = setOf("r"), heardIndirectly = setOf("p")))
-        // Linked to others, with no sign the peer is behind them: nothing this phone can see.
-        assertEquals(TalkLink.NONE, TalkLink.of("p", neighbours = setOf("r"), heardIndirectly = emptySet()))
-        // Heard through someone once, but no link left to send through.
-        assertEquals(TalkLink.NONE, TalkLink.of("p", neighbours = emptySet(), heardIndirectly = setOf("p")))
+        assertEquals(TalkLink.DIRECT, TalkLink.of("p", neighbours = setOf("p", "r"), radioPath = true))
+        assertEquals(TalkLink.MESH, TalkLink.of("p", neighbours = setOf("r"), radioPath = true))
+        // Linked to others, with no fresh sign the peer is behind them: nothing this phone can see.
+        assertEquals(TalkLink.NONE, TalkLink.of("p", neighbours = setOf("r"), radioPath = false))
     }
 
-    /** §2.7: a relay that would cast to the peer is its link only where the mesh has none, as `sendCallTalk` sends. */
+    /** §2.7: a relay that would cast to the peer is its link only where the radios have none, as `sendCallTalk` sends. */
     @Test
-    fun aRelayIsThePeersLinkOnlyWhereTheMeshHasNone() {
-        assertEquals(TalkLink.SPOOL, TalkLink.of("p", neighbours = emptySet(), heardIndirectly = emptySet(), cast = true))
-        assertEquals(TalkLink.SPOOL, TalkLink.of("p", neighbours = setOf("r"), heardIndirectly = emptySet(), cast = true))
-        assertEquals(TalkLink.DIRECT, TalkLink.of("p", neighbours = setOf("p"), heardIndirectly = emptySet(), cast = true))
-        assertEquals(TalkLink.MESH, TalkLink.of("p", neighbours = setOf("r"), heardIndirectly = setOf("p"), cast = true))
-        assertEquals(TalkLink.NONE, TalkLink.of("p", neighbours = emptySet(), heardIndirectly = emptySet(), cast = false))
+    fun aRelayIsThePeersLinkOnlyWhereTheRadiosHaveNone() {
+        assertEquals(TalkLink.SPOOL, TalkLink.of("p", neighbours = emptySet(), radioPath = false, cast = true))
+        assertEquals(TalkLink.SPOOL, TalkLink.of("p", neighbours = setOf("r"), radioPath = false, cast = true))
+        assertEquals(TalkLink.DIRECT, TalkLink.of("p", neighbours = setOf("p"), radioPath = true, cast = true))
+        assertEquals(TalkLink.MESH, TalkLink.of("p", neighbours = setOf("r"), radioPath = true, cast = true))
+        assertEquals(TalkLink.NONE, TalkLink.of("p", neighbours = emptySet(), radioPath = false, cast = false))
+    }
+
+    // ---- TalkWire reports (C-3.11-10) ----
+
+    @Test
+    fun aReportRoundTripsAndIsNeverReadAsAChunk() {
+        val bytes = TalkWire.encodeReport(0xBEEF, TalkReport(b = 300, radio = 4, relay = 9))
+        val (tag, report) = TalkWire.decodeReport(bytes)!!
+        assertEquals(0xBEEF, tag)
+        assertEquals(300, report.b)
+        assertEquals(4, report.radio)
+        assertEquals(9, report.relay)
+        // The chunk decoder refuses it, so a report never opens a burst in the player.
+        assertNull(TalkWire.decode(bytes))
+        // And a chunk is never read as a report, its last one included.
+        assertNull(TalkWire.decodeReport(TalkWire.encode(1, TalkChunk(b = 0, q = 0, a = byteArrayOf(1), e = true))))
+        // Trailing bytes or a cut varint are not one.
+        assertNull(TalkWire.decodeReport(bytes + 0))
+        assertNull(TalkWire.decodeReport(bytes.copyOf(bytes.size - 1) + 0x80.toByte()))
     }
 
     // ---- TalkQueue ----

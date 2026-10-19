@@ -40,10 +40,10 @@ interface CallWalkie {
 
 /**
  * Where a walkie chunk to a peer would go now (§3.11), for the call screen's notice: over a live link of this phone's
- * own ([DIRECT]); through other phones, with recent evidence a path exists ([MESH]: the peer's own frames reached us
- * through one); with no mesh path, through a spool that casts it (§2.7) and the peer was lately seen on
- * ([SPOOL]); or nowhere this phone can see ([NONE]) — a relay the peer was never seen on fans a cast out to nobody
- * we know of.
+ * own ([DIRECT]); through other phones, with fresh evidence a radio path exists ([MESH]: the peer's own frames reached
+ * us through a link we still hold, within `TalkRadioPaths.WINDOW_MS`); with no radio path, through a spool that casts it
+ * (§2.7) and the peer was lately seen on ([SPOOL]); or nowhere this phone can see ([NONE]) — a relay the peer was never
+ * seen on fans a cast out to nobody we know of.
  */
 enum class TalkLink {
     DIRECT,
@@ -54,19 +54,20 @@ enum class TalkLink {
 
     companion object {
         /**
-         * [peerId]'s link, given this phone's live [neighbours], the peers [heardIndirectly] through one of them, and
-         * whether a connected spool the peer was lately seen on would [cast] to it (`MeshManager.castCoversTalk`). The
-         * order is `MeshManager.sendCallTalk`'s: the spool only where the mesh has no path.
+         * [peerId]'s link, given this phone's live [neighbours], whether the radios have a path to the peer through one
+         * of them ([radioPath], `MeshManager.talkRadioPath`), and whether a connected spool the peer was lately seen on
+         * would [cast] to it (`MeshManager.castCoversTalk`). The order is `MeshManager.sendCallTalk`'s: the spool only
+         * where the radios have no path.
          */
         fun of(
             peerId: String,
             neighbours: Set<String>,
-            heardIndirectly: Set<String>,
+            radioPath: Boolean,
             cast: Boolean = false,
         ): TalkLink =
             when {
                 peerId in neighbours -> DIRECT
-                neighbours.isNotEmpty() && peerId in heardIndirectly -> MESH
+                radioPath -> MESH
                 cast -> SPOOL
                 else -> NONE
             }
@@ -104,6 +105,27 @@ object WalkiePolicy {
 
     /** A burst with nothing held and no new chunk for this long is over: its last chunk was lost. */
     const val END_MS = 4_000L
+
+    /**
+     * The receiver reports a burst this long after its last chunk landed, so the slower plane's copy of it is counted
+     * too (C-3.11-10); one whose last chunk never came is reported [END_MS] after its newest.
+     */
+    const val REPORT_SETTLE_MS = 500L
+
+    /**
+     * A burst sent with no report of it back this long after its last chunk went is taken as lost on every path:
+     * [END_MS] for a receiver that never saw its end, and a round trip through a relay on top.
+     */
+    const val REPORT_WAIT_MS = END_MS + 3_000L
+
+    /**
+     * The share of a burst's chunks the radios may lose before its speaker casts the bursts after it through a relay as
+     * well: one in five. A three-chunk burst that loses one is past it.
+     */
+    const val RADIO_LOSS_MAX = 0.2
+
+    /** Bursts in a row whose report shows the radios whole before the speaker stops casting beside them. */
+    const val RADIO_WHOLE_TO_RETURN = 2
 }
 
 /** One chunk of a burst: chunk [q] (from 0) of the sender's burst [b], Opus packets [a] ([OpusPackets]), [e] on its last. */
@@ -112,6 +134,16 @@ class TalkChunk(
     val q: Int,
     val a: ByteArray,
     val e: Boolean = false,
+)
+
+/**
+ * What the receiver of burst [b] heard of it (C-3.11-10): the distinct chunks that came over the radios ([radio]) and
+ * those a relay cast to it ([relay]). A chunk that came both ways counts in both.
+ */
+class TalkReport(
+    val b: Int,
+    val radio: Int,
+    val relay: Int,
 )
 
 /**
@@ -127,6 +159,7 @@ class TalkChunk(
  */
 object TalkWire {
     private const val END = 0x01
+    private const val REPORT = 0x02
     private const val TAG_BYTES = 2
     private const val VARINT_BITS = 7
     private const val VARINT_MORE = 0x80
@@ -153,10 +186,40 @@ object TalkWire {
         return out.toByteArray()
     }
 
-    /** The tag and chunk [bytes] carries, or null when they are not one. */
+    /**
+     * A [TalkReport] for the session [tag] (C-3.11-10): `flags (bit 1) · call tag · varint b · varint radio ·
+     * varint relay`. Sent only to a peer whose walkie signal set `CallPayload.hr`, since a build before it would read
+     * the counts as a chunk.
+     */
+    fun encodeReport(
+        tag: Int,
+        report: TalkReport,
+    ): ByteArray {
+        val out = ByteArrayOutputStream(1 + TAG_BYTES + 3 * VARINT_MAX_BYTES)
+        out.write(REPORT)
+        out.write((tag shr BYTE_BITS) and BYTE)
+        out.write(tag and BYTE)
+        writeVarint(out, report.b)
+        writeVarint(out, report.radio)
+        writeVarint(out, report.relay)
+        return out.toByteArray()
+    }
+
+    /** The tag and report [bytes] carries, or null when they are not one. */
+    fun decodeReport(bytes: ByteArray): Pair<Int, TalkReport>? {
+        if (bytes.size < 1 + TAG_BYTES || bytes[0].toInt() and REPORT == 0) return null
+        val tag = ((bytes[1].toInt() and BYTE) shl BYTE_BITS) or (bytes[2].toInt() and BYTE)
+        val (b, afterB) = readVarint(bytes, 1 + TAG_BYTES) ?: return null
+        val (radio, afterRadio) = readVarint(bytes, afterB) ?: return null
+        val (relay, end) = readVarint(bytes, afterRadio) ?: return null
+        return if (end == bytes.size) tag to TalkReport(b = b, radio = radio, relay = relay) else null
+    }
+
+    /** The tag and chunk [bytes] carries, or null when they are not one (a report among them). */
     fun decode(bytes: ByteArray): Pair<Int, TalkChunk>? {
         if (bytes.size < 1 + TAG_BYTES) return null
         val flags = bytes[0].toInt() and BYTE
+        if (flags and REPORT != 0) return null
         val tag = ((bytes[1].toInt() and BYTE) shl BYTE_BITS) or (bytes[2].toInt() and BYTE)
         val (b, afterB) = readVarint(bytes, 1 + TAG_BYTES) ?: return null
         val (q, afterQ) = readVarint(bytes, afterB) ?: return null

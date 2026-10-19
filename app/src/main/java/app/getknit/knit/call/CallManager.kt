@@ -53,6 +53,8 @@ data class CallState(
     val degraded: Boolean = false,
     // §2.7: the peer's OFFER or ANSWER said it holds a cast ticket, so a spool that sells casts carries ours too.
     val peerCastTicketed: Boolean = false,
+    // C-3.11-10: the peer's walkie OFFER or ANSWER said it reports each burst it hears (`CallPayload.hr`).
+    val peerReportsHeard: Boolean = false,
     // C-3.3-5: an outgoing call with no RINGING back, and nothing this phone can see reaches the peer ([CallReach]).
     // Held once the call ends for that reason, so the screen can say why.
     val unreachable: Boolean = false,
@@ -63,7 +65,8 @@ data class CallState(
 
 /**
  * One chunk of the peer's walkie burst in the connected session [callId] (§3.11), stamped [at] on this phone's clock:
- * its frame was [frameBytes] and stamped [sentAt] by its sender (0: unknown), for the walkie's diagnostics.
+ * its frame was [frameBytes] and stamped [sentAt] by its sender (0: unknown), for the walkie's diagnostics, and a relay
+ * cast it rather than a radio when [viaRelay] (C-3.11-10).
  */
 class TalkIn(
     val callId: String,
@@ -71,6 +74,13 @@ class TalkIn(
     val at: Long,
     val sentAt: Long = 0L,
     val frameBytes: Int = 0,
+    val viaRelay: Boolean = false,
+)
+
+/** The peer's [report] of a burst of ours in the connected walkie session [callId] (C-3.11-10). */
+class TalkReportIn(
+    val callId: String,
+    val report: TalkReport,
 )
 
 /**
@@ -251,6 +261,9 @@ class CallManager(
         // §2.7: the peer's last OFFER or ANSWER carried `ct`.
         var peerCastTicketed = false
 
+        // C-3.11-10: the peer's walkie OFFER or ANSWER carried `hr`.
+        var peerReportsHeard = false
+
         // C-3.3-5: the caller's look at whether anything reaches the peer, until a RINGING; and what it last saw.
         var reachWatch: Job? = null
         var unreachable = false
@@ -301,6 +314,11 @@ class CallManager(
 
     /** The peer's walkie chunks for the connected session (§3.11), for the one collector that plays them. */
     val talk: Flow<TalkIn> = talkIn.receiveAsFlow()
+
+    private val reportsIn = Channel<TalkReportIn>(TALK_BUFFER, BufferOverflow.DROP_OLDEST)
+
+    /** The peer's reports of our bursts in the connected walkie session (C-3.11-10), for the one collector that judges them. */
+    val talkReports: Flow<TalkReportIn> = reportsIn.receiveAsFlow()
 
     /** When a call between neighbours raises its Wi-Fi Direct group (§3.10); a debug-bridge toggle, in memory. */
     @Volatile
@@ -464,21 +482,33 @@ class CallManager(
      * One chunk of [senderId]'s walkie burst ([TalkWire], a `talk` frame's opened plaintext, §3.11): passed on only
      * while this phone's call is a connected walkie session with that peer and the chunk names it. Returns at once; a
      * talk frame is never re-served, and the player orders and dedups by burst and chunk. [sentAt] and [frameBytes]
-     * are the frame's, measured for the diagnostics only.
+     * are the frame's, measured for the diagnostics only; [viaRelay] is whether a spool cast it (C-3.11-10). A report of
+     * one of our bursts ([TalkWire.decodeReport]) goes to [talkReports] under the same rule instead.
      */
     suspend fun onTalk(
         senderId: String,
         bytes: ByteArray,
         sentAt: Long = 0L,
         frameBytes: Int = 0,
+        viaRelay: Boolean = false,
     ) {
+        TalkWire.decodeReport(bytes)?.let { (tag, report) ->
+            sessionWith(senderId, tag)?.let { reportsIn.trySend(TalkReportIn(it, report)) }
+            return
+        }
         val (tag, chunk) = TalkWire.decode(bytes) ?: return
-        val id =
-            mutex.withLock {
-                live?.takeIf { it.peerId == senderId && it.walkie && it.phase == CallPhase.Connected && TalkWire.tagOf(it.id) == tag }?.id
-            } ?: return
-        talkIn.trySend(TalkIn(id, chunk, clock(), sentAt, frameBytes))
+        val id = sessionWith(senderId, tag) ?: return
+        talkIn.trySend(TalkIn(id, chunk, clock(), sentAt, frameBytes, viaRelay))
     }
+
+    // The connected walkie session with [senderId] that a chunk or report tagged [tag] names, if there is one.
+    private suspend fun sessionWith(
+        senderId: String,
+        tag: Int,
+    ): String? =
+        mutex.withLock {
+            live?.takeIf { it.peerId == senderId && it.walkie && it.phase == CallPhase.Connected && TalkWire.tagOf(it.id) == tag }?.id
+        }
 
     @Suppress("ReturnCount") // a ladder of refusals ahead of the one admit
     private fun onOffer(
@@ -511,6 +541,7 @@ class CallManager(
         live = l
         takeKind(l, p)
         l.peerCastTicketed = p.ct
+        l.peerReportsHeard = p.hr
         if (!l.walkie) {
             l.invite = directInviteOf(p)
             l.servers = scope.async { servers(sender) }
@@ -712,6 +743,7 @@ class CallManager(
         if (l.ringingAt == null) l.ringingAt = now
         l.answeredAt = now
         l.peerCastTicketed = p.ct
+        l.peerReportsHeard = p.hr
         if (l.walkie) {
             if (p.m and CallPayload.MEDIA_WALKIE == 0) return finish(l, CallPayload.REASON_MEDIA, CallPayload.PHASE_END)
             connectWalkie(l)
@@ -971,7 +1003,13 @@ class CallManager(
     /** §3.11: a walkie session's OFFER — no media, no ICE servers, no group: only that it is a walkie. */
     private suspend fun dialWalkie(l: Live) {
         val offer =
-            CallPayload(id = l.id, ph = CallPayload.PHASE_OFFER, m = CallPayload.MEDIA_WALKIE, ct = castFlag(CallPayload.MEDIA_WALKIE))
+            CallPayload(
+                id = l.id,
+                ph = CallPayload.PHASE_OFFER,
+                m = CallPayload.MEDIA_WALKIE,
+                ct = castFlag(CallPayload.MEDIA_WALKIE),
+                hr = true,
+            )
         if (!mutex.withLock { current(l) }) return
         log("call ${l.id}: offering a walkie session")
         if (!signals.sendCallSignal(l.peerId, offer)) {
@@ -984,7 +1022,13 @@ class CallManager(
     /** §3.11: the callee's ANSWER to a walkie session, which [connectWalkie] already connected on this side. */
     private suspend fun answerWalkie(l: Live) {
         val answer =
-            CallPayload(id = l.id, ph = CallPayload.PHASE_ANSWER, m = CallPayload.MEDIA_WALKIE, ct = castFlag(CallPayload.MEDIA_WALKIE))
+            CallPayload(
+                id = l.id,
+                ph = CallPayload.PHASE_ANSWER,
+                m = CallPayload.MEDIA_WALKIE,
+                ct = castFlag(CallPayload.MEDIA_WALKIE),
+                hr = true,
+            )
         if (!mutex.withLock { current(l) }) return
         if (!deliver(listOf(Send(l.peerId, answer)))) mutex.withLock { if (current(l)) finish(l, CallPayload.REASON_ERROR) }
     }
@@ -1546,6 +1590,7 @@ class CallManager(
                     walkie = it.walkie,
                     degraded = it.degraded,
                     peerCastTicketed = it.peerCastTicketed,
+                    peerReportsHeard = it.peerReportsHeard,
                     unreachable = it.unreachable,
                     unproven = it.unproven,
                 )

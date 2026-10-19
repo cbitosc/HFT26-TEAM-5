@@ -497,3 +497,59 @@ for the "before" bursts.
 longer off wherever live calls are (ADR 2026-10.swvp). A build with mesh calls alone packages no WebRTC and advertises
 `CAP_WALKIE` without `CAP_CALL`. Its `CallManager` places every call as a walkie. A caller asks for `CAP_WALKIE` alone
 to place one, and `liveLikely` is false toward a peer without `CAP_CALL`.
+
+## Amendment 2026-10-18 (12): the radios first, the relay when they fail
+
+A field call on 2026-10-18 connected and carried no sound either way. The P9 called the P8 twenty minutes after both it
+and the P7 had walked out of the P8's range. The OFFER and the ANSWER crossed a relay, and every chunk went
+`Through a neighbour · flooded` into the P7, which had no path to the P8 either. `sendCallTalk` cast only where
+`meshPathTo` said the mesh had no path, and `meshPathTo` read `RelayedPresence.heard`. That table is ADR 2026-10.fw8g's
+presentation tracker, with a 45-minute linger. Its own KDoc says nothing in `mesh/` may route on it. The P8 was in it
+from frames the P7 had relayed before 16:30, and again from a 16:39 profile the P7 passed on, which had most likely
+reached it from a spool.
+
+The walkie should use the radios wherever they work, and a relay only when they do not. It now decides on evidence
+that is short-lived and names the link, and on what the listener says it heard (`docs/VOICE_CALLS.md` C-3.11-6,
+C-3.11-10):
+
+- **The radio path is `mesh/TalkRadioPaths`, never `relayedPresence`.** A peer that is not a neighbour has a radio
+  path only while one of its own frames reached this phone through a link we still hold, within two minutes
+  (`WINDOW_MS`). The frames that count are a signed frame `verifyInbound` passed, stamped by its author within the
+  window (custody re-serves old frames to every new link), and a `talk` frame the ratchet opened, which is the peer's
+  own bytes as surely as a signature. A spool's frame and a LoRa one never count. A dropped link loses its path at once,
+  and a quiet one after the window. With no radio path the chunk is cast beside the flood.
+- **The listener reports each burst.** A walkie OFFER and ANSWER carry `CallPayload.hr` (additive and defaulted).
+  Between two phones that both set it, the listener sends a report for each of the speaker's bursts back as a `talk`
+  frame of its own. The report is a `TalkWire` plaintext with flag bit 1 holding `b`, the distinct chunks that came
+  over the radios, and those that came through a relay (`HeardLedger`). It goes 500 ms after the burst's last chunk
+  landed, or at the player's 4 s give-up when that chunk never came, and it travels the way a chunk does. A build before
+  this one would read the report as a chunk, which is why it goes only to a peer that set `hr`.
+- **The speaker acts on them.** `TalkRoute` turns on `castToo` once a report shows the radios lost more than a fifth of
+  a burst, or once no report has come 7 s after the burst's last chunk went. While `castToo` is on, `sendCallTalk` casts
+  every chunk beside its radio copy. Two reports in a row with the radios whole turn it off. The listener counts a
+  chunk that came both ways under both planes, so a radio path that recovers shows up while the cast is still running.
+  The diagnostics path reads `Radio losing chunks, relay too`.
+
+`relayedPresence` keeps its linger for the reader alone, and that linger is 15 minutes now (fw8g's amendment).
+`CallReachRule` still reads it. That rule only decides whether an unanswered OFFER stops ringing early, and the OFFER
+itself rides custody and the spools.
+
+Costs:
+
+- *A two-hop session the peer is silent in for over two minutes casts until the peer is heard again.* Every report the
+  peer sends refreshes the path, so this happens only when this phone does all the talking. The cast stops again after
+  two reports showing the radios whole.
+- *A radio path a spool fed.* A neighbour that passes on a peer's frame it got from a spool makes a radio path for
+  two minutes. Nothing about the frame tells the two cases apart. The first lossy report turns the cast on.
+- *One report frame per burst each way.* It is tiny, and it goes through a relay only when that side is casting.
+- *The first burst over a dead path is lost.* Nothing judges it until its report is overdue. A burst that starts
+  inside those 7 s goes by the radios too.
+
+Regressions: `TalkRouteTest`, `TalkRadioPathsTest`, `WalkieStreamTest.aReportRoundTripsAndIsNeverReadAsAChunk`, and
+`WalkieTalkLabTest`'s `aPeerHeardThroughALinkLatelyGetsItsBurstOverTheRadiosAlone`,
+`aPeerTheRadiosLostTouchWithIsCastBesideTheFlood` and `aChunkTheWalkieCastsTooGoesBothWaysToASoundNeighbour`.
+
+Owed: the 2026-10-18 shape again. P9 and P7 walk out of the P8's range, wait out the two minutes, and call the P8. The
+first burst should log `via Through the relay · cast` and be heard. Then a two-hop call (P9 ↔ P7 ↔ P8, the P8 out of
+the P9's range) should stay `Through a neighbour · flooded` with `walkie: reported burst … over the radios` lines and
+no cast.

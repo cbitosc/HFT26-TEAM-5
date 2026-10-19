@@ -1091,6 +1091,17 @@ class LabNode internal constructor(
     /** Every walkie chunk's plaintext this node's pipeline opened and handed the call layer (§3.11). */
     val talks = CopyOnWriteArrayList<ByteArray>()
 
+    // The talk plaintexts of [talks] a spool cast here, rather than a radio.
+    val talksViaRelay = CopyOnWriteArrayList<ByteArray>()
+
+    private fun heardTalk(
+        chunk: ByteArray,
+        viaRelay: Boolean,
+    ) {
+        talks += chunk
+        if (viaRelay) talksViaRelay += chunk
+    }
+
     /**
      * The call layer (docs/VOICE_CALLS.md §3), rebuilt by boot() as the debug build's DI builds it, minus the media
      * ([LabCallMedia]), TURN, the Wi-Fi Direct leg and the walkie. Its tombstones go to the settings file, so a
@@ -1324,7 +1335,7 @@ class LabNode internal constructor(
                 badgeJournal = badges,
                 badgePins = listOf(BadgeKeys.RFC8032_TEST1),
                 onCallSignal = { sender, payload, sentAt -> calls.onSignal(sender, payload, sentAt) },
-                onCallTalk = { _, chunk, _, _ -> talks += chunk },
+                onCallTalk = { _, chunk, _, _, viaRelay -> heardTalk(chunk, viaRelay) },
             )
         val callLines = CopyOnWriteArrayList<String>().also { callLog = it }
         calls =
@@ -1502,11 +1513,15 @@ class LabNode internal constructor(
     /** Runs one round of the 60 s re-offer to every linked neighbour (custody digest, blob and key re-asks), now. */
     suspend fun reoffer() = manager.reofferToNeighbors()
 
-    /** Sends one chunk of a walkie burst to [to], as `WalkieTalk` streams one (docs/VOICE_CALLS.md §3.11). */
+    /**
+     * Sends one chunk of a walkie burst to [to], as `WalkieTalk` streams one (docs/VOICE_CALLS.md §3.11); [castToo] is
+     * the walkie's verdict that its radio path loses chunks (`TalkRoute`).
+     */
     suspend fun sendTalk(
         to: LabNode,
         chunk: ByteArray,
-    ): Boolean = spaced { manager.sendCallTalk(to.nodeId, chunk) != null }
+        castToo: Boolean = false,
+    ): Boolean = spaced { manager.sendCallTalk(to.nodeId, chunk, castToo = castToo) != null }
 
     /** Sends a DM; the frame the app's composer would send. */
     suspend fun sendDm(

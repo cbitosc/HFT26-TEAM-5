@@ -264,8 +264,9 @@ class MeshManager(
     // waiting on the network or the media. The default ignores it — every test, and every build without calls.
     onCallSignal: suspend (senderId: String, payload: CallPayload, sentAt: Long) -> Unit = { _, _, _ -> },
     // A walkie chunk's plaintext from an accepted contact (a `talk` frame, docs/VOICE_CALLS.md §3.11), late-bound and
-    // bound to return at once the same way. The default drops it.
-    onCallTalk: suspend (senderId: String, chunk: ByteArray, sentAt: Long, frameBytes: Int) -> Unit = { _, _, _, _ -> },
+    // bound to return at once the same way; viaRelay is whether a spool cast it. The default drops it.
+    onCallTalk: suspend (senderId: String, chunk: ByteArray, sentAt: Long, frameBytes: Int, viaRelay: Boolean) -> Unit =
+        { _, _, _, _, _ -> },
     // Capability bits this build advertises beyond [Protocol.LOCAL_CAPABILITIES] — [Protocol.CAP_CALL] when the call
     // media is wired (di/CallWiring). OR-ed into our own profile; a change republishes it at the next start.
     private val extraCapabilities: Long = 0L,
@@ -524,6 +525,10 @@ class MeshManager(
     // its signature gate, swept on the metrics tick, read only by the reach tiers. Not a routing input.
     private val relayedPresence = RelayedPresence(selfId = { identity.nodeId() }, clock = clock)
 
+    // Whose own frames crossed the radios to us lately, and through which link (ADR 2026-10.79yb's tenth amendment):
+    // the walkie's send path reads it, and nothing else does. Not [relayedPresence], whose linger is for a reader.
+    private val talkRadioPaths = TalkRadioPaths(clock = clock)
+
     /**
      * Every accepted frame, once, after `InboundPipeline.verifyInbound`: the indirect-reach tracker reads it, and so
      * does the name-clash fade's `lastSeenAt` (ADR 2026-10.k8ge), which only buffers here — the metrics tick writes
@@ -536,6 +541,11 @@ class MeshManager(
         kind: TransportKind,
     ) {
         relayedPresence.note(wire, env, fromNodeId, kind)
+        if (wire.sig.isNotEmpty() &&
+            !FrameType.isUnsignedPointToPoint(env.type)
+        ) {
+            talkRadioPaths.note(env.senderId, fromNodeId, kind, env.sentAt)
+        }
         if (isHeardEvidence(wire, env) && env.senderId != identity.nodeId()) peers.noteSeen(env.senderId, heardAt(env, clock()))
     }
 
@@ -598,7 +608,11 @@ class MeshManager(
             onPeerFrameOpened = { senderId, initEph, flagged -> introSync.onPeerFrameOpened(senderId, initEph, flagged) },
             onTransferCtl = onTransferSignal,
             onCallCtl = onCallSignal,
-            onCallTalk = onCallTalk,
+            onCallTalk = { senderId, chunk, sentAt, frameBytes, hop, kind ->
+                // An opened chunk is the peer's own bytes over the radio, as good as a signature (C-3.11-6).
+                if (hop != null) talkRadioPaths.note(senderId, hop, kind, sentAt)
+                onCallTalk(senderId, chunk, sentAt, frameBytes, hop == null)
+            },
             commonsTitle = { commons?.find(it)?.name },
             noteVerified = ::noteVerified,
         )
@@ -986,6 +1000,7 @@ class MeshManager(
         // A stopped (or paused) mesh hears nothing, so it stops claiming anyone is reachable through it — and,
         // closed, it ignores a frame the cancelled session was still verifying.
         relayedPresence.stop()
+        talkRadioPaths.clear()
     }
 
     /** The one place the router is built, so both constructions report their relays to the ledger alike. */
@@ -3356,14 +3371,17 @@ class MeshManager(
      * No node custodies it, and it never rides LoRa. A live neighbour takes it alone, over its quickest link
      * ([MeshTransport.sendLive]), and relays it nowhere (ttl 0); anyone further gets a flood of at most [TALK_TTL] relays.
      *
-     * A peer this phone has no mesh path to at all — not a neighbour, and not heard through one lately — gets the chunk
-     * **cast** through the spools instead (§2.7, [ScopeSync.cast]), when a connected one would carry it: on an `ent`
+     * A peer this phone has no radio path to — not a neighbour, and none of its own frames through a link of ours within
+     * [TalkRadioPaths.WINDOW_MS] ([talkRadioPath]) — gets the chunk **cast** through the spools too (§2.7, [ScopeSync.cast]),
+     * when a connected one would carry it: on an `ent`
      * spool that needs a cast ticket, ours or the peer's ([peerTicketed], from its walkie signal). The cast copy is
      * signed, as every frame the Internet plane carries is; the radio copy stays unsigned for Coded PHY's sake. Both
      * carry the same id, so the peer keeps whichever arrives first. With links but no path to the peer, the blind flood
      * still goes beside the cast. A neighbour whose live link is near its floor ([MeshTransport.liveLinkFading]) gets
      * the cast beside its radio copy too (ADR 2026-10.79yb's ninth amendment): a dying link keeps counting as a path
-     * until its supervision timeout, about 20 s in which every chunk over it is lost.
+     * until its supervision timeout, about 20 s in which every chunk over it is lost. And [castToo] casts it beside the
+     * radio copy whatever the radios say: the walkie's own verdict that its radio path loses chunks (`TalkRoute`, from
+     * the peer's reports of what it heard), which no link here can see.
      *
      * The frame's size (its envelope's bytes), or null when nothing could be sealed, or there is neither a link nor a
      * spool to hand it to (nothing is sealed then, so the ratchet does not move).
@@ -3372,10 +3390,11 @@ class MeshManager(
         peerId: String,
         chunk: ByteArray,
         peerTicketed: Boolean = false,
+        castToo: Boolean = false,
     ): Int? {
         val links = transport.neighbors.value
         val neighbour = links.firstOrNull { it.nodeId == peerId }
-        val cast = castsTalk(peerId, links, peerTicketed)
+        val cast = castsTalk(peerId, links, peerTicketed, castToo)
         if (links.isEmpty() && !cast) return null
         val peer = peers.find(peerId)
         val bundle = peer?.pubKey?.let { PublicKeyBundle.decode(it) } ?: return null
@@ -3395,23 +3414,31 @@ class MeshManager(
     }
 
     /**
-     * Whether a chunk to [peerId] is cast too: the mesh has no path to it, or its own live link is near its floor
-     * ([MeshTransport.liveLinkFading]); and a connected spool would carry the cast.
+     * Whether a chunk to [peerId] is cast too: the radios have no path to it ([talkRadioPath]), or its own live link is
+     * near its floor ([MeshTransport.liveLinkFading]), or the walkie asked ([castToo]); and a connected spool would
+     * carry the cast.
      */
     private fun castsTalk(
         peerId: String,
         links: Set<Peer>,
         peerTicketed: Boolean,
+        castToo: Boolean,
     ): Boolean {
         val fading = links.any { it.nodeId == peerId } && transport.liveLinkFading(peerId)
-        return (fading || !meshPathTo(peerId, links)) && canCastTalk(peerId, peerTicketed)
+        return (castToo || fading || !radioPathTo(peerId, links)) && canCastTalk(peerId, peerTicketed)
     }
 
-    /** Whether a chunk to [peerId] has a mesh path from these [links]: the peer is one, or was heard through one lately. */
-    private fun meshPathTo(
+    /**
+     * Whether a chunk to [peerId] has a radio path from these [links]: the peer is one, or its own frame came through one
+     * within [TalkRadioPaths.WINDOW_MS]. Never [relayedPresence]: its linger is a statement to a reader, not a route.
+     */
+    private fun radioPathTo(
         peerId: String,
         links: Set<Peer>,
-    ): Boolean = links.any { it.nodeId == peerId } || (links.isNotEmpty() && peerId in relayedPresence.heard.value)
+    ): Boolean = links.any { it.nodeId == peerId } || talkRadioPaths.pathTo(peerId, links.mapTo(HashSet()) { it.nodeId })
+
+    /** Whether a walkie chunk to [peerId] has a radio path now ([radioPathTo]): what the call screen labels its way by. */
+    fun talkRadioPath(peerId: String): Boolean = radioPathTo(peerId, transport.neighbors.value)
 
     /** §2.7: casts [wire]'s frame to [peerId] through the spools, signed, and returns how many took it. */
     private suspend fun castTalk(

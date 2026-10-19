@@ -142,12 +142,15 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   hellos' STUN under a URL rule narrower than the spec's, because one URL libwebrtc refuses ends the call.
   **Before touching `call/Walkie.kt` (`CallWalkie`, `WalkiePolicy`, `TalkWire`, `OpusPackets`, `TalkQueue`), `call/TalkGain`, `CallKind`,
   `CallPayload.MEDIA_WALKIE`, `FrameType.TALK`, `mesh/protocol/TalkSeal`, `MeshManager.sendCallTalk`,
-  `InboundPipeline.handleTalk` / `isTalkShape`, `Protocol.CAP_WALKIE`, `CallManager`'s `fallback` / `walkieOk` /
+  `InboundPipeline.handleTalk` / `isTalkShape`, `Protocol.CAP_WALKIE`, `call/TalkRoute` (`TalkRoute`, `HeardLedger`),
+  `CallPayload.hr`, `mesh/TalkRadioPaths`, `CallManager`'s `fallback` / `walkieOk` /
   `onTalk`, `MeshTransport.sendLive` / `holdLink`, `mesh/wifiaware/NanLinkHold` (the hold in `superviseLink`), `TalkLink`,
   `ui/call/WalkieTalk` / `TalkRecorder` / `TalkPlayer` or `BuildConfig.MESH_CALLS`:** READ ADR 2026-10.79yb and
   `docs/VOICE_CALLS.md` §3.11 — a call with no live path is a media-less walkie session whose bursts stream as Opus in
   unsigned, compactly sealed `talk` frames nobody custodies, sized for Coded PHY (a pin in `TalkSealTest`), so nothing
-  lands in the thread; a live call drops to one, without a frame, only when both OFFER and ANSWER carried the walkie
+  lands in the thread; a chunk stays on the radios while `TalkRadioPaths` holds fresh, link-bound evidence of a path,
+  and is cast beside them otherwise or while the listener's per-burst reports say they lose it (C-3.11-10, the twelfth
+  amendment; never `heardIndirectly`); a live call drops to one, without a frame, only when both OFFER and ANSWER carried the walkie
   bit (parked since 2026-10-09: `CallManager.dropToWalkie` is off, so a lost live call ends `no_route`); the flag is read once, as `CallWiring.WALKIE_WIRED`, and needs no live calls.
   **Before touching `call/CaptureHealth` (`CaptureProfile`, `CapturePolicy`, `CaptureWatch`), `ui/call/CaptureTap`,
   the audio module in `WebRtcCallMedia` or the `call_capture_` keys:** READ ADR 2026-10.kw29 and `docs/VOICE_CALLS.md`
@@ -454,7 +457,7 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   `MeshController.heardIndirectly` (another phone handed us the peer's fresh, signed frame over the radio mesh —
   `mesh/RelayedPresence.kt`, ADR 2026-10.fw8g; presentation only, never a route), `LongRange` is the long-range
   reach set or a spool scope its peer recently pushed to (`mesh/spool/SpoolPresence.kt`, one function the dot
-  reads at 45 min and the mesh at `SPOOL_COVER_MS` = 15 min), `Known` is a bare profile row — and both labelled
+  reads at `PRESENCE_LINGER_MS` = 15 min and the mesh at `SPOOL_COVER_MS` = 15 min), `Known` is a bare profile row — and both labelled
   surfaces derive from `reachOf` so they cannot disagree. READ ADR 2026-09.2ajk before loosening any tier;
   the Contacts list still draws a binary dot from `neighbors` alone.
 - **When touching `identity/PeerLabels`' `stale` rule, `data/LabelAnchors`, `data/LabelFade`, `peers.lastSeenAt`,

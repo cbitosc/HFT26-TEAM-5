@@ -872,6 +872,10 @@ data class TransferPayload(
  * it is connected to (§2.7): a spool that sells casts carries them on a scope one ticketed member holds, both ways, so
  * the flag tells a free peer its own chunks will be carried there too. A hint for the sender's uploads and its link
  * notice, never a grant: the spool checks the ticket it holds, and a build that ignores the flag only casts less.
+ *
+ * [hr] rides a walkie OFFER or ANSWER too (C-3.11-10): the sender reports each burst it hears back to the burst's
+ * speaker, in a `talk` frame of its own, so the speaker can tell a radio path that loses its chunks and cast them
+ * through a relay as well. Only a peer that set it is sent a report; a build that ignores it only never casts on one.
  */
 @Serializable
 data class CallPayload(
@@ -885,6 +889,7 @@ data class CallPayload(
     val dw: DirectInvite? = null,
     val dx: Int? = null,
     val ct: Boolean = false,
+    val hr: Boolean = false,
 ) {
     companion object {
         const val PHASE_OFFER = 1

@@ -417,7 +417,7 @@ private fun Module.walkieGraph() {
             calls = get(),
             recorder = get(),
             player = get(),
-            send = { peerId, chunk, peerTicketed -> get<MeshManager>().sendCallTalk(peerId, chunk, peerTicketed) },
+            send = { peerId, chunk, peerTicketed, castToo -> get<MeshManager>().sendCallTalk(peerId, chunk, peerTicketed, castToo) },
             links = talkLinks(),
             scope = get<CoroutineScope>(),
             log = { Log.i(TAG, it) },
@@ -499,38 +499,40 @@ private fun Scope.talkLinks(): TalkLinks =
             val mesh = get<MeshController>()
             val manager = get<MeshManager>()
             // A relay's hello, its SUB's answer, a ticket's verdict and the peer's traffic arrive on no flow the walkie can
-            // watch, so the spool half is looked at again every few seconds; the radios' half moves the moment they do. A
-            // relay counts only where the peer was lately seen: one it never was on fans the cast out to nobody.
-            val castable =
+            // watch, and the radio path lapses on the clock alone (`TalkRadioPaths.WINDOW_MS`), so both are looked at again
+            // every few seconds; the links move the moment they do. A relay counts only where the peer was lately seen: one
+            // it never was on fans the cast out to nobody.
+            val looked =
                 flow {
                     while (true) {
-                        emit(manager.castCoversTalk(peerId, peerTicketed()))
+                        emit(manager.talkRadioPath(peerId) to manager.castCoversTalk(peerId, peerTicketed()))
                         delay(CAST_LOOK_MS)
                     }
                 }
-            return combine(mesh.neighbors, mesh.heardIndirectly, castable) { linked, heard, cast ->
-                TalkLink.of(peerId, linked.mapTo(HashSet()) { it.nodeId }, heard.keys, cast)
+            return combine(mesh.neighbors, looked) { linked, (radioPath, cast) ->
+                TalkLink.of(peerId, linked.mapTo(HashSet()) { it.nodeId }, radioPath, cast)
             }.distinctUntilChanged()
         }
 
         override fun raise(peerId: String): Boolean = get<MeshTransport>().holdLink(peerId)
 
         // sendCallTalk's order: the peer's own link, a Wi-Fi Aware one first (sendLive), else a flood over any link,
-        // and a cast through a relay for a peer the mesh has no path to, or beside the peer's own link when it fades.
+        // and a cast through a relay for a peer the radios have no path to, or beside the radio copy when the peer's own
+        // link fades or the session's reports say the radios lose chunks.
         override fun pathTo(
             peerId: String,
             peerTicketed: Boolean,
+            castToo: Boolean,
         ): TalkPath {
             val transport = get<MeshTransport>()
             val linked = transport.neighbors.value
-            val meshPath =
-                linked.any { it.nodeId == peerId } || (linked.isNotEmpty() && peerId in get<MeshController>().heardIndirectly.value)
             val manager = get<MeshManager>()
-            val cast = !meshPath && manager.canCastTalk(peerId, peerTicketed)
+            val cast = !manager.talkRadioPath(peerId) && manager.canCastTalk(peerId, peerTicketed)
             return when {
                 cast && manager.castCoversTalk(peerId, peerTicketed) -> TalkPath.SPOOL
                 cast -> TalkPath.CAST_UNSEEN
                 linked.isEmpty() -> TalkPath.NONE
+                castToo && manager.canCastTalk(peerId, peerTicketed) -> TalkPath.LOSSY
                 transport.bulkRouteTo(peerId) == BulkRoute.Linked -> TalkPath.WIFI_AWARE
                 linked.none { it.nodeId == peerId } -> TalkPath.FLOODED
                 transport.liveLinkFading(peerId) && manager.canCastTalk(peerId, peerTicketed) -> TalkPath.FADING

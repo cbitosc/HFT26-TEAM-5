@@ -55,18 +55,20 @@ internal const val PRESENCE_FRESH_MS = 15 * 60_000L
 internal const val PRESENCE_PROFILE_MS = 13 * 60 * 60_000L
 
 /**
- * How long presence lingers after the evidence for it. There are no periodic cues on either plane, so a
- * peer that is present but quiet must not blink out between messages. `LoraMeshTransport`'s own
- * `REACHABLE_LINGER_MS` is the same number for the same reason and stays separate: that one is a routing
- * linger the plane sweeps against, this one is how long a Diagnostics reader is told a path exists.
+ * How long presence lingers after the evidence for it: fifteen minutes, the same as [PRESENCE_FRESH_MS]. There are no
+ * periodic cues on either plane, so a peer that is present but quiet must not blink out between messages, but a peer
+ * that walked away must not read reachable for most of an hour after (ADR 2026-10.fw8g's amendment; it was 45 min,
+ * LoRa's number). `LoraMeshTransport`'s own `REACHABLE_LINGER_MS` stays separate and stays at 45: that one is a routing
+ * linger the plane sweeps against, this one is how long a reader of the presence dot or Diagnostics is told a path
+ * exists. Never a route: the walkie's send path reads `TalkRadioPaths`, not this.
  */
-internal const val PRESENCE_LINGER_MS = 45 * 60_000L
+internal const val PRESENCE_LINGER_MS = 15 * 60_000L
 
 /**
  * How recently a peer must have pushed into a scope on a connected spool for the mesh to treat the spool
  * as that peer's path (ADR 2026-09.y5f3): `AckSync` sends a room tick there first, and the LoRa plane keeps
- * every DM-form frame to such a peer off the air. Deliberately shorter than [PRESENCE_LINGER_MS] — that one
- * is a statement to a Diagnostics reader, this one spends chain keys and airtime — and the same window as
- * [PRESENCE_FRESH_MS], the evidence rule it rests on.
+ * every DM-form frame to such a peer off the air. The same window as [PRESENCE_FRESH_MS], the evidence rule it
+ * rests on, and now as [PRESENCE_LINGER_MS] too; kept a constant of its own because this one spends chain keys and
+ * airtime and that one is a statement to a reader, so either may move without the other.
  */
 internal const val SPOOL_COVER_MS = 15 * 60_000L

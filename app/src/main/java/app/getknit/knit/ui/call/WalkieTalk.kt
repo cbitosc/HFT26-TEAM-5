@@ -3,12 +3,15 @@ package app.getknit.knit.ui.call
 import app.getknit.knit.call.CallManager
 import app.getknit.knit.call.CallPhase
 import app.getknit.knit.call.CallState
+import app.getknit.knit.call.HeardLedger
 import app.getknit.knit.call.OpusPackets
 import app.getknit.knit.call.TalkChunk
 import app.getknit.knit.call.TalkChunker
 import app.getknit.knit.call.TalkIn
 import app.getknit.knit.call.TalkLink
 import app.getknit.knit.call.TalkQueue
+import app.getknit.knit.call.TalkReport
+import app.getknit.knit.call.TalkRoute
 import app.getknit.knit.call.TalkWire
 import app.getknit.knit.call.WalkieMeter
 import app.getknit.knit.call.WalkiePolicy
@@ -74,14 +77,15 @@ internal interface TalkLinks {
     fun raise(peerId: String): Boolean
 
     /**
-     * The way a chunk to [peerId] goes now, by the links `MeshManager.sendCallTalk` sends on: [TalkLink] reads the
-     * peers this phone hears, a peer heard but not linked gets its chunks flooded through the links there are, and one
-     * with no mesh path at all gets them cast through a relay when one carries them ([peerTicketed] as for [linkTo]), as
-     * does a linked peer whose link fades, beside its radio copy.
+     * The way a chunk to [peerId] goes now, by the links `MeshManager.sendCallTalk` sends on: a peer heard through a
+     * link lately gets its chunks flooded through the links there are, and one with no radio path at all gets them cast
+     * through a relay when one carries them ([peerTicketed] as for [linkTo]), as does a linked peer whose link fades, and
+     * any peer when the session's reports said the radios lose its chunks ([castToo]), beside the radio copy.
      */
     fun pathTo(
         peerId: String,
         peerTicketed: Boolean,
+        castToo: Boolean = false,
     ): TalkPath
 }
 
@@ -93,6 +97,9 @@ internal enum class TalkPath(
     BLUETOOTH_CODED("Bluetooth Coded · direct"),
     BLUETOOTH("Bluetooth · direct"),
     FADING("Bluetooth · fading, relay too"),
+
+    // The peer's reports said the radios lose chunks (C-3.11-10): each goes over them and through the relay.
+    LOSSY("Radio losing chunks, relay too"),
     FLOODED("Through a neighbour · flooded"),
     SPOOL("Through the relay · cast"),
 
@@ -126,8 +133,9 @@ internal class WalkieTalk(
     private val recorder: TalkRecorder,
     private val player: TalkPlayer,
     // `MeshManager.sendCallTalk`: one chunk's plaintext sealed into a `talk` frame of the bytes returned; null when
-    // nothing could be sealed. The flag is the peer's cast ticket, from its walkie signal (§2.7).
-    private val send: suspend (peerId: String, chunk: ByteArray, peerTicketed: Boolean) -> Int?,
+    // nothing could be sealed. The first flag is the peer's cast ticket, from its walkie signal (§2.7); the second casts
+    // it beside the radios, because the peer's reports said they lose chunks (C-3.11-10).
+    private val send: suspend (peerId: String, chunk: ByteArray, peerTicketed: Boolean, castToo: Boolean) -> Int?,
     private val scope: CoroutineScope,
     private val clock: () -> Long = { System.currentTimeMillis() },
     private val log: (String) -> Unit = {},
@@ -154,6 +162,13 @@ internal class WalkieTalk(
     // Whether the Wi-Fi Aware link to the walkie call's peer is held now (`TalkLinks.raise`).
     @Volatile
     private var holding = false
+
+    // The session's verdict on its radio path, from the peer's reports (C-3.11-10); null when the peer sends none.
+    @Volatile
+    private var route: TalkRoute? = null
+
+    // Whether chunks going out now go through a relay beside the radios at the session's own word.
+    private fun castToo(): Boolean = route?.castToo == true
 
     /** The burst being spoken: its bytes on their way to [streamer], and whether its end sends ([kept]) or drops it. */
     private class Outgoing(
@@ -233,7 +248,7 @@ internal class WalkieTalk(
 
     // Where a chunk to the peer goes now ("Wi-Fi Aware · direct · held"), and whether the call holds that link.
     private fun pathTo(peerId: String): String? {
-        val path = links?.pathTo(peerId, peerTicketed()) ?: return null
+        val path = links?.pathTo(peerId, peerTicketed(), castToo()) ?: return null
         return path.label + if (holding && path == TalkPath.WIFI_AWARE) " · held" else ""
     }
 
@@ -354,7 +369,7 @@ internal class WalkieTalk(
             // behind it queue meanwhile and go in order.
             var frame: Int? = null
             for (attempt in 0 until SEND_TRIES) {
-                frame = send(call.peerId, chunk, peerTicketed())
+                frame = send(call.peerId, chunk, peerTicketed(), castToo())
                 if (frame != null || attempt == SEND_TRIES - 1) break
                 delay(SEND_RETRY_MS)
             }
@@ -370,6 +385,7 @@ internal class WalkieTalk(
         val keep = kept.await()
         if (q == 0) return Talk.Note.TOO_SHORT
         out(if (keep) chunker.flush() else ByteArray(0), end = true)
+        awaitReport(b, chunks = q, delivered = delivered)
         recordOut(call.peerId, chunks = q, audioMs = chunker.totalMs, sent = delivered)
         log(
             "walkie: burst $b of ${chunker.totalMs}ms to ${call.peerId} in $q chunks ($bytesOut B before the seal), $delivered sealed, " +
@@ -384,6 +400,15 @@ internal class WalkieTalk(
         return Talk.Note.SENT
     }
 
+    // Burst [b] is judged by the peer's report of it, or its absence (C-3.11-10); a burst nothing took has nothing to judge.
+    private fun awaitReport(
+        b: Int,
+        chunks: Int,
+        delivered: Int,
+    ) {
+        if (delivered > 0) route?.sent(b, chunks, at = clock())
+    }
+
     /** A burst out's field-log line: its chunks, those a link took, and the way to [peerId] as it ended. */
     private fun recordOut(
         peerId: String,
@@ -391,7 +416,7 @@ internal class WalkieTalk(
         audioMs: Long,
         sent: Int,
     ) {
-        val path = links?.pathTo(peerId, peerTicketed())
+        val path = links?.pathTo(peerId, peerTicketed(), castToo())
         field.record(
             FieldEvent.Talk(
                 TalkDirection.OUT,
@@ -410,13 +435,19 @@ internal class WalkieTalk(
         lastActivity = clock()
         meter.reset()
         transcript?.reset()
+        // C-3.11-10: reports go only to a peer that said it reads them, and only its reports judge our path.
+        val reports = call.peerReportsHeard
+        route = if (reports) TalkRoute() else null
+        val ledger = if (reports) HeardLedger() else null
         log("walkie: session ${call.id} with ${call.peerId}${if (call.degraded) " (degraded from a live call)" else ""}")
         try {
             coroutineScope {
                 launch { hangUpWhenIdle() }
-                hear(call.id)
+                if (ledger != null) launch { reporting(call, ledger) }
+                hear(call.id, ledger)
             }
         } finally {
+            route = null
             field.record(meter.snapshot().fieldEvent())
             // The model's native heap goes with the call, not two idle minutes later.
             transcript?.release()
@@ -425,65 +456,69 @@ internal class WalkieTalk(
 
     /** Plays the peer's bursts as their chunks land, in order, until the session ends. */
     @Suppress("CyclomaticComplexMethod") // one loop over every way a chunk can land: first, in order, late, last
-    private suspend fun hear(callId: String) =
-        coroutineScope {
-            val inbox = calls.talk.filter { it.callId == callId }.produceIn(this)
-            val queue = TalkQueue()
-            var skipped = 0
-            // Per burst, for its log line: when each chunk came, and when the burst began to play.
-            val arrivals = mutableMapOf<Int, MutableList<Long>>()
-            var playedAt = 0L
+    private suspend fun hear(
+        callId: String,
+        ledger: HeardLedger?,
+    ) = coroutineScope {
+        val inbox = calls.talk.filter { it.callId == callId }.produceIn(this)
+        val queue = TalkQueue()
+        var skipped = 0
+        // Per burst, for its log line: when each chunk came, and when the burst began to play.
+        val arrivals = mutableMapOf<Int, MutableList<Long>>()
+        var playedAt = 0L
 
-            fun take(t: TalkIn) {
-                if (queue.offer(t.chunk, t.at)) {
-                    chunksIn.incrementAndGet()
-                    arrivals.getOrPut(t.chunk.b) { mutableListOf() } += t.at
-                    meter.chunkIn(t.chunk, t.at, t.sentAt, t.frameBytes)
-                }
-                lastActivity = clock()
+        fun take(t: TalkIn) {
+            // Counted before the queue, which drops the second copy of a chunk that came both ways.
+            ledger?.note(t.chunk, t.viaRelay, t.at)
+            if (queue.offer(t.chunk, t.at)) {
+                chunksIn.incrementAndGet()
+                arrivals.getOrPut(t.chunk.b) { mutableListOf() } += t.at
+                meter.chunkIn(t.chunk, t.at, t.sentAt, t.frameBytes)
             }
-            try {
-                while (true) {
-                    when (val step = queue.poll(clock())) {
-                        is TalkQueue.Step.Play -> {
-                            if (step.first) {
-                                playedAt = clock()
-                                arrivals[step.burst]?.minOrNull()?.let { meter.started(it, playedAt) }
-                                if (_talk.value is Talk.Idle) _talk.value = Talk.Hearing
-                                transcript?.begin(step.burst)
-                            }
-                            withContext(Dispatchers.IO) { player.play(OpusPackets.split(step.audio), step.first, step.last) }
-                            if (step.last) {
-                                // Played out: every sample has been through the tap, so the burst is whole.
-                                transcript?.end(step.burst)
-                                logHeard(step.burst, arrivals.remove(step.burst).orEmpty(), playedAt, queue.skipped - skipped)
-                                heard.incrementAndGet()
-                                meter.burstHeard()
-                                if (_talk.value == Talk.Hearing) _talk.value = Talk.Idle()
-                            }
-                            lost.addAndGet(queue.skipped - skipped)
-                            meter.skipped(queue.skipped - skipped)
-                            skipped = queue.skipped
-                            lastActivity = clock()
-                        }
-
-                        is TalkQueue.Step.Wait -> {
-                            withTimeoutOrNull(step.ms) { inbox.receive() }?.let(::take)
-                        }
-
-                        TalkQueue.Step.Idle -> {
-                            take(inbox.receive())
-                        }
-                    }
-                    // Whatever else came meanwhile goes into the queue before it is asked again.
-                    while (true) take(inbox.tryReceive().getOrNull() ?: break)
-                }
-            } finally {
-                player.close()
-                transcript?.abandon()
-                if (_talk.value == Talk.Hearing) _talk.value = Talk.Idle()
-            }
+            lastActivity = clock()
         }
+        try {
+            while (true) {
+                when (val step = queue.poll(clock())) {
+                    is TalkQueue.Step.Play -> {
+                        if (step.first) {
+                            playedAt = clock()
+                            arrivals[step.burst]?.minOrNull()?.let { meter.started(it, playedAt) }
+                            if (_talk.value is Talk.Idle) _talk.value = Talk.Hearing
+                            transcript?.begin(step.burst)
+                        }
+                        withContext(Dispatchers.IO) { player.play(OpusPackets.split(step.audio), step.first, step.last) }
+                        if (step.last) {
+                            // Played out: every sample has been through the tap, so the burst is whole.
+                            transcript?.end(step.burst)
+                            logHeard(step.burst, arrivals.remove(step.burst).orEmpty(), playedAt, queue.skipped - skipped)
+                            heard.incrementAndGet()
+                            meter.burstHeard()
+                            if (_talk.value == Talk.Hearing) _talk.value = Talk.Idle()
+                        }
+                        lost.addAndGet(queue.skipped - skipped)
+                        meter.skipped(queue.skipped - skipped)
+                        skipped = queue.skipped
+                        lastActivity = clock()
+                    }
+
+                    is TalkQueue.Step.Wait -> {
+                        withTimeoutOrNull(step.ms) { inbox.receive() }?.let(::take)
+                    }
+
+                    TalkQueue.Step.Idle -> {
+                        take(inbox.receive())
+                    }
+                }
+                // Whatever else came meanwhile goes into the queue before it is asked again.
+                while (true) take(inbox.tryReceive().getOrNull() ?: break)
+            }
+        } finally {
+            player.close()
+            transcript?.abandon()
+            if (_talk.value == Talk.Hearing) _talk.value = Talk.Idle()
+        }
+    }
 
     // One line per burst heard, in the log and the field log: when each chunk came after the first, and when the burst
     // began to play.
@@ -507,6 +542,50 @@ internal class WalkieTalk(
         )
     }
 
+    /**
+     * C-3.11-10, both halves: each of the peer's bursts reported back to it once [ledger] says it is due, the same way a
+     * chunk goes; and the peer's reports of ours (with the overdue ones) judged into [route], whose verdict the next
+     * chunk out goes by.
+     */
+    private suspend fun reporting(
+        call: CallState,
+        ledger: HeardLedger,
+    ) = coroutineScope {
+        val tag = TalkWire.tagOf(call.id)
+        launch {
+            calls.talkReports.filter { it.callId == call.id }.collect { judge(call.peerId) { report(it.report) } }
+        }
+        while (true) {
+            for (report in ledger.due(clock())) report(call.peerId, tag, report)
+            judge(call.peerId) { expire(clock()) }
+            delay(REPORT_TICK_MS)
+        }
+    }
+
+    // One report of the peer's burst, sent as its chunks came; lost like a chunk when nothing carries it.
+    private suspend fun report(
+        peerId: String,
+        tag: Int,
+        report: TalkReport,
+    ) {
+        send(peerId, TalkWire.encodeReport(tag, report), peerTicketed(), castToo())
+        log("walkie: reported burst ${report.b}: ${report.radio} over the radios, ${report.relay} through the relay")
+    }
+
+    // Applies [step] to the session's route, and logs a change of its verdict.
+    private inline fun judge(
+        peerId: String,
+        step: TalkRoute.() -> Unit,
+    ) {
+        val r = route ?: return
+        val before = r.castToo
+        r.step()
+        if (r.castToo == before) return
+        val verdict =
+            if (r.castToo) "radios losing chunks to $peerId; casting through the relay too" else "radios whole to $peerId again; radio only"
+        log("walkie: $verdict")
+    }
+
     private suspend fun hangUpWhenIdle() {
         while (true) {
             val left = lastActivity + WalkiePolicy.IDLE_END_MS - clock()
@@ -526,6 +605,9 @@ internal class WalkieTalk(
         // recycle (about 1.9 s from its window's teardown to the next link-up, device-measured).
         const val SEND_RETRY_MS = 250L
         const val SEND_TRIES = 11
+
+        // How often the session looks for reports due out and reports overdue in (C-3.11-10).
+        const val REPORT_TICK_MS = 250L
         const val MS_PER_MIN = 60_000L
     }
 }

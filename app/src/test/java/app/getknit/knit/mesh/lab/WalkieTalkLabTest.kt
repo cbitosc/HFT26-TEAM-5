@@ -2,6 +2,7 @@ package app.getknit.knit.mesh.lab
 
 import app.getknit.knit.call.TalkChunk
 import app.getknit.knit.call.TalkWire
+import app.getknit.knit.mesh.TalkRadioPaths
 import app.getknit.knit.mesh.protocol.FrameId
 import app.getknit.knit.mesh.protocol.FrameType
 import app.getknit.knit.mesh.protocol.WireCodec
@@ -57,13 +58,19 @@ class WalkieTalkLabTest {
     private suspend fun burst(
         from: LabNode,
         to: LabNode,
+        castToo: Boolean = false,
     ) = (0 until CHUNKS).forEach { q ->
         val chunk = TalkChunk(b = 0, q = q, a = byteArrayOf(q.toByte()), e = q == CHUNKS - 1)
-        assertTrue(from.sendTalk(to, TalkWire.encode(TAG, chunk)))
+        assertTrue(from.sendTalk(to, TalkWire.encode(TAG, chunk), castToo))
     }
 
-    private fun LabNode.chunksHeard(): Set<Int> =
-        talks
+    private fun LabNode.chunksHeard(): Set<Int> = talks.chunkNumbers()
+
+    // The chunks of [chunksHeard] a spool cast here.
+    private fun LabNode.chunksCast(): Set<Int> = talksViaRelay.chunkNumbers()
+
+    private fun List<ByteArray>.chunkNumbers(): Set<Int> =
+        this
             .mapNotNull {
                 TalkWire
                     .decode(it)
@@ -247,6 +254,107 @@ class WalkieTalkLabTest {
             // over the sound link (which the empty check above may have run ahead of) would show here as more.
             assertEquals("Alice's chunks, and only hers, were cast", CHUNKS, spool.casts.size)
         }
+
+    /**
+     * Alice, a relay and Bob in a line, all three on a spool that would cast. Bob's relayed frames reach Alice through the
+     * relay, so the radios have a fresh path to him (C-3.11-6), and Alice opens [then] with that path proven and nothing
+     * of Bob's still in flight to her.
+     */
+    private suspend fun lineWithAFreshRadioPath(then: suspend (alice: LabNode, relay: LabNode, bob: LabNode, spool: FakeSpool) -> Unit) {
+        val spool = FakeSpool(cast = CAST_BOUNDS)
+        val alice = lab.node("alice", spool = spool).apply { setDisplayName("Alice") }
+        val relay = lab.node("relay", spool = spool).apply { setDisplayName("Relay") }
+        val bob = lab.node("bob", spool = spool).apply { setDisplayName("Bob") }
+        lab.linkAll(alice to relay, relay to bob)
+        lab.awaitAcquainted(alice, relay, bob)
+        trade(alice, bob, carriers = listOf(relay))
+        lab.awaitDmScope(alice, bob)
+        lab.awaitDmScope(bob, alice)
+        // The trade's relayed DMs usually prove the path already; the room post, awaited where it lands, drains the line.
+        assertTrue(bob.sendRoom("bob is here"))
+        lab.await(1) { if (alice.roomPosts()[bob.nodeId]?.contains("bob is here") == true) 1 else 0 }
+        assertTrue("no radio path to bob", alice.manager.talkRadioPath(bob.nodeId))
+        assertTrue("a cast was possible here", alice.manager.canCastTalk(bob.nodeId, peerTicketed = false))
+        then(alice, relay, bob, spool)
+    }
+
+    /** Offline first (C-3.11-6): a peer the radios carried lately, through a link still held, is never cast to. */
+    @Test
+    fun aPeerHeardThroughALinkLatelyGetsItsBurstOverTheRadiosAlone() =
+        runBlocking {
+            lineWithAFreshRadioPath { alice, relay, bob, spool ->
+                burst(alice, bob)
+                lab.await(CHUNKS) { bob.chunksHeard().size }
+                assertEquals((0 until CHUNKS).toSet(), bob.chunksHeard())
+                val prefix = relay.nodeId.take(NODE_ID_CHARS)
+                assertEquals("each chunk went to the relay", CHUNKS, alice.talkSends().count { it.first == prefix })
+                assertTrue("a chunk was cast: ${spool.casts}", spool.casts.isEmpty())
+                assertTrue(bob.chunksCast().isEmpty())
+                // Nothing reached a thread: each side holds the two DMs it traded.
+                lab.assertConverged(listOf(alice, bob), atLeast = 2, carriers = listOf(relay)) { it.dmWith(peerOf(it, alice, bob)) }
+                assertEquals(2, bob.decrypted(bob.dmWith(alice)).size)
+            }
+        }
+
+    /**
+     * The field call of 2026-10-18: Bob walked out of the relay's range, and Alice still holds her link to the relay. The
+     * relayed sighting that once proved a path is older than its window now, so her chunks are cast through the spool
+     * beside the flood, and Bob hears the burst through the relay.
+     */
+    @Test
+    fun aPeerTheRadiosLostTouchWithIsCastBesideTheFlood() =
+        runBlocking {
+            lineWithAFreshRadioPath { alice, relay, bob, spool ->
+                lab.unlink(relay, bob)
+                lab.clock.advance(TalkRadioPaths.WINDOW_MS + 1)
+                assertFalse("the path outlived its window", alice.manager.talkRadioPath(bob.nodeId))
+
+                burst(alice, bob)
+                lab.await(CHUNKS) { bob.chunksHeard().size }
+                assertEquals((0 until CHUNKS).toSet(), bob.chunksCast())
+                assertEquals("every chunk was cast", CHUNKS, spool.casts.size)
+                // The radios were still tried: the flood went to the relay beside each cast.
+                val prefix = relay.nodeId.take(NODE_ID_CHARS)
+                assertEquals(CHUNKS, alice.talkSends().count { it.first == prefix })
+                // Nor did a cast reach a thread: the DMs Bob holds are the two the pair traded. Bob is an island now, reached
+                // through the spool alone, so custody can agree only on Alice's side of the cut.
+                lab.assertConverged(listOf(alice, bob), atLeast = 2, carriers = listOf(relay), custodyAcross = listOf(alice, relay)) {
+                    it.dmWith(peerOf(it, alice, bob))
+                }
+                assertEquals(2, bob.decrypted(bob.dmWith(alice)).size)
+            }
+        }
+
+    /**
+     * The walkie's own verdict (C-3.11-10): the peer's reports said the radios lose chunks, which no link here can see,
+     * so a chunk to a neighbour over a link that does not fade is cast beside its radio copy too.
+     */
+    @Test
+    fun aChunkTheWalkieCastsTooGoesBothWaysToASoundNeighbour() =
+        runBlocking {
+            val spool = FakeSpool(cast = CAST_BOUNDS)
+            val alice = lab.node("alice", spool = spool).apply { setDisplayName("Alice") }
+            val bob = lab.node("bob", spool = spool).apply { setDisplayName("Bob") }
+            lab.link(alice, bob)
+            lab.awaitAcquainted(alice, bob)
+            trade(alice, bob, carriers = emptyList())
+            lab.awaitDmScope(alice, bob)
+            lab.awaitDmScope(bob, alice)
+
+            burst(alice, bob, castToo = true)
+            lab.await(CHUNKS) { bob.chunksHeard().size }
+            assertEquals((0 until CHUNKS).toSet(), bob.chunksHeard())
+            // The spool counts a cast before it fans it out, and the send log is written at the far end, so both are in.
+            assertEquals("every chunk was cast", CHUNKS, spool.casts.size)
+            lab.await(CHUNKS) { alice.talkSends().size }
+        }
+
+    // The other end of [a] and [b]'s thread, seen from [node].
+    private fun peerOf(
+        node: LabNode,
+        a: LabNode,
+        b: LabNode,
+    ): LabNode = if (node === a) b else a
 
     private companion object {
         const val TAG = 0x5A17

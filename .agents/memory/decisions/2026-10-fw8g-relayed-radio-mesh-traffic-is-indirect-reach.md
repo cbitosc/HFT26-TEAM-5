@@ -99,3 +99,17 @@ Regressions:
 - `ProfileDetailsViewModelTest.presenceClimbsFromKnownThroughLongRangeAndIndirectToDirect`.
 - `ProfileDetailsScreenContentTest.anIndirectPeerReadsReachableIndirectly`.
 - `IndirectReachLabTest` (the ends of a line hear each other via the middle; the middle hears nobody second-hand).
+
+## Amendment 2026-10-18: a 15-minute linger, and the trap sprung
+
+`PRESENCE_LINGER_MS` is 15 minutes now, down from 45, the same as `PRESENCE_FRESH_MS`. The 45 came from the LoRa plane's
+`REACHABLE_LINGER_MS`. It was carried over twice, here and in ADR 2026-09.2ajk ("LoRa's number for LoRa's reason"),
+and neither ADR derived it. LoRa's reason is a duty-cycled band where a presence packet costs airtime, and that does
+not hold for Bluetooth or Wi-Fi Aware. Even as presentation, a peer that walked away read reachable for most of an
+hour. The constant also sets the spool tier's linger for the presence dot (`spoolPresentPeers`), which now matches
+`SPOOL_COVER_MS`. LoRa's own routing linger stays at 45.
+
+The trap above was sprung. ADR 2026-10.79yb's sixth amendment had `sendCallTalk` read `heard` to decide whether to cast
+a walkie chunk, and a field call on 2026-10-18 lost every chunk to a peer that had been gone twenty minutes. The
+walkie now has its own short-lived, link-bound evidence (`mesh/TalkRadioPaths`, 79yb's twelfth amendment). Nothing
+in `mesh/` reads `heard` again. The rule above stands, and that case is now its regression.

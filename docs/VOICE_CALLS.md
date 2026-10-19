@@ -711,7 +711,8 @@ its media (`REASON_MEDIA`).
   carries it.
 - **C-3.11-2** A walkie session's OFFER has `m = 4` and no `sdp`, `cand` or `dw`. It rings, goes stale, gets busy
   and glares exactly as §3.3–3.5 say. Answering connects both sides at once, with `m = 4` on the ANSWER: there are
-  no ICE servers, no connect timer and no grace. A build without the walkie declines it with `rsn = 5`, because the
+  no ICE servers, no connect timer and no grace. Both carry `hr = true` from a build that reports what it hears
+  (C-3.11-10). A build without the walkie declines it with `rsn = 5`, because the
   audio bit is absent.
 - **C-3.11-3** A call placed without a kind (the profile's Call button) is a walkie session only when the peer carries
   `CAP_WALKIE` and no live path looks possible. "Possible" means a validated Internet route here, or a Wi-Fi Direct
@@ -760,12 +761,18 @@ its media (`REASON_MEDIA`).
   - **Id.** Its frame id is 11 characters.
   - **Reach.** No node custodies it, parks it, re-serves it or fans it onto the coordination plane or LoRa, and no
     spool stores it. A neighbour of the sender gets it alone, with `ttl = 0`. A peer heard through the mesh gets a
-    flood of at most `ttl = 3` relays. A peer the mesh has no path to gets it **cast** through every connected spool
-    that would carry it (§2.7), signed, and beside the blind flood when this phone has links at all. A neighbour whose
+    flood of at most `ttl = 3` relays. Every other peer is one the radios have no path to, and it gets the chunk
+    **cast** through every connected spool that would carry it (§2.7), signed, and beside the blind flood when this
+    phone has links at all. The radios have a path to a peer that is not a neighbour only while one of the peer's own
+    frames reached this phone through a link it still holds, within the last two minutes (`mesh/TalkRadioPaths`). Two
+    kinds of frame count: a signed frame that passed verification, stamped by its author within those two minutes, and
+    a `talk` frame its ratchet opened. A spool's frame and a LoRa one never count. The reach tiers (`heardIndirectly`,
+    ADR 2026-10.fw8g) are presentation and are never read here. A neighbour whose
     live link is near its floor (`MeshTransport.liveLinkFading`: its link RSSI at or under −95, or three reads in a row
     unanswered) gets the cast beside its radio copy, because a dying link counts as a path until its supervision timeout
-    closes it, about 20 s later. A build that does not know the type relays it like any unknown type and delivers
-    nothing.
+    closes it, about 20 s later. Any peer gets the cast beside the radio copy while the session's reports say the
+    radios lose its chunks (C-3.11-10). A build that does not know the type relays it like any unknown type and
+    delivers nothing.
   - **Receipt.** The addressee admits the frame unsigned only in this shape: addressed to it, by someone else, in no
     group, and admits the signed copy a spool casts through the ordinary signed door. It hands the opened plaintext to
     the call layer only from an accepted contact, and a failed open is never a reset trigger, signed or not. Only a connected walkie session with the sender, under the chunk's tag, takes the chunk.
@@ -794,9 +801,9 @@ its media (`REASON_MEDIA`).
   - **direct:** over a link of this phone's own; nothing is shown. Over a fading link with a relay that would cast,
     the chunks also go through the relay; nothing more is shown, and the diagnostics path reads
     `Bluetooth · fading, relay too`;
-  - **through the mesh:** no link of its own, but the peer's frames reached it through another phone lately; a notice
-    says the chunks go through other phones;
-  - **through the relay:** no mesh path, but a connected relay the peer was lately seen on would cast the chunks
+  - **through the mesh:** no link of its own, but the radios have a path to the peer (C-3.11-6); a notice says the
+    chunks go through other phones;
+  - **through the relay:** no radio path, but a connected relay the peer was lately seen on would cast the chunks
     (§2.7, `ScopeSync.castCovers`); a notice says so. A relay that would take the cast but never saw the peer still
     gets it, since a quiet subscriber leaves no evidence, but the screen reads **none** and the diagnostics path
     `Relay cast · peer not seen on it`;
@@ -853,6 +860,21 @@ its media (`REASON_MEDIA`).
     the transcript finishes is written by `WalkieClipFiles` as a 16 kHz mono WAV and a JSON sidecar, its text
     included, to the app's external files, unencrypted, for scoring the model off the phone. This is the one exception
     to the text never being stored; a release build has no switch.
+
+- **C-3.11-10** The listener of a walkie session reports each of the speaker's bursts back to it, and the speaker
+  casts beside the radios while those reports say the radios lose its chunks (ADR 2026-10.79yb's twelfth amendment).
+  - **Who.** Only between two phones whose OFFER and ANSWER both carried `hr = true` (C-3.11-2). A build that does not
+    know the field would read a report as a chunk, so it is never sent one.
+  - **The report.** A `talk` frame, sealed and sent the way a chunk is (C-3.11-6), whose plaintext is
+    `flags (bit 1) · call tag · varint b · varint radio · varint relay`. `radio` and `relay` count the distinct chunks
+    of burst `b` that came over the radios and through a relay. A chunk that came both ways counts in both. A chunk
+    decoder refuses bit 1, so a report never plays.
+  - **When.** 500 ms after the burst's last chunk landed, or 4 s after its newest chunk when the last never came (the
+    player's give-up, C-3.11-7). Once per burst, and a straggler of a reported burst is not counted.
+  - **The speaker's verdict.** A burst whose report shows the radios lost more than a fifth of its chunks turns the
+    cast on. So does a burst with no report 7 s after its last chunk went. While the cast is on, every chunk is also
+    cast beside its radio copy, and the report goes the same way. Two reports in a row with the radios whole turn it
+    off. A peer that does not report leaves the chunks to C-3.11-6's evidence alone.
 
 ### 3.12 Call records in the thread
 

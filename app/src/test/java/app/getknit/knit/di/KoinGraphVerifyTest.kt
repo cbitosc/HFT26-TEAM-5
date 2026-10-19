@@ -62,12 +62,13 @@ class KoinGraphVerifyTest {
                 Application::class,
                 // Lambdas and values a module writes inline: EmojiCatalogLoader's asset opener and glyph test,
                 // LinkPreviewService's screening hooks, ContactImporter's plane flag, CrashStore's directory,
-                // ThemePreferences' dynamic-colour flow, and WalkieTalk's send (peer, chunk, cast flag, continuation).
+                // ThemePreferences' dynamic-colour flow, and WalkieTalk's send (peer, chunk, cast ticket, cast too, continuation).
                 Function0::class,
                 Function1::class,
                 Function2::class,
                 Function3::class,
                 Function4::class,
+                Function5::class,
                 Boolean::class,
                 File::class,
                 Flow::class,
