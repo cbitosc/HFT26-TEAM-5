@@ -71,6 +71,19 @@ fingerprint() { printf '%s\n' "$1" | sha256sum | cut -d' ' -f1; }
 # each `index` line, which would otherwise count as changes of their own.
 content() { grep -v -e '^index ' -e '^@@ '; }
 
+# `--owed <base>` lists the reviewers the commits since <base> owe, for a pull request nobody reviewed in Claude Code
+# (.github/workflows/review-gates.yml): one line per reviewer, `<name>\t<stage>\t<files, space-separated>`, stage 1
+# first. It reads and writes no state: CI has no stamps, so every reviewer whose paths the range touches is owed.
+if [ "${1:-}" = "--owed" ]; then
+  base="${2:?usage: review-gate.sh --owed <base-rev>}"
+  while IFS=$'\t' read -r name stage _ paths _ <&3; do
+    read -ra specs <<<"$paths"
+    files=$(git diff --name-only "$base" HEAD -- "${specs[@]}" | tr '\n' ' ')
+    [ -n "$files" ] && printf '%s\t%s\t%s\n' "$name" "$stage" "${files% }"
+  done 3< <(reviewers) | sort -t$'\t' -k2,2n -s
+  exit 0
+fi
+
 if [ "${1:-}" = "--stamp" ]; then
   name="${2:?usage: review-gate.sh --stamp <reviewer>}"
   line=$(reviewers | awk -F'\t' -v n="$name" '$1 == n')

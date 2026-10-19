@@ -74,6 +74,11 @@ author; if it fails, `git rebase --signoff origin/main` and a force-push fix the
 once. The rest of CI mirrors the maintainer's internal GitLab pipeline (build, unit tests, the ADR
 and generated-asset sync checks); `detekt`/`ktlintCheck` ride along as advisory.
 
+A change to the radios, the crypto, blob custody or the tests may also get an automated review. The maintainer can
+run the same reviewer agents on your pull request that check their own changes. Their findings arrive as one
+comment, each marked Blocking or Non-blocking, and you need no AI tools of your own. The maintainer decides what
+holds the pull request up.
+
 ## Security
 
 **Do not** report security vulnerabilities through public issues or pull requests. See

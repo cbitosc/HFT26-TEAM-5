@@ -699,7 +699,10 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
 - SPAWN a reviewer persona from `.agents/personas/` when its routing bullet above says so; each hunts one class of
   defect from a catalogue of the ones this repo already shipped and fixed, and never edits. A new reviewer is a
   persona, its symlink in `.claude/agents/`, a line in `.claude/hooks/review-gate.conf` (its stage and the paths
-  its Stop hook gate watches) and a routing bullet here.
+  its Stop hook gate watches) and a routing bullet here. A contributor's GitHub pull request gets the same reviewers
+  in CI when a maintainer applies the `review-gates` label: `.github/workflows/review-gates.yml` runs their checks
+  (`scripts/review-checks.sh`) with no secrets, then `review-gates-report.yml` runs them read-only under the default
+  branch's personas and posts one comment. A reviewer whose checks step changes needs its line in that script too.
 - DELEGATE implementation in a subsystem to its owner persona from `.agents/personas/` when its routing bullet says
   so (today `bluetooth-owner`, `wifi-aware-owner`, `lora-owner`, `crypto-owner` and `blobs-owner`), after its
   reviewer's design pass on the brief (`.agents/rules/review-rounds.md`). An owner writes and tests code inside its

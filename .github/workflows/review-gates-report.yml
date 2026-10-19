@@ -1,0 +1,192 @@
+name: Review gates report
+
+# The second half of the review gates on a contributor's pull request: the reviewer personas
+# (.agents/personas/*-reviewer.md) read the change, take their checks from the first half's results
+# (review-gates.yml), and their findings land on the pull request as one comment. Starts when a `review-gates` run
+# completes; the label a maintainer applied is what started that run.
+#
+# TRUST. This job holds CLAUDE_CODE_OAUTH_TOKEN and a token that can comment, so nothing from the pull request may
+# run here, and nothing the model reads may reach the token:
+#   - The pull request is checked out as files only, never built or executed. Its `.claude/`, `.agents/`, `CLAUDE.md`,
+#     `AGENTS.md` and `.mcp.json` are replaced with the default branch's, and `.claude/settings.json` is removed, so
+#     no hook runs (the base's hooks call scripts/ from the tree) and no MCP server starts. Any symlink pointing
+#     out of the tree is deleted.
+#   - Who is owed comes from the default branch's review-gate.sh and its map, run here, not from the artifact.
+#   - The model gets no Bash, no Write, no web: Read, Grep, Glob and the Agent tool, inside the tree. `git diff
+#     --no-index` or a read of /proc would put the token's environment in reach, so the diffs and the commit list are
+#     written to files before the model starts. Read, Grep and Glob are deliberately NOT in --allowedTools: an allow
+#     rule without a path grants them every path, a symlink's target included (tried 2026-10-19, CLI 2.1.304), while
+#     left out they keep the CLI's default, the working directory only, with symlinks resolved.
+#   - The model's step gets no GitHub token. A later step posts its last message as the comment.
+#   - The checks artifact was produced by the pull request's own code; the prompt tells every reviewer it is data.
+#
+# PINNING: by commit SHA, as triage.yml does, because this job holds secrets. The CLI is pinned to an exact version.
+
+on:
+  workflow_run:
+    workflows: [Review gates]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: review-gates-report-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    name: Reviewers
+    # `skipped` is a label other than `review-gates`; `cancelled` is a run a newer label superseded.
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      contains(fromJSON('["success", "failure", "timed_out"]'), github.event.workflow_run.conclusion)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      actions: read # download the checks artifact
+      issues: write # comment and remove the label (a pull request's comments and labels are the issue's)
+      pull-requests: read
+    steps:
+      # The pull request is the open one whose head is the commit the checks ran on. Read from the API, never from
+      # the artifact, and only while the maintainer's label is still on it.
+      - name: Find the pull request
+        id: pr
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const sha = context.payload.workflow_run.head_sha;
+            const pulls = await github.paginate(github.rest.pulls.list, {
+              owner: context.repo.owner, repo: context.repo.repo, state: 'open', per_page: 100,
+            });
+            const pr = pulls.find((p) => p.head.sha === sha && p.labels.some((l) => l.name === 'review-gates'));
+            if (!pr) {
+              core.notice(`No open pull request at ${sha} carries the review-gates label; nothing to review.`);
+              return;
+            }
+            core.setOutput('number', pr.number);
+            core.setOutput('base_ref', pr.base.ref);
+            core.setOutput('head_sha', sha);
+
+      - name: Check out the default branch (trusted)
+        if: steps.pr.outputs.number
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: trusted
+          persist-credentials: false
+
+      - name: Check out the pull request (files only)
+        if: steps.pr.outputs.number
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/pull/${{ steps.pr.outputs.number }}/head
+          path: pr
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download the checks
+        if: steps.pr.outputs.number
+        continue-on-error: true # a checks run that died uploads nothing; the reviewers are told so
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: review-checks
+          path: checks
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - name: Prepare the tree and the reviewers' inputs
+        id: prep
+        if: steps.pr.outputs.number
+        working-directory: pr
+        env:
+          PR: ${{ steps.pr.outputs.number }}
+          BASE_REF: ${{ steps.pr.outputs.base_ref }}
+          HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          # The ref may have moved since the API answered; review only the commit the checks ran on.
+          [ "$(git rev-parse HEAD)" = "$HEAD_SHA" ] || { echo "::error::the pull request moved past $HEAD_SHA"; exit 1; }
+
+          rm -rf .claude .agents CLAUDE.md AGENTS.md .mcp.json
+          cp -a ../trusted/.claude ../trusted/.agents ../trusted/CLAUDE.md ../trusted/AGENTS.md .
+          rm -f .claude/settings.json .claude/settings.local.json
+          find . -path ./.git -prune -o -type l -print | while read -r link; do
+            case "$(realpath -m "$link")" in "$PWD"/*) ;; *) echo "removing $link (points out of the tree)"; rm -f "$link" ;; esac
+          done
+
+          base=$(git merge-base "origin/$BASE_REF" HEAD)
+          mkdir -p .review-gates
+          CLAUDE_PROJECT_DIR=$PWD bash ../trusted/.claude/hooks/review-gate.sh --owed "$base" >.review-gates/owed.tsv
+          while IFS=$'\t' read -r name _ files; do
+            read -ra list <<<"$files"
+            git diff "$base" HEAD -- "${list[@]}" >".review-gates/$name.diff"
+          done <.review-gates/owed.tsv
+          git log --format='%h %s%n%b' "$base..HEAD" >.review-gates/commits.txt
+          [ ! -d ../checks ] || cp -r ../checks .review-gates/checks
+          sed -e "s/{{PR}}/$PR/g" -e "s/{{HEAD}}/$HEAD_SHA/g" -e "s/{{BASE}}/$base/g" \
+            ../trusted/.github/review-gates/prompt.md >.review-gates/prompt.md
+
+          echo "base=$base" >>"$GITHUB_OUTPUT"
+          if [ -s .review-gates/owed.tsv ]; then echo "owed=true" >>"$GITHUB_OUTPUT"; fi
+          cut -f1,2 .review-gates/owed.tsv
+
+      - name: Install Claude Code
+        if: steps.prep.outputs.owed
+        run: npm install --global @anthropic-ai/claude-code@2.1.304
+
+      - name: Run the reviewers
+        if: steps.prep.outputs.owed
+        working-directory: pr
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          claude -p "$(cat .review-gates/prompt.md)" \
+            --model claude-opus-5-5 \
+            --max-turns 80 \
+            --output-format json \
+            --allowedTools 'Agent' \
+            --disallowedTools 'Bash,Write,Edit,NotebookEdit,WebFetch,WebSearch' \
+            >../claude-out.json || true
+          jq -r '"turns: \(.num_turns // "?"), cost: \(.total_cost_usd // "?"), error: \(.is_error // "?")"' ../claude-out.json || true
+
+      - name: Post the findings
+        if: steps.prep.outputs.base
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          PR: ${{ steps.pr.outputs.number }}
+          OWED: ${{ steps.prep.outputs.owed }}
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- review-gates -->';
+            const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            let body;
+            if (!process.env.OWED) {
+              body = 'No reviewer persona owns a path this pull request changes, so no review gate applies.';
+            } else {
+              let out = {};
+              try { out = JSON.parse(fs.readFileSync('claude-out.json', 'utf8')); } catch (e) {}
+              body = !out.is_error && out.result
+                ? out.result
+                : `The reviewers did not finish (${out.subtype || 'no output'}). See [the run](${run}).`;
+            }
+            body = `${marker}\n${body}`.slice(0, 65000) + `\n\n<sub>[Run](${run})</sub>`;
+            const issue_number = Number(process.env.PR);
+            const { owner, repo } = context.repo;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number });
+            const mine = comments.find((c) => c.user.type === 'Bot' && c.body.startsWith(marker));
+            if (mine) await github.rest.issues.updateComment({ owner, repo, comment_id: mine.id, body });
+            else await github.rest.issues.createComment({ owner, repo, issue_number, body });
+
+      # Applying the label again is how a maintainer asks for the next round.
+      - name: Remove the label
+        if: always() && steps.pr.outputs.number
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          PR: ${{ steps.pr.outputs.number }}
+        with:
+          script: |
+            await github.rest.issues.removeLabel({
+              ...context.repo, issue_number: Number(process.env.PR), name: 'review-gates',
+            }).catch((e) => core.notice(`label not removed: ${e.message}`));
