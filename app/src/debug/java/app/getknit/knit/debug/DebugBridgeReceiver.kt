@@ -73,8 +73,10 @@ import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.data.settings.TicketKeyStore
 import app.getknit.knit.data.settings.TranscriptStore
 import app.getknit.knit.data.webp.WebpTranscode
+import app.getknit.knit.demo.DemoCalls
 import app.getknit.knit.di.LIVE_CALLS_WIRED
 import app.getknit.knit.di.WALKIE_WIRED
+import app.getknit.knit.di.demoGoRequested
 import app.getknit.knit.identity.Identity
 import app.getknit.knit.identity.displayNameFor
 import app.getknit.knit.mesh.ForwardStore
@@ -452,6 +454,15 @@ class DebugBridgeReceiver :
 
                         ACTION_STT -> {
                             handleStt(intent)
+                        }
+
+                        ACTION_DEMOCALL -> {
+                            handleDemoCall(context, intent)
+                        }
+
+                        ACTION_DEMOGO -> {
+                            demoGoRequested()
+                            reply("ok", "cued")
                         }
 
                         ACTION_WEBPPROBE -> {
@@ -2334,6 +2345,80 @@ class DebugBridgeReceiver :
     ): JSONObject = JSONObject().put("status", status).put("message", message)
 
     /**
+     * The scripted peer of a demo build's calls ([DemoCalls]; `-PseedDemo` / `-PdemoDirector` with calls wired) — the
+     * other end the screen's own [CallManager] talks to over loopback, which `…debug.CALL` drives as it drives a real
+     * call. `--es op`:
+     *
+     * - `ring --es peer <id> [--ez walkie true] [--ez open true]`: the peer dials this phone; `open` also brings the call
+     *   screen up over the app once it alerts (an unlocked phone in use shows a heads-up instead), without answering.
+     * - `say --es line <name>`: the peer in the connected call says a bundled line (`demo/voice/<theme>/<name>.pcm`) —
+     *   into a live call's captions, or as a walkie burst. In the background: poll `…debug.CALL` / `…debug.STT`.
+     * - `talk --es line <name>`: this phone's walkie burst says that line, the talk button held as long as it lasts.
+     * - `mic --es line <name>`: the next burst this phone records says that line in place of the microphone, however
+     *   long a finger holds the talk button (a film of the real gesture).
+     * - `hangup`: the peer hangs up.
+     * - `answer --el ms <n>`: how long a peer this phone rings waits before it answers; negative leaves it ringing.
+     * - `captions --ez on true|false`: a live call's CC button, remembered from call to call.
+     */
+    @Suppress("ReturnCount") // a flat dispatch over the ops
+    private suspend fun handleDemoCall(
+        context: Context,
+        intent: Intent,
+    ): JSONObject {
+        if (!BuildConfig.SEED_DEMO) return reply("error", "not a demo build (-PseedDemo / -PdemoDirector)")
+        val calls = getKoin().getOrNull<CallManager>() ?: return reply("error", "this build wires no calls")
+        when (val op = intent.getStringExtra("op") ?: "") {
+            "ring" -> {
+                val peer = intent.getStringExtra("peer") ?: return reply("error", "missing 'peer' extra")
+                DemoCalls.ring(peer, walkie = intent.getBooleanExtra("walkie", false))
+                val alerting = DemoCalls.await(CallPhase.Alerting) ?: return reply("error", "the ring never came")
+                if (intent.getBooleanExtra("open", false)) {
+                    context.startActivity(CallActivity.intent(context, alerting.id).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                }
+                return reply("ok", "ringing ${alerting.id}").put("id", alerting.id)
+            }
+
+            "say", "talk" -> {
+                val line = intent.getStringExtra("line") ?: return reply("error", "missing 'line' extra")
+                // Seconds of audio, past a broadcast's own timeout: it runs on the app scope and this replies at once.
+                scope.launch { if (op == "say") DemoCalls.say(line) else DemoCalls.talk(line) }
+                return reply("ok", "${if (op == "say") "the peer says" else "talking"} '$line'")
+            }
+
+            "hangup" -> {
+                DemoCalls.peerHangsUp()
+                return reply("ok", "the peer hung up")
+            }
+
+            "mic" -> {
+                val line = intent.getStringExtra("line") ?: return reply("error", "missing 'line' extra")
+                if (!DemoCalls.micSays(line)) return reply("error", "no demo line '$line'")
+                return reply("ok", "the next burst says '$line'")
+            }
+
+            "answer" -> {
+                val ms = intent.getLongExtra("ms", DemoCalls.answerAfterMs ?: -1L)
+                DemoCalls.answerAfterMs = ms.takeIf { it >= 0 }
+                return reply("ok", if (ms >= 0) "a rung peer answers after ${ms}ms" else "a rung peer lets it ring")
+            }
+
+            "captions" -> {
+                DemoCalls.captions(intent.getBooleanExtra("on", true))
+                return reply("ok", "captions ${intent.getBooleanExtra("on", true)}")
+            }
+
+            else -> {
+                return reply("error", "op must be ring|say|talk|mic|hangup|answer|captions").put(
+                    "call",
+                    calls.state.value
+                        ?.phase
+                        ?.name,
+                )
+            }
+        }
+    }
+
+    /**
      * Drives the experimental voice calls (docs/VOICE_CALLS.md): `--es op` is `state` (the default: the call, its
      * selected candidate pair as `route`, the relay-only toggle and the Wi-Fi Direct leg), `start --es peer <id>`,
      * `answer`, `decline`, `hangup`, `relay --ez on true|false` (C-3.7-3: every new call through TURN), or
@@ -2372,6 +2457,7 @@ class DebugBridgeReceiver :
      * `capture`: the profile the next call opens on and why, and the open call's microphone (`profile`, `switched`,
      * `health`: WATCHING, LIVE, SILENCED, SWITCHED or DEAD). Hosting (ADR 2026-10.w3dw): `directHost`.
      */
+
     @Suppress("CyclomaticComplexMethod", "ReturnCount", "LongMethod") // a flat dispatch over the ops
     private suspend fun handleCall(
         context: Context,
@@ -3692,6 +3778,8 @@ class DebugBridgeReceiver :
         const val ACTION_XFER = "app.getknit.knit.debug.XFER"
         const val ACTION_CALL = "app.getknit.knit.debug.CALL"
         const val ACTION_STT = "app.getknit.knit.debug.STT"
+        const val ACTION_DEMOCALL = "app.getknit.knit.debug.DEMOCALL"
+        const val ACTION_DEMOGO = "app.getknit.knit.debug.DEMOGO"
         const val ACTION_BACKUP = "app.getknit.knit.debug.BACKUP"
         const val ACTION_PURGE = "app.getknit.knit.debug.PURGE"
         const val ACTION_RESETDB = "app.getknit.knit.debug.RESETDB"

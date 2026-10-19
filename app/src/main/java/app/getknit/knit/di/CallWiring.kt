@@ -13,6 +13,7 @@ import app.getknit.knit.call.CallMedia
 import app.getknit.knit.call.CallMediaSampler
 import app.getknit.knit.call.CallReach
 import app.getknit.knit.call.CallReachRule
+import app.getknit.knit.call.CallSignals
 import app.getknit.knit.call.CallTimings
 import app.getknit.knit.call.CallToneSync
 import app.getknit.knit.call.CallWalkie
@@ -168,27 +169,35 @@ private fun callGraph(): Module =
         }
         single { CallTombStore(get()) }
         single { IncomingCalls(get(), get<CoroutineScope>()) }
-        single {
-            CallManager(
-                signals = { peerId, payload -> get<MeshManager>().sendCallSignal(peerId, payload) },
-                turn = if (LIVE_CALLS_WIRED) get<TurnSource>() else TurnSource.None,
-                media = if (LIVE_CALLS_WIRED) get<CallMedia>() else CallMedia.None,
-                scope = get<CoroutineScope>(),
-                selfId = { get<Identity>().nodeId() },
-                log = { Log.i(TAG, it) },
-                direct = if (LIVE_CALLS_WIRED) get<DirectCallPath>() else CallDirect.None,
-                walkie = if (WALKIE_WIRED) walkieRoute() else CallWalkie.None,
-                relayAll = if (LIVE_CALLS_WIRED) get<RelayAllCalls>().read else ({ true }),
-                tombs = get<CallTombStore>(),
-                reach = callReach(),
-                takesIncoming = get<IncomingCalls>()::takes,
-                field = fieldLog(),
-            )
-        }
+        single { callManager() }
         if (STT_WIRED) speechGraph()
         if (WALKIE_WIRED) walkieGraph()
         recordGraph()
     }
+
+/**
+ * The one [CallManager], over the mesh's sealed DMs and each kind's own seams. A demo build (`-PseedDemo`, debug only)
+ * calls scripted peers over loopback instead, with media that moves no audio and no TURN or Wi-Fi Direct leg to raise
+ * (di/DemoWiring); every other build gets null from those seams.
+ */
+private fun Scope.callManager(): CallManager {
+    val demo = if (LIVE_CALLS_WIRED) demoCallMediaOrNull() else null
+    return CallManager(
+        signals = demoCallSignalsOrNull() ?: CallSignals { peerId, payload -> get<MeshManager>().sendCallSignal(peerId, payload) },
+        turn = if (LIVE_CALLS_WIRED && demo == null) get<TurnSource>() else TurnSource.None,
+        media = demo ?: if (LIVE_CALLS_WIRED) get<CallMedia>() else CallMedia.None,
+        scope = get<CoroutineScope>(),
+        selfId = { get<Identity>().nodeId() },
+        log = { Log.i(TAG, it) },
+        direct = if (LIVE_CALLS_WIRED && demo == null) get<DirectCallPath>() else CallDirect.None,
+        walkie = if (WALKIE_WIRED) walkieRoute() else CallWalkie.None,
+        relayAll = if (LIVE_CALLS_WIRED) get<RelayAllCalls>().read else ({ true }),
+        tombs = get<CallTombStore>(),
+        reach = callReach(),
+        takesIncoming = get<IncomingCalls>()::takes,
+        field = fieldLog(),
+    )
+}
 
 /** What every call leaves behind and rings with, of either kind: its line in the thread, its faces, its alerting. */
 private fun Module.recordGraph() {
@@ -416,7 +425,9 @@ private fun Module.walkieGraph() {
             calls = get(),
             recorder = get(),
             player = get(),
-            send = { peerId, chunk, peerTicketed, castToo -> get<MeshManager>().sendCallTalk(peerId, chunk, peerTicketed, castToo) },
+            send =
+                demoTalkSendOrNull()
+                    ?: { peerId, chunk, peerTicketed, castToo -> get<MeshManager>().sendCallTalk(peerId, chunk, peerTicketed, castToo) },
             links = talkLinks(),
             scope = get<CoroutineScope>(),
             log = { Log.i(TAG, it) },

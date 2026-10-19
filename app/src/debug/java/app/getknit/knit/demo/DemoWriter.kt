@@ -14,20 +14,29 @@ import app.getknit.knit.data.forward.ForwardDao
 import app.getknit.knit.data.forward.ForwardEntity
 import app.getknit.knit.data.group.GroupEntity
 import app.getknit.knit.data.group.GroupMembersStore
+import app.getknit.knit.data.message.CallRecord
 import app.getknit.knit.data.message.Conversations
 import app.getknit.knit.data.message.DeliveryPlane
 import app.getknit.knit.data.message.MentionStore
 import app.getknit.knit.data.message.MessageEntity
 import app.getknit.knit.data.message.withReply
+import app.getknit.knit.data.message.withVideo
 import app.getknit.knit.data.peer.MetPeerRepository
 import app.getknit.knit.data.peer.PeerEntity
 import app.getknit.knit.data.reaction.ReactionEntity
 import app.getknit.knit.data.settings.SettingsStore
+import app.getknit.knit.data.video.VideoFrames
+import app.getknit.knit.di.CALLS_WIRED
+import app.getknit.knit.di.LIVE_CALLS_WIRED
+import app.getknit.knit.di.WALKIE_WIRED
 import app.getknit.knit.mesh.ForwardStore
+import app.getknit.knit.mesh.protocol.CallPayload
 import app.getknit.knit.mesh.protocol.FrameType
 import app.getknit.knit.mesh.protocol.LinkPreviewBlob
 import app.getknit.knit.mesh.protocol.Mention
+import app.getknit.knit.mesh.protocol.Protocol
 import app.getknit.knit.mesh.protocol.ReplyRef
+import app.getknit.knit.mesh.protocol.VideoInfo
 import app.getknit.knit.ui.whatsnew.WhatsNew
 import kotlinx.coroutines.flow.first
 import org.koin.core.Koin
@@ -50,6 +59,9 @@ class DemoWriter(
     // Every message in the scenario, keyed by id — so a reply can resolve the message it quotes (for the
     // denormalized author/snippet, mirroring what a real inbound reply carries).
     private val msgById: Map<String, DemoMsg>,
+    // Avatar keys read from another key's file: a mirrored scenario's local profile wears the peer's face, and the
+    // peer ours (`DemoScenario.mirrored`).
+    private val avatarAlias: Map<String, String> = emptyMap(),
 ) {
     private val peers = koin.get<PeerRepository>()
     private val messages = koin.get<MessageRepository>()
@@ -95,6 +107,9 @@ class DemoWriter(
                     // Heard from just now: a seeded namesake (the second "Jonas W.") stays a live clash, so the
                     // name-clash fade never quietly un-suffixes a captured screen (ADR 2026-10.k8ge).
                     lastSeenAt = now,
+                    // The call kinds this build takes, advertised as a profile would: the chat's Call and Mesh call
+                    // place a call only toward a peer that runs one (C-3.1-2, C-3.11-1). None where calls are not wired.
+                    capabilities = DEMO_CALL_CAPS.takeIf { it != 0L },
                 ),
             )
         }
@@ -167,6 +182,31 @@ class DemoWriter(
             if (thread.read) settings.setLastReadAt(peer, now)
         }
         scenario.requestGroup?.let { seedGroup(it, now, read = false) }
+    }
+
+    /**
+     * Writes the scenario's call lines into their DM threads (§3.12) through the same [CallRecord] a finished call
+     * leaves, so the thread draws the real row. Only in a build that wires calls: a build without them never has one.
+     */
+    suspend fun seedCallRecords(now: Long) {
+        if (!CALLS_WIRED) return
+        scenario.calls.forEach { c ->
+            val startedAt = now - c.minsAgo * 60_000L
+            // Connected a few seconds after it began: the ring.
+            val connectedAt = c.seconds?.let { startedAt + 6_000L }
+            val record =
+                CallRecord(
+                    id = c.id,
+                    outgoing = c.outgoing,
+                    walkie = c.walkie,
+                    reason = CallPayload.REASON_USER,
+                    byPeer = !c.outgoing,
+                    missed = c.missed,
+                    connectedAt = connectedAt,
+                    endedAt = c.seconds?.let { secs -> connectedAt?.plus(secs * 1_000L) },
+                )
+            messages.save(record.toEntity(peerId = nodeId(c.peer), selfId = me, startedAt = startedAt))
+        }
     }
 
     /** Blocks the scenario's blocked slots, so "Blocked users" has rows instead of its empty state. */
@@ -280,8 +320,9 @@ class DemoWriter(
         val voice = m.voiceSeconds?.let { voiceBlob(it) }
         val imageHash = if (voice == null) m.image?.let { imageBlob(it, m.imageMime) } else null
         // One attachment per message, in the order the fields are declared: a card only when neither a voice
-        // note nor a photo took the slot.
+        // note nor a photo took the slot, and a video only when nothing else did.
         val linkHash = if (voice == null && imageHash == null) m.link?.let { linkBlob(it) } else null
+        val video = if (voice == null && imageHash == null && linkHash == null) m.video?.let { videoBlob(it) } else null
         messages.save(
             MessageEntity(
                 id = m.id,
@@ -302,7 +343,7 @@ class DemoWriter(
                     MentionStore.encode(
                         if (m.mentionsMe) listOf(Mention(me, scenario.meName)) else emptyList(),
                     ),
-                attachmentHash = voice?.hash ?: imageHash ?: linkHash,
+                attachmentHash = voice?.hash ?: imageHash ?: linkHash ?: video?.hash,
                 // Plaintext blob (attachmentKey stays null) → BlobFetcher decodes the bytes directly. A card
                 // rides the same slot under its own MIME, which is the whole of how it is told apart.
                 attachmentMime =
@@ -310,13 +351,17 @@ class DemoWriter(
                         voice != null -> VoiceAudio.MIME
                         imageHash != null -> m.imageMime
                         linkHash != null -> LinkPreviewBlob.MIME
+                        video != null -> DEMO_VIDEO_MIME
                         else -> null
                     },
+                // What a sender's ingest names and sizes a video, so an older build's file bubble has both.
+                attachmentName = video?.let { DEMO_VIDEO_NAME },
+                attachmentSize = video?.size,
                 // Seeded rather than derived: the derivation runs when a blob *arrives*, and a seeded row
                 // never arrives. Writing them here is what the real inbound path would have written.
                 voiceDurationMs = voice?.durationMs,
                 voicePeaks = voice?.peaks,
-            ).withReply(replyRefFor(m)).let { row ->
+            ).withReply(replyRefFor(m)).withVideo(video?.info).let { row ->
                 // A seeded reply quotes a seeded original, so it is written as the inbound path would leave it once
                 // judged (ADR 2026-10.gpa3) — else every demo quote would wear the "unverified" cue.
                 if (row.replyToId != null && !fromMe) row.copy(replyCheck = MessageEntity.REPLY_VERIFIED) else row
@@ -384,7 +429,7 @@ class DemoWriter(
      */
     private suspend fun avatar(key: String): String? =
         runCatching {
-            val bytes = context.assets.open("demo/avatars/${scenario.theme}/$key.jpg").use { it.readBytes() }
+            val bytes = context.assets.open("demo/avatars/${scenario.theme}/${avatarAlias[key] ?: key}.jpg").use { it.readBytes() }
             val hash = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
             blobs.insert(hash, "image/jpeg", bytes)
             hash
@@ -442,6 +487,29 @@ class DemoWriter(
     ): ByteArray? =
         runCatching {
             context.assets.open("demo/images/${scenario.theme}/$name.$ext").use { it.readBytes() }
+        }.getOrNull()
+
+    /** A seeded video's blob hash, its size, and the description its sender's ingest would have carried. */
+    private class SeededVideo(
+        val hash: String,
+        val size: Long,
+        val info: VideoInfo,
+    )
+
+    /**
+     * Loads bundled clip [name] (`demo/videos/<theme>/<name>.mp4`), stores it as a plaintext blob under the video MIME,
+     * and returns it with the description a sender carries (ADR 2026-10.hmfe) — derived here by the app's own
+     * [VideoFrames], the duration and size from the bytes and the poster chosen across the clip, never typed in. Null
+     * when the asset is missing or reads as no video, and the line renders text-only.
+     */
+    private suspend fun videoBlob(name: String): SeededVideo? =
+        runCatching {
+            val bytes = context.assets.open("demo/videos/${scenario.theme}/$name.mp4").use { it.readBytes() }
+            val meta = VideoFrames.meta(bytes) ?: return@runCatching null
+            val poster = VideoFrames.poster(bytes) ?: ByteArray(0)
+            val hash = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+            blobs.insert(hash, DEMO_VIDEO_MIME, bytes)
+            SeededVideo(hash, bytes.size.toLong(), VideoInfo(meta.durationMs, meta.width, meta.height, poster))
         }.getOrNull()
 
     /** A seeded voice note's blob hash plus the description a real arrival would have derived from it. */
@@ -504,6 +572,14 @@ class DemoWriter(
         const val YOUR_MESH_SINCE_MS = 40L * 24 * 60 * 60_000L
         const val YOUR_MESH_STRANGERS = 40
         const val YOUR_MESH_CARRYING = 6
+
+        // What the app's own ingest stores and names a short video as (AttachmentStore's, which keeps them private).
+        const val DEMO_VIDEO_MIME = "video/mp4"
+        const val DEMO_VIDEO_NAME = "video.mp4"
+
+        // The call kinds a seeded peer advertises: those this build takes, and none where it takes no calls.
+        val DEMO_CALL_CAPS =
+            (if (LIVE_CALLS_WIRED) Protocol.CAP_CALL else 0L) or (if (WALKIE_WIRED) Protocol.CAP_WALKIE else 0L)
 
         // A seeded voice note's synthetic ADTS stream: mono 22.05 kHz AAC-LC, the recorder's own format, so
         // VoiceAudio reads the same duration off it that it would off a real recording.

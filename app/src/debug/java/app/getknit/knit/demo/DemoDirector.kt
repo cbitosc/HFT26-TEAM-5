@@ -2,24 +2,43 @@
 
 package app.getknit.knit.demo
 
+import android.content.Context
+import android.content.Intent
 import android.util.Log
 import app.getknit.knit.BuildConfig
+import app.getknit.knit.call.CallKind
+import app.getknit.knit.call.CallManager
+import app.getknit.knit.call.CallPhase
 import app.getknit.knit.data.message.Conversations
 import app.getknit.knit.data.message.DeliveryPlane
+import app.getknit.knit.di.CALLS_WIRED
 import app.getknit.knit.identity.Identity
 import app.getknit.knit.mesh.MeshManager
 import app.getknit.knit.mesh.Peer
+import app.getknit.knit.ui.call.CallActivity
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import org.koin.core.Koin
 
 /**
- * Debug-only trailer director (`-PdemoDirector=true`). Plays a scripted, animated conversation on the
- * **Nearby** room so a screen recording becomes the promo trailer: the local user types + sends a message,
- * peers reply, more nodes join (the "connected to N" header climbs), and the room fills with photos, an
- * animated GIF, a voice note, a link-preview card, reactions, quoted replies, @-mentions, "typing…" cues, and
- * a line that arrives over a LoRa board rather than the radios.
+ * Debug-only trailer director (`-PdemoDirector=true`). Plays a scripted, animated [DemoScene] so a screen recording
+ * becomes a promo film. The **Nearby** scene is the trailer proper: the local user types + sends a message, peers
+ * reply, more nodes join (the "connected to N" header climbs), and the room fills with photos, an animated GIF, a voice
+ * note, a link-preview card, reactions, quoted replies, @-mentions, "typing…" cues, and a line that arrives over a LoRa
+ * board rather than the radios.
+ *
+ * The four **call** scenes are one phone each of a two-phone call film (`.private/scripts/build-call-promo.sh`): a live
+ * call with the verified contact (`call-out`, this phone dials; `call-in`, this phone is the one dialled) and a mesh
+ * call, the walkie-talkie, with Sam (`walkie-out`, `walkie-in`). They run the app's own call stack against a scripted
+ * peer over loopback ([DemoCalls]), so the call screen, the ring, the captions, the transcript and the record left in
+ * the thread are the real ones. A callee take is the same cast seen from the other phone ([DemoScenario.mirrored]),
+ * and both takes of a pair share their beats to the millisecond from the cue, so laid side by side they ring, connect
+ * and speak in step: each phone feeds its captions and its transcript the other side's line.
  *
  * It writes through [DemoWriter] (the same repository primitives the static [DemoSeeder] uses), so every
  * change animates into the live UI with no bespoke rendering — peer messages/reactions land via reactive
@@ -33,6 +52,11 @@ class DemoDirector(
     // Shared with DemoTransport (built in DemoWiring): mutating it grows the reported neighbor set, so the
     // "connected to N" header climbs live. Starts at one node (see DemoWiring).
     private val roster: MutableStateFlow<Set<Peer>>,
+    // Which scene this launch asked for — completed by MainActivity from its intent, which starts long before the
+    // director needs it (see DemoWiring's demoScene).
+    private val scene: Deferred<DemoScene>,
+    // The `…debug.DEMOGO` cue a call scene holds for before its first beat (see DemoWiring's demoGo).
+    private val go: Deferred<Unit>,
 ) {
     private val mesh = koin.get<MeshManager>()
     private val composer = koin.get<DemoComposer>()
@@ -42,16 +66,19 @@ class DemoDirector(
 
     suspend fun run() {
         runCatching { play() }
-            .onFailure { Log.e("DemoDirector", "trailer playback failed", it) }
+            .onFailure { Log.e(TAG, "trailer playback failed", it) }
     }
 
     private suspend fun play() {
         val me = koin.get<Identity>().nodeId()
-        val scenario = demoScenarioFor(BuildConfig.DEMO_THEME)
-        val script = timeline()
+        // A launch that never reached MainActivity (nothing completes the request) plays the trailer.
+        val which = withTimeoutOrNull(SCENE_WAIT_MS) { scene.await() } ?: DemoScene.NEARBY
+        val base = demoScenarioFor(BuildConfig.DEMO_THEME)
+        // A callee take is the same cast from the other phone: its profile is the peer's, and the peer is us.
+        val scenario = which.mirror?.let(base::mirrored) ?: base
         // Every message the writer might resolve a reply against: the scenario's own history (its DM/group
         // replies), plus this timeline's ambient + live messages.
-        val timelineMsgs = script.mapNotNull { (it as? Beat.PeerMessage)?.msg }
+        val timelineMsgs = timeline().mapNotNull { (it as? Beat.PeerMessage)?.msg }
         val msgById =
             (
                 scenario.nearby +
@@ -62,7 +89,8 @@ class DemoDirector(
                     AMBIENT +
                     timelineMsgs
             ).associateBy { it.id }
-        writer = DemoWriter(koin, scenario, me, msgById)
+        val faces = which.mirror?.let { slot -> DemoSeeder.idOf(slot).let { mapOf("me" to it, it to "me") } }.orEmpty()
+        writer = DemoWriter(koin, scenario, me, msgById, faces)
 
         val now = System.currentTimeMillis()
         // Baseline: profile + cast, a couple of ambient Nearby lines so the room isn't empty, and the full
@@ -72,6 +100,7 @@ class DemoDirector(
         writer.seedDms(now)
         val groupId = writer.seedGroup(scenario.group, now)
         writer.seedRequests(now)
+        writer.seedCallRecords(now)
         // The Meshtastic room's history: the trailer cuts to it, and binding the board below is what makes
         // its row exist at all.
         writer.seedMeshRoom(now)
@@ -79,30 +108,96 @@ class DemoDirector(
         // glyph — so the director arms both planes exactly as the still seeder does.
         DemoPlanes.arm(koin, coveredLabels = scenario.dms.map { writer.nodeId(it.peer) } + groupId)
 
-        // Give the cold-started Nearby screen a beat to compose and subscribe to DemoComposer before the
-        // first local-type beat (its command flow has no replay, so a too-early emit would be missed).
+        // Give the cold-started screen a beat to compose and subscribe to DemoComposer before the first
+        // local-type beat (its command flow has no replay, so a too-early emit would be missed).
         delay(1_500)
-        for (beat in script) {
+        val stage = stageFor(which)
+        // A cued scene holds, settled and still, until the recording is rolling and the cue lands; a run nobody
+        // cues (a hand launch) plays anyway once the wait runs out.
+        if (stage.cued) withTimeoutOrNull(GO_WAIT_MS) { go.await() }
+        Log.i(TAG, "scene ${which.key}: playing ${stage.script.size} beats")
+        for (beat in stage.script) {
             delay(beat.delayMs)
-            apply(beat)
+            // Each beat's wall-clock, for a recording to be aligned against (the first one is its frame zero).
+            Log.i(TAG, "beat ${beat::class.simpleName}")
+            apply(beat, stage)
         }
     }
 
-    private suspend fun apply(beat: Beat) {
+    /** The scene's conversation and beats. A call scene also readies its peer: in range, and the CC button set. */
+    private suspend fun stageFor(which: DemoScene): Stage {
+        val peer = which.peer ?: return Stage(nearby, dmPeer = null, timeline())
+        check(CALLS_WIRED) { "scene ${which.key} needs a build with calls (-Pcalls=true)" }
+        val peerId = writer.nodeId(peer)
+        // The call's peer is a neighbour: the header says so, and the call's reach rule finds them.
+        roster.update { it + Peer(peerId) }
+        // The scripted peer answers this phone's ring as the callee take answers its own: the same wait, so the pair
+        // connects in step. Captions on for a live call, from the first frame (the CC button's remembered choice).
+        DemoCalls.answerAfterMs = if (which.walkie) WALKIE_ANSWER_MS else LIVE_ANSWER_MS
+        if (!which.walkie) DemoCalls.captions(true)
+        return Stage(peerId, dmPeer = peerId, callScript(which), cued = true)
+    }
+
+    private suspend fun apply(
+        beat: Beat,
+        stage: Stage,
+    ) {
         when (beat) {
             is Beat.PeerJoin -> {
                 roster.update { it + Peer(writer.nodeId(beat.slot)) }
             }
 
             is Beat.Typing -> {
-                mesh.seedDemoTyping(nearby, writer.nodeId(beat.slot))
+                mesh.seedDemoTyping(stage.conversation, writer.nodeId(beat.slot))
             }
 
             is Beat.PeerMessage -> {
                 // Resolve the peer's typing bubble the instant their message lands.
-                mesh.clearDemoTyping(nearby, writer.nodeId(beat.msg.from))
-                writer.write(beat.msg, nearby, dmPeer = null, System.currentTimeMillis())
+                mesh.clearDemoTyping(stage.conversation, writer.nodeId(beat.msg.from))
+                writer.write(beat.msg, stage.conversation, stage.dmPeer, System.currentTimeMillis())
             }
+
+            is Beat.Dial -> {
+                // The call screen opens on its own for an outgoing call (CallController), as it does for the Call button.
+                val refusal = koin.get<CallManager>().start(checkNotNull(stage.dmPeer), beat.kind)
+                if (refusal != null) Log.e(TAG, "dial refused: $refusal")
+            }
+
+            is Beat.Ring -> {
+                // Off the beat's clock, as a dial is: the ring lands a hop later, as the caller's take sees it ring.
+                val peerId = checkNotNull(stage.dmPeer)
+                koin.get<CoroutineScope>().launch {
+                    DemoCalls.ring(peerId, walkie = beat.walkie)
+                    // The phone is in use, so the ring would be a heads-up; the take shows the call screen it opens.
+                    DemoCalls.await(CallPhase.Alerting)?.let { ringing ->
+                        val context = koin.get<Context>()
+                        context.startActivity(CallActivity.intent(context, ringing.id).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                    }
+                }
+            }
+
+            is Beat.Answer -> {
+                val calls = koin.get<CallManager>()
+                calls.state.value
+                    ?.takeIf { it.phase == CallPhase.Alerting }
+                    ?.let { calls.answer(it.id) }
+                    ?: Log.e(TAG, "nothing to answer")
+            }
+
+            is Beat.PeerSays -> {
+                // Seconds of audio: the beats after it keep their own clock.
+                koin.get<CoroutineScope>().launch { if (!DemoCalls.say(beat.line)) Log.e(TAG, "the peer could not say ${beat.line}") }
+            }
+
+            is Beat.Talk -> {
+                koin.get<CoroutineScope>().launch { if (!DemoCalls.talk(beat.line)) Log.e(TAG, "could not talk ${beat.line}") }
+            }
+
+            is Beat.HangUp -> {
+                if (beat.peer) DemoCalls.peerHangsUp() else koin.get<CallManager>().hangUp()
+            }
+
+            is Beat.Pause -> {}
 
             is Beat.Reaction -> {
                 writer.react(beat.targetId, beat.reactor, beat.emoji, System.currentTimeMillis())
@@ -120,7 +215,85 @@ class DemoDirector(
         }
     }
 
+    /** What a scene plays on: its conversation (the DM peer, for a DM), its beats, and whether it waits to be cued. */
+    private class Stage(
+        val conversation: String,
+        val dmPeer: String?,
+        val script: List<Beat>,
+        val cued: Boolean = false,
+    )
+
     private companion object {
+        const val TAG = "DemoDirector"
+
+        /** How long to wait for MainActivity's scene before defaulting to the trailer. */
+        const val SCENE_WAIT_MS = 3_000L
+
+        /** How long a cued scene holds for `…debug.DEMOGO` before playing on its own. */
+        const val GO_WAIT_MS = 120_000L
+
+        /** How long the callee lets a live call ring, and a walkie one: long enough to read the ring. */
+        const val LIVE_ANSWER_MS = 2_400L
+        const val WALKIE_ANSWER_MS = 2_000L
+
+        /**
+         * One phone of a call pair. Every beat is timed from the cue and the two takes of a pair share them, so the
+         * caller's phone and the callee's ring, connect and speak in step: the first beat dials (or is dialled), the
+         * callee answers [LIVE_ANSWER_MS] after its ring (the scripted peer on the caller's take, this phone on the
+         * callee's), and each line is said at the same instant on both — heard on the phone that is not saying it.
+         * Then the caller hangs up, and the call screen gives way to the thread with the call's line in it.
+         */
+        private fun callScript(scene: DemoScene): List<Beat> {
+            val out = scene.mirror == null
+            val open: Beat =
+                if (out) {
+                    Beat.Dial(
+                        if (scene.walkie) CallKind.WALKIE else CallKind.LIVE,
+                        delayMs = 800,
+                    )
+                } else {
+                    Beat.Ring(scene.walkie, delayMs = 800)
+                }
+            // The callee's answer, its ring's length after the ring lands (one hop after the first beat): by the scripted
+            // peer on the caller's take, where this phone only waits the same while, and by this phone on the callee's.
+            val answerAt = (if (scene.walkie) WALKIE_ANSWER_MS else LIVE_ANSWER_MS) + DemoCalls.HOP_MS
+            val ring = if (out) Beat.Pause(answerAt) else Beat.Answer(answerAt)
+
+            // A line said on this phone is the user's own voice (captioned nowhere, or a burst it records); one said on
+            // the other phone is heard here.
+            fun says(
+                line: String,
+                byCaller: Boolean,
+                delayMs: Long,
+            ): Beat =
+                when {
+                    byCaller == out && scene.walkie -> Beat.Talk(line, delayMs)
+                    byCaller == out -> Beat.Pause(delayMs)
+                    else -> Beat.PeerSays(line, delayMs)
+                }
+            val hangUp = Beat.HangUp(peer = !out, delayMs = if (scene.walkie) 7_000 else 8_000)
+            return if (scene.walkie) {
+                listOf(
+                    open,
+                    ring,
+                    says("walkie-caller", byCaller = true, delayMs = 1_600),
+                    says("walkie-callee", byCaller = false, delayMs = 5_200),
+                    hangUp,
+                    // The thread with the session's line in it, before the take ends.
+                    Beat.Pause(3_000),
+                )
+            } else {
+                listOf(
+                    open,
+                    ring,
+                    says("live-caller", byCaller = true, delayMs = 2_000),
+                    says("live-callee", byCaller = false, delayMs = 3_800),
+                    hangUp,
+                    Beat.Pause(3_000),
+                )
+            }
+        }
+
         // Ambient Nearby history so the room reads as "already happening" when the recording opens.
         private val AMBIENT =
             listOf(
@@ -267,4 +440,71 @@ private sealed interface Beat {
     data class LocalSend(
         override val delayMs: Long,
     ) : Beat
+
+    /** Nothing: the next beat's wait, kept in step with the other take of a pair. */
+    data class Pause(
+        override val delayMs: Long,
+    ) : Beat
+
+    /** This phone calls the scene's peer, as the chat's Call (or Mesh call) button does. */
+    data class Dial(
+        val kind: CallKind,
+        override val delayMs: Long,
+    ) : Beat
+
+    /** The scene's peer calls this phone, and the call screen comes up for the ring. */
+    data class Ring(
+        val walkie: Boolean,
+        override val delayMs: Long,
+    ) : Beat
+
+    /** This phone answers the call that is ringing, as the call screen's Answer does. */
+    data class Answer(
+        override val delayMs: Long,
+    ) : Beat
+
+    /** The peer says [line] (`demo/voice/<theme>/<line>.pcm`): into the captions, or as a walkie burst. */
+    data class PeerSays(
+        val line: String,
+        override val delayMs: Long,
+    ) : Beat
+
+    /** This phone's walkie burst says [line], the talk button held while it lasts. */
+    data class Talk(
+        val line: String,
+        override val delayMs: Long,
+    ) : Beat
+
+    /** The call ends: hung up here, or by the [peer]. */
+    data class HangUp(
+        val peer: Boolean,
+        override val delayMs: Long,
+    ) : Beat
+}
+
+/**
+ * What the director plays, named by the `demo_scene` launch extra: `nearby` (or none) for the trailer's Nearby room, and
+ * one phone each of the two call pairs — `call-out` / `call-in`, a live call with the verified contact, and
+ * `walkie-out` / `walkie-in`, a mesh call with Sam. Cold-start a call scene into `chat/<peer>` (see `record-trailer.sh`);
+ * an `-in` scene plays the [mirror] cast, so its phone is the peer's.
+ */
+enum class DemoScene(
+    val key: String,
+    /** The DM peer a call scene calls or is called by; null for the room. */
+    val peer: Slot? = null,
+    val walkie: Boolean = false,
+    /** The slot whose phone this take is, for a callee take; null when it is the local user's own. */
+    val mirror: Slot? = null,
+) {
+    NEARBY("nearby"),
+    CALL_OUT("call-out", peer = Slot.DANI),
+    CALL_IN("call-in", peer = Slot.DANI, mirror = Slot.DANI),
+    WALKIE_OUT("walkie-out", peer = Slot.SAM, walkie = true),
+    WALKIE_IN("walkie-in", peer = Slot.SAM, walkie = true, mirror = Slot.SAM),
+    ;
+
+    companion object {
+        /** The scene [key] names; the trailer for null or anything unknown, so a typo films the default rather than nothing. */
+        fun of(key: String?): DemoScene = entries.firstOrNull { it.key == key } ?: NEARBY
+    }
 }

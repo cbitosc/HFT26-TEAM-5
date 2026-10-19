@@ -109,6 +109,8 @@ Extras and reply fields: the action's bullet in `.agents/context/debug-bridge.md
 - **Fault injection and trials:** `NANFAIL`, `NANSTORM`, `NANREFUSE`, `NANICM`, `NANDIAL`, `NANINIT`,
   `NANMSG`, `MODEL`. Each has a negative control in its bullet; run it too.
 - **UI-test fixtures:** `FLAGMSG`, `MSGNOTIF`, `REQNOTIF`, `REVIEW`.
+- **Demo builds only** (`-PseedDemo` / `-PdemoDirector`): `DEMOCALL` (the scripted peer of the demo's calls),
+  `DEMOGO` (cue a director scene that holds for it).
 - **Media and packaging probes:** `WEBPPROBE`, `WEBPCONV`, `WEBPCHECK`, `SHAREAPK`.
 
 ## When it answers nothing

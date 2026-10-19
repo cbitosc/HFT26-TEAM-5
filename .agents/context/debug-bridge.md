@@ -419,6 +419,19 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   (a real fault → latched on the next launch); `kill` is the **negative control** — SIGKILL is recorded
   exactly as a force-stop is, so it must never latch no matter how often it fires.
 - `…debug.REACT` — `--es id <messageId> --es emoji <emoji>`. `…debug.HEAL` — nudge rescan/re-advertise.
+- `…debug.DEMOGO` — cues a **trailer-director scene** that is holding for it: a `-PdemoDirector=true` build launched
+  with `--es demo_scene call-out|call-in|walkie-out|walkie-in` seeds, opens the DM and waits, so the recording can
+  start on a settled screen (its clock then begins at the scene's first beat). A no-op in any other build or scene;
+  the maintainer overlay's `record-trailer.sh` fires it.
+- `…debug.DEMOCALL` — the **other end of a demo build's calls** (`-PseedDemo` / `-PdemoDirector` with calls wired):
+  the screen's own `CallManager` calls a scripted peer over loopback (`demo/DemoCalls`), and `…debug.CALL` drives
+  this phone's side as it does a real call. `--es op ring --es peer <id> [--ez walkie true] [--ez open true]` (the
+  peer dials this phone; `open` brings the call screen up without answering), `say --es line <name>` (the peer in the
+  connected call says `demo/voice/<theme>/<name>.pcm` — into a live call's captions or as a walkie burst; in the
+  background), `talk --es line <name>` (this phone's walkie burst says it), `mic --es line <name>` (the next burst a
+  finger holds says it), `hangup` (the peer hangs up), `answer --el ms <n>` (how long a rung peer waits before it
+  answers; negative lets it ring) and `captions --ez on true|false` (a live call's CC button). Errors in a non-demo
+  build.
 - `…debug.PAUSE --ei minutes 15|60` / `…debug.RESUME` — the notification's Pause / Resume by their store
   write alone (`SettingsStore.meshPausedUntil`, which `MeshService` follows), so it is the chat list banner's
   path and works with the service down (its next start comes up paused). `…debug.STATE` reports

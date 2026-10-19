@@ -91,6 +91,13 @@ data class DemoMsg(
      * one message, one attachment — and the seeder honours that order.
      */
     val link: DemoLink? = null,
+    /**
+     * A short video (ADR 2026-10.hmfe): the base name of a bundled clip under `demo/videos/<theme>/<video>.mp4`, already
+     * encoded the way the app's pipeline sends one (`.private/scripts/fetch-demo-videos.sh`). Its duration, size and
+     * poster are derived from the bytes at seed time, as a sender derives them, and ride on the row like a received
+     * description. Mutually exclusive with the other attachments; a missing asset leaves the line text-only.
+     */
+    val video: String? = null,
 )
 
 /** A peer contact. [verified] pins a (fake) key + out-of-band confirmation so the DM header shows the
@@ -159,6 +166,21 @@ data class DemoMeshPost(
     val mine: Boolean = false,
 )
 
+/**
+ * A call's line in a DM thread (`data/message/CallRecord`, §3.12): placed by the local user when [outgoing], over the
+ * mesh as a walkie session when [walkie], [minsAgo] when it began, connected for [seconds] (null: it never connected),
+ * or [missed]. Seeded only in a build that wires calls — a build without them never writes one.
+ */
+data class DemoCallRecord(
+    val id: String,
+    val peer: Slot,
+    val outgoing: Boolean,
+    val minsAgo: Long,
+    val seconds: Long? = null,
+    val walkie: Boolean = false,
+    val missed: Boolean = false,
+)
+
 /** A group thread: its name, its member set (which derives the group id), and its history. */
 data class DemoGroup(
     val name: String,
@@ -193,7 +215,46 @@ data class DemoScenario(
      * only be photographed in its "nothing has been said yet" state.
      */
     val meshRoom: List<DemoMeshPost> = emptyList(),
+    /** The calls the DM threads remember: one live call and one mesh call, so a thread shows both lines. */
+    val calls: List<DemoCallRecord> = emptyList(),
 )
+
+/**
+ * This scenario as [slot]'s phone sees it: their profile is the local one and ours is theirs, in every thread — the
+ * second phone of a two-phone film (the trailer's callee takes). Only the cast swaps; the words, the photos and the
+ * times stay. An @-mention of the local user is dropped rather than moved, since the text still names the original.
+ */
+fun DemoScenario.mirrored(slot: Slot): DemoScenario {
+    fun swap(s: Slot): Slot =
+        when (s) {
+            Slot.ME -> slot
+            slot -> Slot.ME
+            else -> s
+        }
+
+    fun DemoMsg.mirror(): DemoMsg =
+        copy(
+            from = swap(from),
+            reactions = reactions.map { it.copy(reactor = swap(it.reactor)) },
+            deliveredTo = deliveredTo.map(::swap),
+            mentionsMe = false,
+        )
+
+    fun DemoGroup.mirror(): DemoGroup = copy(members = members.map(::swap), messages = messages.map { it.mirror() })
+
+    val them = peers.first { it.slot == slot }
+    return copy(
+        meName = them.name,
+        meStatus = them.status,
+        peers = peers.map { if (it.slot == slot) it.copy(name = meName, status = meStatus) else it },
+        nearby = nearby.map { it.mirror() },
+        dms = dms.map { thread -> thread.copy(messages = thread.messages.map { it.mirror() }) },
+        group = group.mirror(),
+        requests = requests.map { thread -> thread.copy(messages = thread.messages.map { it.mirror() }) },
+        requestGroup = requestGroup?.mirror(),
+        calls = calls.map { if (it.peer == slot) it.copy(outgoing = !it.outgoing) else it },
+    )
+}
 
 /** Returns the scenario for [theme] (the `-PdemoTheme` build value), falling back to hiking. */
 fun demoScenarioFor(theme: String): DemoScenario =
@@ -323,6 +384,10 @@ private val HIKING_SCENARIO =
                         listOf(
                             DemoMsg("demo-dm-sam-1", Slot.ME, "Great hiking with you today!", 30),
                             DemoMsg("demo-dm-sam-2", Slot.SAM, "Likewise! Same crew next time?", 9),
+                            // A short video, tall, as a phone films one: the bubble, its poster and its length. Ahead of
+                            // the bottle line, which the seeded suites read and a tall bubble below it would push off a
+                            // small screen.
+                            DemoMsg("demo-dm-sam-3v", Slot.SAM, "The falls on the way down 🌊", 8, video = "stream"),
                             DemoMsg("demo-dm-sam-3", Slot.SAM, "Oh and I found your water bottle 💧", 7),
                             // The one seeded voice note. It lives in this DM because `chat/samr1v00` is the
                             // route the accessibility audit and the seeded UI runs already open, so the
@@ -367,6 +432,8 @@ private val HIKING_SCENARIO =
                         // A shared position: the group is where "come find us" gets said, and the card it draws is
                         // what the seeded UI, UIAutomator and accessibility runs audit for that bubble.
                         DemoMsg("demo-group-7", Slot.SAM, "Parked at the upper lot, come find us\ngeo:37.876710,-122.245400;u=9", 200),
+                        // The group's newest line is a short video, wide: the thread the listing's group shot shows.
+                        DemoMsg("demo-group-8", Slot.PRIYA, "Falls are roaring after the storm 🌊", 120, video = "falls"),
                     ),
             ),
         requests =
@@ -396,6 +463,13 @@ private val HIKING_SCENARIO =
                     ),
             ),
         blocked = listOf(Slot.MARLO),
+        calls =
+            listOf(
+                // After "Deal.": she rang back from the car. Ours, live, four minutes.
+                DemoCallRecord("demo-call-dani", Slot.DANI, outgoing = true, minsAgo = 100, seconds = 252),
+                // Sam called over the mesh from the col, out of every network's reach, before his messages.
+                DemoCallRecord("demo-call-sam", Slot.SAM, outgoing = false, minsAgo = 14, seconds = 65, walkie = true),
+            ),
         meshRoom =
             listOf(
                 // A stranger's radio, named by the board's NodeDB, three hops out: the ordinary case, and the
@@ -569,6 +643,7 @@ private val FESTIVAL_SCENARIO =
                         listOf(
                             DemoMsg("fest-dm-sam-1", Slot.ME, "Epic set tonight! 🔥", 30),
                             DemoMsg("fest-dm-sam-2", Slot.SAM, "Right?? Same crew at the dome tomorrow?", 9),
+                            DemoMsg("fest-dm-sam-3v", Slot.SAM, "Burn barrel's lit back at camp 🔥", 8, video = "barrel"),
                             DemoMsg("fest-dm-sam-3", Slot.SAM, "Oh and I found your goggles 🥽", 7),
                             // Voice-note parity with the hiking theme: the same route (`chat/samr1v00`) that
                             // the a11y audit and the store capture open shows the voice bubble in both themes.
@@ -603,6 +678,7 @@ private val FESTIVAL_SCENARIO =
                         ),
                         DemoMsg("fest-group-5", Slot.PRIYA, "You're a legend 🔆", 288),
                         DemoMsg("fest-group-6", Slot.THEO, "", 240, voiceSeconds = 12),
+                        DemoMsg("fest-group-7", Slot.PRIYA, "The light forest is going off tonight ✨", 120, video = "lights"),
                     ),
             ),
         requests =
@@ -632,6 +708,11 @@ private val FESTIVAL_SCENARIO =
                     ),
             ),
         blocked = listOf(Slot.MARLO),
+        calls =
+            listOf(
+                DemoCallRecord("fest-call-luna", Slot.DANI, outgoing = true, minsAgo = 100, seconds = 252),
+                DemoCallRecord("fest-call-kai", Slot.SAM, outgoing = false, minsAgo = 14, seconds = 65, walkie = true),
+            ),
         meshRoom =
             listOf(
                 DemoMeshPost(

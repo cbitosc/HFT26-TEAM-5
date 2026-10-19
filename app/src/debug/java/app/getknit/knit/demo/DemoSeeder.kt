@@ -66,6 +66,7 @@ class DemoSeeder(
         writer.seedDms(now)
         val groupId = writer.seedGroup(scenario.group, now)
         writer.seedRequests(now)
+        writer.seedCallRecords(now)
         writer.seedBlocked()
         writer.seedYourMesh(now)
         // The paired board's own channel, mirrored locally. [DemoPlanes] binds the board below, and the room's
@@ -79,7 +80,7 @@ class DemoSeeder(
 
         // The two planes an emulator cannot run, reported rather than dialled. Covered scopes are the
         // accepted threads only: a stranger you have not answered has no scope in the real plane either.
-        DemoPlanes.arm(koin, coveredLabels = scenario.dms.map { nodeIdOf(it.peer) } + groupId)
+        DemoPlanes.arm(koin, coveredLabels = scenario.dms.map { idOf(it.peer) } + groupId)
         seedCrashReport()
         seedLatchedModel()
     }
@@ -123,23 +124,23 @@ class DemoSeeder(
         )
     }
 
-    /** The node id behind a scenario [Slot] — the seeder's own copy of [DemoWriter.nodeId] for ME-free slots. */
-    private fun nodeIdOf(slot: Slot): String =
-        when (slot) {
-            Slot.SAM -> SAM
-            Slot.DANI -> DANI
-            Slot.THEO -> THEO
-            Slot.PRIYA -> PRIYA
-            Slot.JONAS -> JONAS
-            Slot.LENA -> LENA
-            Slot.JONAS_TWO -> JONAS_TWO
-            Slot.RIVER -> RIVER
-            Slot.NOAH -> NOAH
-            Slot.MARLO -> MARLO
-            Slot.ME -> error("ME has no fixed id — it is this device's runtime node id")
-        }
-
     companion object {
+        /** The node id behind a scenario [Slot] — [DemoWriter.nodeId] for every slot but [Slot.ME], which has none fixed. */
+        fun idOf(slot: Slot): String =
+            when (slot) {
+                Slot.SAM -> SAM
+                Slot.DANI -> DANI
+                Slot.THEO -> THEO
+                Slot.PRIYA -> PRIYA
+                Slot.JONAS -> JONAS
+                Slot.LENA -> LENA
+                Slot.JONAS_TWO -> JONAS_TWO
+                Slot.RIVER -> RIVER
+                Slot.NOAH -> NOAH
+                Slot.MARLO -> MARLO
+                Slot.ME -> error("ME has no fixed id — it is this device's runtime node id")
+            }
+
         /**
          * Completes when this process's [seed] returns, whether it succeeded or not. The seed runs detached on
          * the IO dispatcher, and it writes the peers well before the requests or the room's newest posts, so a

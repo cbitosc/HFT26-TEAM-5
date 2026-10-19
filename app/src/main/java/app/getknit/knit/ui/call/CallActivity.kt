@@ -752,7 +752,11 @@ private fun Header(
 }
 
 @Composable
-private fun StatsToggle(stats: Boolean, onStats: (Boolean) -> Unit, walkie: Boolean) {
+private fun StatsToggle(
+    stats: Boolean,
+    onStats: (Boolean) -> Unit,
+    walkie: Boolean,
+) {
     IconToggleButton(checked = stats, onCheckedChange = onStats) {
         val description =
             when {

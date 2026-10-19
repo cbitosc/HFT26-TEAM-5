@@ -19,6 +19,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import app.getknit.knit.di.WithCallBar
+import app.getknit.knit.di.demoSceneRequested
 import app.getknit.knit.notifications.ConversationShortcutSync
 import app.getknit.knit.ui.KnitApp
 import app.getknit.knit.ui.RouteInbox
@@ -84,6 +85,9 @@ class MainActivity : ComponentActivity() {
             } else {
                 null
             }
+        // The trailer director's scene for this launch (`--es demo_scene call-out`); a no-op seam in every build but
+        // the director's, which is the only one that reads the extra.
+        if (BuildConfig.DEMO_DIRECTOR) demoSceneRequested(intent?.getStringExtra(EXTRA_DEMO_SCENE))
         storageGate.open()
         retryStorageOnResume()
         setContent {
@@ -278,6 +282,7 @@ class MainActivity : ComponentActivity() {
         /** Deep-link route extra set by [app.getknit.knit.notifications.MessageNotifier] on a notification tap. */
         const val EXTRA_ROUTE = "app.getknit.knit.NOTIF_ROUTE"
         private const val EXTRA_DEMO_ROUTE = "demo_route"
+        private const val EXTRA_DEMO_SCENE = "demo_scene"
 
         private const val TAG = "MainActivity"
 
