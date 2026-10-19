@@ -471,6 +471,8 @@ internal fun CallScreen(
 ) {
     val phase = state?.phase
     var showStats by rememberSaveable { mutableStateOf(statsShown) }
+    // A walkie's transcript is the CC button's for this call alone: shown until it is tapped off.
+    var showTranscript by rememberSaveable { mutableStateOf(true) }
     val walkieUp = state?.walkie == true && phase == CallPhase.Connected
     // A walkie session's card in place of the media's: it has no media to read.
     val diagnostics: (@Composable (Modifier) -> Unit)? =
@@ -479,9 +481,9 @@ internal fun CallScreen(
             walkieUp -> walkieStats?.let { s -> { m -> WalkieDiagnostics(s, m) } }
             else -> stats?.let { s -> { m -> CallDiagnostics(s, m, capture) } }
         }
-    // With the diagnostics off, a walkie session shows what the peer said in the card's place (C-3.11-9), and a live
-    // call with its CC button on shows its captions there (C-3.7-5).
-    val transcribed = transcript?.takeIf { walkieUp && !showStats }
+    // With the diagnostics off and its CC button on, a walkie session shows what the peer said in the card's place
+    // (C-3.11-9), and a live call its captions (C-3.7-5).
+    val transcribed = transcript?.takeIf { walkieUp && showTranscript && !showStats }
     val captioned = captions?.takeIf { captionsOn && state?.walkie != true && phase in MEDIA_UP && diagnostics == null }
     val card = diagnostics != null || transcribed != null || captioned != null
     Surface(modifier = modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surface) {
@@ -495,7 +497,17 @@ internal fun CallScreen(
                 Header(
                     stats = if (phase in MEDIA_UP) showStats else null,
                     onStats = { showStats = it },
-                    transcript = transcript != null && walkieUp,
+                    walkie = walkieUp,
+                    captionsOn =
+                        when {
+                            walkieUp -> showTranscript.takeIf { transcript != null }
+                            else -> captionsOn.takeIf { captions != null && phase in MEDIA_UP && state?.walkie != true }
+                        },
+                    // Turning captions on puts them in the card's place, so the diagnostics give way.
+                    onCaptions = { on ->
+                        if (on) showStats = false
+                        if (walkieUp) showTranscript = on else onCaptions(on)
+                    },
                 )
                 if (inline) {
                     Spacer(Modifier.height(8.dp))
@@ -539,8 +551,6 @@ internal fun CallScreen(
                         onRoute,
                         onCallBack,
                         onClose,
-                        captionsOn = captionsOn.takeIf { captions != null },
-                        onCaptions = onCaptions,
                     )
                 }
             }
@@ -706,33 +716,52 @@ private fun InlineFace(
 }
 
 /**
- * The experimental label, with the diagnostics card's toggle at its end while there is a card to show ([stats]); with a
- * [transcript] behind it, the toggle's other side shows that.
+ * The experimental label, with the diagnostics card's toggle at its end while there is a card to show ([stats]). The CC
+ * button ([captionsOn]: a live call's captions, C-3.7-5, or a [walkie]'s transcript, C-3.11-9) sits just before it, so
+ * the controls below keep their three buttons.
  */
 @Composable
 private fun Header(
     stats: Boolean?,
     onStats: (Boolean) -> Unit,
-    transcript: Boolean = false,
+    walkie: Boolean = false,
+    captionsOn: Boolean? = null,
+    onCaptions: (Boolean) -> Unit = {},
 ) {
     Box(Modifier.fillMaxWidth().heightIn(min = 48.dp), contentAlignment = Alignment.Center) {
+        // Two buttons at the end would run into the centred label on a narrow phone: keep it clear of both sides.
         Text(
             "Experimental · internal testing",
+            modifier = if (captionsOn != null) Modifier.padding(horizontal = 96.dp) else Modifier,
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = if (captionsOn != null) TextAlign.Center else null,
         )
-        if (stats != null) {
-            IconToggleButton(checked = stats, onCheckedChange = onStats, modifier = Modifier.align(Alignment.CenterEnd)) {
-                val description =
-                    when {
-                        transcript && stats -> "Show transcript"
-                        transcript -> "Show walkie diagnostics"
-                        stats -> "Hide call diagnostics"
-                        else -> "Show call diagnostics"
-                    }
-                Icon(Icons.Outlined.Insights, contentDescription = description)
+        Row(Modifier.align(Alignment.CenterEnd)) {
+            if (captionsOn != null) {
+                IconToggleButton(checked = captionsOn, onCheckedChange = onCaptions) {
+                    Icon(
+                        if (captionsOn) Icons.Filled.ClosedCaption else Icons.Outlined.ClosedCaptionDisabled,
+                        contentDescription = if (captionsOn) "Hide captions" else "Show captions",
+                    )
+                }
             }
+            if (stats != null) StatsToggle(stats, onStats, walkie)
         }
+    }
+}
+
+@Composable
+private fun StatsToggle(stats: Boolean, onStats: (Boolean) -> Unit, walkie: Boolean) {
+    IconToggleButton(checked = stats, onCheckedChange = onStats) {
+        val description =
+            when {
+                walkie && stats -> "Hide walkie diagnostics"
+                walkie -> "Show walkie diagnostics"
+                stats -> "Hide call diagnostics"
+                else -> "Show call diagnostics"
+            }
+        Icon(Icons.Outlined.Insights, contentDescription = description)
     }
 }
 
@@ -785,9 +814,6 @@ private fun Controls(
     onRoute: (CallAudioRoute) -> Unit,
     onCallBack: () -> Unit,
     onClose: () -> Unit,
-    // The CC button's state, or null for no button (C-3.7-5).
-    captionsOn: Boolean? = null,
-    onCaptions: (Boolean) -> Unit = {},
 ) {
     // A fixed band, so the face and name above don't jump when the controls change or go.
     Box(Modifier.fillMaxWidth().heightIn(min = 112.dp), contentAlignment = Alignment.BottomCenter) {
@@ -803,24 +829,6 @@ private fun Controls(
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
                 CallAction("Decline", Icons.Filled.CallEnd, HangUpRed, onDecline)
                 CallAction("Answer", Icons.Filled.Call, AnswerGreen, onAnswer)
-            }
-        } else if (captionsOn != null) {
-            // Three toggles, then the hang-up at the end of the row: one band as high as two buttons', so the caller's
-            // card above keeps its room.
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-                verticalAlignment = Alignment.Bottom,
-            ) {
-                CallToggle("Mute", if (state.muted) Icons.Filled.MicOff else Icons.Filled.Mic, state.muted, onMute)
-                CallToggle(
-                    "Captions",
-                    if (captionsOn) Icons.Filled.ClosedCaption else Icons.Outlined.ClosedCaptionDisabled,
-                    captionsOn,
-                    onCaptions,
-                )
-                AudioRouteButton(routing, onRoute)
-                CallAction("End", Icons.Filled.CallEnd, HangUpRed, onHangUp)
             }
         } else {
             Row(
