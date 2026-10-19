@@ -2868,6 +2868,22 @@ class MeshManagerTest {
      */
     private fun Rig.askedHashes(): Set<String> = blobAsks().mapTo(HashSet()) { it.second.hash }
 
+    /**
+     * Counts the re-arms that reached their wants, through [MeshManager.beforeRewantApplies]. Installed before `start()`,
+     * so [awaitStartupReArms] can tell when both start-up passes have run.
+     */
+    private fun Rig.countReArms(): AtomicInteger = AtomicInteger().also { n -> manager.beforeRewantApplies = { n.incrementAndGet() } }
+
+    /**
+     * Returns once both start-up re-arms (the limit collector's first value and the newcomer's pass) have applied their
+     * wants, so a "held" read sees every pass and not only the first. Two have entered the lock; the re-offer's own
+     * re-arm queues behind the second and runs only after its wants applied — and is one more pass the hold must survive.
+     */
+    private suspend fun Rig.awaitStartupReArms(passes: AtomicInteger) {
+        await(2) { passes.get() }
+        manager.reofferToNeighbors()
+    }
+
     @Test
     fun theDatabaseReArmHoldsAnAttachmentOverTheLimitToWifiAwareAndChoosingNeverFetchesItAtOnce() =
         runTest(UnconfinedTestDispatcher()) {
@@ -2893,8 +2909,10 @@ class MeshManagerTest {
             rig.stubProfileState(MutableStateFlow(0L)) // start() reads the profile settings too
             coEvery { rig.groups.observeGroups() } returns flowOf(emptyList()) // the startup storage sweep's read
 
+            val passes = rig.countReArms()
             rig.manager.start()
             rig.await(3) { rig.askedHashes().size }
+            rig.awaitStartupReArms(passes)
             assertEquals(
                 "the tapped, the small and the shared one asked plain; the large one not at all",
                 setOf("tapped", "small", "shared"),
@@ -2988,8 +3006,10 @@ class MeshManagerTest {
             rig.stubProfileState(MutableStateFlow(0L))
             coEvery { rig.groups.observeGroups() } returns flowOf(emptyList())
 
+            val passes = rig.countReArms()
             rig.manager.start()
             rig.await(1) { rig.askedHashes().size }
+            rig.awaitStartupReArms(passes)
             assertEquals(
                 "the carrier pull stays plain; the unopened DM to us is held",
                 setOf("carried"),
@@ -3020,8 +3040,10 @@ class MeshManagerTest {
             rig.stubProfileState(MutableStateFlow(0L))
             coEvery { rig.groups.observeGroups() } returns flowOf(emptyList())
 
+            val passes = rig.countReArms()
             rig.manager.start()
             rig.await(2) { rig.askedHashes().size }
+            rig.awaitStartupReArms(passes)
             assertEquals(
                 "the large room post is held to Wi-Fi Aware; the small and the lifted one asked plain",
                 setOf("small-clip", "lifted"),
@@ -3058,8 +3080,10 @@ class MeshManagerTest {
             rig.stubProfileState(MutableStateFlow(0L))
             coEvery { rig.groups.observeGroups() } returns flowOf(emptyList())
 
+            val passes = rig.countReArms()
             rig.manager.start()
             rig.await(1) { rig.askedHashes().size }
+            rig.awaitStartupReArms(passes)
             assertEquals("only the small post is asked for", setOf("small-clip"), rig.blobAsks().mapTo(HashSet()) { it.second.hash })
 
             rig.bluetoothDownloadLimit.value = null // "Never ask": nothing is held, so both are carrier pulls again
