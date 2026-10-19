@@ -232,7 +232,7 @@ class KeyedVectorTest {
         assertEquals(link("fileHeader").getValue("record").jsonPrimitive.content, fileHeaderRecord().toHex())
         assertEquals(link("fileHeaderResumed").getValue("record").jsonPrimitive.content, fileHeaderResumedRecord().toHex())
 
-        val parsedHello = Protocol.parse(helloPayload().decodeToString())
+        val parsedHello = checkNotNull(Protocol.parse(helloPayload().decodeToString()))
         assertEquals(alice.nodeId, parsedHello.nodeId)
         assertEquals(CAPABILITIES, parsedHello.capabilities)
         assertEquals(digestIds, LinkFraming.decodeDigest(LinkFraming.encodeDigest(DigestWire(digestIds)))?.ids)

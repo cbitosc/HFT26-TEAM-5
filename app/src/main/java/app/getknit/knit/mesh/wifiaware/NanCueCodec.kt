@@ -1,5 +1,7 @@
 package app.getknit.knit.mesh.wifiaware
 
+import app.getknit.knit.identity.NodeId
+
 /**
  * Pure codec for the Wi-Fi Aware **coordination plane** text payloads: a peer's `nodeId|version` **cue** and
  * the trailing `|d<version>` **digest segment** of its publish SSI. Both are folded over the [StoreDigest]
@@ -27,13 +29,19 @@ object NanCueCodec {
         version: Long,
     ): ByteArray = "$localNodeId$CUE_SEP$version".encodeToByteArray()
 
-    /** Parse a peer's cue payload, or null if it isn't a well-formed `nodeId|version` UTF-8 string. */
+    /**
+     * Parse a peer's cue payload, or null if it isn't a well-formed `nodeId|version` UTF-8 string or its nodeId
+     * is not canonical ([NodeId.toBytesOrNull], #199: SQLite drops a leading U+FEFF from a UTF-16 bind, so a
+     * marked twin of a real id would be noted reachable apart from it yet share its `peers` row).
+     */
     fun parseCue(bytes: ByteArray): Cue? {
         val s = runCatching { bytes.decodeToString() }.getOrNull() ?: return null
         val i = s.lastIndexOf(CUE_SEP)
         if (i <= 0) return null
         val version = s.substring(i + 1).toLongOrNull() ?: return null
-        return Cue(s.substring(0, i), version)
+        val nodeId = s.substring(0, i)
+        if (NodeId.toBytesOrNull(nodeId) == null) return null
+        return Cue(nodeId, version)
     }
 
     /** Encode the trailing digest segment appended to a publish SSI: `|d<version>`. */

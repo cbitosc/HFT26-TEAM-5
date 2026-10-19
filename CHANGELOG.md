@@ -87,6 +87,8 @@ document:
   of it first. Knit now turns the fake away, so the real message arrives.
 - If you read more than 128 of someone's Nearby room posts before you next met, their phone showed your double
   tick on only 128 of them. It now shows on all of them.
+- A modified copy of Knit nearby could change the photo your phone shows for one of your contacts, even while
+  that contact was connected. Knit now turns away a phone that names itself with an altered copy of their ID.
 
 ## [2.9.0](https://github.com/getknit/knit/releases/tag/v2.9.0) — 2026-10-12T23:11:38Z
 

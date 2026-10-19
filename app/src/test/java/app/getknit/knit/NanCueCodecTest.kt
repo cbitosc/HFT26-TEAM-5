@@ -1,5 +1,6 @@
 package app.getknit.knit
 
+import app.getknit.knit.identity.NodeId
 import app.getknit.knit.mesh.wifiaware.NanCueCodec
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -9,15 +10,15 @@ import org.junit.Test
 class NanCueCodecTest {
     @Test
     fun encodeParseCueRoundTrips() {
-        val cue = NanCueCodec.parseCue(NanCueCodec.encodeCue("node8id0", 42L))
-        assertEquals(NanCueCodec.Cue("node8id0", 42L), cue)
+        val cue = NanCueCodec.parseCue(NanCueCodec.encodeCue(ID, 42L))
+        assertEquals(NanCueCodec.Cue(ID, 42L), cue)
     }
 
     @Test
-    fun parseCueSplitsOnTheLastSeparator() {
-        // Real nodeIds never contain '|', but the split is defined as lastIndexOf so a stray separator in the
-        // id half can't steal the version.
-        assertEquals(NanCueCodec.Cue("a|b", 42L), NanCueCodec.parseCue("a|b|42".encodeToByteArray()))
+    fun aCueWithASecondSeparatorNamesNoPeer() {
+        // A canonical node id never holds a separator, and a version that does is not a number (#199).
+        assertNull(NanCueCodec.parseCue("a|$ID|42".encodeToByteArray()))
+        assertNull(NanCueCodec.parseCue("$ID|a|42".encodeToByteArray()))
     }
 
     @Test
@@ -25,8 +26,17 @@ class NanCueCodecTest {
         assertNull("empty bytes", NanCueCodec.parseCue(ByteArray(0)))
         assertNull("no separator", NanCueCodec.parseCue("nosep".encodeToByteArray()))
         assertNull("separator at 0 (empty nodeId)", NanCueCodec.parseCue("|42".encodeToByteArray()))
-        assertNull("non-numeric version", NanCueCodec.parseCue("node|abc".encodeToByteArray()))
+        assertNull("non-numeric version", NanCueCodec.parseCue("$ID|abc".encodeToByteArray()))
         assertNull("malformed bytes decode to a separatorless string", NanCueCodec.parseCue(byteArrayOf(0xFF.toByte(), 0xFE.toByte())))
+    }
+
+    @Test
+    fun aCueWhoseNodeIdIsNotCanonicalNamesNoPeer() {
+        // #199: SQLite drops a leading U+FEFF from a UTF-16 bind, so a marked twin noted reachable apart from the
+        // real id would still share its peers row.
+        assertNull("BOM-led", NanCueCodec.parseCue("\uFEFF$ID|42".encodeToByteArray()))
+        assertNull("uppercase", NanCueCodec.parseCue("${ID.uppercase()}|42".encodeToByteArray()))
+        assertNull("legacy 8-char id", NanCueCodec.parseCue("node8id0|42".encodeToByteArray()))
     }
 
     @Test
@@ -53,5 +63,9 @@ class NanCueCodecTest {
     fun parseSsiDigestRejectsMissingOrNonNumericSegment() {
         assertNull("no |d segment (older build)", NanCueCodec.parseSsiDigest("knit|3|node8id0"))
         assertNull("non-numeric digest", NanCueCodec.parseSsiDigest("knit|dabc"))
+    }
+
+    private companion object {
+        val ID = NodeId.derive("nan-cue-test")
     }
 }

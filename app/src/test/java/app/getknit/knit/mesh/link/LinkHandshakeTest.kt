@@ -1,5 +1,6 @@
 package app.getknit.knit.mesh.link
 
+import app.getknit.knit.identity.NodeId
 import app.getknit.knit.mesh.protocol.Protocol
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -20,20 +21,20 @@ class LinkHandshakeTest {
 
     @Test
     fun theResponderLearnsTheInitiatorsIdentityFromItsHello() {
-        val peer = LinkHandshake.readHello(ByteArrayInputStream(helloFrom("a1b2c3")))
+        val peer = LinkHandshake.readHello(ByteArrayInputStream(helloFrom(A)))
 
         assertNotNull(peer)
-        assertEquals("a1b2c3", peer!!.nodeId)
+        assertEquals(A, peer!!.nodeId)
         assertEquals(Protocol.VERSION, peer.protoVersion)
         assertEquals(Protocol.LOCAL_CAPABILITIES, peer.capabilities)
     }
 
     @Test
     fun theHelloIsOneHelloRecordCarryingTheAdvert() {
-        val record = LinkFraming.read(ByteArrayInputStream(helloFrom("a1b2c3")))
+        val record = LinkFraming.read(ByteArrayInputStream(helloFrom(A)))
 
         assertEquals(LinkFraming.Type.HELLO, record?.type)
-        assertArrayEquals(Protocol.advertise("a1b2c3").encodeToByteArray(), record!!.payload)
+        assertArrayEquals(Protocol.advertise(A).encodeToByteArray(), record!!.payload)
     }
 
     @Test
@@ -47,23 +48,32 @@ class LinkHandshakeTest {
                 }
             }
 
-        LinkHandshake.writeHello(out, "a1b2c3")
+        LinkHandshake.writeHello(out, A)
 
         assertTrue(flushed)
     }
 
     @Test
     fun theInitiatorConfirmsThePeerItReachedFromTheReply() {
-        val reply = ByteArrayOutputStream().also { LinkHandshake.replyHello(it, "d4e5f6") }.toByteArray()
+        val reply = ByteArrayOutputStream().also { LinkHandshake.replyHello(it, B) }.toByteArray()
 
-        assertEquals("d4e5f6", LinkHandshake.readHello(ByteArrayInputStream(reply))?.nodeId)
+        assertEquals(B, LinkHandshake.readHello(ByteArrayInputStream(reply))?.nodeId)
     }
 
     @Test
     fun aFirstRecordThatIsNotAHelloIsRejected() {
-        val frame = LinkFraming.encode(LinkFraming.Type.FRAME, Protocol.advertise("a1b2c3").encodeToByteArray())
+        val frame = LinkFraming.encode(LinkFraming.Type.FRAME, Protocol.advertise(A).encodeToByteArray())
 
         assertNull(LinkHandshake.readHello(ByteArrayInputStream(frame)))
+    }
+
+    @Test
+    fun aHelloNamingANodeIdThatIsNotCanonicalIsRejected() {
+        // #199: SQLite drops a leading U+FEFF from a UTF-16 bind, so a BOM-led twin would pass the transports'
+        // duplicate-link checks and then read and write the real id's peers row.
+        val hello = LinkFraming.encode(LinkFraming.Type.HELLO, Protocol.advertise("\uFEFF$A").encodeToByteArray())
+
+        assertNull(LinkHandshake.readHello(ByteArrayInputStream(hello)))
     }
 
     @Test
@@ -73,7 +83,7 @@ class LinkHandshakeTest {
 
     @Test
     fun aTruncatedHelloIsRejectedRatherThanThrown() {
-        val hello = helloFrom("a1b2c3")
+        val hello = helloFrom(A)
 
         assertNull(LinkHandshake.readHello(ByteArrayInputStream(hello.copyOf(hello.size - 1))))
     }
@@ -89,11 +99,16 @@ class LinkHandshakeTest {
     fun readingTheHelloLeavesTheRecordsBehindItForTheLink() {
         // The caller keeps reading the same stream for the link's frames, so the handshake must take one record only.
         val frame = byteArrayOf(9, 8, 7)
-        val stream = ByteArrayInputStream(helloFrom("a1b2c3") + LinkFraming.encode(LinkFraming.Type.FRAME, frame))
+        val stream = ByteArrayInputStream(helloFrom(A) + LinkFraming.encode(LinkFraming.Type.FRAME, frame))
 
-        assertEquals("a1b2c3", LinkHandshake.readHello(stream)?.nodeId)
+        assertEquals(A, LinkHandshake.readHello(stream)?.nodeId)
         val next = LinkFraming.read(stream)
         assertEquals(LinkFraming.Type.FRAME, next?.type)
         assertArrayEquals(frame, next!!.payload)
+    }
+
+    private companion object {
+        val A = NodeId.derive("handshake-a")
+        val B = NodeId.derive("handshake-b")
     }
 }

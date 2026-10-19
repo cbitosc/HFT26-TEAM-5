@@ -1,7 +1,9 @@
 package app.getknit.knit
 
+import app.getknit.knit.identity.NodeId
 import app.getknit.knit.mesh.protocol.Protocol
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -10,7 +12,7 @@ class ProtocolTest {
     fun advertiseParseRoundTrips() {
         // A real 26-char base32 nodeId (contains no '|', so the split-on-'|' round-trips cleanly).
         val id = "ffbbh6thbepahqxsv2gqog45m4"
-        val parsed = Protocol.parse(Protocol.advertise(id))
+        val parsed = checkNotNull(Protocol.parse(Protocol.advertise(id)))
         assertEquals(id, parsed.nodeId)
         assertEquals(Protocol.VERSION, parsed.protoVersion)
         assertEquals(Protocol.LOCAL_CAPABILITIES, parsed.capabilities)
@@ -19,16 +21,16 @@ class ProtocolTest {
     @Test
     fun bareLegacyNodeIdParsesToUnknownVersion() {
         // A peer that advertises just its nodeId (a pre-protocol build) is "unknown" — version 0, no caps.
-        val parsed = Protocol.parse("abcd1234")
-        assertEquals("abcd1234", parsed.nodeId)
+        val parsed = checkNotNull(Protocol.parse(ID))
+        assertEquals(ID, parsed.nodeId)
         assertEquals(0, parsed.protoVersion)
         assertEquals(0L, parsed.capabilities)
     }
 
     @Test
     fun parseNeverThrowsOnGarbageSegments() {
-        val parsed = Protocol.parse("abcd1234|notanint|zzz")
-        assertEquals("abcd1234", parsed.nodeId)
+        val parsed = checkNotNull(Protocol.parse("$ID|notanint|zzz"))
+        assertEquals(ID, parsed.nodeId)
         assertEquals(0, parsed.protoVersion)
         assertEquals(0L, parsed.capabilities)
     }
@@ -68,7 +70,10 @@ class ProtocolTest {
         assertEquals(0x1000L, Protocol.CAP_DOORBELL)
         assertEquals(Protocol.CAP_DIRECT_TRANSFER shl 1, Protocol.CAP_DOORBELL)
         assertEquals(0L, Protocol.LOCAL_CAPABILITIES and Protocol.CAP_DOORBELL)
-        assertEquals(Protocol.CAP_DOORBELL, Protocol.parse("ffbbh6thbepahqxsv2gqog45m4|1|1009").capabilities and Protocol.CAP_DOORBELL)
+        assertEquals(
+            Protocol.CAP_DOORBELL,
+            checkNotNull(Protocol.parse("ffbbh6thbepahqxsv2gqog45m4|1|1009")).capabilities and Protocol.CAP_DOORBELL,
+        )
     }
 
     @Test
@@ -78,7 +83,7 @@ class ProtocolTest {
         assertEquals(0x2000L, Protocol.CAP_BLOB_HAVE)
         assertEquals(Protocol.CAP_DOORBELL shl 1, Protocol.CAP_BLOB_HAVE)
         assertEquals(Protocol.CAP_BLOB_HAVE, Protocol.LOCAL_CAPABILITIES and Protocol.CAP_BLOB_HAVE)
-        val advertised = Protocol.parse(Protocol.advertise("ffbbh6thbepahqxsv2gqog45m4")).capabilities
+        val advertised = checkNotNull(Protocol.parse(Protocol.advertise("ffbbh6thbepahqxsv2gqog45m4"))).capabilities
         assertEquals(Protocol.CAP_BLOB_HAVE, advertised and Protocol.CAP_BLOB_HAVE)
     }
 
@@ -94,6 +99,31 @@ class ProtocolTest {
     @Test
     fun nodeIdIsAlwaysTheFirstSegment() {
         // Robust to any future suffix appended after the capabilities field.
-        assertEquals("abcd1234", Protocol.parse("abcd1234|1|f|future|stuff").nodeId)
+        assertEquals(ID, checkNotNull(Protocol.parse("$ID|1|f|future|stuff")).nodeId)
+    }
+
+    @Test
+    fun aNodeIdThatIsNotCanonicalNamesNoPeer() {
+        // #199: the id keys the peers row, and SQLite drops a leading U+FEFF from a UTF-16 bind, so a marked twin
+        // would pass every in-memory duplicate check and still land on the real id's row.
+        val last = NodeId.ALPHABET.indexOf(ID.last())
+        // 128 bits leave the last base32 char two padding bits; setting one decodes to the same bytes but
+        // re-encodes differently.
+        val padded = ID.dropLast(1) + NodeId.ALPHABET[last or 1]
+        val advert = Protocol.advertise(ID).removePrefix(ID)
+
+        assertNull("BOM-led", Protocol.parse("\uFEFF$ID$advert"))
+        assertNull("byte-swapped BOM-led", Protocol.parse("\uFFFE$ID$advert"))
+        assertNull("padding bits set", Protocol.parse("$padded$advert"))
+        assertNull("uppercase", Protocol.parse("${ID.uppercase()}$advert"))
+        assertNull("25 chars", Protocol.parse("${ID.dropLast(1)}$advert"))
+        assertNull("27 chars", Protocol.parse("${ID}a$advert"))
+        assertNull("empty", Protocol.parse(""))
+        assertNull("empty id with segments", Protocol.parse(advert))
+        assertNull("legacy 8-char id", Protocol.parse("abcd1234"))
+    }
+
+    private companion object {
+        val ID = NodeId.derive("protocol-test")
     }
 }

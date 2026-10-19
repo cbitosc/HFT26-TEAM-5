@@ -1,13 +1,15 @@
 package app.getknit.knit.mesh.protocol
 
+import app.getknit.knit.identity.NodeId
+
 /**
  * The mesh protocol version and capability registry, plus the codec for the endpoint-info advert string.
  *
  * A peer advertises `nodeId|version|capabilitiesHex` in its discovery advert ([advertise]) — the Wi-Fi
  * Aware `serviceSpecificInfo` or the BLE service-data payload; a peer
  * that only knows the bare nodeId (a legacy/unknown build) parses to version 0 / no capabilities
- * ([parse], which never throws). This is the *unauthenticated* connection-time hint — known before a
- * single frame flows — used only as a routing/degradation signal, never for trust (trust stays on the
+ * ([parse], which never throws, and reads a non-canonical nodeId as null). This is the *unauthenticated*
+ * connection-time hint — known before a single frame flows — used only as a routing/degradation signal, never for trust (trust stays on the
  * signature path). The same [VERSION]/[capabilities][LOCAL_CAPABILITIES] also ride, authenticated, on
  * [ProfileContent] so a peer reachable only via relay still learns them.
  *
@@ -198,10 +200,16 @@ object Protocol {
     /**
      * Parses an endpoint name. The first segment is always the nodeId (robust to any future suffix); a
      * missing version/capabilities (a bare legacy nodeId) yields version 0 / no capabilities. Never
-     * throws — an unparseable segment degrades to "unknown".
+     * throws — an unparseable version or capabilities segment degrades to "unknown".
+     *
+     * Null when the nodeId is not canonical ([NodeId.toBytesOrNull], #199): the id arrives as text and keys
+     * the `peers` row, and SQLite drops a leading U+FEFF from a UTF-16 bind, so `"\uFEFF" + X` would pass every
+     * in-memory duplicate-link check and still read and write X's row (the frame-id twin, ADR 2026-10.9qr4).
+     * Every Android and iOS build advertises a canonical id, so this refuses no real peer.
      */
-    fun parse(endpointName: String): PeerWire {
+    fun parse(endpointName: String): PeerWire? {
         val parts = endpointName.split(SEP)
+        if (NodeId.toBytesOrNull(parts[0]) == null) return null
         return PeerWire(
             nodeId = parts[0],
             protoVersion = parts.getOrNull(1)?.toIntOrNull() ?: 0,

@@ -76,3 +76,26 @@ and wrong-type ids refused), `MeshRouterTest.aFrameWhoseIdIsNotCanonicalIsRefuse
 `ScopeFramesTest`'s non-canonical blob case, `CommonsSyncTest`'s quarantined post, and `mesh/lab/CanonicalIdLabTest`
 (a signed twin flooded ahead of the real post is refused, and the three nodes converge). The lab's other scenarios
 exercise only ids the app mints, so they would fail if the gate refused an honest shape.
+
+## Amendment 2026-10-19 — a link's node id is canonical too (#199)
+
+The last gap above is closed. A neighbour's node id reaches us as text through three doors: the link HELLO
+(`LinkHandshake.readHello`), the Wi-Fi Aware publish SSI (`WifiAwareTransport.onDiscovered`) and the Wi-Fi Aware cue
+(`NanCueCodec.parseCue`). None checked the id, so a HELLO naming `"﻿" + V` got past both transports' duplicate-link
+checks, which compare Kotlin strings, while it read and wrote `V`'s `peers` row. An avatar pushed over that link landed
+on `V`'s profile (`InboundPipeline.pointPeerAtAvatar`) even while `V` itself was linked, and the same id stamped `V`'s
+first sighting in `met_peers`.
+
+`Protocol.parse` now answers null unless the first segment is a canonical node id (`NodeId.toBytesOrNull`: 26
+lowercase base32 characters that round-trip through 16 bytes), and `parseCue` refuses the same way. `readHello` was
+already nullable, and both transports close a link whose HELLO reads as null. The BLE advert carries the id as 16 raw
+bytes, so it was never exposed. No build is partitioned: every Android tag and the iOS port advertise
+`NodeId.derive` output. The check sits at the parse, not at the avatar or `met_peers` writes, so no later reader of a
+link's id has to remember it.
+
+What it does not cover: link identity is still unauthenticated, so a neighbour can claim `V`'s exact id while `V` is not
+linked to us, and push an avatar under it. The iOS port already refuses these ids: its link session takes a HELLO's
+id only through `NodeId(_:)`, the same round trip, and it has no Wi-Fi Aware plane.
+
+Regression: `ProtocolTest` and `NanCueCodecTest` (marked, padded, uppercase, short and long ids refused) and
+`LinkHandshakeTest` (a HELLO naming a marked id reads as null).

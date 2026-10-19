@@ -2117,7 +2117,7 @@ class WifiAwareTransport(
         ssi: ByteArray,
     ) {
         if (ssi.isEmpty()) return
-        val advert = Protocol.parse(ssi.decodeToString())
+        val advert = Protocol.parse(ssi.decodeToString()) ?: return // a non-canonical id names no peer (#199)
         val peerNodeId = advert.nodeId
         if (peerNodeId == localNodeId) return
         val ssiText = ssi.decodeToString()

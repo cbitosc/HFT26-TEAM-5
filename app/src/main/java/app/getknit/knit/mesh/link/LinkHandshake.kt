@@ -38,8 +38,9 @@ object LinkHandshake {
 
     /**
      * Responder: read exactly one record and require it to be a [LinkFraming.Type.HELLO], returning the peer's
-     * parsed advert — or null if the first record is missing / not a HELLO (reject and close the socket). Reads
-     * from a plain [InputStream] so the caller can pass whichever buffered stream it will keep reading from.
+     * parsed advert — or null if the first record is missing / not a HELLO, or names a non-canonical node id
+     * ([Protocol.parse], #199) (reject and close the socket). Reads from a plain [InputStream] so the caller can
+     * pass whichever buffered stream it will keep reading from.
      */
     fun readHello(input: InputStream): Protocol.PeerWire? {
         val first = runCatching { LinkFraming.read(input) }.getOrNull() ?: return null
