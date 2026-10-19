@@ -146,10 +146,42 @@ class MessageNotifier internal constructor(
                 state.avatarBytes = conversation.avatarBytes
                 state.faces = conversation.faces
                 state.stamp = shortcuts.stamp()
-                state.count += 1
+                // A keyed line replaces its earlier self (a changed reaction) instead of stacking, and is
+                // still the one line it was for the summary's count.
+                val replaced = incoming.key?.let { state.history.removeKey(it) } == true
+                if (!replaced) state.count += 1
                 renderOf(state, state.history.add(incoming))
             }
         buildAndPost(render, self)
+        postSummary()
+    }
+
+    override fun retractReaction(
+        conversationId: String,
+        key: String,
+    ) {
+        val tag = tagFor(conversationId, isMention = false)
+        val self = lastSelf
+        val render =
+            synchronized(states) {
+                val state = states[tag] ?: return
+                if (!state.history.removeKey(key)) return
+                state.count = (state.count - 1).coerceAtLeast(0)
+                if (state.history.isEmpty()) {
+                    states.remove(tag)
+                    null
+                } else {
+                    renderOf(state, state.history.snapshot())
+                }
+            }
+        when {
+            // The reaction was all it said: the notification goes with it.
+            render == null -> runCatching { manager.cancel(tag, ID_MESSAGE) }
+
+            // Re-posted without the line; setOnlyAlertOnce keeps the update silent. A state implies a post,
+            // which recorded [lastSelf], so the null arm is defensive only.
+            self != null -> buildAndPost(render, self)
+        }
         postSummary()
     }
 

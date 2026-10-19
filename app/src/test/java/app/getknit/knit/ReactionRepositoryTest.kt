@@ -4,11 +4,14 @@ import app.getknit.knit.data.ReactionRepository
 import app.getknit.knit.data.RoomDbTest
 import app.getknit.knit.data.message.MessageEntity
 import app.getknit.knit.data.reaction.ReactionEntity
+import app.getknit.knit.ui.group
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -53,6 +56,43 @@ class ReactionRepositoryTest : RoomDbTest() {
             assertNull(repo.currentEmoji("m1", "alice"))
         }
 
+    // `apply`'s answer is what a reaction notifies on (ADR 2026-10.59fu): only a write that changed what the reactor
+    // shows. Each false here is a re-delivery that must not notify twice.
+    @Test
+    fun applyReportsOnlyAChangeOfTheVisibleReaction() =
+        runTest {
+            val repo = repo()
+
+            assertTrue("a first reaction", repo.apply(reaction("alice", "👍", at = 100)))
+            assertFalse("the same frame again", repo.apply(reaction("alice", "👍", at = 100)))
+            assertFalse("a stale replace", repo.apply(reaction("alice", "❤️", at = 50)))
+            assertFalse("a newer stamp, the same emoji", repo.apply(reaction("alice", "👍", at = 120)))
+            assertTrue("a replace", repo.apply(reaction("alice", "❤️", at = 150)))
+            assertTrue("a retraction", repo.apply(reaction("alice", null, at = 200)))
+            assertFalse("a second retraction", repo.apply(reaction("alice", null, at = 250)))
+            assertFalse("a retraction of nothing", repo.apply(reaction("bob", null, at = 300)))
+            assertTrue("an add after a retraction", repo.apply(reaction("alice", "😂", at = 400)))
+        }
+
+    @Test
+    fun theNewestReactionOnOwnMessagesBreaksASameInstantTieById() =
+        runTest {
+            val repo = repo()
+            db.groupDao().upsert(group(groupId = "g-1", members = listOf(ME, "bob", "carol")))
+            listOf("m-a", "m-b").forEach {
+                db.messageDao().upsert(MessageEntity(id = it, senderId = ME, conversationId = "g-1", body = it, sentAt = 1L))
+            }
+            repo.apply(ReactionEntity("m-a", "bob", "👍", updatedAt = 10L))
+            repo.apply(ReactionEntity("m-b", "bob", "❤️", updatedAt = 10L))
+            repo.apply(ReactionEntity("m-a", "carol", "😂", updatedAt = 10L))
+
+            val head = repo.observeNewestOnOwn(ME, emptyList()).first().getValue("g-1")
+
+            assertEquals("m-b", head.target.id)
+            assertEquals("bob", head.reactorNodeId)
+            assertEquals("❤️", head.emoji)
+        }
+
     @Test
     fun observeExcludesRetractedReactions() =
         runTest {
@@ -92,4 +132,8 @@ class ReactionRepositoryTest : RoomDbTest() {
                     .toSet()
             assertEquals(setOf("fresh-orphan", "kept-msg"), live)
         }
+
+    private companion object {
+        const val ME = "me-node"
+    }
 }

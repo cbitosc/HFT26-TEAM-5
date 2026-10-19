@@ -67,8 +67,9 @@ data class MessageContent(
     // Control marker for ratchet session management and sealed metadata (additive;
     // [CTL_SESSION_RESET], [CTL_GROUP_KEY], [CTL_GROUP_KEY_REQ], [CTL_GROUP_KEY_ACK],
     // [CTL_RECEIPT], [CTL_REACTION], [CTL_PROFILE], [CTL_TRANSFER], [CTL_CALL]). A non-null value means this frame is machinery, not
-    // conversation: it is never persisted as a message, never notified, never acked-as-a-message —
-    // see docs/FORWARD_SECRECY_RATCHET.md §7. Inside the ciphertext deliberately: a relay cannot
+    // conversation: it is never persisted as a message, never acked-as-a-message, and notifies only
+    // as a reaction to a message we wrote, post-commit (ADR 2026-10.59fu) — see
+    // docs/FORWARD_SECRECY_RATCHET.md §7. Inside the ciphertext deliberately: a relay cannot
     // distinguish machinery from an ordinary DM. An unknown value is consumed as a silent no-op,
     // which is what lets new ctl values ship additively.
     val ctl: Int? = null,

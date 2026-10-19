@@ -101,6 +101,7 @@ import app.getknit.knit.moderation.ImageScreeningService
 import app.getknit.knit.notifications.NotifConversation
 import app.getknit.knit.notifications.NotifMessage
 import app.getknit.knit.notifications.Notifier
+import app.getknit.knit.notifications.reactionNotificationKey
 import com.google.crypto.tink.InsecureSecretKeyAccess
 import com.google.crypto.tink.KeyTemplates
 import com.google.crypto.tink.KeysetHandle
@@ -753,10 +754,11 @@ class InboundPipelineTest {
             messageId: String,
             emoji: String?,
             sentAt: Long = 7L,
+            id: String = "react-$messageId-${author.nodeId}",
         ): RelayEnvelope =
             RelayEnvelope(
                 type = FrameType.REACTION,
-                id = "react-$messageId-${author.nodeId}",
+                id = id,
                 senderId = author.nodeId,
                 sentAt = sentAt,
                 payload = WireCodec.encodePayload(ReactionContent(messageId = messageId, emoji = emoji)),
@@ -8130,6 +8132,291 @@ class InboundPipelineTest {
             assertFalse(rig.msgMap.containsKey("ctl-gx1"))
             coVerify(exactly = 0) { rig.notifier.notify(any(), any(), any(), any(), any()) }
             assertFalse(rig.originated.any { it.type == FrameType.RECEIPT })
+        }
+
+    // --- A reaction to a message we wrote notifies (ADR 2026-10.59fu) ---
+
+    /** Stores [id] as a message we wrote in [conversationId], backs the authored set, and makes every reaction write land. */
+    private fun Rig.ownMessage(
+        id: String,
+        conversationId: String,
+        body: String = "see you at 6",
+        attachmentHash: String? = null,
+        attachmentMime: String? = null,
+        moderation: Int = MessageEntity.MODERATION_NONE,
+    ) {
+        msgMap[id] =
+            MessageEntity(
+                id = id,
+                senderId = self.nodeId,
+                conversationId = conversationId,
+                body = body,
+                sentAt = 1L,
+                attachmentHash = attachmentHash,
+                attachmentMime = attachmentMime,
+                moderation = moderation,
+            )
+        backAuthoredByMessages()
+        coEvery { reactions.apply(any()) } returns true
+    }
+
+    /** Every notification line the pipeline posted, in order. */
+    private fun Rig.postedLines(): List<NotifMessage> {
+        val posted = mutableListOf<NotifMessage>()
+        coVerify(atLeast = 0) { notifier.notify(capture(posted), any(), any(), any(), any()) }
+        return posted
+    }
+
+    @Test
+    fun aCleartextReactionToMyMessageNotifiesUnderItsKey() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.pin(alice)
+            rig.ownMessage("mine", conversationId = alice.nodeId)
+
+            rig.deliver(alice, rig.reaction(alice, messageId = "mine", emoji = "👍"))
+
+            val line = rig.postedLines().single()
+            assertEquals("Reacted 👍 to “see you at 6”", line.body)
+            assertEquals(alice.nodeId, line.senderId)
+            assertEquals(alice.nodeId, line.conversationId)
+            assertEquals(reactionNotificationKey("mine", alice.nodeId), line.key)
+        }
+
+    @Test
+    fun aSealedDmReactionToMyMessageNotifiesAfterTheCommit() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.pin(alice)
+            rig.ownMessage("mine", conversationId = alice.nodeId)
+
+            rig.deliver(alice, V2Author(alice, rig).dm("ctl-r1", "", ctl = MessageContent.CTL_REACTION, rp = ReactionPayload("mine", "👍")))
+
+            val line = rig.postedLines().single()
+            assertEquals("Reacted 👍 to “see you at 6”", line.body)
+            assertEquals(alice.nodeId, line.senderId)
+            assertEquals(alice.nodeId, line.conversationId)
+            assertEquals(reactionNotificationKey("mine", alice.nodeId), line.key)
+            // Still machinery: never a message row, never a tick.
+            assertFalse(rig.msgMap.containsKey("ctl-r1"))
+            assertFalse(rig.originated.any { it.type == FrameType.RECEIPT })
+        }
+
+    @Test
+    fun aSealedGroupReactionToMyMessageNotifiesAfterTheCommitAndOnlyOnce() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.pin(alice)
+            val group = rig.seedRatchetGroup(alice)
+            val author = GroupRatchetAuthor(alice, group.id)
+            rig.deliver(
+                alice,
+                V2Author(alice, rig).dm(
+                    "seed-n",
+                    "",
+                    ctl = MessageContent.CTL_GROUP_KEY,
+                    gk = GroupKeyPayload(group.id, keys = listOf(author.seed())),
+                ),
+            )
+            rig.ownMessage("gmine", conversationId = group.id)
+            val frame =
+                author.groupFrame(group, id = "ctl-gn", body = "", ctl = MessageContent.CTL_REACTION, rp = ReactionPayload("gmine", "🔥"))
+
+            rig.deliver(alice, frame)
+            // The same frame again (custody re-serve): the chain refuses it, so nothing commits and nothing posts.
+            rig.deliver(alice, frame, from = party().nodeId)
+
+            val line = rig.postedLines().single()
+            assertEquals("Reacted 🔥 to “see you at 6”", line.body)
+            assertEquals(alice.nodeId, line.senderId)
+            assertEquals(group.id, line.conversationId)
+            assertEquals(reactionNotificationKey("gmine", alice.nodeId), line.key)
+        }
+
+    @Test
+    fun aReactionThatChangedNothingDoesNotNotify() =
+        runTest {
+            // A stale replay or the same emoji re-delivered: the repository answers false, and that is the dedupe.
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.pin(alice)
+            rig.ownMessage("mine", conversationId = alice.nodeId)
+            coEvery { rig.reactions.apply(any()) } returns false
+
+            rig.deliver(alice, rig.reaction(alice, messageId = "mine", emoji = "👍"))
+            rig.deliver(alice, V2Author(alice, rig).dm("ctl-s1", "", ctl = MessageContent.CTL_REACTION, rp = ReactionPayload("mine", "👍")))
+
+            coVerify(exactly = 2) { rig.reactions.apply(any()) }
+            coVerify(exactly = 0) { rig.notifier.notify(any(), any(), any(), any(), any()) }
+            coVerify(exactly = 0) { rig.notifier.retractReaction(any(), any()) }
+        }
+
+    @Test
+    fun aReactionToSomeoneElsesMessageDoesNotNotify() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.pin(alice)
+            rig.ownMessage("mine", conversationId = alice.nodeId)
+            rig.msgMap["theirs"] =
+                MessageEntity(id = "theirs", senderId = alice.nodeId, conversationId = alice.nodeId, body = "hi", sentAt = 1L)
+
+            rig.deliver(alice, rig.reaction(alice, messageId = "theirs", emoji = "👍"))
+
+            coVerify(exactly = 1) { rig.reactions.apply(any()) }
+            coVerify(exactly = 0) { rig.notifier.notify(any(), any(), any(), any(), any()) }
+        }
+
+    @Test
+    fun aReactionToAnOrphanOrAHeardPostDoesNotNotify() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.pin(alice)
+            rig.ownMessage("mine", conversationId = Conversations.MESHTASTIC)
+            // A heard Meshtastic post sits in our sender column, but not a word of it is ours.
+            rig.msgMap["mine"] = rig.msgMap.getValue("mine").copy(originNode = 7L)
+
+            rig.deliver(alice, rig.reaction(alice, messageId = "nowhere", emoji = "👍"))
+            rig.deliver(alice, rig.reaction(alice, messageId = "mine", emoji = "👍"))
+
+            coVerify(exactly = 2) { rig.reactions.apply(any()) }
+            coVerify(exactly = 0) { rig.notifier.notify(any(), any(), any(), any(), any()) }
+        }
+
+    @Test
+    fun aReactionFromSomeoneOutsideTheThreadDoesNotNotify() =
+        runTest {
+            // A carrier sees every DM's id; its reaction to one is not a conversation we are in.
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            val bob = party()
+            rig.pin(alice)
+            rig.pin(bob)
+            rig.ownMessage("mine", conversationId = alice.nodeId)
+            val group = rig.seedRatchetGroup(alice)
+            rig.ownMessage("gmine", conversationId = group.id)
+
+            rig.deliver(bob, rig.reaction(bob, messageId = "mine", emoji = "👍"))
+            rig.deliver(bob, rig.reaction(bob, messageId = "gmine", emoji = "👍"))
+
+            coVerify(exactly = 2) { rig.reactions.apply(any()) }
+            coVerify(exactly = 0) { rig.notifier.notify(any(), any(), any(), any(), any()) }
+        }
+
+    @Test
+    fun aReactorBlockedBetweenTheWriteAndTheNoticeDoesNotNotify() =
+        runTest {
+            // Every inbound door drops a blocked sender before the write; the notice re-reads the list so a
+            // block that lands while the reaction is being applied still silences it.
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.pin(alice)
+            rig.ownMessage("mine", conversationId = alice.nodeId)
+            coEvery { rig.reactions.apply(any()) } answers {
+                rig.settings.blocked.value = setOf(alice.nodeId)
+                true
+            }
+
+            rig.deliver(alice, rig.reaction(alice, messageId = "mine", emoji = "👍"))
+
+            coVerify(exactly = 1) { rig.reactions.apply(any()) }
+            coVerify(exactly = 0) { rig.notifier.notify(any(), any(), any(), any(), any()) }
+        }
+
+    @Test
+    fun myOwnReactionLoopingBackDoesNotNotify() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            rig.ownMessage("mine", conversationId = Conversations.NEARBY)
+
+            // The add is silenced by the notification builder too; the retraction only by the notice's own gate.
+            rig.deliver(rig.self, rig.reaction(rig.self, messageId = "mine", emoji = "👍"), from = party().nodeId)
+            val retraction = rig.reaction(rig.self, messageId = "mine", emoji = null, sentAt = 8L, id = "react-x")
+            rig.deliver(rig.self, retraction, from = party().nodeId)
+
+            coVerify(exactly = 2) { rig.reactions.apply(any()) }
+            coVerify(exactly = 0) { rig.notifier.notify(any(), any(), any(), any(), any()) }
+            coVerify(exactly = 0) { rig.notifier.retractReaction(any(), any()) }
+        }
+
+    @Test
+    fun aReactionInAnUnacceptedThreadDoesNotNotify() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.pin(alice)
+            rig.ownMessage("mine", conversationId = alice.nodeId)
+            // The relaxed default: authored nowhere, accepted nowhere — a stranger's thread.
+            coEvery { rig.messages.conversationsIAuthoredIn(any()) } returns emptyList()
+
+            rig.deliver(alice, rig.reaction(alice, messageId = "mine", emoji = "👍"))
+
+            coVerify(exactly = 1) { rig.reactions.apply(any()) }
+            coVerify(exactly = 0) { rig.notifier.notify(any(), any(), any(), any(), any()) }
+        }
+
+    @Test
+    fun aRefusedEmojiDoesNotNotify() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.pin(alice)
+            rig.ownMessage("mine", conversationId = alice.nodeId)
+
+            rig.deliver(alice, rig.reaction(alice, messageId = "mine", emoji = "👍".repeat(17)))
+            rig.deliver(alice, V2Author(alice, rig).dm("ctl-f1", "", ctl = MessageContent.CTL_REACTION, rp = ReactionPayload("mine", " ")))
+
+            assertEquals(2L, rig.drops(DropReason.REACTION_REFUSED))
+            coVerify(exactly = 0) { rig.notifier.notify(any(), any(), any(), any(), any()) }
+        }
+
+    @Test
+    fun aChangedEmojiReplacesTheLineAndARetractionWithdrawsIt() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.pin(alice)
+            rig.ownMessage("mine", conversationId = alice.nodeId)
+            val key = reactionNotificationKey("mine", alice.nodeId)
+
+            rig.deliver(alice, rig.reaction(alice, messageId = "mine", emoji = "👍", sentAt = 7L))
+            rig.deliver(alice, rig.reaction(alice, messageId = "mine", emoji = "🔥", sentAt = 8L, id = "react-2"))
+            rig.deliver(alice, rig.reaction(alice, messageId = "mine", emoji = null, sentAt = 9L, id = "react-3"))
+
+            val lines = rig.postedLines()
+            assertEquals(listOf("Reacted 👍 to “see you at 6”", "Reacted 🔥 to “see you at 6”"), lines.map { it.body })
+            assertTrue(lines.all { it.key == key })
+            coVerify(exactly = 1) { rig.notifier.retractReaction(alice.nodeId, key) }
+        }
+
+    @Test
+    fun aReactionToAHiddenMessageSaysOnlyThatItIsHidden() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.pin(alice)
+            rig.ownMessage("mine", conversationId = alice.nodeId, body = "rude words", moderation = MessageEntity.MODERATION_TEXT_FLAGGED)
+
+            rig.deliver(alice, rig.reaction(alice, messageId = "mine", emoji = "👍"))
+
+            assertEquals("Reacted 👍 to “Message hidden”", rig.postedLines().single().body)
+        }
+
+    @Test
+    fun aReactionToAnAttachmentOnlyMessageNamesTheAttachment() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.pin(alice)
+            rig.ownMessage("mine", conversationId = alice.nodeId, body = "", attachmentHash = "h1", attachmentMime = "image/gif")
+
+            rig.deliver(alice, rig.reaction(alice, messageId = "mine", emoji = "👍"))
+
+            assertEquals("Reacted 👍 to “${NotificationLabels.ENGLISH.gif}”", rig.postedLines().single().body)
         }
 
     @Test

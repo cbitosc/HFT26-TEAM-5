@@ -23,6 +23,9 @@ class NotificationHistory(
 
     fun clear() = items.clear()
 
+    /** Removes the line posted under [key] ([NotifMessage.key]); returns true if there was one. */
+    fun removeKey(key: String): Boolean = items.removeAll { it.key == key }
+
     /** Removes every message for [conversationId]; returns true if any were removed. */
     fun remove(conversationId: String): Boolean = items.removeAll { it.conversationId == conversationId }
 

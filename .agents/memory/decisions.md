@@ -212,6 +212,7 @@ carries; never renumber an old one.
 | [2026-10.3tee](decisions/2026-10-3tee-internet-plane-voice-calls-use-webrtc-signalled-over-sealed-spool-frames.md) | Internet-plane voice calls use WebRTC signalled over sealed Spool frames | voip, spool, webrtc, privacy |
 | [2026-10.3y2s](decisions/2026-10-3y2s-the-knit-watch-face-is-a-wff-v4-face-fed-by-a-ring-complication.md) | The Knit watch face is a WFF v4 face fed by a ring complication | wear, ui |
 | [2026-10.47rw](decisions/2026-10-47rw-a-keystore-refusal-is-not-proof-a-secret-is-gone.md) | A Keystore refusal is not proof a secret is gone | crypto, storage, reliability |
+| [2026-10.59fu](decisions/2026-10-59fu-a-reaction-to-your-message-notifies-and-can-head-the-chat-list.md) | A reaction to your message notifies and can head the chat list | ui, notifications, receipts |
 | [2026-10.5buf](decisions/2026-10-5buf-a-bluetooth-file-feed-is-clocked-by-its-receiver-s-reports.md) | A Bluetooth file feed is clocked by its receiver's reports | ble, mesh, blobs |
 | [2026-10.5hzt](decisions/2026-10-5hzt-a-transfer-s-ready-is-sent-until-the-receiver-connects.md) | A transfer's READY is sent until the receiver connects, and a send that ended short is retried from its card | transfer, ui |
 | [2026-10.6e5t](decisions/2026-10-6e5t-a-blob-is-fetched-from-the-best-neighbour-that-says-it-holds-it.md) | A blob is fetched from the best neighbour that says it holds it | mesh, wire, blobs |

@@ -67,7 +67,11 @@ receipt/reaction frames stay accepted forever (`handleReceipt`/`handleReaction` 
 ## 3. Delivery semantics
 
 Control-frame contract unchanged: never persisted as a message, never notified, never acked — a
-sealed receipt can't draw a receipt-for-a-receipt, and the exists-gate can't re-ack a ctl id.
+sealed receipt can't draw a receipt-for-a-receipt, and the exists-gate can't re-ack a ctl id. One
+exception to "never notified" since ADR 2026-10.59fu: someone's reaction to a message this phone wrote
+notifies, as a line in that thread's notification, in the **post-commit** half and only when
+`ReactionRepository.apply` reports the reactor's visible emoji changed (so a re-delivery never notifies
+twice); a retraction withdraws the line. It is still never a message row and never acked.
 Row effects commit **inside the ctl transaction** (the ratchet/chain advance and the tick/reaction
 land atomically; a crash re-processes cleanly on re-serve):
 

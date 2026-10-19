@@ -31,6 +31,8 @@ document:
 - Settings has a new Low-power mode that turns Wi-Fi Aware off to save battery, and it switches on by itself
   while Battery Saver is on. Bluetooth keeps the phone on the mesh, so messages still arrive, but photos and
   files take longer.
+- You now get a notification when someone reacts to one of your messages, and that chat moves to the top of
+  your list with their reaction as its last line. Changing or taking back a reaction updates both.
 
 ### Changed
 

@@ -1,7 +1,9 @@
 package app.getknit.knit.data.reaction
 
 import app.getknit.knit.data.RoomDbTest
+import app.getknit.knit.data.message.Conversations
 import app.getknit.knit.data.message.MessageEntity
+import app.getknit.knit.ui.group
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
@@ -72,6 +74,80 @@ class ReactionDaoTest : RoomDbTest() {
             assertEquals(1, dao.observeAll().first().size)
         }
 
+    private fun heads(blocked: List<String> = emptyList()) =
+        dao.observeNewestOnOwnMessages(ME, blocked, rooms = listOf(Conversations.NEARBY, Conversations.MESHTASTIC), commonsGlob = "c-*")
+
+    @Test
+    fun `observeNewestOnOwnMessages heads each thread with the newest live reaction someone made to our words`() =
+        runTest {
+            val messages = db.messageDao()
+            db.groupDao().upsert(group(groupId = "g-hikers", members = listOf(ME, "bob", "carol", "mallory")))
+            messages.upsert(MessageEntity(id = "mine-dm", senderId = ME, conversationId = "bob", body = "lunch?", sentAt = 1L))
+            messages.upsert(MessageEntity(id = "theirs-dm", senderId = "bob", conversationId = "bob", body = "sure", sentAt = 2L))
+            messages.upsert(MessageEntity(id = "mine-g", senderId = ME, conversationId = "g-hikers", body = "trail?", sentAt = 1L))
+            messages.upsert(
+                MessageEntity(id = "mine-n", senderId = ME, conversationId = Conversations.NEARBY, body = "anyone?", sentAt = 1L),
+            )
+            // A heard Meshtastic post sits in our sender column by convention, and a notice is not a message.
+            messages.upsert(
+                MessageEntity(id = "heard", senderId = ME, conversationId = "g-hikers", body = "hi", sentAt = 3L, originNode = 0x1234L),
+            )
+            messages.upsert(
+                MessageEntity(
+                    id = "notice",
+                    senderId = ME,
+                    conversationId = "g-hikers",
+                    body = "",
+                    sentAt = 4L,
+                    kind = MessageEntity.KIND_MEMBER_LEFT,
+                ),
+            )
+            dao.upsert(ReactionEntity("mine-dm", "bob", emoji = "👍", updatedAt = 10L)) // the DM thread's head
+            dao.upsert(ReactionEntity("mine-dm", "carol", emoji = "❤️", updatedAt = 20L)) // not the DM's peer: never
+            dao.upsert(ReactionEntity("mine-dm", ME, emoji = "😂", updatedAt = 30L)) // our own: never
+            dao.upsert(ReactionEntity("theirs-dm", "bob", emoji = "🎉", updatedAt = 60L)) // not our words
+            dao.upsert(ReactionEntity("mine-g", "bob", emoji = "🔥", updatedAt = 5L))
+            dao.upsert(ReactionEntity("mine-g", "carol", emoji = "🎸", updatedAt = 6L)) // the group thread's head
+            dao.upsert(ReactionEntity("mine-g", "mallory", emoji = "👎", updatedAt = 40L)) // blocked: never
+            dao.upsert(ReactionEntity("mine-g", "dave", emoji = "🎉", updatedAt = 41L)) // not on the roster: never
+            dao.upsert(ReactionEntity("mine-g", ME, emoji = "😂", updatedAt = 45L)) // on the roster, but our own: never
+            dao.upsert(ReactionEntity("mine-g", "erin", emoji = null, updatedAt = 50L)) // a tombstone: never
+            dao.upsert(ReactionEntity("mine-n", "zed", emoji = "👋", updatedAt = 3L)) // a room: anyone
+            dao.upsert(ReactionEntity("heard", "bob", emoji = "👍", updatedAt = 70L))
+            dao.upsert(ReactionEntity("notice", "bob", emoji = "👍", updatedAt = 80L))
+            dao.upsert(ReactionEntity("gone", "bob", emoji = "👍", updatedAt = 90L)) // an orphan
+
+            val heads = heads(blocked = listOf("mallory")).first()
+
+            assertEquals(
+                setOf(
+                    listOf("bob", "mine-dm", "bob", "👍", "10"),
+                    listOf("g-hikers", "mine-g", "carol", "🎸", "6"),
+                    listOf(Conversations.NEARBY, "mine-n", "zed", "👋", "3"),
+                ),
+                heads.map { listOf(it.target.conversationId, it.target.id, it.reactorNodeId, it.emoji, it.reactedAt.toString()) }.toSet(),
+            )
+        }
+
+    @Test
+    fun `observeNewestOnOwnMessages takes a blocked reactor back once unblocked`() =
+        runTest {
+            db.messageDao().upsert(MessageEntity(id = "mine", senderId = ME, conversationId = "bob", body = "hi", sentAt = 1L))
+            dao.upsert(ReactionEntity("mine", "bob", emoji = "👎", updatedAt = 10L))
+
+            assertTrue(heads(blocked = listOf("bob")).first().isEmpty())
+            assertEquals(listOf("bob"), heads().first().map { it.reactorNodeId })
+        }
+
+    @Test
+    fun `observeNewestOnOwnMessages counts a commons member as a room's reader`() =
+        runTest {
+            db.messageDao().upsert(MessageEntity(id = "mine", senderId = ME, conversationId = "c-club", body = "hi", sentAt = 1L))
+            dao.upsert(ReactionEntity("mine", "zed", emoji = "👋", updatedAt = 10L))
+
+            assertEquals(listOf("zed"), heads().first().map { it.reactorNodeId })
+        }
+
     @Test
     fun `deleteForMessage drops every reaction on a message`() =
         runTest {
@@ -84,4 +160,8 @@ class ReactionDaoTest : RoomDbTest() {
             assertEquals(listOf("m2"), dao.observeAll().first().map { it.messageId })
             assertTrue(dao.emojiFor("m1", "u1") == null)
         }
+
+    private companion object {
+        const val ME = "me-node"
+    }
 }

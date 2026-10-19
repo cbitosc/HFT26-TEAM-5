@@ -7,6 +7,7 @@ import app.getknit.knit.call.CaptureHealth
 import app.getknit.knit.data.AttachmentIdentities
 import app.getknit.knit.data.KnitDatabase
 import app.getknit.knit.data.LinkCardStore
+import app.getknit.knit.data.ReactionRepository
 import app.getknit.knit.data.commons.CommonsRepository
 import app.getknit.knit.data.crypto.IdentityKeyStore
 import app.getknit.knit.data.forward.ForwardRepository
@@ -99,6 +100,7 @@ val uiModule =
                 get<LoraStatusRepository>().facts,
                 androidContext(),
                 get<CommonsRepository>(),
+                get<ReactionRepository>(),
             )
         }
         viewModel { ContactsViewModel(get(), get(), get(), get(), get(), get()) }

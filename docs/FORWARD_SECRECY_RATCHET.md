@@ -317,7 +317,8 @@ skipped-key path absorbs.
   those still unacked only, once per reset; that pass records nothing and never re-arms, and a
   later reset replaces a pending one (ADR 2026-10.dmgw). A peer reachable live at neither pass
   still misses those DMs, and the pending pass is in-memory state a restart loses. Control frames are never persisted, notified, or acked
-  as messages; inbound replacements are additionally rate-limited (1/peer/h). The resetter's session
+  as messages (one exception: a reaction to a message you wrote notifies, after its commit, ADR 2026-10.59fu);
+  inbound replacements are additionally rate-limited (1/peer/h). The resetter's session
   stays unconfirmed until it opens a frame the peer sealed under the new root: a dead-era frame drained
   under its `prevRoot` never confirms it (§4), so every frame it seals meanwhile carries the init, and
   a peer that has not yet seen the reset can adopt it from any of them. The peer answers each new init

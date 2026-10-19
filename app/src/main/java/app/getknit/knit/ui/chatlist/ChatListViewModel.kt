@@ -8,6 +8,7 @@ import app.getknit.knit.data.GroupRepository
 import app.getknit.knit.data.MessageRepository
 import app.getknit.knit.data.PeerDirectory
 import app.getknit.knit.data.PeerRepository
+import app.getknit.knit.data.ReactionRepository
 import app.getknit.knit.data.commons.CommonsEntity
 import app.getknit.knit.data.commons.CommonsRepository
 import app.getknit.knit.data.draft.DraftEntity
@@ -18,6 +19,7 @@ import app.getknit.knit.data.message.Conversations
 import app.getknit.knit.data.message.DeliveryPlane
 import app.getknit.knit.data.message.GroupFace
 import app.getknit.knit.data.message.MessageEntity
+import app.getknit.knit.data.reaction.ReactionHead
 import app.getknit.knit.data.relay.RelayFacts
 import app.getknit.knit.data.relay.RelayPlane
 import app.getknit.knit.data.relay.planeFor
@@ -43,6 +45,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.mapLatest
@@ -157,6 +160,9 @@ class ChatListViewModel(
     // The joined commons (§7.4): a row per room from the join on, and the leave behind "delete". Nullable and
     // last so the positional test rigs still compile; production always passes it.
     private val commons: CommonsRepository? = null,
+    // Reactions to our own messages, for the row a reaction heads (ADR 2026-10.59fu). Nullable and last for the
+    // same reason as [commons].
+    private val reactions: ReactionRepository? = null,
 ) : ViewModel() {
     private val myNodeId = MutableStateFlow<String?>(null)
 
@@ -176,6 +182,8 @@ class ChatListViewModel(
         val commons: List<CommonsEntity> = emptyList(),
         /** Content filtering is on, so a flagged newest message previews as hidden (ADR 2026-10.9rh6). */
         val hideFlagged: Boolean = false,
+        /** Per thread, the newest reaction someone made to a message we wrote (ADR 2026-10.59fu). */
+        val reactions: Map<String, ReactionHead> = emptyMap(),
     )
 
     // Neighbor count + radio health + the (already-dismissal-aware) banner + Internet-plane state, folded
@@ -198,10 +206,19 @@ class ChatListViewModel(
         val loraRoom: Boolean,
     )
 
+    // Reactions to our own messages, per thread — empty until our id is known, rather than holding the whole
+    // list back for it. Blocked reactors are left out by the query, as their messages are by the table's.
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private val reactionHeads: Flow<Map<String, ReactionHead>> =
+        combine(myNodeId, settings.blockedNodeIds.distinctUntilChanged()) { me, blocked -> me to blocked }
+            .flatMapLatest { (me, blocked) ->
+                if (me == null || reactions == null) flowOf(emptyMap()) else reactions.observeNewestOnOwn(me, blocked)
+            }
+
     // Paired before the combine below rather than added to it: that combine sits on the typed five-flow
     // overload on purpose, and a sixth argument would drop it onto the untyped vararg one.
     private val draftsAndTransfers =
-        combine(drafts.all, transfers.states) { draftRows, live -> draftRows to live }
+        combine(drafts.all, transfers.states, reactionHeads) { draftRows, live, heads -> Triple(draftRows, live, heads) }
 
     // Paired for the same reason: the joined commons and whether content filtering hides a flagged preview.
     private val roomsAndFilter =
@@ -223,8 +240,8 @@ class ChatListViewModel(
             draftsAndTransfers,
             messages.observeNewestOriginChannel(Conversations.MESHTASTIC).distinctUntilChanged(),
             roomsAndFilter,
-        ) { accepted, groupList, (draftRows, live), channel, (rooms, hideFlagged) ->
-            ListInputs(accepted, groupList, draftRows, live, channel, rooms, hideFlagged)
+        ) { accepted, groupList, (draftRows, live, heads), channel, (rooms, hideFlagged) ->
+            ListInputs(accepted, groupList, draftRows, live, channel, rooms, hideFlagged, heads)
         }
 
     // Radio-off banner: which warning the per-radio statuses imply, and whether the user has dismissed it.

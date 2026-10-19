@@ -114,6 +114,7 @@ fun notificationLabels(context: Context): NotificationLabels =
         file = context.getString(R.string.chat_list_preview_file),
         hidden = context.getString(R.string.moderation_preview_hidden),
         video = context.getString(R.string.chat_list_preview_video),
+        reaction = context.getString(R.string.reaction_preview),
     )
 
 /** What to say about an ingest that produced nothing. */

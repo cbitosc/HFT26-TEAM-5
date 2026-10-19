@@ -638,6 +638,10 @@
     <string name="chat_list_preview_transfer_interrupted">Stopped partway through %1$s</string>
     <string name="chat_attachment_with_size">%1$s · %2$s</string>
     <string name="chat_list_preview_with_sender">%1$s: %2$s</string>
+    <!-- Someone reacted to a message you wrote (ADR 2026-10.59fu): the chat list's line in a DM, and the notification line. %1$s is the emoji, %2$s the message's opening words. -->
+    <string name="reaction_preview">Reacted %1$s to \u201C%2$s\u201D</string>
+    <!-- The same line in a group or a room, naming who reacted (%1$s). %2$s is the emoji, %3$s the message's opening words. -->
+    <string name="chat_list_reaction_preview_with_sender">%1$s reacted %2$s to \u201C%3$s\u201D</string>
     <plurals name="chat_list_unread_count">
         <item quantity="one">%d unread message</item>
         <item quantity="other">%d unread messages</item>

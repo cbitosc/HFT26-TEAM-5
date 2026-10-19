@@ -86,6 +86,18 @@ class NotificationTest {
     }
 
     @Test
+    fun historyRemoveKeyDropsOnlyThatLine() {
+        val history = NotificationHistory(capacity = 8)
+        history.add(msg("a"))
+        history.add(msg("b").copy(key = "reaction:m1:b"))
+        history.add(msg("c").copy(key = "reaction:m1:c"))
+
+        assertTrue(history.removeKey("reaction:m1:b"))
+        assertEquals(listOf("a", "c"), history.snapshot().map { it.senderId })
+        assertFalse(history.removeKey("reaction:m1:b"))
+    }
+
+    @Test
     fun incomingNotificationSkipsOwnMessages() {
         val result =
             incomingNotification(

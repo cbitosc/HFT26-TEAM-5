@@ -8,7 +8,9 @@ import app.getknit.knit.identity.displayNameFor
  * thread it belongs to — used both to pick the channel and to suppress/clear notifications for the
  * conversation currently on screen. [avatarBytes] are the sender's avatar image bytes (read from the
  * encrypted blob store), or null for the letter fallback — notifications can't go through Coil, so the
- * raw bytes are carried and decoded directly.
+ * raw bytes are carried and decoded directly. [key] names a line that a later one replaces rather than
+ * stacks under, and that can be withdrawn — a reaction's ([reactionNotificationKey], ADR 2026-10.59fu);
+ * null for a message, which is only ever added.
  */
 data class NotifMessage(
     val senderId: String,
@@ -17,6 +19,7 @@ data class NotifMessage(
     val sentAt: Long,
     val conversationId: String,
     val avatarBytes: ByteArray?,
+    val key: String? = null,
 ) {
     // ByteArray needs content-based equals/hashCode (the generated reference comparison would make two
     // otherwise-identical messages unequal).
@@ -28,7 +31,8 @@ data class NotifMessage(
             body == other.body &&
             sentAt == other.sentAt &&
             conversationId == other.conversationId &&
-            avatarBytes.contentEquals(other.avatarBytes)
+            avatarBytes.contentEquals(other.avatarBytes) &&
+            key == other.key
     }
 
     override fun hashCode(): Int {
@@ -38,9 +42,20 @@ data class NotifMessage(
         result = 31 * result + sentAt.hashCode()
         result = 31 * result + conversationId.hashCode()
         result = 31 * result + (avatarBytes?.contentHashCode() ?: 0)
+        result = 31 * result + (key?.hashCode() ?: 0)
         return result
     }
 }
+
+/**
+ * The [NotifMessage.key] of one person's reaction to one message: a changed emoji replaces their line, a
+ * retraction withdraws it ([Notifier.retractReaction]), and two people's reactions to the same message are
+ * two lines.
+ */
+fun reactionNotificationKey(
+    messageId: String,
+    reactorNodeId: String,
+): String = "reaction:$messageId:$reactorNodeId"
 
 /**
  * One member of a photo-less group's cluster as the shade draws it (ADR 2026-09.zapp): the shade's twin of
@@ -114,17 +129,32 @@ data class NotifConversation(
  * posts one MessagingStyle notification per conversation, all stacked under a single group summary
  * ("N messages in M chats"), Signal-style.
  */
+@Suppress("TooManyFunctions") // one method per thing the shade shows or clears, over one notifier's state
 interface Notifier {
     /** Registers the notification channels + groups. Safe to call repeatedly; called once at startup. */
     fun createChannel()
 
-    /** Records [incoming] and (re)posts the per-conversation notification on the channel for its kind. */
+    /**
+     * Records [incoming] and (re)posts the per-conversation notification on the channel for its kind. A keyed
+     * [incoming] ([NotifMessage.key]) replaces the thread's earlier line under the same key in place.
+     */
     fun notify(
         incoming: NotifMessage,
         conversation: NotifConversation,
         selfId: String,
         selfName: String,
         selfAvatarBytes: ByteArray?,
+    )
+
+    /**
+     * Withdraws the line [notify] posted under [key] in [conversationId]'s notification — someone took their
+     * reaction back (ADR 2026-10.59fu). The notification re-renders without it, silently, or goes when it was
+     * the last line. Nothing to withdraw (never posted, already cleared, or the process restarted since) is a
+     * no-op.
+     */
+    fun retractReaction(
+        conversationId: String,
+        key: String,
     )
 
     /**
@@ -257,7 +287,8 @@ fun summaryCounts(perConversationCounts: Collection<Int>): Pair<Int, Int> {
  * the message is our own ([senderId] == [selfId]) or has a blank body. [peerName] is the caller's
  * collision-aware label (`PeerLabel.text` — `Name (Alias)` when another known peer shares the name,
  * ADR 058) and passes through verbatim; when it is unknown or blank the sender name falls back to the
- * friendly alias derived from the node id, mirroring the chat UI's resolution.
+ * friendly alias derived from the node id, mirroring the chat UI's resolution. [key] is the line's
+ * [NotifMessage.key] — a reaction's, null for a message.
  */
 fun incomingNotification(
     senderId: String,
@@ -267,6 +298,7 @@ fun incomingNotification(
     peerName: String?,
     peerAvatarBytes: ByteArray?,
     conversationId: String,
+    key: String? = null,
 ): NotifMessage? {
     if (senderId == selfId) return null
     if (body.isBlank()) return null
@@ -277,6 +309,7 @@ fun incomingNotification(
         sentAt = sentAt,
         conversationId = conversationId,
         avatarBytes = peerAvatarBytes,
+        key = key,
     )
 }
 

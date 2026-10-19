@@ -29,10 +29,12 @@ import app.getknit.knit.data.message.MentionStore
 import app.getknit.knit.data.message.MessageEntity
 import app.getknit.knit.data.message.REPLY_SNIPPET_MAX
 import app.getknit.knit.data.message.StatusNotices
+import app.getknit.knit.data.message.buildReplySnippet
 import app.getknit.knit.data.message.hiddenByFilter
 import app.getknit.knit.data.message.videoInfo
 import app.getknit.knit.data.message.withReply
 import app.getknit.knit.data.message.withVideo
+import app.getknit.knit.data.message.writtenBy
 import app.getknit.knit.data.peer.PeerEntity
 import app.getknit.knit.data.reaction.ReactionEntity
 import app.getknit.knit.data.settings.InboundSettings
@@ -100,6 +102,7 @@ import app.getknit.knit.notifications.ConversationFaces
 import app.getknit.knit.notifications.Notifier
 import app.getknit.knit.notifications.incomingNotification
 import app.getknit.knit.notifications.mentionNotification
+import app.getknit.knit.notifications.reactionNotificationKey
 import kotlinx.coroutines.flow.first
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
@@ -812,7 +815,8 @@ class InboundPipeline(
      * (reactions can outrun the message over the mesh) — the row persists regardless and the UI joins.
      * An emoji the wire refuses ([isValidReactionEmoji]) applies nothing and counts
      * [DropReason.REACTION_REFUSED]; never truncated (that splits a sequence into tofu) and never read as
-     * a retraction (garbage would erase a valid reaction). Custody and relay already happened upstream.
+     * a retraction (garbage would erase a valid reaction). Custody and relay already happened upstream. A write
+     * that changed what the reactor shows notifies, after it, when the message is ours ([noticeReaction]).
      */
     private suspend fun handleReaction(env: RelayEnvelope) {
         // Blocked sender: drop the reaction (the router still relays it onward to other peers).
@@ -822,14 +826,14 @@ class InboundPipeline(
             metrics.onDropped(DropReason.REACTION_REFUSED)
             return
         }
-        reactions.apply(
+        val row =
             ReactionEntity(
                 messageId = content.messageId,
                 reactorNodeId = env.senderId,
                 emoji = content.emoji,
                 updatedAt = clampFuture(env.sentAt),
-            ),
-        )
+            )
+        if (reactions.apply(row)) noticeReaction(env, row)
     }
 
     // [plane] is carried purely for the sealed delivery receipt a v2 ctl DM may turn out to be
@@ -1233,13 +1237,15 @@ class InboundPipeline(
 
     /**
      * Dispatches a decrypted v2 control DM. A control frame is machinery, not conversation:
-     * advance/commit the session state but never persist, notify, or ack it as a message. Group-key
+     * advance/commit the session state but never persist it as a message and never ack it; the one
+     * notification a ctl earns is a reaction to a message we wrote, posted post-commit like every other
+     * follow-up here (ADR 2026-10.59fu). Group-key
      * payloads commit their group state inside the SAME transaction/lock as the DM advance
      * (adoptSeeds/onKeyAck are deliberately lock-free — the shared ratchet mutex is already held
      * there); sealed receipts/reactions (CTL_RECEIPT/CTL_REACTION) commit their row updates there
      * too, so a crash never splits the chain advance from the tick/reaction it carried. Post-commit
-     * actions (reset recovery, the adoption ack, a key-request answer) originate new frames and run
-     * strictly after, outside the transaction.
+     * actions (reset recovery, the adoption ack, a key-request answer, a reaction's notification) run
+     * strictly after, outside the transaction — a commit that refused the frame notifies nothing.
      */
     @Suppress("CyclomaticComplexMethod") // one arm per ctl value; splitting the dispatch would scatter the registry
     private suspend fun handleCtlDm(
@@ -1287,6 +1293,12 @@ class InboundPipeline(
                 outcome.avatarToPull?.let { pullRelayAvatarIfNeeded(env.senderId, it, haveAvatar = false) }
             }
 
+            MessageContent.CTL_REACTION -> {
+                // Post-commit: the row is written and the chain advanced, so a crash between the two can only
+                // lose a notification, never post one for a reaction that did not land.
+                outcome.reaction?.let { noticeReaction(env, it) }
+            }
+
             MessageContent.CTL_TRANSFER -> {
                 plain.xf?.let { onTransferSignal(env, it, me) }
             }
@@ -1307,6 +1319,8 @@ class InboundPipeline(
         val adoptedRoot: Boolean = false,
         /** An avatar a sealed profile advertised whose bytes we still lack (`CTL_PROFILE` only). */
         val avatarToPull: String? = null,
+        /** A sealed reaction whose write changed what its reactor shows (`CTL_REACTION` only), else null. */
+        val reaction: ReactionEntity? = null,
     )
 
     /**
@@ -1348,7 +1362,7 @@ class InboundPipeline(
             }
 
             MessageContent.CTL_REACTION -> {
-                applySealedReaction(env, plain.rp)
+                return CtlOutcome(reaction = applySealedReaction(env, plain.rp))
             }
 
             MessageContent.CTL_PROFILE -> {
@@ -1554,19 +1568,22 @@ class InboundPipeline(
      * Applies a sealed `CTL_REACTION` (DM or group form): same LWW convergence as the cleartext frame
      * (reactor = authenticated sender, clock = the frame's signed sentAt, bounded by [clampFuture]),
      * committed atomically with the ratchet/chain advance. Orphan-permissive like the cleartext path — the
-     * target may not have arrived yet; the 24 h orphan reaper bounds junk.
+     * target may not have arrived yet; the 24 h orphan reaper bounds junk. Returns the row when its write
+     * changed what the reactor shows — the caller's post-commit [noticeReaction] — else null (refused, absent,
+     * stale, or the same emoji again), so a re-served frame never notifies twice.
      */
     private suspend fun applySealedReaction(
         env: RelayEnvelope,
         rp: ReactionPayload?,
-    ) {
-        rp ?: return
+    ): ReactionEntity? {
+        rp ?: return null
         // Same refusal as the cleartext path; the chain/ratchet advance that carried it is unaffected.
         if (rp.emoji != null && !isValidReactionEmoji(rp.emoji)) {
             metrics.onDropped(DropReason.REACTION_REFUSED)
-            return
+            return null
         }
-        reactions.apply(ReactionEntity(rp.messageId, env.senderId, rp.emoji, clampFuture(env.sentAt)))
+        val row = ReactionEntity(rp.messageId, env.senderId, rp.emoji, clampFuture(env.sentAt))
+        return row.takeIf { reactions.apply(it) }
     }
 
     /**
@@ -1768,13 +1785,17 @@ class InboundPipeline(
         }
         if (plain.ctl != null) {
             // A ctl marker keeps its contract regardless of the envelope it arrived in: advance the
-            // chain, persist nothing as a message, notify nothing, ack nothing. CTL_REACTION is the one
-            // ctl that legitimately rides the group form (a sealed group reaction, applied atomically
-            // with the chain delta); everything else here — group-key machinery on pairwise DMs, an
-            // unknown future value — commits the advance and does nothing.
-            commit {
-                if (plain.ctl == MessageContent.CTL_REACTION) applySealedReaction(env, plain.rp)
-            }
+            // chain, persist nothing as a message, ack nothing. CTL_REACTION is the one ctl that
+            // legitimately rides the group form (a sealed group reaction, applied atomically with the
+            // chain delta), and the one that may notify — a reaction to a message we wrote, only once the
+            // commit has landed (ADR 2026-10.59fu); everything else here — group-key machinery on
+            // pairwise DMs, an unknown future value — commits the advance and does nothing.
+            var reaction: ReactionEntity? = null
+            val committed =
+                commit {
+                    if (plain.ctl == MessageContent.CTL_REACTION) reaction = applySealedReaction(env, plain.rp)
+                }
+            if (committed) reaction?.let { noticeReaction(env, it) }
             return
         }
         deliverChat(
@@ -3328,6 +3349,8 @@ class InboundPipeline(
         conversationId: String,
         body: String,
         origin: MeshPostOrigin? = null,
+        // A reaction's line key ([reactionNotificationKey]): a later change replaces the line in place.
+        key: String? = null,
     ) {
         val me = identity.nodeId()
         val peer = peers.find(env.senderId)
@@ -3352,6 +3375,7 @@ class InboundPipeline(
                 peerName = speaker?.name ?: senderLabel.text,
                 peerAvatarBytes = if (speaker != null) speaker.avatar else peerAvatar,
                 conversationId = conversationId,
+                key = key,
             ) ?: return
         val conversation = conversationFaces.resolve(conversationId, me, labels)
         val selfAvatar = settings.ownAvatarHash.first()?.let { blobs.bytes(it) }
@@ -3406,14 +3430,90 @@ class InboundPipeline(
         fileName: String?,
         labels: NotificationLabels,
     ): String =
+        attachmentLabel(content.attachmentHash, content.attachmentMime, fileName, video = content.video != null, labels)
+            ?: content.body
+
+    /**
+     * [attachmentPreview]'s rule over the bare fields, so an inbound frame and a stored row ([noticeReaction]'s
+     * target) name an attachment the same way. Null when there is no attachment ([hash] null).
+     */
+    private fun attachmentLabel(
+        hash: String?,
+        mime: String?,
+        fileName: String?,
+        video: Boolean,
+        labels: NotificationLabels,
+    ): String? =
         when {
-            content.attachmentHash == null -> content.body
-            content.video != null -> labels.video
+            hash == null -> null
+            video -> labels.video
             fileName != null -> labels.file.format(fileName)
-            VoiceAudio.isVoice(content.attachmentMime) -> labels.voice
-            content.attachmentMime == LinkPreviewBlob.MIME -> labels.link
-            content.attachmentMime == "image/gif" -> labels.gif
+            VoiceAudio.isVoice(mime) -> labels.voice
+            mime == LinkPreviewBlob.MIME -> labels.link
+            mime == "image/gif" -> labels.gif
             else -> labels.photo
+        }
+
+    /**
+     * Notifies that someone reacted to a message we wrote (ADR 2026-10.59fu): "Reacted 👍 to “see you at 6”",
+     * one line per reactor per message ([reactionNotificationKey]) that a changed emoji replaces and a
+     * retraction withdraws. Called only after [reaction]'s write landed and changed what the reactor shows
+     * ([ReactionRepository.apply]'s answer) — on the cleartext path after the write, on both sealed paths after
+     * the ratchet commit — so a custody re-serve, a spool copy or a replay never notifies twice.
+     *
+     * Read on the local delivery path only, never in custody or relay. The target must be ours and stored (an
+     * orphan cannot be: our own sends are saved before they leave), and the reactor must be someone who reads
+     * that thread — the DM's peer, a member on the group's roster, anyone in a room — because a message id is
+     * visible to every carrier, and a carrier's reaction to it is not a conversation we are in. A blocked reactor
+     * never notifies (the cleartext path already dropped them; the sealed ones did not ask). The thread must
+     * pass the same [isAccepted] gate a message does.
+     */
+    private suspend fun noticeReaction(
+        env: RelayEnvelope,
+        reaction: ReactionEntity,
+    ) {
+        val me = identity.nodeId()
+        val reactor = reaction.reactorNodeId
+        if (reactor == me || reactor in settings.blockedNodeIds.first()) return
+        val target = messages.find(reaction.messageId) ?: return
+        if (!target.writtenBy(me) || !readsThread(reactor, target.conversationId)) return
+        if (!isAccepted(target.conversationId, me)) return
+        val key = reactionNotificationKey(reaction.messageId, reactor)
+        val emoji = reaction.emoji
+        if (emoji == null) {
+            notifier.retractReaction(target.conversationId, key)
+            return
+        }
+        val labels = notificationLabels()
+        val snippet =
+            if (target.hiddenByFilter(settings.contentFilteringEnabled.first())) {
+                labels.hidden
+            } else {
+                buildReplySnippet(
+                    GeoUri.describe(target.body, labels.location),
+                    flagged = false,
+                    attachmentLabel =
+                        attachmentLabel(
+                            target.attachmentHash,
+                            target.attachmentMime,
+                            target.attachmentName,
+                            video = target.videoDurationMs != null,
+                            labels,
+                        ),
+                )
+            }
+        notifyWithBody(env, target.conversationId, labels.reaction.format(emoji, snippet), key = key)
+    }
+
+    /** Whether [nodeId] reads [conversationId]: the DM's peer, a member on the group's roster, anyone in a room. */
+    private suspend fun readsThread(
+        nodeId: String,
+        conversationId: String,
+    ): Boolean =
+        when (Conversations.kindFor(conversationId)) {
+            ConversationKind.DM -> nodeId == conversationId
+            ConversationKind.GROUP -> groups.find(conversationId)?.let { nodeId in GroupMembersStore.decode(it.members) } == true
+            else -> true
         }
 
     /** Fires a "you were mentioned" notification on the Mentions channel for an inbound chat in [conversationId]. */

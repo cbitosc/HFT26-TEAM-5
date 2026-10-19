@@ -70,6 +70,25 @@ class MessageNotifierTest {
         sender: String = conversation.conversationId,
     ) = notifier.notify(message(conversation, body, sender), conversation, ME, "Me", null)
 
+    private fun react(
+        conversation: NotifConversation,
+        emoji: String,
+        reactor: String = conversation.conversationId,
+        messageId: String = "m1",
+    ) = notifier.notify(
+        message(conversation, "Reacted $emoji to “lunch?”", reactor).copy(key = reactionNotificationKey(messageId, reactor)),
+        conversation,
+        ME,
+        "Me",
+        null,
+    )
+
+    private fun lines(tag: String): List<String> =
+        NotificationCompat.MessagingStyle
+            .extractMessagingStyleFromNotification(conversations().getValue(tag))!!
+            .messages
+            .map { it.text.toString() }
+
     private fun mention(
         conversation: NotifConversation,
         body: String = "@me look",
@@ -204,6 +223,82 @@ class MessageNotifierTest {
                 .person
                 ?.key,
         )
+    }
+
+    @Test
+    fun aChangedReactionReplacesItsLineAndCountsOnce() {
+        val alice = dm("alice")
+        receive(alice, body = "see you")
+        react(alice, "👍")
+        react(alice, "❤️")
+
+        assertEquals(listOf("see you", "Reacted ❤️ to “lunch?”"), lines("alice"))
+        receive(group("g-hikers"), body = "hey", sender = "carol")
+        val res = app.resources
+        val expected =
+            res.getString(
+                R.string.notif_summary,
+                res.getQuantityString(R.plurals.notif_summary_messages, 3, 3),
+                res.getQuantityString(R.plurals.notif_summary_chats, 2, 2),
+            )
+        assertEquals("a replaced reaction is still one line in the count", expected, summary()!!.text())
+    }
+
+    @Test
+    fun twoPeoplesReactionsToOneMessageAreTwoLines() {
+        val hikers = group("g-hikers")
+        react(hikers, "👍", reactor = "bob")
+        react(hikers, "🔥", reactor = "carol")
+
+        assertEquals(listOf("Reacted 👍 to “lunch?”", "Reacted 🔥 to “lunch?”"), lines("g-hikers"))
+    }
+
+    @Test
+    fun aRetractedReactionLeavesTheThreadsOtherLines() {
+        val alice = dm("alice")
+        receive(alice, body = "see you")
+        react(alice, "👍")
+        receive(group("g-hikers"), body = "hey", sender = "carol")
+
+        notifier.retractReaction("alice", reactionNotificationKey("m1", "alice"))
+
+        assertEquals(listOf("see you"), lines("alice"))
+        val res = app.resources
+        val expected =
+            res.getString(
+                R.string.notif_summary,
+                res.getQuantityString(R.plurals.notif_summary_messages, 2, 2),
+                res.getQuantityString(R.plurals.notif_summary_chats, 2, 2),
+            )
+        assertEquals("the withdrawn line leaves the count", expected, summary()!!.text())
+    }
+
+    @Test
+    fun aRetractedReactionThatWasTheWholeNotificationTakesIt() {
+        react(dm("alice"), "👍")
+        receive(dm("bob"))
+
+        notifier.retractReaction("alice", reactionNotificationKey("m1", "alice"))
+
+        assertEquals(setOf("bob"), conversations().keys)
+    }
+
+    @Test
+    fun aRetractionWithNothingPostedChangesNothing() {
+        receive(dm("alice"), body = "see you")
+
+        notifier.retractReaction("alice", reactionNotificationKey("m1", "alice"))
+        notifier.retractReaction("bob", reactionNotificationKey("m1", "bob"))
+
+        assertEquals(listOf("see you"), lines("alice"))
+    }
+
+    @Test
+    fun aReactionInTheThreadOnScreenPostsNothing() {
+        notifier.setVisibleConversation("alice")
+        react(dm("alice"), "👍")
+
+        assertTrue(active().toString(), active().isEmpty())
     }
 
     @Test

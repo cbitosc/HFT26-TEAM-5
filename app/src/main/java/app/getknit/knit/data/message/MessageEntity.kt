@@ -394,6 +394,14 @@ object MentionStore {
 val MessageEntity.isStatusNotice: Boolean get() = kind != MessageEntity.KIND_NORMAL
 
 /**
+ * Whether [me] wrote this message: our sender id, an ordinary message rather than a notice, and no Meshtastic
+ * origin — a heard post sits in our sender column by convention (the phone whose board heard it writes the row),
+ * but not a word of it is ours. What earns a chat-list tick, and what a reaction must target to notify us
+ * (ADR 2026-10.59fu); `ReactionDao.observeNewestOnOwnMessages` mirrors it in SQL.
+ */
+fun MessageEntity.writtenBy(me: String?): Boolean = senderId == me && originNode == null && !isStatusNotice
+
+/**
  * Whether the reader's Content filtering ([filterOn]) hides this message: its own body was flagged, or the words
  * it quotes were ([MessageEntity.replyToFlagged], ADR 2026-10.gpa3). The one predicate every surface that hides a
  * flagged message reads — the bubble, the details screen, the list previews and the notification — and the

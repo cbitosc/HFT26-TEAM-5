@@ -86,7 +86,8 @@ seal (no prekey, stale capability), the seed is parked in the outbox and the gro
 back to v1 for everyone (§5 gate).
 
 Like every ctl frame (ADR 016 precedent), a seed DM is an ordinary custodial chat frame on the wire
-— v1 relays flood and custody it for 24 h — and is never persisted, notified, or acked as a message.
+— v1 relays flood and custody it for 24 h — and is never persisted, notified, or acked as a message
+(the one ctl that notifies is a reaction to a message you wrote, ADR 2026-10.59fu).
 A build without the group scheme that decrypts one sees an unknown `ctl` and consumes it as a silent no-op (pinned by
 test), still advancing the pair's DM session. Receivers adopt idempotently: a re-served distribution
 matches on `(epoch, mintedAt)` and never rewinds the chain; adoption is gated on holding the group,
