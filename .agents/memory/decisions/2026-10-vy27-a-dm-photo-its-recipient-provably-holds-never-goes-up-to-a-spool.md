@@ -9,7 +9,7 @@ topics: [spool, attachments]
 # ADR 2026-10.vy27 — A DM photo its recipient provably holds never goes up to a spool
 
 Status: Accepted (2026-10-17; `AttachmentDeferPolicy.proved`, `ScopeSync`'s `LocalPass.PROVED`,
-`AttachmentHolderEntity` / `AttachmentHolderDao` (DB v27), `BlobExchange.confirmHeld` / `onPeerHolds`,
+`AttachmentHolderEntity` / `AttachmentHolderDao` (DB v22), `BlobExchange.confirmHeld` / `onPeerHolds`,
 `MeshMetrics.spoolAttachProved`, `AttachmentDeferPolicy.PROOF_WAIT_MS` (revision 2). Amends ADR 021. No wire change: the holder query is ADR 2026-10.6e5t's, asked of a
 hash we hold. Spec: `docs/SPOOL_PROTOCOL.md` C-9.5-6, C-9.5-8, §9.5's reference-client paragraph, §10.1)
 
@@ -59,7 +59,7 @@ owed, and none is.
 
 **Why it persists.** A deferral is in memory because losing it only means deferring less. A proof that is lost means
 uploading the very photo it was kept to spare, and a phone restarts far more often than a photo leaves custody (24 h).
-So it is a Room table (DB v27, `KnitMigrations.MIGRATION_26_27`), pruned with the blob in `BlobRepository`'s GC, and
+So it is a Room table (DB v22, `KnitMigrations.MIGRATION_21_22`), pruned with the blob in `BlobRepository`'s GC, and
 carried in a backup like `blobs`: a restore is a move, and the peer still holds what it held.
 
 **The alternatives a reader reaches for first.** A completion report from the receiver — a final `blobprog`, or an

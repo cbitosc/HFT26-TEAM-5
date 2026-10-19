@@ -670,21 +670,26 @@ before "simplifying":
   case here runs inside `runTest { }` — and `Migration.migrate` is suspend too (`KnitMigrations`). **DB v1 is the frozen launch baseline** — there is **no** destructive fallback: from
   v1 forward every `@Database` bump MUST add a tested `Migration` to `KnitMigrations` (`data/KnitMigrations.kt`,
   appended to `ALL`) and a from→to case to `KnitDatabaseMigrationTest` — a missing migration throws at
-  open time (caught here in CI), never silently wipes. The DB is at **v12** today, with eleven migrations
-  (`MIGRATION_1_2` … `MIGRATION_11_12`) and a `KnitDatabaseMigrationTest` case for each, plus a current-schema
-  smoke test whose hardcoded `version` must be bumped by hand — as must `SqlCipherDriverUpgradeTest`'s
-  `CURRENT_VERSION`, which has now gone stale twice. Keep the version count down while a branch is
+  open time (caught here in CI), never silently wipes. The DB is at **v22** today, with twenty-one migrations
+  (`MIGRATION_1_2` … `MIGRATION_21_22`) and a `KnitDatabaseMigrationTest` case for each, plus a current-schema
+  smoke test whose `CURRENT_VERSION` must be bumped by hand (`SqlCipherDriverUpgradeTest` reads
+  `KNIT_DB_SCHEMA_VERSION`). Keep the version count down while a branch is
   unreleased — fold its schema churn into one bump before merging, the way `MIGRATION_9_10` carries the whole
-  LoRa bridge and `MIGRATION_10_11` the whole drafts feature — because a shipped migration can never be merged
-  away afterwards, and a branch that mints its own numbers strands every lab device the moment it opens a
-  database from the other branch.
+  LoRa bridge, `MIGRATION_10_11` the whole drafts feature and `MIGRATION_21_22` everything after 2.9.0 (once
+  v22…v27) — because a shipped migration can never be merged away afterwards, and a branch that mints its own
+  numbers strands every lab device the moment it opens a database from the other branch. Fold up to the last
+  release's version: check `git show v<last>:app/src/main/java/app/getknit/knit/data/KnitDatabase.kt`.
   **Folding a bump the lab has already installed needs a way back down.** `drafts.updatedAt` was briefly its
   own v12; collapsing it into v11 left the test phones holding a database whose `user_version` was *higher*
   than the app's, which Room throws on at every open rather than shrugging off. The way back is a registered
   downgrade `Migration(higher, lower)` — Room takes a descending path — and when the fold changed no columns
   its body is empty, because Room hashes schema *content* rather than version numbers, so only the stamp
   moves. Ship it, install across the fleet, then delete it; the alternative is wiping the drawer. The v12 → v11
-  shim did exactly that on 2026-09-10 and is gone. **An FTS table's sync triggers are the migration's job
+  shim did exactly that on 2026-09-10 and is gone; the v27 → v22 one (`KnitMigrations.LAB_DOWNGRADE_27_22`,
+  registered beside `ALL`, outside it) is the same move, to be deleted once the lab has opened it. Before writing
+  one, read the identity hash each lab phone holds out of its installed APK's dex (the `identityHash` of every
+  `<version>.json`, grepped in `classes*.dex`) and check the fold's regenerated JSON carries the same hash: an
+  empty shim is only right from a version whose schema the fold reproduces exactly. **An FTS table's sync triggers are the migration's job
   here:** Room drops every `room_fts_content_sync_*` trigger before a migration and re-creates its own after,
   but `MigrationTestHelper`'s delegate does neither, so `MIGRATION_11_12` creates them itself (verbatim from
   `12.json`'s `contentSyncTriggers`) or a migrated test file never indexes a write. A bump need not

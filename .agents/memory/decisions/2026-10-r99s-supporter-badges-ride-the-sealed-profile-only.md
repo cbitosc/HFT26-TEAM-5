@@ -20,7 +20,7 @@ Spec: `docs/SUPPORTER_BADGE.md`.
 - **Sealed-only carriage.** `ProfilePayload.badges` and `ProfileV2` label 8 carry `{wrapper, r}` (at most 4).
   `ProfileContent` never does: its bootstrap is 432 B of the 448-B two-packet LoRa ceiling, and every carrier keeps the
   cleartext frame (2026-09.g64k), relays included. This breaks the `openToChat` rule that a presentation field rides
-  all three layouts, so the receiver keeps badges in their own table (`peer_badges`, DB v24): only a sealed profile that
+  all three layouts, so the receiver keeps badges in their own table (`peer_badges`, DB v22): only a sealed profile that
   passes the version gate replaces them (absent clears), and the cleartext writer never names the table. A column on
   `peers` would be reverted by the next cleartext upsert the moment someone "tidies" the writers into one.
 - **Every recipient alike.** While the switch is on, every sealed profile carries the badge to every peer with a

@@ -12,7 +12,7 @@ Status: Accepted (2026-10-16); amended 2026-10-17 (below: the file button, the r
 attachment is held like a sealed one), ADR 2026-10.9rh6 (the room screens a video's frames on the way out) and ADR
 2026-10.unqn (a video is never passed through). Additive wire: `ChatContent.attachmentSize` and `.video`,
 `MessageContent.video` (`MessageContentV2` label 16), all null and omitted by default; three vectors added, none
-moved. DB v25. No capability bit. iOS companion owed. Device trial owed.
+moved. DB v22. No capability bit. iOS companion owed. Device trial owed.
 
 **What was observed.** A picked `.mp4` went out through "Send a file" as an opaque named file, at most 8 MiB as
 picked, and nothing played it. A phone's own clip of 30–90 s is 20–200 MB. The goal is a short social-style clip as a

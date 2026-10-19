@@ -112,7 +112,7 @@ interface MessageDao {
 
     /**
      * Up to [limit] unjudged replies by somebody other than [me] whose original **is** held — the backlog the mesh
-     * start settles (rows from before v23, or an insert whose settle a crash cut short). A reply whose original is
+     * start settles (rows from before v22, or an insert whose settle a crash cut short). A reply whose original is
      * absent stays out, so the set only shrinks as it is worked.
      */
     @Query(

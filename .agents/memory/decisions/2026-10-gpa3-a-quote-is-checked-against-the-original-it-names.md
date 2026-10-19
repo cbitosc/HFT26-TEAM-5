@@ -32,7 +32,7 @@ verdict. No wire change: the fix is receiver-only and needs no paired iOS change
 - **The verdict** (`data/message/QuoteCheck.kt`, `quoteVerdict`) is VERIFIED when this phone holds the message under the
   quoted id, in the reply's own thread, by the author the quote names. That message must also be an ordinary one (not a
   status line, not a heard Meshtastic post, whose sender column is this phone by convention) and not the reply itself.
-  Anything else that resolves is a MISMATCH. `messages.replyCheck` (DB v23, local only) holds `REPLY_UNCHECKED`,
+  Anything else that resolves is a MISMATCH. `messages.replyCheck` (DB v22, local only) holds `REPLY_UNCHECKED`,
   `REPLY_VERIFIED` or `REPLY_MISMATCH`.
 - **A verified quote is rebuilt from the original** (`settleQuote`), by the composer's own rule (`quoteSnippet`), with
   labels in the reader's language (`QuoteLabels`, built from the same strings the composer uses). The rebuilt snippet is
@@ -42,7 +42,7 @@ verdict. No wire change: the fix is receiver-only and needs no paired iOS change
   replies waiting on it. Each side reads only after its own insert has committed, so whichever of reply and original
   lands second sees the other. The write is a conditional `UPDATE … WHERE replyCheck = 0` that touches only the quote
   columns, so no transaction is needed and nothing written in between is undone. `settleBacklog` runs once per
-  `MeshManager.start()`, after the own-profile seed, for rows from before v23 and for a settle a crash cut short. Our
+  `MeshManager.start()`, after the own-profile seed, for rows from before v22 and for a settle a crash cut short. Our
   own replies are never judged or rewritten: we quoted a row we held, and `resealAndFlood` re-ships the stored quote.
 - **Moderation** (`messages.replyToFlagged`, local only). A verified quote carries the original's *own* verdict. It is
   non-transitive: a reply to a reply hidden only for its quote is not hidden. An unverified quote's snippet is screened

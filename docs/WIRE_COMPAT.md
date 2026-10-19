@@ -581,7 +581,7 @@ is 432 B of the 448-B two-packet LoRa ceiling (`CoordinationPlaneSizeBudgetTest`
 the cleartext frame (ADR 2026-09.g64k), relays included. The rule above — a presentation field rides all three layouts
 or the next sealed update reverts it — is about a field the cleartext frame sets and the sealed path would overwrite;
 the inverse trap is the cleartext frame overwriting a sealed-only field. So a receiver keeps badges in a table of
-their own (`peer_badges`, DB v24), replaced whole only by a sealed profile that passes the version gate (absent
+their own (`peer_badges`, DB v22), replaced whole only by a sealed profile that passes the version gate (absent
 clears) and **never named by the cleartext profile writer**, whatever its version. Don't move them onto `peers`, and
 don't add a badge field to `ProfileContent` "for symmetry". No capability bit, no ctl value, no version bump, no
 discovery marker; the transcoder never sees the sealed plaintext. *Metadata cost:* the field is inside the seal **and a badge change never moves the cleartext profile's

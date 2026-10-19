@@ -47,7 +47,7 @@ class KnitDatabaseMigrationTest {
         )
 
     @Test
-    fun `the current schema (v26) creates and opens from the exported JSON`() =
+    fun `the current schema (v22) creates and opens from the exported JSON`() =
         runTest {
             helper.createDatabase(CURRENT_VERSION).close()
         }
@@ -831,174 +831,77 @@ class KnitDatabaseMigrationTest {
         }
 
     @Test
-    fun `migrate 22 to 23 leaves every reply unchecked and unflagged and indexes the late check's lookup`() =
+    fun `migrate 21 to 22 leaves every message's new columns at their upgrade values and every table it adds empty`() =
         runTest {
-            // A verified quote is rebuilt with localized labels SQL cannot produce, so nothing is judged here; the
-            // mesh start's backlog pass does it (ADR 2026-10.gpa3).
-            helper.createDatabase(22).use { c ->
+            helper.createDatabase(21).use { c ->
                 c.execSQL(
                     "INSERT INTO messages (id, senderId, conversationId, body, sentAt, received, receivedVia, mentions, " +
                         "replyToHasAttachment, moderation, pendingKey, kind, originViaMqtt, originSigned, attachmentAnimated, " +
-                        "replyToId, replyToAuthorId, replyToSnippet) " +
-                        "VALUES ('r1','n1','peer-1','sure',2,1,0,'[]',0,0,0,0,0,0,0,'o1','n2','old words')",
+                        "replyToId, replyToAuthorId, replyToSnippet, attachmentHash, attachmentMime, attachmentSize) " +
+                        "VALUES ('r1','n1','peer-1','sure',2,1,0,'[]',0,0,0,0,0,0,0,'o1','n2','old words','H1','video/mp4',2000000)",
                 )
-            }
-            helper.runMigrationsAndValidate(23, listOf(KnitMigrations.MIGRATION_22_23)).use { c ->
-                c.prepare("SELECT replyCheck, replyToFlagged, replyToSnippet FROM messages WHERE id = 'r1'").use { s ->
-                    assertTrue(s.step())
-                    assertEquals(0L, s.getLong(0))
-                    assertEquals(0L, s.getLong(1))
-                    assertEquals("old words", s.getText(2))
-                }
-                c
-                    .prepare(
-                        "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'index_messages_replyToId_replyCheck'",
-                    ).use { s -> assertTrue("the replies waiting on an original are found by index", s.step()) }
-            }
-        }
-
-    @Test
-    fun `migrate 23 to 24 leaves every attachment unapproved and indexes the attachment hash`() =
-        runTest {
-            // ADR 2026-10.js2p: the tap is the user's, never inferred at upgrade.
-            helper.createDatabase(23).use { c ->
-                c.execSQL(
-                    "INSERT INTO messages (id, senderId, conversationId, body, sentAt, received, receivedVia, mentions, " +
-                        "replyToHasAttachment, moderation, pendingKey, kind, originViaMqtt, originSigned, attachmentAnimated, " +
-                        "replyCheck, replyToFlagged, attachmentHash, attachmentSize) " +
-                        "VALUES ('f1','n1','peer-1','',2,0,0,'[]',0,0,0,0,0,0,0,0,0,'H1',2000000)",
-                )
-            }
-            helper.runMigrationsAndValidate(24, listOf(KnitMigrations.MIGRATION_23_24)).use { c ->
-                c.prepare("SELECT attachmentFetchApproved, attachmentSize FROM messages WHERE id = 'f1'").use { s ->
-                    assertTrue(s.step())
-                    assertEquals(0L, s.getLong(0))
-                    assertEquals(2_000_000L, s.getLong(1))
-                }
-                c
-                    .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'index_messages_attachmentHash'")
-                    .use { s -> assertTrue("a delivery reads the rows naming its attachment by index", s.step()) }
-            }
-        }
-
-    @Test
-    fun `migrate 24 to 25 adds the video columns empty on every row`() =
-        runTest {
-            // ADR 2026-10.hmfe: nothing before this build sent a video, so no row describes one.
-            helper.createDatabase(24).use { c ->
-                c.execSQL(
-                    "INSERT INTO messages (id, senderId, conversationId, body, sentAt, received, receivedVia, mentions, " +
-                        "replyToHasAttachment, moderation, pendingKey, kind, originViaMqtt, originSigned, attachmentAnimated, " +
-                        "replyCheck, replyToFlagged, attachmentFetchApproved, attachmentHash, attachmentMime) " +
-                        "VALUES ('v1','n1','peer-1','',2,0,0,'[]',0,0,0,0,0,0,0,0,0,0,'H1','video/mp4')",
-                )
-            }
-            helper.runMigrationsAndValidate(25, listOf(KnitMigrations.MIGRATION_24_25)).use { c ->
-                c
-                    .prepare(
-                        "SELECT videoDurationMs, videoWidth, videoHeight, videoPoster, attachmentMime, videoPosterFlagged FROM messages",
-                    ).use { s ->
-                        assertTrue(s.step())
-                        (0..3).forEach { assertTrue("column $it is null", s.isNull(it)) }
-                        assertEquals("video/mp4", s.getText(4))
-                        assertEquals("no poster is flagged at upgrade", 0L, s.getLong(5))
-                    }
-            }
-        }
-
-    @Test
-    fun `migrate 25 to 26 adds an empty peer_badges table and keeps every peer`() =
-        runTest {
-            helper.createDatabase(25).use { c ->
                 c.execSQL(
                     "INSERT INTO peers (nodeId, name, status, verified, updatedAt, openToChat, lastSeenAt) VALUES ('p1','Pat','',0,1,0,0)",
                 )
-            }
-            helper.runMigrationsAndValidate(26, listOf(KnitMigrations.MIGRATION_25_26)).use { c ->
-                c.prepare("SELECT COUNT(*) FROM peers").use { s ->
-                    assertTrue(s.step())
-                    assertEquals(1L, s.getLong(0))
-                }
-                c.prepare("SELECT COUNT(*) FROM peer_badges").use { s ->
-                    assertTrue(s.step())
-                    assertEquals("a badge is kept from the next sealed profile", 0L, s.getLong(0))
-                }
-            }
-        }
-
-    @Test
-    fun `migrate 24 to 26 lays main's v24 and v25 down on a calls-branch build that numbered peer_badges v24`() =
-        runTest {
-            // A phone that ran the calls branch before main's v24 landed: stamped 24, peer_badges present, no approval.
-            helper.createDatabase(23).use { c ->
-                c.execSQL(
-                    "INSERT INTO messages (id, senderId, conversationId, body, sentAt, received, receivedVia, mentions, " +
-                        "replyToHasAttachment, moderation, pendingKey, kind, originViaMqtt, originSigned, attachmentAnimated, " +
-                        "replyCheck, replyToFlagged, attachmentHash, attachmentSize) " +
-                        "VALUES ('f1','n1','peer-1','',2,0,0,'[]',0,0,0,0,0,0,0,0,0,'H1',2000000)",
-                )
-                c.execSQL(PEER_BADGES_SQL)
-                c.execSQL("INSERT INTO peer_badges (nodeId, position, wrapper, r) VALUES ('p1', 0, x'01', x'02')")
-                c.execSQL("PRAGMA user_version = 24")
-            }
-            helper
-                .runMigrationsAndValidate(26, listOf(KnitMigrations.MIGRATION_24_25, KnitMigrations.MIGRATION_25_26))
-                .use { c ->
-                    c.prepare("SELECT attachmentFetchApproved, videoDurationMs FROM messages WHERE id = 'f1'").use { s ->
-                        assertTrue(s.step())
-                        assertEquals(0L, s.getLong(0))
-                        assertTrue(s.isNull(1))
-                    }
-                    c.prepare("SELECT COUNT(*) FROM peer_badges").use { s ->
-                        assertTrue(s.step())
-                        assertEquals("the badges it already held are kept", 1L, s.getLong(0))
-                    }
-                }
-        }
-
-    @Test
-    fun `migrate 25 to 26 lays main's v25 down on a calls-branch build that numbered peer_badges v25`() =
-        runTest {
-            // A phone that ran the calls branch before main's v25 landed: stamped 25, peer_badges present, no video columns.
-            helper.createDatabase(24).use { c ->
-                c.execSQL(
-                    "INSERT INTO messages (id, senderId, conversationId, body, sentAt, received, receivedVia, mentions, " +
-                        "replyToHasAttachment, moderation, pendingKey, kind, originViaMqtt, originSigned, attachmentAnimated, " +
-                        "replyCheck, replyToFlagged, attachmentFetchApproved) " +
-                        "VALUES ('f1','n1','peer-1','',2,0,0,'[]',0,0,0,0,0,0,0,0,0,1)",
-                )
-                c.execSQL(PEER_BADGES_SQL)
-                c.execSQL("INSERT INTO peer_badges (nodeId, position, wrapper, r) VALUES ('p1', 0, x'01', x'02')")
-                c.execSQL("PRAGMA user_version = 25")
-            }
-            helper.runMigrationsAndValidate(26, listOf(KnitMigrations.MIGRATION_25_26)).use { c ->
-                c.prepare("SELECT attachmentFetchApproved, videoDurationMs, videoPosterFlagged FROM messages").use { s ->
-                    assertTrue(s.step())
-                    assertEquals(1L, s.getLong(0))
-                    assertTrue(s.isNull(1))
-                    assertEquals(0L, s.getLong(2))
-                }
-                c.prepare("SELECT COUNT(*) FROM peer_badges").use { s ->
-                    assertTrue(s.step())
-                    assertEquals("the badges it already held are kept", 1L, s.getLong(0))
-                }
-            }
-        }
-
-    @Test
-    fun `migrate 26 to 27 adds an empty attachment_holders table and keeps every blob`() =
-        runTest {
-            helper.createDatabase(26).use { c ->
                 c.execSQL("INSERT INTO blobs (hash, mime, bytes) VALUES ('h1', 'image/jpeg', x'01')")
             }
-            helper.runMigrationsAndValidate(27, listOf(KnitMigrations.MIGRATION_26_27)).use { c ->
-                c.prepare("SELECT COUNT(*) FROM blobs").use { s ->
+            helper.runMigrationsAndValidate(22, listOf(KnitMigrations.MIGRATION_21_22)).use { c ->
+                c
+                    .prepare(
+                        "SELECT replyCheck, replyToFlagged, replyToSnippet, attachmentFetchApproved, attachmentSize, " +
+                            "videoDurationMs, videoWidth, videoHeight, videoPoster, videoPosterFlagged, attachmentMime " +
+                            "FROM messages WHERE id = 'r1'",
+                    ).use { s ->
+                        assertTrue(s.step())
+                        // A verified quote is rebuilt with localized labels SQL cannot produce, so nothing is judged
+                        // here; the mesh start's backlog pass does it (ADR 2026-10.gpa3).
+                        assertEquals(0L, s.getLong(0))
+                        assertEquals(0L, s.getLong(1))
+                        assertEquals("old words", s.getText(2))
+                        // ADR 2026-10.js2p: the tap is the user's, never inferred at upgrade.
+                        assertEquals(0L, s.getLong(3))
+                        assertEquals(2_000_000L, s.getLong(4))
+                        // ADR 2026-10.hmfe: nothing before this build sent a video, so no row describes one.
+                        (5..8).forEach { assertTrue("column $it is null", s.isNull(it)) }
+                        assertEquals("no poster is flagged at upgrade", 0L, s.getLong(9))
+                        assertEquals("video/mp4", s.getText(10))
+                    }
+                listOf("index_messages_replyToId_replyCheck", "index_messages_attachmentHash").forEach { index ->
+                    c.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = '$index'").use { s ->
+                        assertTrue("$index exists", s.step())
+                    }
+                }
+                c.prepare("SELECT (SELECT COUNT(*) FROM peers), (SELECT COUNT(*) FROM blobs)").use { s ->
+                    assertTrue(s.step())
+                    assertEquals(1L, s.getLong(0))
+                    assertEquals(1L, s.getLong(1))
+                }
+                // A badge is kept from the next sealed profile; a photo proves itself on its next round.
+                c.prepare("SELECT (SELECT COUNT(*) FROM peer_badges), (SELECT COUNT(*) FROM attachment_holders)").use { s ->
+                    assertTrue(s.step())
+                    assertEquals(0L, s.getLong(0))
+                    assertEquals(0L, s.getLong(1))
+                }
+            }
+        }
+
+    @Test
+    fun `a lab database stamped 27 walks back down to the folded 22 and keeps every row`() =
+        runTest {
+            // The fold's pre-merge numbering put the same schema at v27; only the stamp differs.
+            helper.createDatabase(22).use { c ->
+                c.execSQL("INSERT INTO attachment_holders (hash, holderId, plane, provedAt) VALUES ('h1', 'p1', 1, 5)")
+                c.execSQL("PRAGMA user_version = 27")
+            }
+            // What the builder registers, so a shim dropped from `build` goes red here.
+            helper.runMigrationsAndValidate(22, KnitMigrations.REGISTERED.toList()).use { c ->
+                c.prepare("SELECT COUNT(*) FROM attachment_holders").use { s ->
                     assertTrue(s.step())
                     assertEquals(1L, s.getLong(0))
                 }
-                c.prepare("SELECT COUNT(*) FROM attachment_holders").use { s ->
+                c.prepare("PRAGMA user_version").use { s ->
                     assertTrue(s.step())
-                    assertEquals("a photo proves itself on its next round, or uploads as before", 0L, s.getLong(0))
+                    assertEquals(22L, s.getLong(0))
                 }
             }
         }
@@ -1008,13 +911,7 @@ class KnitDatabaseMigrationTest {
          * KnitDatabase `@Database(version = …)` — bump alongside the DB (its retention is CLASS, so the version
          * can't be read reflectively). A missing schemas/<db>/<version>.json fails the smoke test.
          */
-        const val CURRENT_VERSION = 27
-
-        /** Room's `peer_badges` DDL, as a calls-branch dev build laid it down under an older version number. */
-        const val PEER_BADGES_SQL =
-            "CREATE TABLE IF NOT EXISTS `peer_badges` " +
-                "(`nodeId` TEXT NOT NULL, `position` INTEGER NOT NULL, `wrapper` BLOB NOT NULL, `r` BLOB NOT NULL, " +
-                "PRIMARY KEY(`nodeId`, `position`))"
+        const val CURRENT_VERSION = 22
 
         /** The v16 column list with an attachment — MIGRATION_16_17's test seeds rows through it. */
         const val INSERT_V16 =

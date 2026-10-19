@@ -2,11 +2,11 @@
   "formatVersion": 1,
   "database": {
     "version": 22,
-    "identityHash": "cdf6f14117508269d6b41b8e884bc28d",
+    "identityHash": "d3a17bd91c9c593b2234cc8571cefaa8",
     "entities": [
       {
         "tableName": "messages",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `senderId` TEXT NOT NULL, `recipientId` TEXT, `conversationId` TEXT NOT NULL, `body` TEXT NOT NULL, `sentAt` INTEGER NOT NULL, `received` INTEGER NOT NULL, `receivedVia` INTEGER NOT NULL, `arrivedAt` INTEGER, `mentions` TEXT NOT NULL, `attachmentHash` TEXT, `attachmentMime` TEXT, `attachmentKey` TEXT, `replyToId` TEXT, `replyToAuthorId` TEXT, `replyToAuthor` TEXT, `replyToSnippet` TEXT, `replyToHasAttachment` INTEGER NOT NULL, `voiceDurationMs` INTEGER, `voicePeaks` TEXT, `attachmentName` TEXT, `attachmentSize` INTEGER, `moderation` INTEGER NOT NULL, `pendingKey` INTEGER NOT NULL, `kind` INTEGER NOT NULL, `originNode` INTEGER, `originName` TEXT, `originChannel` TEXT, `originHops` INTEGER, `originSnrDeci` INTEGER, `originViaMqtt` INTEGER NOT NULL, `originPeerId` TEXT, `originSigned` INTEGER NOT NULL, `attachmentAnimated` INTEGER NOT NULL, `attachmentPlainHash` TEXT, `attachmentSourceHash` TEXT, PRIMARY KEY(`id`))",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `senderId` TEXT NOT NULL, `recipientId` TEXT, `conversationId` TEXT NOT NULL, `body` TEXT NOT NULL, `sentAt` INTEGER NOT NULL, `received` INTEGER NOT NULL, `receivedVia` INTEGER NOT NULL, `arrivedAt` INTEGER, `mentions` TEXT NOT NULL, `attachmentHash` TEXT, `attachmentMime` TEXT, `attachmentKey` TEXT, `replyToId` TEXT, `replyToAuthorId` TEXT, `replyToAuthor` TEXT, `replyToSnippet` TEXT, `replyToHasAttachment` INTEGER NOT NULL, `voiceDurationMs` INTEGER, `voicePeaks` TEXT, `attachmentName` TEXT, `attachmentSize` INTEGER, `moderation` INTEGER NOT NULL, `pendingKey` INTEGER NOT NULL, `kind` INTEGER NOT NULL, `originNode` INTEGER, `originName` TEXT, `originChannel` TEXT, `originHops` INTEGER, `originSnrDeci` INTEGER, `originViaMqtt` INTEGER NOT NULL, `originPeerId` TEXT, `originSigned` INTEGER NOT NULL, `attachmentAnimated` INTEGER NOT NULL, `attachmentPlainHash` TEXT, `attachmentSourceHash` TEXT, `replyCheck` INTEGER NOT NULL, `replyToFlagged` INTEGER NOT NULL, `attachmentFetchApproved` INTEGER NOT NULL, `videoDurationMs` INTEGER, `videoWidth` INTEGER, `videoHeight` INTEGER, `videoPoster` TEXT, `videoPosterFlagged` INTEGER NOT NULL, PRIMARY KEY(`id`))",
         "fields": [
           {
             "fieldPath": "id",
@@ -202,6 +202,50 @@
             "fieldPath": "attachmentSourceHash",
             "columnName": "attachmentSourceHash",
             "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "replyCheck",
+            "columnName": "replyCheck",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "replyToFlagged",
+            "columnName": "replyToFlagged",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "attachmentFetchApproved",
+            "columnName": "attachmentFetchApproved",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "videoDurationMs",
+            "columnName": "videoDurationMs",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "videoWidth",
+            "columnName": "videoWidth",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "videoHeight",
+            "columnName": "videoHeight",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "videoPoster",
+            "columnName": "videoPoster",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "videoPosterFlagged",
+            "columnName": "videoPosterFlagged",
+            "affinity": "INTEGER",
+            "notNull": true
           }
         ],
         "primaryKey": {
@@ -241,6 +285,25 @@
             ],
             "orders": [],
             "createSql": "CREATE INDEX IF NOT EXISTS `index_messages_attachmentPlainHash` ON `${TABLE_NAME}` (`attachmentPlainHash`)"
+          },
+          {
+            "name": "index_messages_replyToId_replyCheck",
+            "unique": false,
+            "columnNames": [
+              "replyToId",
+              "replyCheck"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_messages_replyToId_replyCheck` ON `${TABLE_NAME}` (`replyToId`, `replyCheck`)"
+          },
+          {
+            "name": "index_messages_attachmentHash",
+            "unique": false,
+            "columnNames": [
+              "attachmentHash"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_messages_attachmentHash` ON `${TABLE_NAME}` (`attachmentHash`)"
           }
         ]
       },
@@ -1667,11 +1730,85 @@
             "memberId"
           ]
         }
+      },
+      {
+        "tableName": "peer_badges",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`nodeId` TEXT NOT NULL, `position` INTEGER NOT NULL, `wrapper` BLOB NOT NULL, `r` BLOB NOT NULL, PRIMARY KEY(`nodeId`, `position`))",
+        "fields": [
+          {
+            "fieldPath": "nodeId",
+            "columnName": "nodeId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "position",
+            "columnName": "position",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "wrapper",
+            "columnName": "wrapper",
+            "affinity": "BLOB",
+            "notNull": true
+          },
+          {
+            "fieldPath": "r",
+            "columnName": "r",
+            "affinity": "BLOB",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "nodeId",
+            "position"
+          ]
+        }
+      },
+      {
+        "tableName": "attachment_holders",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`hash` TEXT NOT NULL, `holderId` TEXT NOT NULL, `plane` INTEGER NOT NULL, `provedAt` INTEGER NOT NULL, PRIMARY KEY(`hash`, `holderId`))",
+        "fields": [
+          {
+            "fieldPath": "hash",
+            "columnName": "hash",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "holderId",
+            "columnName": "holderId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "plane",
+            "columnName": "plane",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "provedAt",
+            "columnName": "provedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "hash",
+            "holderId"
+          ]
+        }
       }
     ],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'cdf6f14117508269d6b41b8e884bc28d')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'd3a17bd91c9c593b2234cc8571cefaa8')"
     ]
   }
 }

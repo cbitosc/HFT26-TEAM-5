@@ -524,7 +524,7 @@ doc). **Don't start a deferred item without explicit direction.**
   hardware — send a photo co-located (expect the deferred counter climbing and no `aput`), separate the
   devices, expect the upload within one 60 s heal round of the sighting lapsing.
   **A DM photo its recipient provably holds never goes up, BUILT 2026-10-17** (ADR 2026-10.vy27, spec C-9.5-6's
-  exception and C-9.5-8's proof of bytes, DB v27 `attachment_holders`): the recipient's own hash-checked radio
+  exception and C-9.5-8's proof of bytes, DB v22 `attachment_holders`): the recipient's own hash-checked radio
   arrival, or its `blobhave` answer to the sender over a live short-range link, settles the photo for good — no
   upload after the peers part or at last call. An ack alone still only defers. Counted as `spoolAttachProved`. That
   supersedes the trial above: co-located, expect `spoolAttachProved` and no `aput` even after separating; with

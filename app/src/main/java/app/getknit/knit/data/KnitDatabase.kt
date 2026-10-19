@@ -56,7 +56,7 @@ import net.zetetic.database.sqlcipher.driver.SQLCipherDriver
  * The `@Database` version, as a top-level constant so the annotation and [KnitDatabase.SCHEMA_VERSION] read
  * one number (an annotation argument cannot name the class's own companion).
  */
-internal const val KNIT_DB_SCHEMA_VERSION = 27
+internal const val KNIT_DB_SCHEMA_VERSION = 22
 
 @Database(
     entities = [
@@ -199,31 +199,31 @@ internal const val KNIT_DB_SCHEMA_VERSION = 27
     //     new-era frame on an old era's chain (#135, ADR 2026-10.gcrd). Local only, no wire change. Both tables are
     //     recreated empty (a tag cannot be computed in SQL, and a guessed one would keep a stale row live);
     //     migrated by KnitMigrations.MIGRATION_20_21.
-    // v22: one `group_member_clocks` table — each founding member's leave and rejoin clocks per group, which until
+    // v22: everything after 2.9.0, folded into one bump (KnitMigrations.MIGRATION_21_22). All local, no wire change:
+    //   - one `group_member_clocks` table — each founding member's leave and rejoin clocks per group, which until
     //     now were read back off the `sentAt` of the `leave:` / `rejoin:` status lines. The retention sweep may drop
     //     a request thread's lines while the group lives on, and a frame custody re-served after that flipped the
-    //     roster on Android alone (IOS-6, ADR 2026-09.v6fu). Local only, no wire change; carried in a backup like
-    //     `groups`. Filled from the lines that exist at upgrade; migrated by KnitMigrations.MIGRATION_21_22.
-    // v23: `messages.replyCheck` and `messages.replyToFlagged`, indexed `(replyToId, replyCheck)` — local only: whether
-    //     an inbound reply's quote was judged against the original it names, and this phone's verdict on the quoted
-    //     words (ADR 2026-10.gpa3). No wire change. Unchecked and unflagged on existing rows; the mesh start's
-    //     `QuoteVerifier.settleBacklog` judges those whose original is held. Migrated by KnitMigrations.MIGRATION_22_23.
-    // v24: `messages.attachmentFetchApproved` — local only: the user tapped "Tap to download" on a large attachment
-    //     only Bluetooth could fetch, so its fetch may ride Bluetooth (ADR 2026-10.js2p). No wire change. Unapproved on
-    //     existing rows, which gates none of them: none declared a size over the limit except named files, and those
-    //     fetch on as before once the user taps. Migrated by KnitMigrations.MIGRATION_23_24.
-    // v25: `messages.videoDurationMs` / `videoWidth` / `videoHeight` / `videoPoster` / `videoPosterFlagged`: a short
+    //     roster on Android alone (IOS-6, ADR 2026-09.v6fu). Carried in a backup like `groups`; filled from the
+    //     lines that exist at upgrade.
+    //   - `messages.replyCheck` and `messages.replyToFlagged`, indexed `(replyToId, replyCheck)`: whether an inbound
+    //     reply's quote was judged against the original it names, and this phone's verdict on the quoted words (ADR
+    //     2026-10.gpa3). Unchecked and unflagged on existing rows; the mesh start's `QuoteVerifier.settleBacklog`
+    //     judges those whose original is held.
+    //   - `messages.attachmentFetchApproved`: the user tapped "Tap to download" on a large attachment only Bluetooth
+    //     could fetch, so its fetch may ride Bluetooth (ADR 2026-10.js2p), and an index on `messages.attachmentHash`.
+    //     Unapproved on existing rows, which gates none of them: none declared a size over the limit except named
+    //     files, and those fetch on as before once the user taps.
+    //   - `messages.videoDurationMs` / `videoWidth` / `videoHeight` / `videoPoster` / `videoPosterFlagged`: a short
     //     video's duration, upright size and inline JPEG poster, the sender's labels until the bytes land, and this
-    //     phone's verdict on the poster (ADR 2026-10.hmfe). Migrated by KnitMigrations.MIGRATION_24_25.
-    // v26: one `peer_badges` table — the supporter badges each peer's sealed profile last carried, verbatim, verified
+    //     phone's verdict on the poster (ADR 2026-10.hmfe).
+    //   - one `peer_badges` table — the supporter badges each peer's sealed profile last carried, verbatim, verified
     //     when shown (docs/SUPPORTER_BADGE.md, ADR 2026-10.r99s). A table rather than columns on `peers`, and written
-    //     only by the sealed profile path, so a cleartext profile never reverts them. Rows go with their pin and ride a
-    //     backup like `peers`. Empty on arrival; migrated by KnitMigrations.MIGRATION_25_26.
-    // v27: one `attachment_holders` table — per (attachment hash, holder) proof, learnt over a short-range radio, that
+    //     only by the sealed profile path, so a cleartext profile never reverts them. Rows go with their pin and ride
+    //     a backup like `peers`. Empty on arrival.
+    //   - one `attachment_holders` table — per (attachment hash, holder) proof, learnt over a short-range radio, that
     //     a DM photo's recipient holds its bytes: the recipient's own radio arrival, or the peer's answer to a holder
-    //     query. A DM photo so proved never goes up to a spool (docs/SPOOL_PROTOCOL.md C-9.5-8, ADR 2026-10.vy27). No
-    //     wire change. Rows go with their blob and ride a backup like `blobs`. Empty on arrival; migrated by
-    //     KnitMigrations.MIGRATION_26_27.
+    //     query. A DM photo so proved never goes up to a spool (docs/SPOOL_PROTOCOL.md C-9.5-8, ADR 2026-10.vy27).
+    //     Rows go with their blob and ride a backup like `blobs`. Empty on arrival.
     version = KNIT_DB_SCHEMA_VERSION,
     // Export the schema JSON to app/schemas/ (location set by the androidx.room Gradle plugin's
     // room { schemaDirectory(...) } in app/build.gradle.kts). Keeps the schema diffable in review and feeds
@@ -309,7 +309,7 @@ abstract class KnitDatabase : RoomDatabase() {
                 // Every schema change from here ships a tested KnitMigrations entry; a version bump with no
                 // matching migration makes Room throw at open time (caught by KnitDatabaseMigrationTest) — a loud
                 // failure in CI, never a silent wipe of a user's messages/custody/pins in production.
-                .addMigrations(*KnitMigrations.ALL)
+                .addMigrations(*KnitMigrations.REGISTERED)
                 .build()
         }
     }

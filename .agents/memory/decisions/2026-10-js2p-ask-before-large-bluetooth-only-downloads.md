@@ -11,7 +11,7 @@ topics: [blobs, ui, wire]
 Status: Accepted (2026-10-16). Amends ADR 2026-10.f7gg and 2026-10.6e5t (a fast-only want asks and queries only
 neighbours Wi-Fi Aware can carry the bytes from) and ADR 2026-09.qq2r (a photo or voice note of 1 MB or more now
 declares its size too). One additive wire field (`BlobReqContent.fastOnly`), no capability bit, one vector added,
-none moved. DB v24 (`messages.attachmentFetchApproved`). The iOS companion is owed (below). Device trial owed.
+none moved. DB v22 (`messages.attachmentFetchApproved`). The iOS companion is owed (below). Device trial owed.
 
 **What was observed.** Every received attachment was fetched the moment it was seen, over whichever plane a holder
 served it on. A file of several MB that only Bluetooth peers held took minutes at the base pace (a 2 MB picture is
@@ -42,7 +42,7 @@ whole time (ADR 2026-10.g24x), and the user never chose it. Over Wi-Fi Aware the
    `messages.attachmentFetchApproved` on every row naming the hash, then wants it plain; a row that arrives later
    naming a tapped hash comes in tapped (`InboundPipeline.deliverChat`), or it would show the card again. The database
    is the source (`rules/mesh.md`): `rewantMissingBlobs` re-derives every want's flag on every call from
-   `MessageDao.attachmentFetchRows(me)` — one entry per row, read by the `messages.attachmentHash` index v24 adds —
+   `MessageDao.attachmentFetchRows(me)` — one entry per row, read by the `messages.attachmentHash` index v22 adds —
    folded per hash by `BluetoothFetchGate.fastOnly(rows, …)`:
    fast-only only when *every* row is (one row that is ours, tapped, under the limit or undeclared fetches it for all).
    Folding the largest size in SQL was rejected: a stranger's DM naming a contact's attachment hash with an inflated

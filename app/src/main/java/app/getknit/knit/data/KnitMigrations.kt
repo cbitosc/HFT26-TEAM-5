@@ -527,12 +527,31 @@ object KnitMigrations {
         }
 
     /**
-     * v21 → v22: one `group_member_clocks` table — each founding member's leave and rejoin clocks per group, moved
-     * off the `sentAt` of the `leave:<group>:<member>` and `rejoin:<group>:<member>` status lines, which the
-     * retention sweep may drop while the group lives on (IOS-6, ADR 2026-09.v6fu). Filled from the lines a device
-     * holds at upgrade, for groups it still holds; the member is read off the line's id, the id the clocks were
-     * always keyed by. A line already swept is a clock already lost, and stays 0 — the reading it had. The CREATE
-     * must stay byte-equivalent to what Room generates for `app/schemas/**/22.json`.
+     * v21 → v22: everything the schema gained after 2.9.0, in one bump (a shipped migration can never be merged
+     * away, so the unreleased churn is folded before it ships). All local, no wire change:
+     *
+     * - one `group_member_clocks` table — each founding member's leave and rejoin clocks per group, moved off the
+     *   `sentAt` of the `leave:<group>:<member>` and `rejoin:<group>:<member>` status lines, which the retention sweep
+     *   may drop while the group lives on (IOS-6, ADR 2026-09.v6fu). Filled from the lines a device holds at upgrade,
+     *   for groups it still holds; the member is read off the line's id, the id the clocks were always keyed by. A
+     *   line already swept is a clock already lost, and stays 0 — the reading it had.
+     * - `messages.replyCheck` and `messages.replyToFlagged`, indexed `(replyToId, replyCheck)` — whether an inbound
+     *   reply's quote was judged against the original it names, and this phone's verdict on the quoted words (ADR
+     *   2026-10.gpa3). No backfill: a verified quote is rebuilt from its original with localized labels SQL cannot
+     *   produce, so every existing reply starts unchecked and `QuoteVerifier.settleBacklog` judges those whose
+     *   original is held on the next mesh start.
+     * - `messages.attachmentFetchApproved` — the user's "Tap to download" on a large attachment only Bluetooth could
+     *   fetch (ADR 2026-10.js2p), unapproved on every existing row — and an index on `messages.attachmentHash` for
+     *   the delivery's per-hash read of every row naming an attachment.
+     * - a short video's duration, upright size, inline poster and the poster's verdict on the message row (ADR
+     *   2026-10.hmfe), null (and unflagged) on every existing row: nothing before this build sent a video.
+     * - one `peer_badges` table — the supporter badges each peer's sealed profile last carried, verified when shown
+     *   (docs/SUPPORTER_BADGE.md, ADR 2026-10.r99s). Empty: each fills as that peer's next sealed profile lands.
+     * - one `attachment_holders` table — per (attachment hash, holder) proof, learnt over a short-range radio, that a
+     *   DM photo's recipient holds its bytes, so the photo never goes up to a spool (docs/SPOOL_PROTOCOL.md C-9.5-8,
+     *   ADR 2026-10.vy27). Empty: a photo already in custody proves itself on its next round, or uploads as before.
+     *
+     * The SQL must stay byte-equivalent to what Room generates for `app/schemas/**/22.json`.
      */
     val MIGRATION_21_22 =
         object : Migration(21, 22) {
@@ -553,92 +572,23 @@ object KnitMigrations {
                         "WHERE substr(m.id, 1, length('rejoin:' || g.groupId || ':')) = 'rejoin:' || g.groupId || ':'" +
                         ") WHERE memberId != '' GROUP BY groupId, memberId",
                 )
-            }
-        }
-
-    /**
-     * v22 → v23: `messages.replyCheck` and `messages.replyToFlagged`, and an index on `(replyToId, replyCheck)` — whether
-     * an inbound reply's quote was judged against the original it names, and this phone's verdict on the quoted words
-     * (ADR 2026-10.gpa3). Local only. No backfill here: a verified quote is rebuilt from its original with localized
-     * labels SQL cannot produce, so every existing reply starts unchecked and `QuoteVerifier.settleBacklog` judges
-     * those whose original is held on the next mesh start. Additive only; the SQL must stay byte-equivalent to what
-     * Room generates for `app/schemas/**/23.json`.
-     */
-    val MIGRATION_22_23 =
-        object : Migration(22, 23) {
-            override suspend fun migrate(connection: SQLiteConnection) {
                 connection.execSQL("ALTER TABLE `messages` ADD COLUMN `replyCheck` INTEGER NOT NULL DEFAULT 0")
                 connection.execSQL("ALTER TABLE `messages` ADD COLUMN `replyToFlagged` INTEGER NOT NULL DEFAULT 0")
                 connection.execSQL(
                     "CREATE INDEX IF NOT EXISTS `index_messages_replyToId_replyCheck` ON `messages` (`replyToId`, `replyCheck`)",
                 )
-            }
-        }
-
-    /**
-     * v23 → v24: `messages.attachmentFetchApproved` — the user's "Tap to download" on a large attachment only Bluetooth
-     * could fetch (ADR 2026-10.js2p), and an index on `messages.attachmentHash` for the delivery's per-hash read of
-     * every row naming an attachment. Local only; unapproved on every existing row. Additive only; the SQL must stay
-     * byte-equivalent to what Room generates for `app/schemas/**/24.json`.
-     */
-    val MIGRATION_23_24 =
-        object : Migration(23, 24) {
-            override suspend fun migrate(connection: SQLiteConnection) {
                 connection.execSQL("ALTER TABLE `messages` ADD COLUMN `attachmentFetchApproved` INTEGER NOT NULL DEFAULT 0")
                 connection.execSQL("CREATE INDEX IF NOT EXISTS `index_messages_attachmentHash` ON `messages` (`attachmentHash`)")
-            }
-        }
-
-    /**
-     * v24 → v25: a short video's duration, upright size and inline poster on the message row (ADR 2026-10 short
-     * videos). All nullable and null on every existing row: nothing before this build sent a video.
-     *
-     * Development builds of the calls branch numbered `peer_badges` v24 before main's v24 landed, so a phone that ran
-     * one is stamped 24 without main's column and index. Nothing released carried that schema; the step lays main's
-     * v24 down when it is missing rather than leave those phones unable to open their database.
-     */
-    val MIGRATION_24_25 =
-        object : Migration(24, 25) {
-            override suspend fun migrate(connection: SQLiteConnection) {
-                if (!connection.hasColumn("messages", "attachmentFetchApproved")) MIGRATION_23_24.migrate(connection)
                 connection.execSQL("ALTER TABLE `messages` ADD COLUMN `videoDurationMs` INTEGER")
                 connection.execSQL("ALTER TABLE `messages` ADD COLUMN `videoWidth` INTEGER")
                 connection.execSQL("ALTER TABLE `messages` ADD COLUMN `videoHeight` INTEGER")
                 connection.execSQL("ALTER TABLE `messages` ADD COLUMN `videoPoster` TEXT")
                 connection.execSQL("ALTER TABLE `messages` ADD COLUMN `videoPosterFlagged` INTEGER NOT NULL DEFAULT 0")
-            }
-        }
-
-    /**
-     * v25 → v26: one `peer_badges` table — the supporter badges each peer's sealed profile last carried, verified when
-     * shown (docs/SUPPORTER_BADGE.md, ADR 2026-10.r99s). Empty on arrival: each fills as that peer's next sealed profile
-     * lands. Additive only; the SQL must stay byte-equivalent to what Room generates for `app/schemas/**/26.json`.
-     *
-     * Development builds of the calls branch numbered this table v25 before main's v25 landed, so a phone that ran one
-     * is stamped 25 with `peer_badges` and without main's video columns; the step lays those down when they are missing.
-     */
-    val MIGRATION_25_26 =
-        object : Migration(25, 26) {
-            override suspend fun migrate(connection: SQLiteConnection) {
-                if (!connection.hasColumn("messages", "videoDurationMs")) MIGRATION_24_25.migrate(connection)
                 connection.execSQL(
                     "CREATE TABLE IF NOT EXISTS `peer_badges` " +
                         "(`nodeId` TEXT NOT NULL, `position` INTEGER NOT NULL, `wrapper` BLOB NOT NULL, `r` BLOB NOT NULL, " +
                         "PRIMARY KEY(`nodeId`, `position`))",
                 )
-            }
-        }
-
-    /**
-     * v26 → v27: one `attachment_holders` table — per (attachment hash, holder) proof, learnt over a short-range radio,
-     * that a DM photo's recipient holds its bytes, so the photo never goes up to a spool (docs/SPOOL_PROTOCOL.md
-     * C-9.5-8, ADR 2026-10.vy27). Empty on arrival: a photo already in custody proves itself on its next round, or
-     * uploads as it would have. Additive only; the SQL must stay byte-equivalent to what Room generates for
-     * `app/schemas/**/27.json`.
-     */
-    val MIGRATION_26_27 =
-        object : Migration(26, 27) {
-            override suspend fun migrate(connection: SQLiteConnection) {
                 connection.execSQL(
                     "CREATE TABLE IF NOT EXISTS `attachment_holders` " +
                         "(`hash` TEXT NOT NULL, `holderId` TEXT NOT NULL, `plane` INTEGER NOT NULL, `provedAt` INTEGER NOT NULL, " +
@@ -647,14 +597,16 @@ object KnitMigrations {
             }
         }
 
-    private fun SQLiteConnection.hasColumn(
-        table: String,
-        column: String,
-    ): Boolean =
-        prepare("PRAGMA table_info(`$table`)").use { info ->
-            var found = false
-            while (!found && info.step()) found = info.getText(1) == column
-            found
+    /**
+     * Lab only, and temporary: walks a development database stamped v27 back down to v22. Before the fold above, the
+     * post-2.9.0 schema was numbered v22…v27 and the lab phones installed it at v27; Room throws at every open on a
+     * `user_version` above the app's, but takes a registered descending path. The body is empty because v27 *is* the
+     * folded v22 — Room hashes schema content, not the version, so only the stamp moves. Delete it once every lab
+     * phone has opened its database on a build that carries it. Not in [ALL], which is the upgrade chain.
+     */
+    val LAB_DOWNGRADE_27_22 =
+        object : Migration(27, 22) {
+            override suspend fun migrate(connection: SQLiteConnection) = Unit
         }
 
     /** All migrations, applied by Room in order. */
@@ -681,10 +633,8 @@ object KnitMigrations {
             MIGRATION_19_20,
             MIGRATION_20_21,
             MIGRATION_21_22,
-            MIGRATION_22_23,
-            MIGRATION_23_24,
-            MIGRATION_24_25,
-            MIGRATION_25_26,
-            MIGRATION_26_27,
         )
+
+    /** What [KnitDatabase.build] registers: the upgrade chain plus the temporary lab downgrade. */
+    val REGISTERED: Array<Migration> = ALL + LAB_DOWNGRADE_27_22
 }
