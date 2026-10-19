@@ -14,6 +14,8 @@ import app.getknit.knit.mesh.crypto.ratchet.RatchetCrypto
 import app.getknit.knit.mesh.crypto.ratchet.RatchetEngine
 import app.getknit.knit.mesh.crypto.sealBytes
 import app.getknit.knit.mesh.link.FastFrameCodec
+import app.getknit.knit.mesh.link.FrameTranscoder
+import app.getknit.knit.mesh.link.IdElision
 import app.getknit.knit.mesh.lora.LoraFrameCodec
 import app.getknit.knit.mesh.lora.LoraMeshTransport
 import app.getknit.knit.mesh.lora.LoraSizeHint
@@ -309,12 +311,14 @@ class CoordinationPlaneSizeBudgetTest {
     private fun fullProfile(
         alice: Party,
         spk: RatchetCrypto.KeyPair,
+        /** A fresh id by default; the id every build mints and every door demands is [FrameId.profileId]. */
+        id: String = FrameId.new(),
     ): WireEnvelope {
         val spkSig = alice.crypto.signRaw(RatchetCrypto.spkSigningBytes(SPK_ID, spk.pub))
         return alice.sign(
             RelayEnvelope(
                 type = FrameType.PROFILE,
-                id = FrameId.new(),
+                id = id,
                 senderId = alice.nodeId,
                 sentAt = SENT_AT,
                 payload =
@@ -795,7 +799,8 @@ class CoordinationPlaneSizeBudgetTest {
             ProfilePayload(
                 name = "n".repeat(TextLimits.DISPLAY_NAME),
                 status = "s".repeat(TextLimits.STATUS),
-                avatarHash = "ab".repeat(32),
+                // Random bytes, not a pattern: deflate would fold a repeated hash or name to nothing and hide its cost.
+                avatarHash = Random(PROFILE_SEED).nextBytes(32).joinToString("") { "%02x".format(it) },
                 version = 1_756_100_000_000L,
                 openToChat = true,
                 loraNode = 0xFFFFFFFFL,
@@ -910,6 +915,229 @@ class CoordinationPlaneSizeBudgetTest {
         )
     }
 
+    // --- budgets: a MeshCore board (ADR 2026-10.jend: 164 B a packet over BLE, <= 3 fragments) ---
+
+    /** One form of a frame on the MeshCore hop: its bytes and its packets at [MESHCORE_PAYLOAD] ("-": not this form). */
+    private class Form(
+        val frame: ByteArray?,
+    ) {
+        /** Packets this form takes, or null past [FastFrameCodec.MAX_PARTS]. */
+        val parts: Int?
+            get() = frame?.let { if (it.size <= MESHCORE_PAYLOAD) 1 else FastFrameCodec.fragment(it, MESHCORE_PAYLOAD, fragId = 1)?.size }
+
+        override fun toString(): String = frame?.let { "${it.size}B/${parts ?: ">3"}" } ?: "-"
+    }
+
+    /** The four forms of one frame on the MeshCore hop, as the size report prints them. */
+    private class MeshCoreRow(
+        val today: Form,
+        val unsigned: Form,
+        val elided: Form,
+        val both: Form,
+    )
+
+    /**
+     * [wire] as today's `0x05`, then the two cuts measured for a MeshCore board: unsigned on a direct hop (item 1 —
+     * the signature dropped, `relay = false`, as ADR 059's live-link tick; DM-form frames only) and elided
+     * ([IdElision], item 2 — a profile's derived id and sender, everyone else's sender as a prefix and a DM's
+     * recipient too). Every elided form must decode back to the frame among its candidates.
+     */
+    private fun meshCoreRow(
+        label: String,
+        wire: WireEnvelope,
+        author: Party,
+        knows: List<Party>,
+    ): MeshCoreRow {
+        val dmForm = WireCodec.decodeEnvelope(wire.signed)?.recipientId != null
+        val bare = WireEnvelope(relay = false, sig = ByteArray(0), signed = wire.signed)
+        val ids = knows.map { NodeId.toBytes(it.nodeId) }
+        val resolve = { prefix: ByteArray -> ids.filter { it.copyOf(prefix.size).contentEquals(prefix) } }
+
+        fun elided(w: WireEnvelope): ByteArray? {
+            val frame = FastFrameCodec.encodeElided(w, prefixSender = true, prefixRecipient = true) ?: return null
+            val back = FastFrameCodec.decodeElided(frame, resolve)
+            assertTrue("$label: the elided form decodes back to the frame", back.any { it.signed.contentEquals(w.signed) })
+            return frame
+        }
+        val row =
+            MeshCoreRow(
+                today = Form(checkNotNull(FastFrameCodec.encodeBest(wire, transcode = true)).frame),
+                unsigned = Form(if (dmForm) FastFrameCodec.encodeTranscoded(bare) else null),
+                elided = Form(checkNotNull(elided(wire)) { "$label must elide" }),
+                both = Form(if (dmForm) elided(bare) else null),
+            )
+        assertTrue("$label verifies", MessageCrypto.verify(author.bundle, wire.sig, wire.signed))
+        println(
+            "meshcore@$MESHCORE_PAYLOAD: $label 0x05=${row.today} unsigned=${row.unsigned} " +
+                "elided=${row.elided} unsigned+elided=${row.both}",
+        )
+        return row
+    }
+
+    /**
+     * What the two cuts buy on a MeshCore board, frame by frame. Today's `0x05` forms take one more packet at 164 B
+     * than at Meshtastic's 231 (the spike's Q9); dropping the signature on a direct hop and leaving out the ids the
+     * receiver rebuilds take the ✓✓ and a short DM back down. The table is the measurement; the pins are the claims
+     * the follow-up to ADR 2026-10.jend rests on.
+     */
+    @Suppress("LongMethod") // one table: every row is a frame the plane carries, measured in the same four forms
+    @Test
+    fun theMeshCoreHopWithAndWithoutTheCuts() {
+        val alice = party()
+        val bob = party()
+        val both = listOf(alice, bob)
+        val sealer = V2Sealer(alice, bob, RatchetCrypto.generateKeyPair())
+        val init =
+            meshCoreRow("sealed-dm-100char-init-v3", alice.sign(sealer.dm(FrameId.new(), body = "a".repeat(100), v3 = true)), alice, both)
+        sealer.confirm()
+        val tick =
+            meshCoreRow(
+                "sealed-receipt-steady-v3",
+                alice.sign(sealer.dm(FrameId.new(), body = "", ctl = MessageContent.CTL_RECEIPT, ack = FrameId.new(), v3 = true)),
+                alice,
+                both,
+            )
+        val reaction =
+            meshCoreRow(
+                "sealed-reaction-steady-v3",
+                alice.sign(
+                    sealer.dm(
+                        FrameId.new(),
+                        body = "",
+                        ctl = MessageContent.CTL_REACTION,
+                        rp = ReactionPayload(messageId = FrameId.new(), emoji = "👍"),
+                        v3 = true,
+                    ),
+                ),
+                alice,
+                both,
+            )
+        val short =
+            meshCoreRow(
+                "sealed-dm-40char-steady-v3",
+                alice.sign(sealer.dm(FrameId.new(), body = "See you at the north gate in ten minutes", v3 = true)),
+                alice,
+                both,
+            )
+        val long =
+            meshCoreRow("sealed-dm-100char-steady-v3", alice.sign(sealer.dm(FrameId.new(), body = "b".repeat(100), v3 = true)), alice, both)
+        val acks = List(DmAckCoalescer.MAX_LORA_TICK_ACKS) { FrameId.new() }
+        meshCoreRow(
+            "coalesced-dm-tick-12-v3",
+            alice.sign(sealer.dm(FrameId.new(), body = "", ctl = MessageContent.CTL_RECEIPT, acks = acks, v3 = true)),
+            alice,
+            both,
+        )
+        val fixtureProfile = meshCoreRow("profile-full-fresh-id", fullProfile(alice, RatchetCrypto.generateKeyPair()), alice, both)
+        val profile =
+            meshCoreRow(
+                "profile-full-minted-id",
+                fullProfile(alice, RatchetCrypto.generateKeyPair(), id = FrameId.profileId(alice.nodeId, SENT_AT)),
+                alice,
+                both,
+            )
+        val post100 = meshCoreRow("room-chat-100char", broadcastChat(alice, "c".repeat(100)), alice, both)
+        val post200 = meshCoreRow("room-chat-200char", broadcastChat(alice, "Lorem ipsum dolor sit amet ".repeat(8).take(200)), alice, both)
+        val minted = fullProfile(alice, RatchetCrypto.generateKeyPair(), id = FrameId.profileId(alice.nodeId, SENT_AT))
+        println(
+            "meshcore@$MESHCORE_PAYLOAD: profile id as minted costs " +
+                "${checkNotNull(profile.today.frame).size - checkNotNull(fixtureProfile.today.frame).size}B over the fixture's fresh id; " +
+                "on Meshtastic it is lora@${MeshtasticProto.MAX_PAYLOAD}=${transcodedLoraParts(minted)} " +
+                "lora@$esp32PayloadCap=${transcodedLoraParts(minted, esp32PayloadCap)}",
+        )
+        // init, reaction, long, post100 and post200 are measured, not pinned: the table above is their record.
+        listOf(init, reaction, long, post100, post200).forEach { assertTrue(it.elided.parts != null) }
+        assertEquals("today the signed ✓✓ is two packets at 164", 2, tick.today.parts)
+        assertEquals("unsigned on a direct hop, the ✓✓ is one", 1, tick.unsigned.parts)
+        assertEquals("…and still one with the ids elided", 1, tick.both.parts)
+        assertTrue("a short DM drops a packet with both cuts", checkNotNull(short.both.parts) < checkNotNull(short.today.parts))
+        // Measured on the bodies, not the frames: today's frame deflates, and how well depends on the random keys' hex.
+        val profileSaved =
+            checkNotNull(FrameTranscoder.transcode(minted.signed)).size -
+                checkNotNull(IdElision.elide(minted.signed, prefixSender = true, prefixRecipient = true)).size
+        assertTrue("the minted profile loses its derived id and sender ($profileSaved B)", profileSaved >= PROFILE_DERIVED_SAVING)
+        assertEquals("…and still takes three packets: the lean profile (item 3) is what could take one off", 3, profile.elided.parts)
+    }
+
+    /**
+     * Item 3's measurement: what each optional profile field costs on the MeshCore hop, elided, and what a lean
+     * profile — the fields a room reader needs to verify and name a post's author — would take. Nothing here is a
+     * wire form: a lean profile is only the full one with fields left out, so the sizes are what the signed object
+     * would weigh, not a design (a receiver today would let it replace the full profile it holds).
+     */
+    @Test
+    fun theLeanProfileOnTheMeshCoreHop() {
+        val alice = party()
+        val spk = RatchetCrypto.generateKeyPair()
+        val spkSig = alice.crypto.signRaw(RatchetCrypto.spkSigningBytes(SPK_ID, spk.pub))
+        val full =
+            ProfileContent(
+                name = "Alice Example",
+                status = "Out exploring the mesh",
+                // Random bytes, not a pattern: deflate would fold a repeated hash or name to nothing and hide its cost.
+                avatarHash = Random(PROFILE_SEED).nextBytes(32).joinToString("") { "%02x".format(it) },
+                pubKey = alice.bundle.encoded,
+                deviceTag = "0123456789abcdef",
+                protoVersion = Protocol.VERSION,
+                capabilities = Protocol.LOCAL_CAPABILITIES,
+                prekey = PrekeyInfo(id = SPK_ID, pub = spk.pub, sig = spkSig),
+                version = SENT_AT,
+                openToChat = true,
+                loraNode = 0xFFFFFFFFL,
+                loraKey = "oR62IJmFUE0Tgcw0GcypU5ZqUFCQllVBy2snB/BKQA4=",
+            )
+
+        fun frame(content: ProfileContent): ByteArray {
+            val wire =
+                alice.sign(
+                    RelayEnvelope(
+                        type = FrameType.PROFILE,
+                        id = FrameId.profileId(alice.nodeId, SENT_AT),
+                        senderId = alice.nodeId,
+                        sentAt = SENT_AT,
+                        payload = WireCodec.encodePayload(content),
+                    ),
+                )
+            val elided = checkNotNull(FastFrameCodec.encodeElided(wire, prefixSender = true, prefixRecipient = true))
+            assertArrayEquals(wire.signed, FastFrameCodec.decodeElided(elided) { emptyList() }.single().signed)
+            return elided
+        }
+
+        fun parts(frame: ByteArray): Int? = Form(frame).parts
+        val whole = frame(full).size
+        val without =
+            linkedMapOf(
+                "status" to full.copy(status = ""),
+                "avatarHash" to full.copy(avatarHash = null),
+                "deviceTag" to full.copy(deviceTag = null),
+                "protoVersion" to full.copy(protoVersion = null),
+                "capabilities" to full.copy(capabilities = null),
+                "prekey" to full.copy(prekey = null),
+                "openToChat" to full.copy(openToChat = false),
+                "loraNode" to full.copy(loraNode = null),
+                "loraKey" to full.copy(loraKey = null),
+            )
+        without.forEach { (field, content) ->
+            println("meshcore@$MESHCORE_PAYLOAD: profile field $field costs ${whole - frame(content).size}B")
+        }
+        val lean = ProfileContent(name = full.name, status = "", pubKey = full.pubKey, version = SENT_AT)
+        val leanCaps = lean.copy(protoVersion = Protocol.VERSION, capabilities = Protocol.LOCAL_CAPABILITIES)
+        val leanShort = lean.copy(name = "Alice")
+        val leanLongest = lean.copy(name = LONGEST_NAME)
+        assertEquals(TextLimits.DISPLAY_NAME, LONGEST_NAME.length)
+        val rows =
+            linkedMapOf(
+                "full (with avatar)" to frame(full),
+                "lean: name+pubKey+version" to frame(lean),
+                "lean + protoVersion+capabilities" to frame(leanCaps),
+                "lean, 5-char name" to frame(leanShort),
+                "lean, ${TextLimits.DISPLAY_NAME}-char name" to frame(leanLongest),
+            )
+        rows.forEach { (label, f) -> println("meshcore@$MESHCORE_PAYLOAD: profile $label ${f.size}B/${parts(f)}") }
+        assertEquals("the full profile takes three packets even elided", 3, parts(checkNotNull(rows["full (with avatar)"])))
+        assertTrue("a lean profile takes at most two", checkNotNull(parts(frame(leanLongest))) <= 2)
+    }
+
     @Test
     fun loraFragmentCeilingArithmetic() {
         // 3 parts x (231-B payload - 4-B fragment header) is the most any compact frame can carry over LoRa: the
@@ -929,6 +1157,16 @@ class CoordinationPlaneSizeBudgetTest {
         const val HYBRID_TEMPLATE = "DHKEM_X25519_HKDF_SHA256_HKDF_SHA256_AES_256_GCM_RAW"
         const val SIG_TEMPLATE = "ED25519_RAW"
         const val SPK_ID = 1
+
+        /** A MeshCore companion's channel-data payload over BLE on an ESP32 board (the spike's Q1: 165 less one). */
+        const val MESHCORE_PAYLOAD = 164
+
+        /** The minted profile id's ~50 B of text and the sender's 17 B, each down to a 1-byte null. */
+        const val PROFILE_DERIVED_SAVING = 60
+        const val PROFILE_SEED = 0x1EA9
+
+        /** A display name at the cap, spelled like one so deflate cannot fold it. */
+        const val LONGEST_NAME = "Maximiliana Ortega de la Cruz Jr"
 
         /** Fixed realistic clocks so every run measures identical frames. */
         const val SENT_AT = 1_755_700_000_000L

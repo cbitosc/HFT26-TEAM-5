@@ -61,6 +61,9 @@ internal object FrameTranscoder {
     /** Schema 1 as `Scope.key → label`, for the freeze test. */
     fun schema(): Map<String, Int> = SCOPES.flatMap { s -> s.fields.map { "${s.name}.${it.key}" to it.label } }.toMap()
 
+    /** The small int a known frame type rides as, or null for a type that stays text. */
+    fun typeCode(type: String): Long? = TYPE_CODES[type]
+
     /** What a field's value becomes: copied verbatim, or one of the text ↔ bytes transforms, or a nested scope. */
     private enum class Kind { PASS, FRAME_ID, NODE_ID, HASH, GROUP_ID, HEX8, PUBKEY, FRAME_TYPE, MILLIS, NESTED, PAYLOAD }
 

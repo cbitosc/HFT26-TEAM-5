@@ -48,8 +48,14 @@ import java.util.zip.Inflater
  * A sender emits 0x05 only toward `Protocol.CAP_FRAME_TRANSCODE` peers and only when it is the smaller of the
  * two forms ([encodeBest]); a frame the transcoder cannot reproduce keeps 0x03.
  *
+ * Elided frame ([TAG_ELIDED], ADR 2026-10.jend's follow-up): the 0x05 header and sig around an [IdElision] body,
+ * a transcoded body with the ids a receiver can put back left out. It cannot be decoded alone — a prefixed id needs
+ * the receiver's own directory — so it is not a [decodeCompact] tag; [decodeElided] answers every candidate envelope
+ * and the caller keeps the one whose signature verifies. **No sender emits it yet**: it is for a board kind with no
+ * fielded receivers (MeshCore), and stays out of every Wi-Fi Aware, BLE and Meshtastic path.
+ *
  * Tag registry (append-only, like capability bits): `0x01` legacy tagged-CBOR frame (forever), `0x02`
- * burned (a since-removed nudge), `0x03` compact, `0x04` fragment, `0x05` transcoded. Flag bits are append-only too: a
+ * burned (a since-removed nudge), `0x03` compact, `0x04` fragment, `0x05` transcoded, `0x06` elided. Flag bits are append-only too: a
  * receiver drops any reserved bit it does not know, so a new bit is only ever emitted toward a peer whose
  * capabilities say it reads it (UNSIGNED rides behind `Protocol.CAP_CRYPTO_V3`). Tags stay non-printable
  * (`0x00..0x1F`) so untagged cues — whose first byte is a printable node-id char — remain
@@ -69,6 +75,9 @@ internal object FastFrameCodec {
 
     /** A single transcoded frame (layout above, ADR 060): the 0x03 header around a [FrameTranscoder] body. */
     const val TAG_TRANSCODED: Byte = 0x05
+
+    /** A single elided frame (layout above): the 0x05 header around an [IdElision] body. Not emitted yet. */
+    const val TAG_ELIDED: Byte = 0x06
 
     // Reserved elsewhere in this tag space: 0x10 is `LoraCtl.TAG`, the LoRa plane's gateway-to-gateway
     // control packet (ADR 044). It never reaches this codec — it is dispatched before decode — but it shares
@@ -153,6 +162,52 @@ internal object FastFrameCodec {
         val transcoded = encodeTranscoded(wire) ?: return compact?.let { Best(it, transcodeRefused = true) }
         val frame = if (compact == null || transcoded.size < compact.size) transcoded else compact
         return Best(frame, transcodeRefused = false)
+    }
+
+    /**
+     * The one 0x06 frame for [wire]: [IdElision]'s body, raw-deflated with no dictionary when that is strictly
+     * smaller. Null when the sig is unrepresentable or the body cannot be reproduced — the caller keeps 0x05.
+     * [prefixSender] and [prefixRecipient] are the caller's per-frame call ([IdElision.elide]).
+     */
+    fun encodeElided(
+        wire: WireEnvelope,
+        prefixSender: Boolean,
+        prefixRecipient: Boolean,
+    ): ByteArray? {
+        if (!representable(wire)) return null
+        val body = IdElision.elide(wire.signed, prefixSender, prefixRecipient) ?: return null
+        return frame(TAG_ELIDED, wire, body, deflate(body, null), DICT_ID_NONE)
+    }
+
+    /**
+     * Every [WireEnvelope] a 0x06 [message] can stand for, given [resolve] for its prefixed ids
+     * ([IdElision.rebuild]); empty when it is malformed under the same rules as [decodeCompact].
+     */
+    fun decodeElided(
+        message: ByteArray,
+        resolve: (ByteArray) -> List<ByteArray>,
+    ): List<WireEnvelope> {
+        if (message.size < HEADER_BYTES + 1 || message[0] != TAG_ELIDED) return emptyList()
+        val flags = message[1].toInt() and BYTE_MASK
+        if (flags and RESERVED_MASK != 0) return emptyList()
+        val sigBytes = if (flags and FLAG_UNSIGNED != 0) 0 else SIG_BYTES
+        if (message.size < HEADER_BYTES + sigBytes + 1) return emptyList()
+        val raw = message.copyOfRange(HEADER_BYTES + sigBytes, message.size)
+        val body =
+            when {
+                flags and FLAG_DEFLATED == 0 -> raw
+                (flags shr DICT_SHIFT) and DICT_MASK == DICT_ID_NONE -> inflate(raw, null)
+                else -> null
+            } ?: return emptyList()
+        return IdElision.rebuild(body, resolve).map { signed ->
+            WireEnvelope(
+                ttl = (message[2].toInt() shr NIBBLE_BITS) and NIBBLE_MAX,
+                hops = message[2].toInt() and NIBBLE_MAX,
+                relay = flags and FLAG_RELAY != 0,
+                sig = message.copyOfRange(HEADER_BYTES, HEADER_BYTES + sigBytes),
+                signed = signed,
+            )
+        }
     }
 
     /**

@@ -87,6 +87,11 @@ Owed before release:
   board);
 - a client that matches each response to its request, survives a lost drain reply, and rejects a frame whose length
   byte exceeds what arrived;
+- a pacer driven by the board's queue depth from `GET_STATS`, not the fixed 3 s `LoraPacePolicy.MIN_GAP_MS`. With
+  the gap, a MeshCore board is gap-bound at 21 % duty, carrying about 197 KB of payload an hour against LongFast's
+  260 KB on a dedicated slot, and every extra fragment costs a full gap (a ✓✓ takes 6 s instead of 3). Paced on
+  feedback under the same 50 % allowance, it carries about 466 KB an hour, and the board's own 50 % bucket
+  (`airtime_factor`) would then bind as well;
 - a registered `data_type` (the spike used the development range);
 - the region UX;
 - trials: the one-named-hop route through a third board as a repeater, and real-range loss outdoors. Indoors the link
