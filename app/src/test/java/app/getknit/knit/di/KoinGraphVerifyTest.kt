@@ -14,6 +14,7 @@ import app.getknit.knit.data.settings.ContributionJournal
 import app.getknit.knit.data.settings.InboundSettings
 import app.getknit.knit.data.settings.ModelLoadJournal
 import app.getknit.knit.fieldlog.FieldJournal
+import app.getknit.knit.fieldlog.FieldRecorder
 import app.getknit.knit.identity.IdentitySource
 import app.getknit.knit.mesh.RadioSupport
 import app.getknit.knit.mesh.spool.FreeKeyJournal
@@ -78,6 +79,8 @@ class KoinGraphVerifyTest {
                 RadioSupport::class,
                 // The field log's journal, built over its noBackupFilesDir directory in the FieldLog definition.
                 FieldJournal::class,
+                // The call graph's recorder, a lambda over FieldLog resolved at each record (CallWiring.fieldLog).
+                FieldRecorder::class,
                 // Narrow interfaces a module satisfies with a concrete singleton it already holds:
                 // `get<SettingsStore>()` as InboundSettings / ContributionJournal / ModelLoadJournal,
                 // `get<Identity>()` as IdentitySource.

@@ -2,8 +2,8 @@ package app.getknit.knit.fieldlog
 
 /**
  * Where an event writes its fields. There is deliberately **no string field**: a value is a number, a
- * boolean, an enum constant's name (compiled into the APK, the same on every install) or a peer, and a peer
- * is written as its per-log pseudonym ([Pseudonyms]), never its node id. So nothing a user typed, no name,
+ * boolean, an enum constant's name (compiled into the APK, the same on every install), a peer or a relay, and
+ * each of those two is written as its per-log pseudonym ([Pseudonyms]), never its node id or its URL. So nothing a user typed, no name,
  * no node id, no hash and no address can reach the journal — redaction holds by construction (ADR
  * 2026-10.a239, `docs/FIELD_LOG.md`), and `FieldEventSchemaTest` pins every event's line.
  *
@@ -29,6 +29,12 @@ interface FieldWriter {
     fun peer(
         name: String,
         nodeId: String,
+    )
+
+    /** A relay (a spool), by its redacted URL (`SpoolUrl.redact`): the writer emits the log's pseudonym for it. */
+    fun relay(
+        name: String,
+        url: String,
     )
 }
 
@@ -351,9 +357,13 @@ sealed interface FieldEvent {
 
     /**
      * The paired LoRa board at a sample, while its link is ready: the plane's role, the last packet's signal, the
-     * queue, what it has heard, and the live share of airtime used against its budget. Never the board's name,
-     * address or node number.
+     * queue, what it has heard, and the live share of airtime used against its budget. Beside them, what the role
+     * and a quiet plane are explained by: the gateways heard, the pocket's live links and sightings, the peers a
+     * spool covers; and what the board says of itself: its free queue slots, its battery, and its own duty-cycle
+     * readings (channel use and its own transmit share, in tenths of a percent). Never the board's name, address
+     * or node number.
      */
+    @Suppress("LongParameterList") // one field per column of the line; a holder would only rename the list
     data class Lora(
         val role: Enum<*>,
         val snrTenths: Int?,
@@ -363,9 +373,19 @@ sealed interface FieldEvent {
         val boardsHeard: Int,
         val airUsedMs: Long?,
         val airBudgetMs: Long?,
+        val gatewaysHeard: Int? = null,
+        val pocketLinks: Int? = null,
+        val pocketSightings: Int? = null,
+        val internetCovered: Int? = null,
+        val queueFree: Int? = null,
+        val batteryPercent: Int? = null,
+        val powered: Boolean? = null,
+        val channelUtilTenths: Int? = null,
+        val airUtilTxTenths: Int? = null,
     ) : FieldEvent {
         override val kind get() = "lora"
 
+        @Suppress("CyclomaticComplexMethod") // one optional column per line, each its own null check
         override fun write(out: FieldWriter) {
             out.enum("role", role)
             snrTenths?.let { out.num("snr10", it.toLong()) }
@@ -375,6 +395,254 @@ sealed interface FieldEvent {
             out.num("boards", boardsHeard.toLong())
             airUsedMs?.let { out.num("airUsed", it) }
             airBudgetMs?.let { out.num("airBudget", it) }
+            gatewaysHeard?.let { out.num("gateways", it.toLong()) }
+            pocketLinks?.let { out.num("pocket", it.toLong()) }
+            pocketSightings?.let { out.num("sighted", it.toLong()) }
+            internetCovered?.let { out.num("covered", it.toLong()) }
+            queueFree?.let { out.num("free", it.toLong()) }
+            batteryPercent?.let { out.num("battery", it.toLong()) }
+            powered?.let { out.flag("powered", it) }
+            channelUtilTenths?.let { out.num("chUtil10", it.toLong()) }
+            airUtilTxTenths?.let { out.num("airTx10", it.toLong()) }
+        }
+    }
+
+    /**
+     * The LoRa board's link became ready: [dialMs] from the last attempt's start (its direct dial, or its background
+     * wait's arm) to ready — null when the log began with the link ready — after [tries] failed attempts since the last
+     * up or down; the GATT [mtu]; and the board's radio as its config reported it — `LoraRegion`, `ModemPreset` (only
+     * when it uses one), whether it is pinned to a slot of its own, its hop limit — and whether its firmware signs for
+     * us (XEdDSA), each null where the board did not say. [relinkMs], filled by [FieldLog] like
+     * [BtUp.relinkMs], is the time without a ready link since the last [LoraDown] in this log.
+     */
+    @Suppress("LongParameterList") // one field per column of the line; a holder would only rename the list
+    data class LoraUp(
+        val dialMs: Long?,
+        val tries: Int,
+        val mtu: Int,
+        val region: Enum<*>? = null,
+        val preset: Enum<*>? = null,
+        val dedicatedSlot: Boolean? = null,
+        val hopLimit: Int? = null,
+        val xeddsa: Boolean? = null,
+        val relinkMs: Long? = null,
+    ) : FieldEvent {
+        override val kind get() = "lora_up"
+
+        override fun write(out: FieldWriter) {
+            dialMs?.let { out.num("dial", it) }
+            out.num("tries", tries.toLong())
+            out.num("mtu", mtu.toLong())
+            region?.let { out.enum("region", it) }
+            preset?.let { out.enum("preset", it) }
+            dedicatedSlot?.let { out.flag("slot", it) }
+            hopLimit?.let { out.num("hops", it.toLong()) }
+            xeddsa?.let { out.flag("xeddsa", it) }
+            relinkMs?.let { out.num("relink", it) }
+        }
+    }
+
+    /**
+     * The LoRa board's ready link ended after [lifeMs]: [reason] is the plane's own classification of why, [status]
+     * the GATT status it carried, where it carried one.
+     */
+    data class LoraDown(
+        val reason: Enum<*>,
+        val lifeMs: Long,
+        val status: Int? = null,
+    ) : FieldEvent {
+        override val kind get() = "lora_down"
+
+        override fun write(out: FieldWriter) {
+            out.enum("reason", reason)
+            status?.let { out.num("status", it.toLong()) }
+            out.num("life", lifeMs)
+        }
+    }
+
+    /**
+     * An attempt at the LoRa board's link ended before it was ready: [reason] and [status] as in [LoraDown], [streak]
+     * the attempts failed in a row, this one included, and [waitMs] the backoff before the next, where one was set.
+     */
+    data class LoraFail(
+        val reason: Enum<*>,
+        val streak: Int,
+        val status: Int? = null,
+        val waitMs: Long? = null,
+    ) : FieldEvent {
+        override val kind get() = "lora_fail"
+
+        override fun write(out: FieldWriter) {
+            out.enum("reason", reason)
+            status?.let { out.num("status", it.toLong()) }
+            out.num("streak", streak.toLong())
+            waitMs?.let { out.num("wait", it) }
+        }
+    }
+
+    /**
+     * The LoRa plane's gateway role changed (ADR 044): [role] now, with the election's inputs as they stood — the
+     * pocket's live short-range links and the gateways heard.
+     */
+    data class LoraRole(
+        val role: Enum<*>,
+        val pocketLinks: Int,
+        val gatewaysHeard: Int,
+    ) : FieldEvent {
+        override val kind get() = "lora_role"
+
+        override fun write(out: FieldWriter) {
+            out.enum("role", role)
+            out.num("pocket", pocketLinks.toLong())
+            out.num("gateways", gatewaysHeard.toLong())
+        }
+    }
+
+    /**
+     * The phone's Internet route changed (`InternetGate`): its kind (`RouteKind`, NONE when there is no validated
+     * route) and whether Data Saver restricts the app on it. Every spool line reads against it.
+     */
+    data class Net(
+        val route: Enum<*>,
+        val restricted: Boolean,
+    ) : FieldEvent {
+        override val kind get() = "net"
+
+        override fun write(out: FieldWriter) {
+            out.enum("route", route)
+            out.flag("restricted", restricted)
+        }
+    }
+
+    /**
+     * A spool's hello completed (`SpoolStatus.connected`, ADR 2026-09.vej5): [helloMs] from the dial, after [fails]
+     * dials in a row that never reached one, and what the hello offered — PoW [powBits], attachments, tickets (`ent`),
+     * TURN, casts.
+     */
+    @Suppress("LongParameterList") // one field per column of the line; a holder would only rename the list
+    data class SpoolUp(
+        val relay: String,
+        val helloMs: Long,
+        val fails: Int,
+        val powBits: Int,
+        val attachments: Boolean,
+        val ent: Boolean,
+        val turn: Boolean,
+        val cast: Boolean,
+    ) : FieldEvent {
+        override val kind get() = "spool_up"
+
+        override fun write(out: FieldWriter) {
+            out.relay("relay", relay)
+            out.num("hello", helloMs)
+            out.num("fails", fails.toLong())
+            out.num("pow", powBits.toLong())
+            out.flag("attach", attachments)
+            out.flag("ent", ent)
+            out.flag("turn", turn)
+            out.flag("cast", cast)
+        }
+    }
+
+    /**
+     * A spool session that completed its hello ended after [lifeMs] (from the hello): [reason] the plane's verdict
+     * (`SpoolVerdict`), [code] the close code or HTTP status behind it, [ours] when this phone ended it on a fault of
+     * its own.
+     */
+    data class SpoolDown(
+        val relay: String,
+        val reason: Enum<*>,
+        val lifeMs: Long,
+        val ours: Boolean,
+        val code: Int? = null,
+    ) : FieldEvent {
+        override val kind get() = "spool_down"
+
+        override fun write(out: FieldWriter) {
+            out.relay("relay", relay)
+            out.enum("reason", reason)
+            code?.let { out.num("code", it.toLong()) }
+            out.num("life", lifeMs)
+            out.flag("ours", ours)
+        }
+    }
+
+    /**
+     * A spool dial ended without a hello after [durationMs]: [reason] and [code] as in [SpoolDown], [streak] the dials
+     * failed in a row, this one included, and [retryAfterMs] a `Retry-After` the spool sent with its refusal.
+     */
+    data class SpoolFail(
+        val relay: String,
+        val reason: Enum<*>,
+        val durationMs: Long,
+        val streak: Int,
+        val code: Int? = null,
+        val retryAfterMs: Long? = null,
+    ) : FieldEvent {
+        override val kind get() = "spool_fail"
+
+        override fun write(out: FieldWriter) {
+            out.relay("relay", relay)
+            out.enum("reason", reason)
+            code?.let { out.num("code", it.toLong()) }
+            out.num("dur", durationMs)
+            out.num("streak", streak.toLong())
+            retryAfterMs?.let { out.num("retryAfter", it) }
+        }
+    }
+
+    /**
+     * A connected spool answered with an `err` code other than the last it answered on this connection (`SpoolVerdict`):
+     * an edge, not every refusal, which the `spoolErrors` counter counts.
+     */
+    data class SpoolErr(
+        val relay: String,
+        val code: Enum<*>,
+    ) : FieldEvent {
+        override val kind get() = "spool_err"
+
+        override fun write(out: FieldWriter) {
+            out.relay("relay", relay)
+            out.enum("code", code)
+        }
+    }
+
+    /**
+     * One configured spool at a sample: whether its hello is live, its scopes and how many agree with ours, the records
+     * each side holds for them, the ones it holds that failed validation, the dials failed in a row, its PoW, and where
+     * this connection stands with a ticket and with uploads (`SpoolTicketState`, `SpoolUploads`, as constants). Never a
+     * scope's id or label.
+     */
+    @Suppress("LongParameterList") // one field per column of the line; a holder would only rename the list
+    data class Spool(
+        val relay: String,
+        val connected: Boolean,
+        val scopes: Int,
+        val converged: Int,
+        val local: Int,
+        val remote: Int,
+        val invalid: Int,
+        val fails: Int,
+        val powBits: Int,
+        val ticket: Enum<*>? = null,
+        val uploads: Enum<*>? = null,
+        val reason: Enum<*>? = null,
+    ) : FieldEvent {
+        override val kind get() = "spool"
+
+        override fun write(out: FieldWriter) {
+            out.relay("relay", relay)
+            out.flag("up", connected)
+            out.num("scopes", scopes.toLong())
+            out.num("converged", converged.toLong())
+            out.num("local", local.toLong())
+            out.num("remote", remote.toLong())
+            out.num("invalid", invalid.toLong())
+            out.num("fails", fails.toLong())
+            out.num("pow", powBits.toLong())
+            ticket?.let { out.enum("ticket", it) }
+            uploads?.let { out.enum("uploads", it) }
+            reason?.let { out.enum("reason", it) }
         }
     }
 

@@ -301,13 +301,15 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   screens:** READ ADR 028 and ADR 2026-10.fzsy. Reports are written redacted and leave the phone only by the user's
   hand; ANRs are imported from `ApplicationExitInfo` at start, once each (the `anr-seen` watermark), and `AnrTrace`
   is the privacy boundary for native frames, which the redactor passes verbatim.
-- **When touching `fieldlog/`, a `FieldEvent`, a `field.record(…)` / `field.sampler(…)` call in a transport or the
-  call plane (`call/CallFieldLog.kt`, `CallMediaSampler`), `ui/diagnostics/FieldLog*`, or `MessageDao.inboundDelays` /
-  `receiptDelays`:** READ ADR 2026-10.a239 (its 2026-10-18 amendment for the call lines) and
+- **When touching `fieldlog/`, a `FieldEvent`, a `field.record(…)` / `field.sampler(…)` / `follower(…)` call in a
+  transport, the spool plane (`mesh/spool/SpoolFieldLog.kt`), the LoRa plane (`mesh/lora/LoraFieldLog.kt`) or the call
+  plane (`call/CallFieldLog.kt`, `CallMediaSampler`), `ui/diagnostics/FieldLog*`, or `MessageDao.inboundDelays` /
+  `receiptDelays`:** READ ADR 2026-10.a239 (its 2026-10-18 amendments for the call lines and the LoRa, spool and route
+  lines) and
   `docs/FIELD_LOG.md`. Every build can keep a bounded record of how the radios behaved (4 MiB, 72 h, in
   `noBackupFilesDir`) — off until the user switches it on — and only the user shares it from Diagnostics; no
   upload path, ever. `FieldWriter` has
-  no string field (a peer is a salted pseudonym), so redaction holds by construction; never add one. A new event
+  no string field (a peer or a relay is a salted pseudonym), so redaction holds by construction; never add one. A new event
   is a golden line in `FieldEventSchemaTest`, a row in the doc and a kind in `scripts/fieldlog.py`; a sampler
   runs on the log's tick and only reads.
 - **When touching `legal/`, `ui/about/`, `app/src/main/assets/legal/`, `THIRD-PARTY-NOTICES.md`, or a shipped

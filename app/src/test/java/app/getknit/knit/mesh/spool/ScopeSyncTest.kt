@@ -1,5 +1,7 @@
 package app.getknit.knit.mesh.spool
 
+import app.getknit.knit.fieldlog.FieldEvent
+import app.getknit.knit.fieldlog.FieldRecorder
 import app.getknit.knit.mesh.CarriedFrame
 import app.getknit.knit.mesh.ForwardStore
 import app.getknit.knit.mesh.MeshMetrics
@@ -123,6 +125,7 @@ class ScopeSyncTest {
         log: (String) -> Unit = {},
         // The refresher's wake for an upload locked for want of a ticket (C-7.6-27 amended).
         onUploadWanted: (String) -> Unit = {},
+        field: FieldRecorder = FieldRecorder.NONE,
     ): Member {
         val metrics = MeshMetrics()
         val delivered = mutableListOf<RelayEnvelope>()
@@ -162,6 +165,7 @@ class ScopeSyncTest {
                 tickets = tickets,
                 onUploadWanted = onUploadWanted,
                 log = log,
+                field = field,
             )
         return Member(custody, sync, metrics, delivered, blobs, obtained, wires)
     }
@@ -1544,6 +1548,7 @@ class ScopeSyncTest {
         dialer: SpoolDialer,
         urls: List<String> = listOf(url),
         online: () -> Boolean = { true },
+        field: FieldRecorder = FieldRecorder.NONE,
     ): ScopeSync =
         ScopeSync(
             registry = ScopeRegistry({ alice }, { listOf(ScopeRoots(bob, pairwiseRoot)) }),
@@ -1556,7 +1561,94 @@ class ScopeSyncTest {
             online = online,
             clock = { now },
             jitter = { 0L },
+            field = field,
         )
+
+    /** What a member wrote to the field log, in order. */
+    private class FieldLines : FieldRecorder {
+        private val events = mutableListOf<FieldEvent>()
+
+        override fun record(event: FieldEvent) {
+            synchronized(events) { events += event }
+        }
+
+        fun <T : FieldEvent> of(kind: Class<T>): List<T> = synchronized(events) { events.filterIsInstance(kind) }
+    }
+
+    @Test
+    fun `the field log keeps a spool's hello and how its session ended, under the relay's redacted url`() =
+        runTest {
+            val spool = FakeSpool()
+            val lines = FieldLines()
+            val holder = member(spool, alice, bob, urls = listOf("$url?k=secret"), field = lines)
+
+            holder.sync.start(backgroundScope)
+            pump()
+            val up = lines.of(FieldEvent.SpoolUp::class.java).single()
+            assertEquals(url, up.relay)
+            assertEquals(0, up.fails)
+            assertTrue("this spool carries attachments", up.attachments)
+
+            spool.dropSockets()
+            pump(rounds = 30)
+            val down = lines.of(FieldEvent.SpoolDown::class.java).single()
+            assertEquals(url, down.relay)
+            assertEquals("the spool's end, not ours", SpoolVerdict.NONE, down.reason)
+            assertFalse(down.ours)
+            assertEquals("a dropped session reconnects and says hello again", 2, lines.of(FieldEvent.SpoolUp::class.java).size)
+            assertEquals(emptyList<FieldEvent.SpoolFail>(), lines.of(FieldEvent.SpoolFail::class.java))
+            holder.sync.stop()
+        }
+
+    @Test
+    fun `the field log keeps each dial that never reached a hello, with its streak`() =
+        runTest {
+            val lines = FieldLines()
+            val member = lone(DeadRelay(this), field = lines)
+
+            member.start(backgroundScope)
+            pump(rounds = 20)
+            val fails = lines.of(FieldEvent.SpoolFail::class.java)
+            assertTrue("dialled more than twice: ${fails.size}", fails.size >= 3)
+            assertEquals(listOf(SpoolVerdict.UNREACHABLE), fails.map { it.reason }.distinct())
+            assertEquals((1..fails.size).toList(), fails.map { it.streak })
+            assertEquals(emptyList<FieldEvent.SpoolUp>(), lines.of(FieldEvent.SpoolUp::class.java))
+            member.stop()
+        }
+
+    @Test
+    fun `a refused upgrade is logged with its status and the spool's retry-after`() =
+        runTest {
+            val busy =
+                object : SpoolDialer {
+                    override suspend fun dial(url: String): SpoolSocket =
+                        object : SpoolSocket {
+                            private val ch = Channel<ByteArray>(Channel.UNLIMITED).also { it.close() }
+
+                            override val incoming get() = ch
+                            override val closeReason = "http 503"
+                            override val retryAfterMs = 30_000L
+
+                            override fun send(bytes: ByteArray) = false
+
+                            override fun close(
+                                code: Int,
+                                reason: String,
+                            ) = Unit
+                        }
+                }
+            val lines = FieldLines()
+            val member = lone(busy, field = lines)
+
+            member.start(backgroundScope)
+            pump(rounds = 2)
+            val fail = lines.of(FieldEvent.SpoolFail::class.java).first()
+            assertEquals(SpoolVerdict.HTTP, fail.reason)
+            assertEquals(503, fail.code)
+            assertEquals(30_000L, fail.retryAfterMs)
+            assertEquals(1, fail.streak)
+            member.stop()
+        }
 
     /** A relay nobody answers at: every dial is the dialer's `unreachable` verdict, logged by the clock. */
     private inner class DeadRelay(
@@ -1791,6 +1883,22 @@ class ScopeSyncTest {
 
             pump(rounds = 200) // past the 5 min park: one more try, then parked again
             assertEquals(2, spool.subAttempts[refused])
+            holder.sync.stop()
+        }
+
+    @Test
+    fun `a refusal the spool repeats in one session is one field log line`() =
+        runTest {
+            val spool = FakeSpool(scopeQuota = 1)
+            val group = GroupScopeRoots("g-00112233445566778899aabb", setOf(alice, bob, carol), groupRoot, rootVersion = 1)
+            val lines = FieldLines()
+            val holder = member(spool, alice, bob, groups = listOf(group), clock = { now + testScheduler.currentTime }, field = lines)
+
+            holder.sync.start(backgroundScope)
+            pump(rounds = 400) // refused, parked, asked again past the 5 min park and refused again
+            val refused = spool.subAttempts.keys.single { it !in spool.subscribedScopes }
+            assertEquals("the spool refused it twice", 2, spool.subAttempts[refused])
+            assertEquals(listOf(SpoolVerdict.QUOTA), lines.of(FieldEvent.SpoolErr::class.java).map { it.code })
             holder.sync.stop()
         }
 

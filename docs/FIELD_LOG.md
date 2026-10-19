@@ -8,8 +8,9 @@ ADR 2026-10.a239. Code: `app/src/main/java/app/getknit/knit/fieldlog/`. Reader: 
 ## What is never in it
 
 Names, message text, contacts, node ids, group ids, blob hashes, addresses (Bluetooth, Wi-Fi, IP, a LoRa
-board's), locations, and the calendar beyond the hour the log starts in. Another phone appears only as a
-pseudonym, `p` followed by eight hex digits.
+board's), relay URLs and hosts, scope ids and labels, locations, and the calendar beyond the hour the log starts in.
+Another phone appears only as a pseudonym, `p` followed by eight hex digits; a relay (a spool) as one of its own, `r`
+followed by eight hex digits, made from its URL without the `?k=` token.
 
 - **Recording side.** `FieldWriter` has no string field, so nothing typed can be written.
 - **Export side.** `FieldLogDocument` withholds any line holding a node-id-shaped token and counts it in the
@@ -25,7 +26,8 @@ The journal lives in `noBackupFilesDir/fieldlog/`, so it is never in a backup.
 - **When it is written.** Events reach disk on the mesh session's minute tick and at stop, so a process death
   loses at most a minute.
 - **Pseudonym salt.** The `salt` file holds 32 random bytes. A pseudonym is HMAC-SHA256(salt, node id), cut to
-  4 bytes. Clear deletes the salt.
+  4 bytes; a relay's is HMAC-SHA256(salt, `relay` NUL + its redacted URL), so it can never equal a peer's. Clear
+  deletes the salt.
 - **Clear and the off switch** delete the journal, the salt and the copy last staged in `cacheDir/fieldlog/` for
   a share.
 
@@ -64,7 +66,17 @@ Schema 1. A new field is additive. Renaming or removing a field, or changing a f
 | `nan_down` | A data path ended | `peer`, `initiator`, `life` ms, `clean` (quiet sync, not a reset) |
 | `nan_cycle` | The Aware session was cycled | — |
 | `low_power` | Low-power mode went on or off (ADR 2026-10.d44b); while on, Wi-Fi Aware is off and the Aware lines stop | `on`, `why` SWITCH/BATTERY_SAVER (only when on) |
-| `lora` | Every 5 min while a board's link is ready | `role`, `snr10` (SNR × 10), `rssi`, `queued`, `heard`, `boards`, `airUsed` / `airBudget` ms (live share) |
+| `lora` | Every 5 min while a board's link is ready | `role`, `snr10` (SNR × 10), `rssi`, `queued`, `heard`, `boards`, `airUsed` / `airBudget` ms (live share); `gateways` heard, `pocket` (short-range links), `sighted` (short-range sightings), `covered` (peers a spool covers); the board's `free` queue slots, `battery` %, `powered`, `chUtil10` / `airTx10` (its own channel use and transmit share, tenths of a percent) |
+| `lora_up` | The board's link became ready | `dial` ms (the last attempt's start to ready; none when the log began with it ready), `tries` (failed attempts since the last up or down), `mtu`, the board's `region`, `preset` (only when it uses one), `slot` (a pinned RF slot), `hops`, `xeddsa` (its firmware signs for us), `relink` (ms since the last `lora_down` in this log) |
+| `lora_down` | The board's ready link ended | `reason` GATT_DROP/DIAL_FAILED/DIAL_TIMEOUT/HANDSHAKE/IO/REBOOTED/PROVISIONED/NEEDS_PAIRING/STALE_BOND/ADAPTER_OFF/STOPPED/OTHER, `status` (GATT status, where it carried one), `life` ms |
+| `lora_fail` | An attempt at the board's link ended before ready; the background wait for an absent board is not one | `reason`, `status` as in `lora_down`, `streak` (the session's backoff position), `wait` ms before the next |
+| `lora_role` | The gateway role changed (ADR 044) | `role`, `pocket`, `gateways` |
+| `net` | The Internet route at the session's start, then each change (ADR 2026-09.vej5's route) | `route` NONE/WIFI/CELLULAR/OTHER, `restricted` (Data Saver) |
+| `spool_up` | A spool's hello completed | `relay`, `hello` ms (dial → hello), `fails` (dials before it that never reached one), `pow` bits, `attach`, `ent`, `turn`, `cast` (what the hello offered) |
+| `spool_down` | A session that completed its hello ended | `relay`, `reason` (below), `code` (close code or HTTP status), `life` ms from the hello, `ours` (this phone ended it on a fault) |
+| `spool_fail` | A dial ended without a hello | `relay`, `reason`, `code`, `dur` ms, `streak` (failed dials in a row), `retryAfter` ms (the spool's `Retry-After`) |
+| `spool_err` | A connected spool answered an `err` code other than the last one logged this session | `relay`, `code` |
+| `spool` | Every 5 min, one per configured relay | `relay`, `up`, `scopes`, `converged` (scopes whose digest agrees), `local` / `remote` (records each side holds), `invalid`, `fails`, `pow`, `ticket` NONE/PENDING/ACCEPTED/REFUSED (a spool that takes tickets), `uploads` OPEN/LOCKED/SPENT, `reason` (the status row's standing verdict) |
 | `call_start` | A voice call began here: dialled, alerting, or a glare offer answered at once (docs/VOICE_CALLS.md §3). With no `call_end` after it, the process died in the call | `peer`, `out` (this phone dialled), `walkie` |
 | `call_end` | A call ended here; one per call this phone saw, an offer refused on arrival or never rung included | `peer`, `out`, `walkie`, `reason` USER/BUSY/TIMEOUT/NO_ROUTE/MEDIA/ERROR, or OFF (a kind switched off, C-3.3-7), STALE (never rang, C-3.4-1/3), GLARE (our offer gave way, C-3.5-1); `last` the phase it ended from (none for an offer that never rang); `life` ms; `byPeer`, `missed`, `degraded` (dropped to a walkie); from its start: `ring` (caller: first RINGING or ANSWER), `answer`, `setup` (connected) ms; `talk` ms connected; `restarts` (ICE restarts, §3.8), `drops` (path lost while connected); `relay` (relay-only), `direct` (a Wi-Fi Direct group on offer), `directUp` (this side hosted or joined); `turn` servers and `stun` URLs gathered from (live calls); `unreached` (C-3.3-5), `unproven` (C-3.3-6) |
 | `call_route` | A live call's media selected a candidate pair | `local`, `remote` HOST/SRFLX/PRFLX/RELAY/OTHER, `proto` (local transport), `net` WIFI/CELLULAR/ETHERNET/VPN/…, `direct` (the Wi-Fi Direct group), `seq` (1 for the session's first pair) |
@@ -73,6 +85,16 @@ Schema 1. A new field is additive. Renaming or removing a field, or changing a f
 | `talk` | A walkie burst (§3.11) went out or played to its end | `dir` OUT/IN; OUT: `chunks`, `ms` of speech, `sent` (chunks a link took), `path` (WIFI_AWARE/BLUETOOTH_CODED/BLUETOOTH/FADING/FLOODED/SPOOL/CAST_UNSEEN/NONE), `held` (Aware link held); IN: `chunks`, `lost` (skipped), `wait` (first arrival → playing), `spread` (first → last arrival) ms |
 | `walkie_end` | A walkie session ended | `burstsOut`, `burstsIn`, `chunksOut`, `failed` (no link took it), `chunksIn`, `lost`; medians of the latest chunks: `transit` (two clocks, skew included), `jitter`, `hand` (cut → radio) ms; `frameOut`, `frameIn` average `talk` frame bytes |
 | `latency` | At export, per plane | `dir` IN (others' messages reaching us; includes clock skew) or ACK (receipts for ours; one clock), `plane`, `n`, `p50`, `p90`, `max` ms |
+
+A spool's `reason` and `code` are `SpoolVerdict`: NONE (the socket went with nothing said), the client's own verdicts
+UNREACHABLE, NO_HELLO, UNRESPONSIVE, OVERLONG_LISTING, CLOSED (with the close `code`), HTTP (with the status),
+TRANSPORT (a failure with a response), the `err` codes VERSION, POW, TOMBSTONED, QUOTA, TOO_LARGE, BAD_ID, RATE,
+NOT_SUBSCRIBED, MALFORMED, INTERNAL, CONFLICT, TICKET, and OTHER for a code this build does not know.
+
+The LoRa edges follow the plane's status as it is published, so a link that was ready for a few milliseconds can show
+only as a `lora_fail` (HANDSHAKE or GATT_DROP) with no `lora_up` or `lora_down`. A missing `lora_up` is not proof the
+link never came up. A mesh stop rarely writes the board's `lora_down`, because the session that follows the status ends
+as the plane stops: a `mesh_off` closes an open LoRa link, and the next session's first `lora_up` carries no `relink`.
 
 The call lines exist only in a build with calls (`-Pcalls=true`, ADR 2026-10.swvp). They carry no call id, SDP,
 candidate address, TURN credential or caption: types, counts and times only.

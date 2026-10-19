@@ -5,8 +5,14 @@ import app.getknit.knit.mesh.TransportHealth
 import app.getknit.knit.mesh.TransportKind
 import app.getknit.knit.mesh.TransportStatus
 import app.getknit.knit.mesh.power.PowerState
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
@@ -47,6 +53,9 @@ class FieldLogTest {
             io = UnconfinedTestDispatcher(testScheduler),
             staged = staged,
         )
+
+    /** One mesh session's scope, cancelled as `MeshManager.stop` cancels its own, so the next start is a fresh one. */
+    private fun TestScope.session() = CoroutineScope(backgroundScope.coroutineContext + Job(backgroundScope.coroutineContext[Job]))
 
     private fun List<String>.kinds() = map { Regex(""""e":"(\w+)"""").find(it)!!.groupValues[1] }
 
@@ -167,6 +176,75 @@ class FieldLogTest {
             val ups = log.lines().filter { it.contains("bt_up") }
             assertTrue(ups.first(), !ups.first().contains("relink"))
             assertTrue(ups.last(), ups.last().contains("\"relink\":42000"))
+        }
+
+    @Test
+    fun aFollowerIsCollectedForEachSessionAndAThrowingOneCostsOnlyItsOwnLines() =
+        runTest {
+            val log = newLog()
+            val edges = MutableSharedFlow<FieldEvent>()
+            var resolved = 0
+            log.follower("edges") { edges.also { resolved++ } }
+            log.follower("broken") { flow { error("a status read that threw") } }
+            log.follower("gone") { flowOf(FieldEvent.NanCycle) }
+            log.follower("gone", null)
+            val first = session()
+            log.start(first, statuses)
+            runCurrent()
+            edges.emit(FieldEvent.LowPower(null))
+            runCurrent()
+
+            assertEquals("resolved at the session's start, once", 1, resolved)
+            val kinds = log.lines().kinds()
+            assertEquals(1, kinds.count { it == "low_power" })
+            assertTrue(kinds.toString(), "nan_cycle" !in kinds)
+            assertTrue("the session's own lines still came", "mesh_on" in kinds)
+
+            first.cancel()
+            log.stop()
+            log.start(session(), statuses)
+            runCurrent()
+            edges.emit(FieldEvent.LowPower(null))
+            runCurrent()
+
+            assertEquals("resolved again for the next session", 2, resolved)
+            assertEquals("collected by that session alone", 2, log.lines().kinds().count { it == "low_power" })
+        }
+
+    @Test
+    fun aNewSessionsFirstLoraUpCarriesNoRelinkFromTheLastSessionsOutage() =
+        runTest {
+            val log = newLog()
+            val first = session()
+            log.start(first, statuses)
+            log.record(FieldEvent.LoraUp(dialMs = null, tries = 0, mtu = 512))
+            log.record(FieldEvent.LoraDown(TransportHealth.Degraded, lifeMs = 60_000))
+            first.cancel()
+            log.stop()
+            now += 95_000
+            log.start(session(), statuses)
+            runCurrent()
+            log.record(FieldEvent.LoraUp(dialMs = 4_000, tries = 0, mtu = 512))
+
+            val ups = log.lines().filter { it.contains("lora_up") }
+            assertEquals(2, ups.size)
+            assertTrue(ups.last(), !ups.last().contains("relink"))
+        }
+
+    @Test
+    fun aLoraRelinkCarriesHowLongTheBoardWasWithoutAReadyLink() =
+        runTest {
+            val log = newLog()
+            log.record(FieldEvent.LoraUp(dialMs = null, tries = 0, mtu = 512))
+            log.record(FieldEvent.LoraDown(TransportHealth.Degraded, lifeMs = 60_000))
+            now += 95_000
+            log.record(FieldEvent.LoraUp(dialMs = 4_000, tries = 1, mtu = 512))
+            now += 10_000
+            log.record(FieldEvent.LoraUp(dialMs = 4_000, tries = 0, mtu = 512)) // no down between: no relink
+
+            val ups = log.lines().filter { it.contains("lora_up") }
+            assertEquals(listOf(false, true, false), ups.map { it.contains("relink") })
+            assertTrue(ups[1], ups[1].contains("\"relink\":95000"))
         }
 
     @Test

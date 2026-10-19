@@ -37,6 +37,17 @@ fun interface FieldRecorder {
         sample: (() -> List<FieldEvent>)?,
     ) = Unit
 
+    /**
+     * Registers (or, with null, removes) a stream of [edges] the log follows for each mesh session — a plane's state
+     * changes that some other component already publishes, turned into events by a pure follower. [edges] is called at
+     * each session's start, so whatever it resolves may be built after the log; a follower registered mid-session
+     * starts with the next one.
+     */
+    fun follower(
+        name: String,
+        edges: (() -> Flow<FieldEvent>)?,
+    ) = Unit
+
     companion object {
         val NONE = FieldRecorder { }
     }
@@ -84,6 +95,9 @@ class FieldLog(
     /** When each peer last lost its Bluetooth link, for [FieldEvent.BtUp.relinkMs]. */
     private val downAt = ConcurrentHashMap<String, Long>()
 
+    /** When the LoRa board's ready link last ended, for [FieldEvent.LoraUp.relinkMs]; null while it is up. */
+    @Volatile private var loraDownAt: Long? = null
+
     /** Each radio's last status this session, for the change test and the counters' sample. */
     private val radios = ConcurrentHashMap<TransportKind, TransportStatus>()
 
@@ -92,6 +106,8 @@ class FieldLog(
 
     private val samplers = ConcurrentHashMap<String, () -> List<FieldEvent>>()
 
+    private val followers = ConcurrentHashMap<String, () -> Flow<FieldEvent>>()
+
     @Volatile private var sampledAt = 0L
 
     override fun sampler(
@@ -99,6 +115,13 @@ class FieldLog(
         sample: (() -> List<FieldEvent>)?,
     ) {
         if (sample == null) samplers.remove(name) else samplers[name] = sample
+    }
+
+    override fun follower(
+        name: String,
+        edges: (() -> Flow<FieldEvent>)?,
+    ) {
+        if (edges == null) followers.remove(name) else followers[name] = edges
     }
 
     override fun record(event: FieldEvent) {
@@ -111,7 +134,8 @@ class FieldLog(
 
     /**
      * Fills a [FieldEvent.BtUp]'s time without a link since the same peer's last [FieldEvent.BtDown]. Held here, not
-     * in the transport, so the radio code only reports edges; the map forgets a peer once it links again.
+     * in the transport, so the radio code only reports edges; the map forgets a peer once it links again. A
+     * [FieldEvent.LoraUp]'s is filled the same way, from the board's last [FieldEvent.LoraDown].
      */
     private fun relink(
         at: Long,
@@ -128,6 +152,25 @@ class FieldLog(
 
             is FieldEvent.BtUp -> {
                 downAt.remove(event.peer)?.let { event.copy(relinkMs = at - it) } ?: event
+            }
+
+            else -> {
+                loraRelink(at, event)
+            }
+        }
+
+    /** [relink]'s LoRa half: the board is one link, so one time of its last down is all it needs. */
+    private fun loraRelink(
+        at: Long,
+        event: FieldEvent,
+    ): FieldEvent =
+        when (event) {
+            is FieldEvent.LoraDown -> {
+                event.also { loraDownAt = at }
+            }
+
+            is FieldEvent.LoraUp -> {
+                loraDownAt?.let { event.copy(relinkMs = at - it) }.also { loraDownAt = null } ?: event
             }
 
             else -> {
@@ -192,12 +235,17 @@ class FieldLog(
     ) {
         // The switch, followed for the session: off (the default) queues nothing and samples nothing.
         session.launch { enabled.collect { on = it } }
+        // A board link the last session left down ended with that session (a `mesh_off` closes it): its outage is not
+        // this session's, so the first `lora_up` carries no relink.
+        loraDownAt = null
         record(FieldEvent.MeshOn(versionCode))
         session.launch { power.distinctUntilChanged().collect { record(it.toEvent()) } }
         lowPower?.let { posture ->
             session.launch { posture.distinctUntilChanged().collect { record(FieldEvent.LowPower(it.reason)) } }
         }
         session.launch { followRadios(statuses) }
+        // One that throws costs its own lines, never the session; it is not restarted until the next one.
+        followers.values.forEach { edges -> session.launch { runCatching { edges().collect(::record) } } }
         session.launch {
             while (true) {
                 delay(tickMs)

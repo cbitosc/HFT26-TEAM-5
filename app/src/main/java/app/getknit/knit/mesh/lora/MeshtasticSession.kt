@@ -177,13 +177,13 @@ internal class MeshtasticSession(
                 DialResult.AdapterOff -> {}
 
                 is DialResult.Failed -> {
-                    streak = backoffAndWait("dial ${result.phase} ${result.status}", streak)
+                    streak = backoffAndWait("$REASON_DIAL ${result.phase} ${result.status}", streak)
                 }
 
                 // A background window that ran out is not a failure to back off from: the net's direct dial is
                 // due now, and the policy picks it on the next pass.
                 DialResult.Timeout -> {
-                    if (mode == DialMode.Direct) streak = backoffAndWait("dial timeout", streak)
+                    if (mode == DialMode.Direct) streak = backoffAndWait(REASON_DIAL_TIMEOUT, streak)
                 }
             }
         }
@@ -263,7 +263,7 @@ internal class MeshtasticSession(
             val end = handleOutcome(address, channel, outcome)
             if (end != null) return end
         }
-        return SessionEnd(reason = "cancelled", terminal = LinkState.Idle)
+        return SessionEnd(reason = REASON_CANCELLED, terminal = LinkState.Idle)
     }
 
     /** Handles one merged event; returns a [SessionEnd] to end the session, or null to keep looping. */
@@ -273,7 +273,7 @@ internal class MeshtasticSession(
         outcome: Any,
     ): SessionEnd? =
         when (outcome) {
-            is GattEvent.Disconnected -> SessionEnd(reason = "gatt disconnect ${outcome.status}")
+            is GattEvent.Disconnected -> SessionEnd(reason = "$REASON_GATT_DISCONNECT ${outcome.status}")
             is GattEvent.Notified -> drain(address, channel, awaitId = null)
             is Cmd.Send -> doSend(address, channel, outcome)
             is Cmd.Provision -> runProvision(channel, outcome)
@@ -315,11 +315,11 @@ internal class MeshtasticSession(
                 }
 
                 else -> {
-                    return classify(address, read) ?: SessionEnd(reason = "handshake read $read")
+                    return classify(address, read) ?: SessionEnd(reason = "$REASON_HANDSHAKE_READ $read")
                 }
             }
         }
-        return SessionEnd(reason = "handshake timeout")
+        return SessionEnd(reason = REASON_HANDSHAKE_TIMEOUT)
     }
 
     /**
@@ -362,14 +362,14 @@ internal class MeshtasticSession(
                     if (read.value.isEmpty()) return null
                     val signal = dispatch(MeshtasticProto.decodeFromRadio(read.value), awaitId)
                     when (signal) {
-                        Signal.Rehandshake -> return SessionEnd(reason = "rebooted", resetStreak = true)
+                        Signal.Rehandshake -> return SessionEnd(reason = REASON_REBOOTED, resetStreak = true)
                         Signal.MatchedAwait -> return null
                         Signal.Continue -> Unit
                     }
                 }
 
                 else -> {
-                    return classify(address, read) ?: SessionEnd(reason = "drain read $read")
+                    return classify(address, read) ?: SessionEnd(reason = "$REASON_DRAIN_READ $read")
                 }
             }
         }
@@ -574,7 +574,7 @@ internal class MeshtasticSession(
             else -> {
                 pending.remove(id)
                 cmd.reply.complete(SendResult.NotReady(_state.value))
-                return classify(address, write) ?: SessionEnd(reason = "send write $write")
+                return classify(address, write) ?: SessionEnd(reason = "$REASON_SEND_WRITE $write")
             }
         }
         val end = drain(address, channel, awaitId = id)
@@ -1012,7 +1012,7 @@ internal class MeshtasticSession(
             AdminOutcome.Applied -> {
                 log("lora provision $label")
                 reply.complete(result)
-                SessionEnd(reason = "provisioned", resetStreak = true) // the commit reboots; reconnect reloads channels
+                SessionEnd(reason = REASON_PROVISIONED, resetStreak = true) // the commit reboots; reconnect reloads channels
             }
 
             AdminOutcome.BadSessionKey -> {
@@ -1221,7 +1221,7 @@ internal class MeshtasticSession(
             }
 
             else -> {
-                classify(address, write) ?: SessionEnd(reason = "heartbeat write $write")
+                classify(address, write) ?: SessionEnd(reason = "$REASON_HEARTBEAT_WRITE $write")
             }
         }
     }
@@ -1237,12 +1237,12 @@ internal class MeshtasticSession(
         val bonded = dialer.bondState(address) == BondState.BONDED
         return when {
             result is GattResult.Failed && (result.status == GATT_AUTH_FAIL) -> {
-                SessionEnd(reason = "auth", terminal = if (bonded) LinkState.StaleBond(address) else LinkState.NeedsPairing(address))
+                SessionEnd(reason = REASON_AUTH, terminal = if (bonded) LinkState.StaleBond(address) else LinkState.NeedsPairing(address))
             }
 
             result is GattResult.Failed && (result.status == GATT_INSUFFICIENT_AUTH || result.status == GATT_INSUFFICIENT_ENC) -> {
                 SessionEnd(
-                    reason = "auth ${result.status}",
+                    reason = "$REASON_AUTH ${result.status}",
                     terminal = if (bonded) LinkState.StaleBond(address) else LinkState.NeedsPairing(address),
                 )
             }
@@ -1285,42 +1285,88 @@ internal class MeshtasticSession(
         data object Heartbeat : Cmd
     }
 
-    private companion object {
-        const val BASE_BACKOFF_MS = 5_000L
-        const val MAX_BACKOFF_MS = 180_000L
-        const val DIRECT_CONNECT_TIMEOUT_MS = 30_000L
+    companion object {
+        // The words a [LinkState.Disconnected] reason is built from. Public because the field log folds them onto
+        // [LoraLinkEnd] (ADR 2026-10.a239), and a word spelled twice drifts: `LoraFieldLogTest` walks every one. A
+        // reason is one of these alone, or one of them, a space and what the failure carried — a GATT status, a dial
+        // phase and status, or a [GattResult] (`Failed(status=133)`, `Timeout`, `Closed`).
+
+        /** The background dial's wait (ADR 2026-09.hp88): a dial mode, published as a retry, never a failure. */
         const val WAITING_FOR_BOARD = "waiting for the board"
-        const val SUBSCRIBE_TIMEOUT_MS = 10_000L
-        const val WRITE_TIMEOUT_MS = 10_000L
-        const val BONDING_TIMEOUT_MS = 90_000L
-        const val READ_TIMEOUT_MS = 30_000L
-        const val HANDSHAKE_TIMEOUT_MS = 120_000L
-        const val HEARTBEAT_MS = 180_000L
-        const val ADMIN_TIMEOUT_MS = 8_000L
-        const val MAX_STALE_READS = 32
+
+        /** Then the stack's status: the board's GATT link went away under a session. */
+        const val REASON_GATT_DISCONNECT = "gatt disconnect"
+
+        /** Then the phase (connect/service/mtu/subscribe) and the status: the dial itself failed. */
+        const val REASON_DIAL = "dial"
+
+        /** A direct dial whose connect window ran out. */
+        const val REASON_DIAL_TIMEOUT = "dial timeout"
+
+        /** Then the [GattResult]: a read inside the config handshake failed. */
+        const val REASON_HANDSHAKE_READ = "handshake read"
+
+        /** The config handshake did not complete inside its deadline. */
+        const val REASON_HANDSHAKE_TIMEOUT = "handshake timeout"
+
+        /** Then the [GattResult]: the drain of a ready link failed. */
+        const val REASON_DRAIN_READ = "drain read"
+
+        /** Then the [GattResult]: a packet's write to a ready link failed. */
+        const val REASON_SEND_WRITE = "send write"
+
+        /** Then the [GattResult]: the keep-alive's write to a ready link failed. */
+        const val REASON_HEARTBEAT_WRITE = "heartbeat write"
+
+        /** The board rebooted (or re-sent `my_info`) under a ready session; the next one re-handshakes. */
+        const val REASON_REBOOTED = "rebooted"
+
+        /** A setup or restore was committed; the board reboots to apply it. */
+        const val REASON_PROVISIONED = "provisioned"
+
+        /**
+         * A bond refusal, alone or then the status. Its session ends terminal ([LinkState.NeedsPairing] /
+         * [LinkState.StaleBond]), so it is logged but never published as a reason.
+         */
+        const val REASON_AUTH = "auth"
+
+        /** The session's scope was cancelled; it ends terminal ([LinkState.Idle]), so it is never published either. */
+        const val REASON_CANCELLED = "cancelled"
+
+        private const val BASE_BACKOFF_MS = 5_000L
+        private const val MAX_BACKOFF_MS = 180_000L
+        private const val DIRECT_CONNECT_TIMEOUT_MS = 30_000L
+        private const val SUBSCRIBE_TIMEOUT_MS = 10_000L
+        private const val WRITE_TIMEOUT_MS = 10_000L
+        private const val BONDING_TIMEOUT_MS = 90_000L
+        private const val READ_TIMEOUT_MS = 30_000L
+        private const val HANDSHAKE_TIMEOUT_MS = 120_000L
+        private const val HEARTBEAT_MS = 180_000L
+        private const val ADMIN_TIMEOUT_MS = 8_000L
+        private const val MAX_STALE_READS = 32
 
         // Channel provisioning: Knit takes a free secondary (1..7) and never touches index 0, the board's own
         // primary — which is also what keeps it on the public frequency, where stock nodes relay it (ADR 045).
-        const val FIRST_SECONDARY = 1
-        const val LAST_SECONDARY = 7
-        const val ROLE_DISABLED = 0
-        const val MALFORMED_CONFIG = "board sent a config this build cannot read"
-        const val MALFORMED_OWNER = "board sent a name this build cannot read"
-        const val PACKET_BUFFER = 256
-        const val OUTCOME_BUFFER = 64
+        private const val FIRST_SECONDARY = 1
+        private const val LAST_SECONDARY = 7
+        private const val ROLE_DISABLED = 0
+        private const val MALFORMED_CONFIG = "board sent a config this build cannot read"
+        private const val MALFORMED_OWNER = "board sent a name this build cannot read"
+        private const val PACKET_BUFFER = 256
+        private const val OUTCOME_BUFFER = 64
 
         /**
          * How many other nodes' names the directory holds. A dense urban mesh runs to thousands and the phone
          * only needs whoever it is currently hearing on the public channel, so this is a working set, not a
          * copy of the NodeDB.
          */
-        const val MAX_NODE_NAMES = 256
+        private const val MAX_NODE_NAMES = 256
 
         // Android BluetoothGatt status codes classified as a bond problem (values match the platform).
-        const val GATT_INSUFFICIENT_AUTH = 5
-        const val GATT_INSUFFICIENT_ENC = 15
-        const val GATT_AUTH_FAIL = 137
+        private const val GATT_INSUFFICIENT_AUTH = 5
+        private const val GATT_INSUFFICIENT_ENC = 15
+        private const val GATT_AUTH_FAIL = 137
 
-        val BLANK_BOARD = BoardInfo(0u, null, null)
+        private val BLANK_BOARD = BoardInfo(0u, null, null)
     }
 }

@@ -154,6 +154,9 @@ internal class LoraMeshTransport(
 
     private val _status = MutableStateFlow(LoraStatus())
 
+    /** Serialises [publishStatus]; outermost, never taken under the pacer's or the ledger's monitor. */
+    private val statusLock = Any()
+
     /** A snapshot for the LoRa settings row + the `…debug.LORA` bridge; derived, never routing-affecting. */
     override val status = _status.asStateFlow()
 
@@ -2068,32 +2071,45 @@ internal class LoraMeshTransport(
         publishStatus()
     }
 
-    private fun publishStatus() {
-        val board = (link.state.value as? LinkState.Ready)?.board
-        // The freshest reading among the radios still within the linger — the row's "last heard", now bounded
-        // to radios this plane actually talks to. Empty once they all age out, which is the honest answer.
-        val lastRx = boardsHeardAt.values.maxByOrNull { it.atMs }
-        _status.value =
-            LoraStatus(
-                state = link.state.value,
-                boardAddress = currentConfig?.address,
-                boardNodeNum = board?.myNodeNum,
-                lastSnr = lastRx?.snr,
-                lastRssi = lastRx?.rssi,
-                queueFree = link.queue.value?.free,
-                queued = pace.pending,
-                heard = _reachable.value.size,
-                boardsHeard = boardsHeardAt.size,
-                battery = link.battery.value,
-                boardAir = link.boardAir.value,
-                airtime = pace.airtime.snapshot(clock()),
-                role = role,
-                pocketLinks = linkedPeers.size,
-                pocketSightings = foreignReachable.size,
-                internetCovered = internetPeers.size,
-                gatewaysHeard = gateway.heard,
-            )
-    }
+    /**
+     * Rebuilds [status] from what the plane holds now. Serialised on [statusLock]: it is called from a dozen
+     * coroutines on `Dispatchers.Default`, and an unserialised read-then-write let a pacer that read Ready land its
+     * snapshot over the link collector's Disconnected — harmless to the settings row, which only shows the latest,
+     * but the field log follows the sequence (`LoraFieldLog`) and read it as a down, a phantom up and a second down
+     * (ADR 2026-10.a239's 2026-10-18 amendment). Under the lock each write's reads are newer than the last write's.
+     * Taken outermost: no caller holds the pacer's or the ledger's monitor, and those are taken inside it
+     * ([LoraPacePolicy.pending], [LoraAirtime.snapshot]), never the other way round. No JVM test pins it: the window
+     * is two non-suspending statements, and `FakeMeshtasticLink` has no seam to park a thread between them, so a stress
+     * test would pass on the unlocked code too. Keep the `link.state` read inside the lock.
+     */
+    private fun publishStatus() =
+        synchronized(statusLock) {
+            val linkState = link.state.value
+            val board = (linkState as? LinkState.Ready)?.board
+            // The freshest reading among the radios still within the linger — the row's "last heard", now bounded
+            // to radios this plane actually talks to. Empty once they all age out, which is the honest answer.
+            val lastRx = boardsHeardAt.values.maxByOrNull { it.atMs }
+            _status.value =
+                LoraStatus(
+                    state = linkState,
+                    boardAddress = currentConfig?.address,
+                    boardNodeNum = board?.myNodeNum,
+                    lastSnr = lastRx?.snr,
+                    lastRssi = lastRx?.rssi,
+                    queueFree = link.queue.value?.free,
+                    queued = pace.pending,
+                    heard = _reachable.value.size,
+                    boardsHeard = boardsHeardAt.size,
+                    battery = link.battery.value,
+                    boardAir = link.boardAir.value,
+                    airtime = pace.airtime.snapshot(clock()),
+                    role = role,
+                    pocketLinks = linkedPeers.size,
+                    pocketSightings = foreignReachable.size,
+                    internetCovered = internetPeers.size,
+                    gatewaysHeard = gateway.heard,
+                )
+        }
 
     /**
      * The window's dedup key. Keyed on the signature rather than the frame id because a re-seal keeps its

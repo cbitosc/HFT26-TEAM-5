@@ -15,7 +15,14 @@ import app.getknit.knit.mesh.TransportKind
 import app.getknit.knit.mesh.bluetooth.CodedPhyMode
 import app.getknit.knit.mesh.bluetooth.LinkPhy
 import app.getknit.knit.mesh.lora.LoraGatewayPolicy
+import app.getknit.knit.mesh.lora.LoraLinkEnd
+import app.getknit.knit.mesh.lora.LoraRegion
+import app.getknit.knit.mesh.lora.ModemPreset
 import app.getknit.knit.mesh.power.LowPowerReason
+import app.getknit.knit.mesh.spool.SpoolTicketWord
+import app.getknit.knit.mesh.spool.SpoolUploadsWord
+import app.getknit.knit.mesh.spool.SpoolVerdict
+import app.getknit.knit.net.InternetGate
 import app.getknit.knit.ui.call.TalkPath
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -261,6 +268,121 @@ class FieldEventSchemaTest {
             """{"t":42,"e":"walkie_end","burstsOut":0,"burstsIn":0,"chunksOut":0,"failed":0,"chunksIn":0,"lost":0}""",
             line(FieldEvent.WalkieEnd(0, 0, 0, 0, 0, 0)),
         )
+    }
+
+    @Test
+    fun theLoraKindsKeepTheirLines() {
+        assertEquals(
+            """{"t":42,"e":"lora","role":"PASSIVE","queued":0,"heard":2,"boards":1,"gateways":1,"pocket":3,"sighted":4,""" +
+                """"covered":2,"free":14,"battery":71,"powered":false,"chUtil10":123,"airTx10":8}""",
+            line(
+                FieldEvent.Lora(
+                    LoraGatewayPolicy.Role.PASSIVE,
+                    null,
+                    null,
+                    0,
+                    2,
+                    1,
+                    null,
+                    null,
+                    gatewaysHeard = 1,
+                    pocketLinks = 3,
+                    pocketSightings = 4,
+                    internetCovered = 2,
+                    queueFree = 14,
+                    batteryPercent = 71,
+                    powered = false,
+                    channelUtilTenths = 123,
+                    airUtilTxTenths = 8,
+                ),
+            ),
+        )
+        assertEquals(
+            """{"t":42,"e":"lora_up","dial":4200,"tries":2,"mtu":512,"region":"EU_868","preset":"LONG_FAST","slot":true,""" +
+                """"hops":3,"xeddsa":true,"relink":95000}""",
+            line(
+                FieldEvent.LoraUp(
+                    dialMs = 4_200,
+                    tries = 2,
+                    mtu = 512,
+                    region = LoraRegion.EU_868,
+                    preset = ModemPreset.LONG_FAST,
+                    dedicatedSlot = true,
+                    hopLimit = 3,
+                    xeddsa = true,
+                    relinkMs = 95_000,
+                ),
+            ),
+        )
+        assertEquals("""{"t":42,"e":"lora_up","tries":0,"mtu":23}""", line(FieldEvent.LoraUp(dialMs = null, tries = 0, mtu = 23)))
+        assertEquals(
+            """{"t":42,"e":"lora_down","reason":"GATT_DROP","status":8,"life":600000}""",
+            line(FieldEvent.LoraDown(LoraLinkEnd.GATT_DROP, lifeMs = 600_000, status = 8)),
+        )
+        assertEquals(
+            """{"t":42,"e":"lora_fail","reason":"DIAL_TIMEOUT","streak":3,"wait":20000}""",
+            line(FieldEvent.LoraFail(LoraLinkEnd.DIAL_TIMEOUT, streak = 3, waitMs = 20_000)),
+        )
+        assertEquals(
+            """{"t":42,"e":"lora_role","role":"ACTIVE","pocket":0,"gateways":2}""",
+            line(FieldEvent.LoraRole(LoraGatewayPolicy.Role.ACTIVE, pocketLinks = 0, gatewaysHeard = 2)),
+        )
+    }
+
+    @Test
+    fun theInternetAndSpoolKindsKeepTheirLines() {
+        val relay = "wss://relay.example/v1"
+        val r = names.ofRelay(relay)
+        assertEquals(
+            """{"t":42,"e":"net","route":"CELLULAR","restricted":false}""",
+            line(FieldEvent.Net(InternetGate.RouteKind.CELLULAR, restricted = false)),
+        )
+        assertEquals(
+            """{"t":42,"e":"spool_up","relay":"$r","hello":640,"fails":2,"pow":0,"attach":true,"ent":true,"turn":false,"cast":true}""",
+            line(FieldEvent.SpoolUp(relay, 640, 2, 0, attachments = true, ent = true, turn = false, cast = true)),
+        )
+        assertEquals(
+            """{"t":42,"e":"spool_down","relay":"$r","reason":"CLOSED","code":4003,"life":3600000,"ours":false}""",
+            line(FieldEvent.SpoolDown(relay, SpoolVerdict.CLOSED, 3_600_000, ours = false, code = 4003)),
+        )
+        assertEquals(
+            """{"t":42,"e":"spool_fail","relay":"$r","reason":"HTTP","code":503,"dur":900,"streak":4,"retryAfter":30000}""",
+            line(FieldEvent.SpoolFail(relay, SpoolVerdict.HTTP, 900, 4, code = 503, retryAfterMs = 30_000)),
+        )
+        assertEquals(
+            """{"t":42,"e":"spool_err","relay":"$r","code":"QUOTA"}""",
+            line(FieldEvent.SpoolErr(relay, SpoolVerdict.QUOTA)),
+        )
+        assertEquals(
+            """{"t":42,"e":"spool","relay":"$r","up":true,"scopes":5,"converged":4,"local":120,"remote":118,"invalid":0,""" +
+                """"fails":0,"pow":8,"ticket":"ACCEPTED","uploads":"OPEN"}""",
+            line(
+                FieldEvent.Spool(
+                    relay,
+                    true,
+                    5,
+                    4,
+                    120,
+                    118,
+                    0,
+                    0,
+                    8,
+                    ticket = SpoolTicketWord.ACCEPTED,
+                    uploads = SpoolUploadsWord.OPEN,
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun aRelayIsWrittenAsItsPseudonymNeverItsUrlAndNeverAsAPeer() {
+        val url = "wss://relay.example/v1"
+
+        val rendered = line(FieldEvent.SpoolErr(url, SpoolVerdict.RATE))
+
+        assertTrue(rendered, Regex(""""relay":"r[0-9a-f]{8}"""").containsMatchIn(rendered))
+        assertTrue(rendered, !rendered.contains("relay.example"))
+        assertTrue("a relay's input is its own domain", names.ofRelay(url).drop(1) != names.of(url).drop(1))
     }
 
     @Test

@@ -125,3 +125,39 @@ flag and the clock fallback; `scripts/test_fieldlog.py` is in both CIs.
 libwebrtc's report has no selected pair yet leaves the pair fields out. Tests: `FieldEventSchemaTest`'s call and
 walkie lines, `CallManagerTest`'s field-log cases, `CallFieldLogTest`, `DirectCallPathTest`'s leg lines, and
 `CallStatsReaderTest.theFieldLogKeepsAReadingInWholeUnitsAndConstants`.
+
+## Amendment 2026-10-18 — the LoRa board link and the spools write into it too
+
+**What was asked.** The LoRa plane wrote only a 5-minute sample, and the Internet plane wrote nothing but the spool
+counters' quarter-hour movement. A tester's log could not say when the board link dropped or why, how long a relink
+took, when the gateway role flipped, or which relay refused us, when, and with what.
+
+**What changed.** Eleven more kinds under the same rules, with fields in `docs/FIELD_LOG.md`:
+
+- **LoRa.** `lora_up`, `lora_down`, `lora_fail` and `lora_role` come from a pure follower of the plane's published
+  status (`mesh/lora/LoraFieldLog.kt`), registered through a new seam, `FieldRecorder.follower`. `FieldLog` collects
+  each registered stream on the mesh session and resolves it at the session's start, as the samplers resolve theirs
+  at each tick. Each reason string the board session writes becomes a `LoraLinkEnd` constant. The follower counts
+  the tries before an up itself, because the session's streak carries over unhealthy sessions. The sample widens to
+  the election's inputs and the board's own battery and duty-cycle readings. The follower is the first reader that
+  takes the order of the status snapshots as the record, so `publishStatus` is now serialised: a pacer's stale Ready
+  could otherwise land over the drop's Disconnected. A link ready for only milliseconds can still be conflated away,
+  and the doc says so.
+- **Spools.** `ScopeSync`'s worker writes `spool_up` at a completed hello, `spool_down` at the end of such a session,
+  `spool_fail` for a dial that never reached one, and `spool_err` for each new `err` code in a session. That last is
+  an edge, not every refusal: the counter counts those. `MeshManager` registers a 5-minute `spool` sample per relay.
+  A line's reason is how that connection ended: our fault, else the spool's close. It is never the status row's
+  `lastError`, which can be an older refusal still standing. The words become `SpoolVerdict` constants, with a close
+  code or an HTTP status as a number.
+- **The route.** `net` writes `InternetGate`'s route kind and Data Saver at each session's start and each change, a
+  Wi-Fi to cellular hand-over included. Every spool line is read against it.
+
+**A relay is a pseudonym too.** `FieldWriter.relay` writes `r` + 8 hex of HMAC-SHA256(salt, `relay` NUL + the URL
+without its `?k=` token). The input has its own domain, so a relay's name never equals a peer's, and no host, token
+or scope id or label reaches the journal. `scripts/fieldlog.py check` refuses a relay field that is not one.
+
+**What it costs.** The sample adds one `spool` line per relay every 5 minutes, about 200 bytes each: some 170 KiB over
+three days with three relays, inside the 4 MiB. A flapping relay writes a `spool_fail` per dial, but its backoff
+(fifteen minutes at the ceiling) bounds that. Tests: `FieldEventSchemaTest`'s LoRa, Internet and spool lines,
+`FieldLogTest`'s follower and LoRa relink cases, `NetEdgesTest`, `SpoolFieldLogTest`, `ScopeSyncTest`'s field-log
+cases, `LoraFieldLogTest`, and `scripts/test_fieldlog.py`'s `CheckTest`.

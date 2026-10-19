@@ -10,7 +10,8 @@ where they disagree, the ADR wins and the entry is fixed.
 LoRa-adjacent routing that stays in `AGENTS.md`, because another subsystem owns it: how a Nearby-room ✓✓ gets home
 (`AckSync`'s ride hold, `MeshRouter.handOn`, `coveredByInternet` — ADR 2026-09.y5f3 / 2026-09.wkbk), a link preview on
 a LoRa thread (ADR 2026-09.7x8k), a blob re-wanted at link-up (ADR 2026-09.ptv8), the presence tiers (`ui/Reach.kt`,
-ADR 2026-09.2ajk), and the field log's `FieldEvent.Lora` (ADR 2026-10.a239). The GATT client
+ADR 2026-09.2ajk), and the field log's `FieldEvent.Lora` sample and the link edges `LoraFieldLog` follows (ADR
+2026-10.a239 and its 2026-10-18 amendment). The GATT client
 (`MeshtasticGatt`) is also Bluetooth code: a change there owes `bluetooth-reviewer` as well as `lora-reviewer`.
 
 ## Entries
@@ -129,7 +130,10 @@ ADR 2026-09.2ajk), and the field log's `FieldEvent.Lora` (ADR 2026-10.a239). The
   `LoraOnlySaturated`), or `ui/lora/`:** READ ADR 040, ADR 2026-09.ursc and ADR 2026-09.6ww7. The kind is for
   presentation only — carry, relay and convergence never read it, and it is never folded into `fromNodeId`. A notice
   about a spent window is published on the send that spent it, and a group says LoRa will not carry it from its roster,
-  never the directory.
+  never the directory. `publishStatus` is serialised on its own lock, taken outside the pacer's and the ledger's
+  monitors: the field log's `LoraFieldLog` reads the order of the snapshots as the record, so a stale Ready landing
+  over a newer Disconnected is a phantom down and up (ADR 2026-10.a239's 2026-10-18 amendment). Its reason words are
+  `MeshtasticSession`'s companion constants, folded onto `LoraLinkEnd` and pinned by `LoraFieldLogTest`.
 
 ## Adding an entry
 

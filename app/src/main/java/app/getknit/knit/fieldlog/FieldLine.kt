@@ -9,18 +9,27 @@ import javax.crypto.spec.SecretKeySpec
  * random, kept beside the journal and replaced by Clear, so a peer reads the same across restarts inside one
  * log (its links, drops and relinks line up) but cannot be matched across two people's logs, or across a
  * Clear on one phone. Someone holding this phone *and* a node id could still test it — the residual the ADR
- * (2026-10.a239) records.
+ * (2026-10.a239) records. A relay is named the same way under its own prefix, `r` ([ofRelay]), from its redacted
+ * URL in a domain of its own, so a relay's name can never equal a peer's.
  */
 class Pseudonyms(
     salt: ByteArray,
 ) {
     private val mac = Mac.getInstance(ALGORITHM).apply { init(SecretKeySpec(salt, ALGORITHM)) }
 
-    fun of(nodeId: String): String =
+    fun of(nodeId: String): String = name(PREFIX, nodeId)
+
+    /** A relay, by its redacted URL (`SpoolUrl.redact`): `r` + eight hex digits, never the host. */
+    fun ofRelay(url: String): String = name(RELAY_PREFIX, RELAY_DOMAIN + url)
+
+    private fun name(
+        prefix: String,
+        key: String,
+    ): String =
         synchronized(mac) {
-            val digest = mac.doFinal(nodeId.toByteArray(Charsets.UTF_8))
-            buildString(PREFIX.length + HEX_CHARS) {
-                append(PREFIX)
+            val digest = mac.doFinal(key.toByteArray(Charsets.UTF_8))
+            buildString(prefix.length + HEX_CHARS) {
+                append(prefix)
                 for (i in 0 until HEX_CHARS / 2) append("%02x".format(digest[i].toInt() and BYTE_MASK))
             }
         }
@@ -28,6 +37,10 @@ class Pseudonyms(
     companion object {
         private const val ALGORITHM = "HmacSHA256"
         private const val PREFIX = "p"
+        private const val RELAY_PREFIX = "r"
+
+        // No node id begins with it, so a relay's input can never collide with a peer's.
+        private const val RELAY_DOMAIN = "relay\u0000"
         private const val HEX_CHARS = 8
         private const val BYTE_MASK = 0xff
         const val SALT_BYTES = 32
@@ -82,6 +95,13 @@ object FieldLine {
                     nodeId: String,
                 ) {
                     key(name).append('"').append(pseudonyms.of(nodeId)).append('"')
+                }
+
+                override fun relay(
+                    name: String,
+                    url: String,
+                ) {
+                    key(name).append('"').append(pseudonyms.ofRelay(url)).append('"')
                 }
 
                 private fun key(name: String): StringBuilder = out.append(",\"").append(safe(name)).append("\":")

@@ -1,4 +1,4 @@
-"""Unit tests for scripts/fieldlog.py's `pair`. Run: python3 -m unittest scripts/test_fieldlog.py
+"""Unit tests for scripts/fieldlog.py's `check` and `pair`. Run: python3 -m unittest scripts/test_fieldlog.py
 
 Each case writes two (or three) phones' logs from one timeline in absolute milliseconds, each rebased to its own first
 line and headed with that line's hour, as `FieldLogDocument` writes them, so the offset `pair` has to find is known.
@@ -109,6 +109,25 @@ def call(
                 local, remote = route if out else (route[1], route[0])
                 phone.at(mine + 100, "call_route", local=local, remote=remote, proto="UDP", net="WIFI", direct=False, seq=1)
         phone.at(ended, "call_end", **line)
+
+
+class CheckTest(unittest.TestCase):
+    def test_a_relay_must_be_its_pseudonym_and_never_a_peer_s_or_its_host(self):
+        ok = {"t": 1, "e": "spool_up", "relay": "r0a1b2c3d", "hello": 640, "fails": 0, "pow": 0, "attach": True,
+              "ent": False, "turn": False, "cast": False}
+        self.assertEqual([], fieldlog.validate(ok))
+        self.assertTrue(fieldlog.validate({**ok, "relay": "p0a1b2c3d"}))
+        self.assertTrue(fieldlog.validate({**ok, "relay": "relay.example"}))
+
+    def test_the_lora_board_link_lines_are_known_kinds(self):
+        for line in (
+            {"t": 1, "e": "lora_up", "dial": 4200, "tries": 1, "mtu": 512, "region": "EU_868", "relink": 95000},
+            {"t": 2, "e": "lora_down", "reason": "GATT_DROP", "status": 8, "life": 600000},
+            {"t": 3, "e": "lora_fail", "reason": "DIAL_TIMEOUT", "streak": 2, "wait": 20000},
+            {"t": 4, "e": "lora_role", "role": "PASSIVE", "pocket": 2, "gateways": 1},
+            {"t": 5, "e": "net", "route": "CELLULAR", "restricted": False},
+        ):
+            self.assertEqual([], fieldlog.validate(line), line)
 
 
 class PairTest(unittest.TestCase):

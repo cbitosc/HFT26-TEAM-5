@@ -29,6 +29,7 @@ import app.getknit.knit.fieldlog.FIELD_LOG_SHARE_DIR
 import app.getknit.knit.fieldlog.FieldJournal
 import app.getknit.knit.fieldlog.FieldLog
 import app.getknit.knit.fieldlog.FieldLogExport
+import app.getknit.knit.fieldlog.netEdges
 import app.getknit.knit.identity.Identity
 import app.getknit.knit.mesh.BlobExchange
 import app.getknit.knit.mesh.BridgeFrameSource
@@ -66,6 +67,7 @@ import app.getknit.knit.mesh.lora.MeshtasticGattDialer
 import app.getknit.knit.mesh.lora.MeshtasticLink
 import app.getknit.knit.mesh.lora.MeshtasticSession
 import app.getknit.knit.mesh.lora.fieldSample
+import app.getknit.knit.mesh.lora.loraFieldEdges
 import app.getknit.knit.mesh.meshExceptionHandler
 import app.getknit.knit.mesh.power.AppVisibility
 import app.getknit.knit.mesh.power.BatterySaverState
@@ -159,8 +161,14 @@ val meshModule =
                 staged = File(androidContext().cacheDir, FIELD_LOG_SHARE_DIR),
                 lowPower = get<LowPowerSource>().posture,
             ).also { log ->
-                // Resolved at each sample, never here: the plane's status is built from the transport, which this precedes.
-                if (BuildConfig.LORA_PLANE) log.sampler("lora") { get<LoraPlaneStatus>().status.value.fieldSample() }
+                if (BuildConfig.LORA_PLANE) {
+                    // Resolved at each sample, never here: the plane's status is built from the transport, which this precedes.
+                    log.sampler("lora") { get<LoraPlaneStatus>().status.value.fieldSample() }
+                    // Its link edges, resolved at each session's start, on the board session's clock: a retry's due time is on it.
+                    log.follower("lora") { loraFieldEdges(get<LoraPlaneStatus>().status, SystemClock::elapsedRealtime) }
+                }
+                // The Internet route every spool line reads against, followed for each mesh session.
+                log.follower("net") { netEdges(get<InternetGate>()) }
             }
         }
         single { FieldLogExport(androidContext(), get(), get(), get()) }

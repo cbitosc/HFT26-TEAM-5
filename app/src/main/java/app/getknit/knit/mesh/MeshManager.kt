@@ -40,6 +40,7 @@ import app.getknit.knit.data.reaction.ReactionEntity
 import app.getknit.knit.data.settings.LoraBoard
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.fieldlog.FieldLog
+import app.getknit.knit.fieldlog.FieldRecorder
 import app.getknit.knit.identity.Identity
 import app.getknit.knit.isValidReactionEmoji
 import app.getknit.knit.location.GeoUri
@@ -105,6 +106,7 @@ import app.getknit.knit.mesh.spool.SpoolTickets
 import app.getknit.knit.mesh.spool.TicketIssuer
 import app.getknit.knit.mesh.spool.TicketKeyJournal
 import app.getknit.knit.mesh.spool.TicketRefresher
+import app.getknit.knit.mesh.spool.fieldSample
 import app.getknit.knit.moderation.ImageScreeningService
 import app.getknit.knit.moderation.ScopedTextModerator
 import app.getknit.knit.normalizeSingleLine
@@ -756,7 +758,8 @@ class MeshManager(
                 // the refresher is built below this field.
                 onUploadWanted = { url -> ticketRefresher?.uploadWanted(url) },
                 log = { Log.i(SPOOL_TAG, it) },
-            )
+                field = fieldLog ?: FieldRecorder.NONE,
+            ).also { sync -> fieldLog?.sampler(SPOOL_FIELD_SAMPLER) { sync.status().map { it.fieldSample() } } }
         }
 
     @Volatile
@@ -4073,6 +4076,10 @@ class MeshManager(
 
         /** The Internet plane's logcat tag, shared with `OkHttpSpoolDialer`. */
         const val SPOOL_TAG = "ScopeSync"
+
+        /** The field log's spool sampler: one `spool` line per configured relay every 5 min (ADR 2026-10.a239). */
+        private const val SPOOL_FIELD_SAMPLER = "spool"
+
         const val METRICS_LOG_INTERVAL_MS = 60_000L
         const val FORWARD_SWEEP_INTERVAL_MS = 10 * 60_000L
 

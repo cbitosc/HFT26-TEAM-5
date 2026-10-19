@@ -1,5 +1,7 @@
 package app.getknit.knit.mesh.spool
 
+import app.getknit.knit.fieldlog.FieldEvent
+import app.getknit.knit.fieldlog.FieldRecorder
 import app.getknit.knit.mesh.CarriedFrame
 import app.getknit.knit.mesh.ForwardStore
 import app.getknit.knit.mesh.MeshMetrics
@@ -320,6 +322,9 @@ class ScopeSync(
     // Where the plane says what it did with a ticket and a TURN ask (the app's `ScopeSync` logcat tag). Never handed
     // a ticket, a credential or a token: hosts, outcome words and counts only.
     private val log: (String) -> Unit = {},
+    // The field log (ADR 2026-10.a239): each spool's hello, session end, failed dial and new `err` code, under the
+    // relay's pseudonym. Its 5-minute sample reads [status] from the session's side.
+    private val field: FieldRecorder = FieldRecorder.NONE,
 ) {
     private val workers = ConcurrentHashMap<String, Worker>()
     private val sealCache = SealCache(SEAL_CACHE_MAX)
@@ -824,6 +829,10 @@ class ScopeSync(
         @Volatile
         private var dialFailures = 0
 
+        // The last `err` this session's field log line named, so a refusal repeated every round is one line (an edge).
+        @Volatile
+        private var errLogged: String? = null
+
         // When the last dial began (see [SpoolStatus.lastDialAt]).
         @Volatile
         private var lastDialAt: Long? = null
@@ -1195,12 +1204,8 @@ class ScopeSync(
             val host = this@ScopeSync.session ?: return false
             val dialedAt = clock()
             lastDialAt = dialedAt
-            val socket = dialer.dial(url)
-            if (socket == null) {
-                lastError = UNREACHABLE
-                dialFailures++
-                return false
-            }
+            val socket = dialer.dial(url) ?: return unreached(dialedAt)
+            errLogged = null
             val conn = connect(socket)
             software = null
             presented = null
@@ -1216,6 +1221,7 @@ class ScopeSync(
                 wake()
             }
             val ready = withTimeoutOrNull(HANDSHAKE_TIMEOUT_MS) { conn.awaitReady() } == true
+            val readyAt = clock()
             // A socket that opened and never carried a hello is dropped as our own verdict, through
             // `abort` like every client-side close (ADR 2026-09.amzn), so the backoff grows and the status
             // says so instead of reading "connecting" forever. Both guards matter: the dialer writes
@@ -1226,7 +1232,8 @@ class ScopeSync(
                 rememberHello(conn)
                 // Paired with the dialer's "spool socket failed" line: together they bound when a frame could reach
                 // the spool (a call offer queued in between went out on the next hello, possibly after its end).
-                log("${SpoolUrl.host(url)}: connected (hello ${clock() - dialedAt} ms after the dial)")
+                log("${SpoolUrl.host(url)}: connected (hello ${readyAt - dialedAt} ms after the dial)")
+                fieldUp(conn, readyAt - dialedAt)
                 dialFailures = 0
                 // A route change that landed during this handshake asked for a dial that this hello has
                 // now answered; left in the channel it would fire an immediate re-dial, with the backoff
@@ -1277,7 +1284,71 @@ class ScopeSync(
                 }
             }
             pump.cancel()
-            return endSession(socket, conn, ready)
+            val reached = endSession(socket, conn, ready)
+            fieldEnd(socket, conn, ready, dialedAt, readyAt)
+            return reached
+        }
+
+        /** The dial [session] began at [dialedAt] got no socket at all: the URL could not be dialled. Never reached. */
+        private fun unreached(dialedAt: Long): Boolean {
+            lastError = UNREACHABLE
+            dialFailures++
+            field.record(FieldEvent.SpoolFail(relayKey, SpoolVerdict.UNREACHABLE, clock() - dialedAt, dialFailures))
+            return false
+        }
+
+        /** The field log's line for a completed hello, [helloMs] after its dial: what the hello offered. */
+        private fun fieldUp(
+            conn: SpoolConnection,
+            helloMs: Long,
+        ) = field.record(
+            FieldEvent.SpoolUp(
+                relay = relayKey,
+                helloMs = helloMs,
+                fails = dialFailures,
+                powBits = conn.powBits,
+                attachments = conn.limits?.attachments == true,
+                ent = conn.ent,
+                turn = conn.turn,
+                cast = conn.cast != null,
+            ),
+        )
+
+        /**
+         * The field log's line for a session [endSession] just filed: a dial that never reached a hello, or a session
+         * that did. Its reason is how this connection ended — our fault, else the spool's close, else nothing said —
+         * never [lastError], which can be an older refusal still standing.
+         */
+        private fun fieldEnd(
+            socket: SpoolSocket,
+            conn: SpoolConnection,
+            ready: Boolean,
+            dialedAt: Long,
+            readyAt: Long,
+        ) {
+            val (reason, code) = SpoolVerdict.of(conn.fault ?: socket.closeReason)
+            field.record(
+                if (ready) {
+                    FieldEvent.SpoolDown(relayKey, reason, clock() - readyAt, ours = conn.fault != null, code = code)
+                } else {
+                    FieldEvent.SpoolFail(relayKey, reason, clock() - dialedAt, dialFailures, code, socket.retryAfterMs)
+                },
+            )
+        }
+
+        /** The relay as the field log keys it: its URL without the `?k=` token (a pseudonym is made of it). */
+        private val relayKey get() = SpoolUrl.redact(url)
+
+        /**
+         * Files an `err` [code] the spool answered (or one of our own verdicts on what it sent): the counter, the status
+         * row's [lastError], and a field log line when it differs from the last one this session logged.
+         */
+        private fun refused(code: String) {
+            metrics.onSpoolError()
+            lastError = code
+            if (code == errLogged) return
+            errLogged = code
+            field.record(FieldEvent.SpoolErr(relayKey, SpoolVerdict.of(code).first))
         }
 
         /**
@@ -1578,10 +1649,7 @@ class ScopeSync(
             val fits =
                 listing.blobIds.size <= accountBound(scope.idHex) &&
                     listing.tombstones.size <= tombstoneBound(boundsFor(scope).maxFrames)
-            if (!fits) {
-                metrics.onSpoolError()
-                lastError = OVERLONG_LISTING
-            }
+            if (!fits) refused(OVERLONG_LISTING)
             return fits
         }
 
@@ -1682,10 +1750,7 @@ class ScopeSync(
                     pushed.add(entry.sealed.blobId)
                     metrics.onSpoolPushed()
                 } else {
-                    if (reply is SpoolReply.Failed && !stampDemand(scope.idHex, reply, pow)) {
-                        metrics.onSpoolError()
-                        lastError = reply.code
-                    }
+                    if (reply is SpoolReply.Failed && !stampDemand(scope.idHex, reply, pow)) refused(reply.code)
                     // A per-blob refusal is worth stepping over; anything else (quota, a dead socket) ends
                     // the round.
                     if (reply !is SpoolReply.Failed || !survivable(reply)) break
@@ -1759,10 +1824,7 @@ class ScopeSync(
             if (sealed.blob.size > minOf(conn.limits?.maxBlob ?: Int.MAX_VALUE, bounds.maxBlob)) return false
             val pow = stampFor(scope, conn.powBits)
             val reply = conn.push(scope.id, sealed.blobId, sealed.blob, pow)
-            if (reply is SpoolReply.Failed && !stampDemand(scope.idHex, reply, pow)) {
-                metrics.onSpoolError()
-                lastError = reply.code
-            }
+            if (reply is SpoolReply.Failed && !stampDemand(scope.idHex, reply, pow)) refused(reply.code)
             if (reply !is SpoolReply.Ok) return false
             if (account(scope.idHex, hex(sealed.blobId), sealed.blobId)) metrics.onSpoolAccounted()
             // Fold into the anchor only where one exists — before the SUB is answered there is nothing to
@@ -2289,8 +2351,7 @@ class ScopeSync(
                 return ChunkPut.STOP
             }
             if (stampDemand(scope.idHex, reply, stamp)) return ChunkPut.STOP
-            metrics.onSpoolError()
-            lastError = reply.code
+            refused(reply.code)
             return if (survivable(reply)) ChunkPut.NEXT else ChunkPut.STOP
         }
 
@@ -2381,8 +2442,7 @@ class ScopeSync(
             retryMs: Long?,
         ) {
             if (scopeHex != null && code == SpoolErrCode.POW && demanded(scopeHex, stamped = scopeHex in stampedSubs)) return
-            metrics.onSpoolError()
-            lastError = code
+            refused(code)
             if (scopeHex == null) return
             // A refused stamp is stale (day rollover, or the spool raised its difficulty): drop it so the
             // next SUB/PUSH mines a fresh one instead of replaying the rejected counter forever.

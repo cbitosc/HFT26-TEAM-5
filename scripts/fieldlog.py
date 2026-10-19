@@ -15,6 +15,9 @@ number of phones, and prints the tables the open radio questions ask for:
 - link RSSI by PHY from the 5-minute samples, and the RSSI each PHY step happened at;
 - Wi-Fi Aware data-path lifetimes and session cycles;
 - message latency per plane, as each phone summarised it;
+- the LoRa board link: dial and relink time, tries before each up, link life and failed attempts by reason, role
+  flips, and the board's own channel use;
+- the Internet route, and each relay's hello time, session life and failed dials by reason, and its `err` codes;
 - voice calls (a build with calls): how each ended and from which phase, ring and setup times, the media's round
   trip and loss by route, the microphone's health, Wi-Fi Direct legs, walkie bursts, and calls with no end line.
 
@@ -58,7 +61,22 @@ KINDS: dict[str, set[str] | None] = {
     "nan_down": {"peer", "initiator", "life", "clean"},
     "nan_cycle": set(),
     "low_power": {"on", "why"},
-    "lora": {"role", "snr10", "rssi", "queued", "heard", "boards", "airUsed", "airBudget"},
+    "lora": {
+        "role", "snr10", "rssi", "queued", "heard", "boards", "airUsed", "airBudget", "gateways", "pocket", "sighted",
+        "covered", "free", "battery", "powered", "chUtil10", "airTx10",
+    },
+    "lora_up": {"dial", "tries", "mtu", "region", "preset", "slot", "hops", "xeddsa", "relink"},
+    "lora_down": {"reason", "status", "life"},
+    "lora_fail": {"reason", "status", "streak", "wait"},
+    "lora_role": {"role", "pocket", "gateways"},
+    "net": {"route", "restricted"},
+    "spool_up": {"relay", "hello", "fails", "pow", "attach", "ent", "turn", "cast"},
+    "spool_down": {"relay", "reason", "code", "life", "ours"},
+    "spool_fail": {"relay", "reason", "code", "dur", "streak", "retryAfter"},
+    "spool_err": {"relay", "code"},
+    "spool": {
+        "relay", "up", "scopes", "converged", "local", "remote", "invalid", "fails", "pow", "ticket", "uploads", "reason",
+    },
     "latency": {"dir", "plane", "n", "p50", "p90", "max"},
     "call_start": {"peer", "out", "walkie"},
     "call_end": {
@@ -79,10 +97,11 @@ KINDS: dict[str, set[str] | None] = {
 }
 
 # Summary sections shown as a count of lines, and as the values themselves, rather than as percentiles.
-COUNTED = {"nan cycles", "call routes", "call mic", "call deaf readings"}
+COUNTED = {"nan cycles", "call routes", "call mic", "call deaf readings", "lora roles", "spool errs", "net routes"}
 LISTED = {"call drops / restarts"}
 
 PSEUDONYM = re.compile(r"^p[0-9a-f]{8}$")
+RELAY = re.compile(r"^r[0-9a-f]{8}$")
 ENUM = re.compile(r"^[A-Za-z0-9_]+$")
 NODE_ID = re.compile(r"(?<![a-z2-7])[a-z2-7]{26}(?![a-z2-7])")
 
@@ -141,7 +160,7 @@ def validate(event: dict) -> list[str]:
         if allowed is not None and name not in allowed:
             problems.append(f"{kind}: unexpected field {name!r}")
         if isinstance(value, str):
-            ok = PSEUDONYM.match(value) if name == "peer" else ENUM.match(value)
+            ok = {"peer": PSEUDONYM, "relay": RELAY}.get(name, ENUM).match(value)
             if not ok:
                 problems.append(f"{kind}.{name}: {value!r} is neither a pseudonym nor a constant")
         elif not isinstance(value, (bool, int)):
@@ -194,6 +213,30 @@ def summarise(logs: list[Log]) -> dict:
                 out["nan life s"][f"{dev} {'clean' if e['clean'] else 'reset'}"].append(e["life"] / 1000)
             elif kind == "nan_cycle":
                 out["nan cycles"][dev].append(1)
+            elif kind == "lora_up":
+                if "dial" in e:
+                    out["lora dial s"][dev].append(e["dial"] / 1000)
+                if "relink" in e:
+                    out["lora relink s"][dev].append(e["relink"] / 1000)
+                out["lora tries before up"][dev].append(e["tries"])
+            elif kind == "lora_down":
+                out["lora life s"][f"{dev} {e['reason']}"].append(e["life"] / 1000)
+            elif kind == "lora_fail":
+                out["lora fail wait s"][f"{dev} {e['reason']}"].append(e.get("wait", 0) / 1000)
+            elif kind == "lora_role":
+                out["lora roles"][f"{dev} {e['role']}"].append(1)
+            elif kind == "lora" and "chUtil10" in e:
+                out["lora board channel use %"][dev].append(e["chUtil10"] / 10)
+            elif kind == "net":
+                out["net routes"][f"{dev} {e['route']}"].append(1)
+            elif kind == "spool_up":
+                out["spool hello s"][f"{dev} {e['relay']}"].append(e["hello"] / 1000)
+            elif kind == "spool_down":
+                out["spool life s"][f"{dev} {e['relay']} {e['reason']}"].append(e["life"] / 1000)
+            elif kind == "spool_fail":
+                out["spool fails s"][f"{dev} {e['relay']} {e['reason']}"].append(e["dur"] / 1000)
+            elif kind == "spool_err":
+                out["spool errs"][f"{dev} {e['relay']} {e['code']}"].append(1)
             elif kind == "latency":
                 out["latency s"][f"{dev} {e['dir']} {e['plane']}"].append(
                     f"n={e['n']} p50={e['p50'] / 1000:g} p90={e['p90'] / 1000:g} max={e['max'] / 1000:g}"
