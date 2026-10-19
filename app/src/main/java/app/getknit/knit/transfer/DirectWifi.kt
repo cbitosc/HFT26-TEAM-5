@@ -34,16 +34,27 @@ data class GroupCredentials(
         /** Whether [ssid] names a group this app hosted (a crash can leave one up; a foreign one is never touched). */
         fun isOurs(ssid: String?): Boolean = ssid?.startsWith("$SSID_PREFIX$SSID_HEAD-") == true
 
-        /** Whether [ssid]/[passphrase] are something the platform would accept — what a READY is checked against. */
+        /**
+         * Whether [ssid]/[passphrase] are something the platform would accept — what a READY or a call's invite is
+         * checked against. The name is held to `WifiP2pConfig.Builder.setNetworkName`'s own pattern, not just the
+         * prefix: one it refuses throws from the builder on the joining side, past every `DirectWifiException` catch, so
+         * a transfer never reaches Failed. The passphrase is WPA's 8 to 63 printable ASCII characters.
+         */
         fun isValid(
             ssid: String?,
             passphrase: String?,
         ): Boolean =
             ssid != null &&
-                ssid.startsWith(SSID_PREFIX) &&
+                PLATFORM_SSID.matches(ssid) &&
                 ssid.toByteArray(Charsets.UTF_8).size <= SSID_MAX_BYTES &&
                 passphrase != null &&
-                passphrase.length in PASSPHRASE_MIN..PASSPHRASE_MAX
+                passphrase.length in PASSPHRASE_MIN..PASSPHRASE_MAX &&
+                passphrase.all { it in PRINTABLE_ASCII }
+
+        /** `WifiP2pConfig.Builder.setNetworkName`'s check, verbatim (AOSP): `DIRECT-`, two alphanumerics, then anything. */
+        private val PLATFORM_SSID = Regex("^DIRECT-[a-zA-Z0-9]{2}.*")
+
+        private val PRINTABLE_ASCII = ' '..'~'
 
         private fun alnum(
             rng: SecureRandom,

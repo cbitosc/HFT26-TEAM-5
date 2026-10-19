@@ -315,6 +315,27 @@ class TransferManagerTest {
         }
 
     /**
+     * A READY naming a group the platform's builder would refuse (`DIRECT-` with no two alphanumerics after it) is not
+     * a READY: before the fix it passed `GroupCredentials.isValid`, the receiver's join threw `IllegalArgumentException`
+     * past every `DirectWifiException` catch, and the transfer was left Connecting, never Failed, with the sender told
+     * nothing. Now the receiver never joins and fails it as it fails a READY that never came.
+     */
+    @Test
+    fun aReadyNamingAGroupThePlatformRefusesIsIgnoredAndTheTransferFails() =
+        runBlocking {
+            val (a, b) = pair()
+            a.withClip()
+            a.signals.rewrite = { if (it.phase == TransferPayload.PHASE_READY) it.copy(ssid = "DIRECT-") else it }
+            val id = offer(a)
+            awaitIncoming(b, id)
+            assertNull(b.manager.accept(id))
+            awaitPhase(b, id, TransferPhase.Failed)
+            assertEquals(TransferPayload.REASON_TIMEOUT, b.record(id)!!.reason)
+            awaitPhase(a, id, TransferPhase.Failed)
+            assertTrue(b.log.events.none { it == "join" })
+        }
+
+    /**
      * The 2026-10-05 shape: the receiver could not open the first READY (a ratchet collision, #135), and the
      * pair's session healed while the receiver was still waiting. A READY sent again under the healed session
      * gets the file across. Without the re-send this is [aLostReadyFailsTheReceiverAndCancelsTheSender].

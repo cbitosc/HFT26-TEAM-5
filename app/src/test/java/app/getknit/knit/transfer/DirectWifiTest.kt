@@ -53,9 +53,33 @@ class DirectWifiTest {
 
     @Test
     fun theNamesLengthIsCountedInUtf8BytesNotCharacters() {
-        // Twelve two-byte characters: 19 characters, 31 bytes — and one more is 20 characters but 33 bytes.
-        assertTrue(GroupCredentials.isValid("DIRECT-" + "é".repeat(12), "passphrase"))
-        assertFalse(GroupCredentials.isValid("DIRECT-" + "é".repeat(13), "passphrase"))
+        // `DIRECT-kn` and eleven two-byte characters: 20 characters, 31 bytes — one more is 21 characters but 33 bytes.
+        assertTrue(GroupCredentials.isValid("DIRECT-kn" + "é".repeat(11), "passphrase"))
+        assertFalse(GroupCredentials.isValid("DIRECT-kn" + "é".repeat(12), "passphrase"))
+    }
+
+    @Test
+    fun aNameThePlatformsBuilderRefusesIsInvalidThoughItCarriesThePrefix() {
+        // `setNetworkName` throws IllegalArgumentException for each of these on the joining side, past every catch
+        // that expects a DirectWifiException — so a READY or an invite naming one must be refused here instead.
+        for (refused in listOf("DIRECT-", "DIRECT-a", "DIRECT-!x-abc", "DIRECT-é1-abc", "DIRECT-ab\ncd")) {
+            assertFalse(refused, GroupCredentials.isValid(refused, "passphrase"))
+            assertFalse(refused, platformName.matches(refused))
+        }
+    }
+
+    @Test
+    fun twoAlphanumericsAfterThePrefixAreEnoughAndTheRestIsFree() {
+        assertTrue(GroupCredentials.isValid("DIRECT-ab", "passphrase"))
+        assertTrue(GroupCredentials.isValid("DIRECT-9Z Living room!", "passphrase"))
+    }
+
+    @Test
+    fun aPassphraseOutsidePrintableAsciiIsInvalid() {
+        // WPA's passphrase is 8 to 63 printable ASCII characters; a space is one of them.
+        assertTrue(GroupCredentials.isValid("DIRECT-kn-abcdefgh", "pass phrase ~"))
+        assertFalse(GroupCredentials.isValid("DIRECT-kn-abcdefgh", "pässphrase"))
+        assertFalse(GroupCredentials.isValid("DIRECT-kn-abcdefgh", "pass\tphrase"))
     }
 
     @Test

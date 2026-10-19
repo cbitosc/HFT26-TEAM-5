@@ -92,6 +92,15 @@ class CallDirectTest {
     }
 
     @Test
+    fun aGroupNameWithTheBarePrefixLeavesNoCredentials() {
+        // `DIRECT-` with no two alphanumerics after it: the builder throws on the joining side rather than fail the join.
+        val bare = invite(s = "DIRECT-")
+
+        assertNull(bare.credentials())
+        assertFalse(bare.isUsable())
+    }
+
+    @Test
     fun aPassphraseShorterThanWpaAllowsLeavesNoCredentials() {
         assertNull(invite(p = "seven77").credentials())
         assertFalse(invite(p = null).isUsable())

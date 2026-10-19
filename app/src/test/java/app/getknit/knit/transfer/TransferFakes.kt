@@ -15,13 +15,18 @@ import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.Collections
+import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.random.Random
 
-/** A shared, ordered log of what a side did — signals sent and radio calls — for ordering assertions. */
+/**
+ * A shared, ordered log of what a side did — signals sent and radio calls — for ordering assertions. Copy-on-write, so
+ * a test polling it (`count`, `none`) iterates a snapshot while a retry loop is still appending: a synchronized list
+ * read without its lock threw ConcurrentModificationException from `DirectCallPathTest`'s join-retry poll.
+ */
 class SideLog(
     val name: String,
 ) {
-    val events: MutableList<String> = Collections.synchronizedList(mutableListOf())
+    val events: MutableList<String> = CopyOnWriteArrayList()
 
     fun note(event: String) {
         events += event
@@ -57,6 +62,7 @@ class FakeDirectWifi(
         timeoutMs: Long,
     ): HostedGroup {
         log.note("host")
+        builderChecks(credentials)
         if (hostFails) throw DirectWifiException("host refused", hostRefusal)
         // Both loopback families, as a real group interface carries both — the listener binds each.
         return HostedGroup(
@@ -75,6 +81,7 @@ class FakeDirectWifi(
     ): JoinedGroup {
         log.note("join")
         joinIpv4 += ipv4
+        builderChecks(credentials)
         if (joinDelayMs > 0) delay(joinDelayMs)
         if (joinFailures > 0) {
             if (joinFailures != Int.MAX_VALUE) joinFailures -= 1
@@ -91,6 +98,15 @@ class FakeDirectWifi(
     override suspend fun sweep() {
         log.note("sweep")
         swept += Unit
+    }
+
+    /**
+     * What `WifiP2pConfig.Builder` refuses before the framework sees a group, with the platform's own exception: a name
+     * outside `setNetworkName`'s pattern (AOSP, verbatim here rather than `GroupCredentials`' copy, so the fake cannot
+     * agree with the code it tests by construction).
+     */
+    private fun builderChecks(credentials: GroupCredentials) {
+        require(credentials.ssid.matches(Regex("^DIRECT-[a-zA-Z0-9]{2}.*"))) { "network name must starts with the prefix DIRECT-xy." }
     }
 
     companion object {
@@ -223,6 +239,9 @@ class FakeTransferSignals(
 
     /** Signals matching this are lost on the air (never delivered). */
     var drop: (TransferPayload) -> Boolean = { false }
+
+    /** What the peer receives in place of each signal sent: a sender's own build writing its fields differently. */
+    var rewrite: (TransferPayload) -> TransferPayload = { it }
     val sent = Collections.synchronizedList(mutableListOf<TransferPayload>())
 
     override suspend fun sendTransferSignal(
@@ -235,7 +254,8 @@ class FakeTransferSignals(
         if (drop(payload)) return true
         val target = peer ?: return true
         val sentAt = clock()
-        scope.launch { target.onSignal(log.name, payload, sentAt) }
+        val delivered = rewrite(payload)
+        scope.launch { target.onSignal(log.name, delivered, sentAt) }
         return true
     }
 }
