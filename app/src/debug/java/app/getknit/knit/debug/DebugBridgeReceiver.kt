@@ -1977,7 +1977,8 @@ class DebugBridgeReceiver :
     /**
      * What the refresher knows about [url]'s host (ADR 2026-10.3sk7): the issuer origin, whether a key is held, the last
      * answer, the account's `endsAt` and the next ask — never the key or the ticket. `nextAskAt` is null for a parked
-     * (`unknown-key`) key; it is when the refresher would ask with the plane running and a route up.
+     * (`unknown-key`) key, and for a free one unless an upload waits there with no ticket to present; it is when the
+     * refresher would ask with the plane running and a route up.
      */
     private suspend fun ticketKeyJson(
         tickets: SpoolTickets,
@@ -1986,7 +1987,14 @@ class DebugBridgeReceiver :
         val host = SpoolUrl.hostname(url) ?: return JSONObject().put("held", false)
         val key = ticketKeys.keys.first()[host] ?: return JSONObject().put("held", false)
         val state = ticketKeys.keyStates.first()[host] ?: KeyState.FRESH
-        val next = TicketRefreshPolicy.dueAt(state, tickets.presentable(url)?.claims?.exp)
+        val presentable = tickets.presentable(url)
+        // A free key never asks on the margin, only while an upload waits (C-7.6-27 amended): the refresher's own rule.
+        val next =
+            if (key.free) {
+                TicketRefreshPolicy.freeDueAt(state, mesh.freeTicketWaiting(host), presentable != null)
+            } else {
+                TicketRefreshPolicy.dueAt(state, presentable?.claims?.exp)
+            }
         return JSONObject()
             .put("held", true)
             .put("free", key.free)

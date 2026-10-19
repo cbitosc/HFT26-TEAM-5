@@ -125,7 +125,8 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   bench issuer behind `adb reverse tcp:3000 tcp:3000` is `http://127.0.0.1:3000`. Each spool's `ticketKey` in the
   dump shows `held`, the `issuer` origin, the last `answer` (`ok`/`unknown-key`/`ended`, null before one), `endsAt`
   (epoch ms), `failures` (asks in a row with no verdict) and `nextAskAt` / `nextAskInMs` (null when parked by
-  `unknown-key`) — never the key or the ticket. Logcat under `ScopeSync`: `<host>: ticket fetched from <issuer>
+  `unknown-key`, and for a `free` key unless an upload waits there with no ticket to present — a free key never asks
+  on the 6 h margin) — never the key or the ticket. Logcat under `ScopeSync`: `<host>: ticket fetched from <issuer>
   (exp …)` or `<host>: ticket ask: unknown-key|ended (endsAt …)|no verdict (<reason>)|unavailable (retry after …)`.
   **Free tickets** (`docs/VOICE_CALLS.md` C-7.6-32 to C-7.6-38): `--es url <spoolUrl> --es freeIssuer
   <https://host[:port]|clear>` sets the **free issuer** for that relay's host (only the seeded `lax.spool.getknit.app`

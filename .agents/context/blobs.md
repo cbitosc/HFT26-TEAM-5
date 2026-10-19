@@ -75,7 +75,7 @@ Adjacent routing that stays where its owner is, because another subsystem owns i
   `budgetOf`, `noteAsker`, `pullNewcomers`, `Want.budget` / `until` / `freshLinks`, `PullThroughGate`, `wantAll`'s
   `until`, the `sentAt` / `dm` of `AttachmentFetchRow`, `deliveredFetch`'s deadline, `CarriedAttachment.sentAt`,
   `ForwardStore.attachmentsNeedingFetch(now)`, `ParkedAsk.ask`, `BlobEvent.PullWithheld` / `EchoDeclined`, `Want.dead`'s blind
-  half, `Want.cycleGap`'s long backoff (`LONG_DEAD_MS`, `MAX_LONG_BACKOFF_SHIFT`):** READ ADR 2026-10.2drc (#195).
+  half, `Want.cycleGap`'s long backoff (`LONG_DEAD_MS`, `MAX_LONG_BACKOFF_SHIFT`, `Want.longDead`):** READ ADR 2026-10.2drc (#195).
   Every `blobreq` carries how many phones deep it may still pull, the receiver counted, and the root's deadline. A want
   of our own mints `PULL_BUDGET` (3); a neighbour that lacks the blob wants it with one less, and an absent field (an
   older build, the iOS port today) is a fetch only and never refreshes a want. An ask keeps a want alive only when it
@@ -83,7 +83,8 @@ Adjacent routing that stays where its owner is, because another subsystem owns i
   in review opened another loop. The deadline is a DM's custody window from its latest row (`PullThroughGate.until`);
   past it nobody pulls or makes an echo. A pull never needed a carrier, so reach to a far end two or more hops away is
   the cost. Past two lead-less cycles a blind cycle that brought nothing is dead (amending f7gg), and a streak dead for a
-  day backs off into hours, fast-only wants excepted. Wire change: two vectors added; the iOS port owes the fields and
+  day backs off into hours, fast-only wants excepted; since the 2026-10-19 amendment so does one past its own deadline
+  once it reaches the 6 min ceiling (`Want.longDead`), since a restart forgets the day's streak but never the deadline. Wire change: two vectors added; the iOS port owes the fields and
   rules as a companion change. Lab: `StrandedAttachmentLabTest`, `PullBudgetLabTest`; unit: `BlobHolderQueryTest`, `PullThroughGateTest`,
   `WireSerializationTest`, `GoldenVectorTest`.
 - **Before touching `CarrierPullPolicy`, `ForwardStore.carriedAttachments`, what `onCarriedFrame` /

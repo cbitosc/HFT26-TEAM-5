@@ -164,3 +164,40 @@ the frame and wants the blob itself, at a full budget. A smaller one cuts off th
 The device oracle adds `blob no-pull` and `blob no-echo`, and every ask line (`blob ask`, `blob fetch`, `blob pull`)
 ends `[pull n]`, or `[pull n, until <ms>]` with a deadline. A `blob cycle … next if dead in` line past 360000 ms means
 a want dead for a day.
+
+## Amendment (2026-10-19): the deadline starts the long backoff too
+
+**What was observed.** The Pixel 9, a lab phone reinstalled more than once a day, still held the #195 card's want,
+`92134a58…`, whose deadline had passed on 2026-10-16 at 15:08. All day it cycled at the 6 min ceiling (`blob cycle
+92134a58… after 92 dead, next if dead in 360000 ms`), querying three neighbours and asking one each time. The long
+backoff waited on a day of the dead streak (`Want.deadSince`), which lives in memory only: a restart forgets it, and so
+does the sweep after half an hour with no neighbour. A phone restarted more than daily never reaches it.
+
+**The rule.** A dead streak is long dead (`Want.longDead`) once it has reached the 6 min ceiling
+(`MAX_BACKOFF_SHIFT` dead cycles) and either it is `LONG_DEAD_MS` old, as before, or the want's own deadline
+(`Want.until`, wall clock against the frame's clock, as `pullWithheldWhy` reads it) has passed. Each further dead cycle
+of a long-dead streak doubles on (`longDeadCycles`), to `MAX_LONG_BACKOFF_SHIFT`. The deadline is re-derived from the
+rows on every re-arm, so a restart cannot forget it. The ramp past a deadline is 45 s, 90 s, 3 min, 6 min, then 12, 24,
+48, 96 min and about 3.2 h (11 520 000 ms), the 3.2 h cycle from the ninth. Requiring the ceiling keeps the first four
+steps; the count is read before the cycle's own is added, so the 6 min cycle is kept too. A dead cycle that is not long
+dead clears `longDeadCycles`, so a deadline a re-arm lifted (a group row naming the hash, a newer DM's row) and later
+restored ramps from 12 min again rather than jumping back to hours. The day's branch is unchanged in practice: a
+streak a day old has opened far more than three dead cycles (the first three take 5¼ min). Unchanged as well: any lead
+ends the streak, a neighbour that links is queried at once, nothing is pulled or echoed past the deadline, and a
+fast-only want keeps the 6 min ceiling. No wire, schema or iOS change; the rule is local pacing, not convergence.
+
+**What it costs, amended.**
+
+- **Latency once a pair is a day dead** now holds from the deadline as well: a DM's picture past its custody window
+  whose holder stays linked but blind is asked at most every 3.2 h.
+- **A restart forgets the streak** is no longer true of a deadline-bound want past its first four dead cycles after the
+  restart: its gap is 12 min about 11 min after it, and 3.2 h about 3.2 h after it. A want with no deadline (a
+  group's picture) still forgets it.
+- **A blind neighbour is asked at the backed-off pace** sooner: from the fifth dead cycle past the deadline.
+- **New: a neighbour linked the whole time that comes to hold the bytes after the deadline** (a spool fetch, an iPhone
+  asked blind) is found only at the next cycle, up to about 3.2 h away. A newcomer is still queried at once.
+
+**Kept true by:** `BlobHolderQueryTest`'s past-deadline ramp, deadline-ahead ceiling, lead reset and lifted-then-restored
+deadline cases, the no-deadline day case and the past-deadline withheld-pull counts; `StrandedAttachmentLabTest`
+unchanged. A `blob cycle … next if dead in` line past 360000 ms now means a want dead for a day **or** past its
+deadline.

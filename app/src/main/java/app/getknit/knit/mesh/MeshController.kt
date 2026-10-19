@@ -124,6 +124,12 @@ interface MeshController {
     fun freeTicketAsking(): Set<String> = emptySet()
 
     /**
+     * Whether an upload of ours waits at relay [host] for want of a files ticket (C-7.6-27 amended): the only time a free
+     * key asks, so the debug bridge's `nextAskAt` for one. False without tickets.
+     */
+    fun freeTicketWaiting(host: String): Boolean = false
+
+    /**
      * Per-peer DM ratchet state, for diagnosing a session that will not recover. Debug-only observability:
      * every gate in the reset path returns silently, so from outside there is no way to tell a peer whose
      * heuristic has not fired from one we hold no prekey for — states that look identical and need opposite

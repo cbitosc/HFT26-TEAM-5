@@ -668,7 +668,7 @@ doc). **Don't start a deferred item without explicit direction.**
   `FileHeaderWire` partial marker. Querying unlinked Wi-Fi Aware peers over the message plane is deferred too.
 - **Giving up on an attachment nobody can bring** (#195, ADR 2026-10.2drc). A received attachment whose bytes never
   arrive stays wanted for as long as its row lives. Since #195 a DM's row past its frame's custody window asks nobody
-  to pull it through, and a want dead for a day is queried a few times a day, so the cost is bounded. The want itself never ends. Ending it means a verdict on the row (a column and its migration), a bubble that
+  to pull it through, and a want dead for a day, or past its deadline, is queried a few times a day, so the cost is bounded. The want itself never ends. Ending it means a verdict on the row (a column and its migration), a bubble that
   says the picture was lost, and a rule for bytes that turn up later: deferred until a user asks for it.
 - **The pull budget on iOS** (ADR 2026-10.2drc). The iOS port asks with no `pull` / `until` and echoes without bound.
   Its companion owes the two fields, the absent-is-1 and `pull = 0` rules, a hop less on its echoes, the refresh rule,

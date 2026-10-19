@@ -2316,7 +2316,7 @@ class BlobExchange(
         var emptyCycles = 0
 
         // Dead cycles in a row before this one ([dead]): each doubles the wait for the next ([cycleGap]). When the
-        // streak began, and how many dead cycles it has opened since it passed [LONG_DEAD_MS] (#195).
+        // streak began, and how many dead cycles it has opened since it went [longDead] (#195).
         var deadCycles = 0
         var deadSince: Long? = null
         var longDeadCycles = 0
@@ -2414,20 +2414,35 @@ class BlobExchange(
         /**
          * How long this cycle stands before the next opens at [t]: [CYCLE_MS], doubled for each dead cycle in a row
          * before this one while this one is dead too, at most [MAX_BACKOFF_SHIFT] times (45 s, 90 s, 3 min, then 6 min).
-         * The second cycle, which widens the pull-through, keeps its pace. A streak dead for [LONG_DEAD_MS] doubles on
-         * with each further dead cycle, to [MAX_LONG_BACKOFF_SHIFT] (12, 24, 48, 96 min, then about 3.2 h): a blob nobody
-         * has held for a day costs a query a few times a day, not ten an hour (#195). A neighbour that links is still
-         * queried at once, and any lead ends the streak. Not a fast-only want: its dead cycle is a Wi-Fi Aware link that
-         * did not come up, not a blob nobody holds, and it keeps the 6 min ceiling ADR 2026-10.js2p set.
+         * The second cycle, which widens the pull-through, keeps its pace. A [longDead] streak doubles on with each
+         * further dead cycle, to [MAX_LONG_BACKOFF_SHIFT] (12, 24, 48, 96 min, then about 3.2 h): a blob nobody has held
+         * for a day, or one whose frame's deadline has passed, costs a query a few times a day, not ten an hour (#195).
+         * A neighbour that links is still queried at once, and any lead ends the streak. Not a fast-only want: its dead
+         * cycle is a Wi-Fi Aware link that did not come up, not a blob nobody holds, and it keeps the 6 min ceiling ADR
+         * 2026-10.js2p set.
          */
         fun cycleGap(
             t: Long,
             dead: Boolean = dead(),
         ): Long {
             if (!dead) return CYCLE_MS
-            val extra = if (!fastOnly && deadSince?.let { t - it >= LONG_DEAD_MS } == true) longDeadCycles else 0
+            val extra = if (longDead(t)) longDeadCycles else 0
             return CYCLE_MS shl minOf(minOf(deadCycles, MAX_BACKOFF_SHIFT) + extra, MAX_LONG_BACKOFF_SHIFT)
         }
+
+        /**
+         * Whether this want's dead streak backs off past the 6 min ceiling at [t]: it has reached the ceiling
+         * ([MAX_BACKOFF_SHIFT] dead cycles), and it has been dead for [LONG_DEAD_MS] or its frame's deadline ([until],
+         * on the frame's wall clock, as [pullWithheldWhy] reads it) has passed. The deadline is the trigger a restart
+         * cannot forget: the streak is in memory, and a lab phone reinstalled more than daily never reached a day of it,
+         * so a card past its window cycled at the ceiling for days (device log of 2026-10-19, ADR 2026-10.2drc's
+         * amendment). Requiring the ceiling keeps the ramp: 45 s, 90 s, 3 min, 6 min, then 12 min onwards. Never a
+         * fast-only want ([cycleGap]).
+         */
+        fun longDead(t: Long): Boolean =
+            !fastOnly &&
+                deadCycles >= MAX_BACKOFF_SHIFT &&
+                (deadSince?.let { t - it >= LONG_DEAD_MS } == true || until?.let { t >= it } == true)
 
         /** A lead, a lifted fast-only hold or a cycle that was not dead: the backoff starts over. */
         fun endDeadStreak() {
@@ -2463,9 +2478,11 @@ class BlobExchange(
         ) {
             if (natural) {
                 if (dead()) {
-                    // The streak's start is the first dead cycle's; past a day of it, each one more doubles on (#195).
+                    // The streak's start is the first dead cycle's; once it is long dead, each one more doubles on (#195).
+                    // Read before the count moves, so the 6 min cycle is kept. A deadline a re-arm lifted (a group row, a
+                    // newer DM's) forgets the long count, so one restored later ramps from 12 min again.
                     if (deadCycles == 0) deadSince = cycleAt
-                    if (deadSince?.let { t - it >= LONG_DEAD_MS } == true) longDeadCycles++
+                    if (longDead(t)) longDeadCycles++ else longDeadCycles = 0
                     deadCycles++
                 } else {
                     endDeadStreak()
@@ -2728,8 +2745,9 @@ class BlobExchange(
         private const val MAX_BACKOFF_SHIFT = 3
 
         // A dead streak this old doubles on past MAX_BACKOFF_SHIFT, to this many doublings at most: about 3.2 h (#195).
-        // A DM's frame is carried a day (ForwardRepository.DEFAULT_TTL_MS); past that a blob nobody in reach held all
-        // day is one nobody is bringing.
+        // So does one past its frame's deadline (Want.until, Want.longDead), the trigger a restart cannot forget; this
+        // one is for a want with no deadline (a group's picture), where a blob nobody in reach held all day is one nobody
+        // is bringing.
         const val LONG_DEAD_MS = 24 * 60 * 60_000L
         const val MAX_LONG_BACKOFF_SHIFT = 8
 

@@ -1728,9 +1728,10 @@ class BlobHolderQueryTest {
             }
 
             assertEquals("nobody was asked to pull it", 0, pullsBy("a", hash, b, c))
-            assertEquals("each dead cycle said so once", 7, a.events.count { it == BlobExchange.BlobEvent.PullWithheld })
+            // Cycles at 0, 1, 3, 6, 12 and 24 min: past its deadline, the fifth dead cycle backs off past 6 min.
+            assertEquals("each dead cycle said so once", 6, a.events.count { it == BlobExchange.BlobEvent.PullWithheld })
             // The same backoff as a cycle that pulled, and no rechecks: nobody was pulled.
-            assertEquals("a query a cycle", 7, b.queriesFrom("a").size)
+            assertEquals("a query a cycle", 6, b.queriesFrom("a").size)
 
             val e = Node("e", backgroundScope)
             e.store.seed(bytes)
@@ -2082,14 +2083,15 @@ class BlobHolderQueryTest {
             val bytes = picture()
             val hash = sha256Hex(bytes) // nobody holds it, for good
 
+            // No deadline (a group's picture): only a day of the dead streak backs it off past 6 min.
             val opened = mutableListOf(0L)
-            a.exchange.wantAll(listOf(hash to null), until = mapOf(hash to 0L))
+            a.exchange.wantAll(listOf(hash to null))
             for (minute in 1L..2_010L) { // the 60 s tick, for a day and a half
                 listOf(a, b).forEach { it.now = minute * 60_000L } // b's answer budget refills on its own clock
-                val before = b.queriesFrom("a").size
-                a.exchange.wantAll(listOf(hash to null), until = mapOf(hash to 0L))
+                val before = pullsBy("a", hash, b) // a cycle pulls b once; its first two also recheck it
+                a.exchange.wantAll(listOf(hash to null))
                 a.exchange.reask()
-                if (b.queriesFrom("a").size > before) opened += minute
+                if (pullsBy("a", hash, b) > before) opened += minute
             }
             val gaps = opened.zipWithNext { x, y -> y - x }
             assertEquals("45 s, 90 s, 3 min, then 6 min", listOf(1L, 2L, 3L), gaps.take(3))
@@ -2112,6 +2114,117 @@ class BlobHolderQueryTest {
             val before = b.queriesFrom("a").size
             a.exchange.reask()
             assertEquals("the next cycle a minute on, not hours", before + 1, b.queriesFrom("a").size)
+        }
+
+    /**
+     * Ticks [a] and [b] each minute from [from] through [to], re-arming [hash] with the deadline [until] gives that minute
+     * (null: none), and returns the minutes a cycle opened in: those [heard] grew in. b, linked throughout and lacking the
+     * blob, is queried once a cycle past its deadline; inside it, it is asked to pull once a cycle, and the first two
+     * cycles' rechecks query it again ([BlobExchange.PULL_RECHECK_DEAD_CYCLES]), so those count its pulls instead.
+     */
+    private suspend fun cycleMinutes(
+        a: Node,
+        b: Node,
+        hash: String,
+        from: Long,
+        to: Long,
+        heard: () -> Int = { b.queriesFrom("a").size },
+        until: (Long) -> Long?,
+    ): List<Long> {
+        val opened = mutableListOf<Long>()
+        for (minute in from..to) {
+            at(minute * 60_000L, a, b)
+            val before = heard()
+            a.exchange.wantAll(listOf(hash to null), until = until(minute)?.let { mapOf(hash to it) } ?: emptyMap())
+            a.exchange.reask()
+            if (heard() > before) opened += minute
+        }
+        return opened
+    }
+
+    @Test
+    fun aWantPastItsDeadlineBacksOffIntoHoursFromItsFifthDeadCycleWithNoDayOfStreak() =
+        runTest(UnconfinedTestDispatcher()) {
+            val a = Node("a", backgroundScope)
+            val b = Node("b", backgroundScope)
+            a.transport.connect(b.transport)
+            val hash = sha256Hex(picture()) // nobody holds it, and its DM's custody window is over
+
+            // A restart forgets the streak: the deadline is what backs it off (device log of 2026-10-19, ADR 2026-10.2drc).
+            a.exchange.wantAll(listOf(hash to null), until = mapOf(hash to 0L))
+            val opened = listOf(0L) + cycleMinutes(a, b, hash, 1L, 600L) { 0L }
+            assertEquals(
+                "45 s, 90 s, 3 min, 6 min, then 12, 24, 48, 96 min and about 3.2 h",
+                listOf(0L, 1L, 3L, 6L, 12L, 24L, 48L, 96L, 192L, 384L, 576L),
+                opened,
+            )
+            assertEquals("nobody was asked to pull it", 0, pullsBy("a", hash, b))
+        }
+
+    @Test
+    fun aWantWhoseDeadlineIsAheadKeepsTheSixMinuteCeiling() =
+        runTest(UnconfinedTestDispatcher()) {
+            val a = Node("a", backgroundScope)
+            val b = Node("b", backgroundScope)
+            a.transport.connect(b.transport)
+            val hash = sha256Hex(picture()) // nobody holds it, inside its DM's custody window
+            val ahead = 7L * 24 * 60 * 60_000L
+
+            a.exchange.wantAll(listOf(hash to null), until = mapOf(hash to ahead))
+            val opened = listOf(0L) + cycleMinutes(a, b, hash, 1L, 120L, heard = { pullsBy("a", hash, b) }) { ahead }
+            val gaps = opened.zipWithNext { x, y -> y - x }
+            assertEquals("45 s, 90 s, 3 min", listOf(1L, 2L, 3L), gaps.take(3))
+            assertTrue("then 6 min, no further: $gaps", gaps.drop(3).isNotEmpty() && gaps.drop(3).all { it == 6L })
+        }
+
+    @Test
+    fun aLeadEndsADeadlinesLongBackoffAndTheRampStartsOver() =
+        runTest(UnconfinedTestDispatcher()) {
+            val a = Node("a", backgroundScope)
+            val b = Node("b", backgroundScope)
+            a.transport.connect(b.transport)
+            val hash = sha256Hex(picture())
+
+            a.exchange.wantAll(listOf(hash to null), until = mapOf(hash to 0L))
+            val opened = listOf(0L) + cycleMinutes(a, b, hash, 1L, 200L) { 0L }
+            assertEquals("deep in the long backoff", 192L, opened.last())
+
+            // A neighbour fetching it is a lead: the streak is over, and the next cycle keeps the plain pace.
+            val e = Node("e", backgroundScope)
+            e.transport.arriving += hash
+            at(201 * 60_000L, a, b, e)
+            a.transport.connect(e.transport)
+            a.exchange.linked(listOf("e"))
+            a.exchange.reask()
+            assertEquals("a newcomer is queried at once", 1, e.queriesFrom("a").size)
+            e.transport.arriving -= hash
+            // e goes as it came: the ramp starts over from 45 s, and backs off past 6 min only at its fifth dead cycle.
+            a.transport.disconnect(e.transport)
+            a.exchange.unlinked(listOf("e"))
+            assertEquals(
+                "a minute on, then 45 s, 90 s, 3 min, 6 min and 12 min",
+                listOf(202L, 203L, 205L, 208L, 214L, 226L),
+                cycleMinutes(a, b, hash, 202L, 240L) { 0L },
+            )
+        }
+
+    @Test
+    fun aDeadlineLiftedMidStreakDropsBackToSixMinutesAndRestoredRampsAgain() =
+        runTest(UnconfinedTestDispatcher()) {
+            val a = Node("a", backgroundScope)
+            val b = Node("b", backgroundScope)
+            a.transport.connect(b.transport)
+            val hash = sha256Hex(picture())
+
+            // Past the deadline to minute 24, none from 25 (a group row names it too), the deadline back from 45. Lifted,
+            // the cycle opened at 24 pulls b at 25 and stands 6 min from that pull ([cycleDue]), no longer 12 min.
+            a.exchange.wantAll(listOf(hash to null), until = mapOf(hash to 0L))
+            val opened = listOf(0L) + cycleMinutes(a, b, hash, 1L, 90L) { minute -> 0L.takeIf { minute !in 25L..44L } }
+            assertEquals(
+                "back to 6 min while lifted, then 12 and 24 again, not 48",
+                listOf(0L, 1L, 3L, 6L, 12L, 24L, 31L, 37L, 43L, 49L, 61L, 85L),
+                opened,
+            )
         }
 
     @Test

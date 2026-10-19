@@ -266,8 +266,8 @@ alive, or their root once it stops. Every ask also carries a deadline: for a DM'
 pull never needed a carrier, so the cost is a far end two or more hops away, reached again once the two ends link
 directly. An older build's ask, and an iPhone's today, carry neither field: here they only ever make a fetch, and never
 keep one alive. The iPhone itself still echoes without bound until its port carries the fields. Past two
-cycles without a lead, a cycle that asked an iPhone blind and brought nothing backs off too. A want dead for a day backs
-off from 6 min into hours, unless it is fast-only.
+cycles without a lead, a cycle that asked an iPhone blind and brought nothing backs off too. A want dead for a day, or
+past its own deadline from its fifth dead cycle, backs off from 6 min into hours, unless it is fast-only.
 
 ## How fast a link is fed
 

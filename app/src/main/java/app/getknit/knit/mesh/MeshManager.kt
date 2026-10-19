@@ -1029,6 +1029,8 @@ class MeshManager(
 
     override fun freeTicketAsking(): Set<String> = ticketRefresher?.asking?.value.orEmpty()
 
+    override fun freeTicketWaiting(host: String): Boolean = ticketRefresher?.isWaiting(host) == true
+
     /**
      * Demo-screenshot only: pin a fixed set of spool statuses, so the relay indicators (the chat header's
      * globe, the relay settings rows, the Diagnostics section) render against a plane that never opens a
