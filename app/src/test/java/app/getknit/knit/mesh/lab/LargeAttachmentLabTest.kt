@@ -1,6 +1,7 @@
 package app.getknit.knit.mesh.lab
 
 import app.getknit.knit.data.message.Conversations
+import app.getknit.knit.data.message.MessageEntity
 import app.getknit.knit.data.settings.BluetoothDownloadLimit
 import app.getknit.knit.mesh.BulkRoute
 import app.getknit.knit.mesh.protocol.VideoInfo
@@ -16,6 +17,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.random.Random
 
 /**
@@ -207,6 +209,108 @@ class LargeAttachmentLabTest {
             carol.reoffer()
             assertTrue("Carol never tapped: ${carol.asksFor(hash)}", carol.asksFor(hash).none { !it.fastOnly })
             assertEquals("Carol took no copy", 0, alice.filesTo(carol, hash) + bob.filesTo(carol, hash))
+        }
+
+    /**
+     * Two acquainted nodes on one Bluetooth link with Alice's large room video delivered to Bob and held to Wi-Fi Aware,
+     * his row read back untapped: the setup of the two re-arm races below, which move that row inside a re-arm.
+     */
+    private suspend fun heldRoomVideo(
+        alice: LabNode,
+        bob: LabNode,
+        seed: Int,
+    ): Triple<String, String, MessageEntity> {
+        lab.link(alice, bob)
+        lab.awaitAcquainted(alice, bob)
+        val (id, hash) = largeRoomVideo(alice, seed)
+        lab.await(1) { if (bob.row(id) != null) 1 else 0 }
+        lab.await(1) { if (bob.metrics.files().blobFastOnlyHeld > 0) 1 else 0 }
+        val row = checkNotNull(bob.row(id))
+        assertEquals("the post declares its size", LARGE_BYTES.toLong(), row.attachmentSize)
+        assertEquals("untapped", false, row.attachmentFetchApproved)
+        return Triple(id, hash, row)
+    }
+
+    /**
+     * Bob's re-arm — the one that runs the hook which sets [fired], if any — ending in no plain `blobreq` and no `blobhave`
+     * for [hash] over Bluetooth, no copy, and one more step held fast-only. Then the tap, and the video crosses once.
+     */
+    private suspend fun reArmHoldsThenTheTapFetchesOnce(
+        alice: LabNode,
+        bob: LabNode,
+        hash: String,
+        fired: AtomicBoolean?,
+    ) {
+        val heldBefore = bob.metrics.files().blobFastOnlyHeld
+        bob.reoffer()
+        if (fired != null) assertTrue("the hook ran inside a re-arm", fired.get())
+        lab.settle() // lab-lint: allow sleep-as-sync — a pause before checking nothing went over Bluetooth
+        assertTrue("no plain ask over Bluetooth before the tap: ${bob.asksFor(hash)}", bob.asksFor(hash).none { !it.fastOnly })
+        assertTrue("no holder query before the tap: ${bob.transport.blobQueries}", bob.transport.blobQueries.none { hash in it.hashes })
+        assertEquals("no copy before the tap", 0, alice.filesTo(bob, hash))
+        lab.await(1) { if (bob.metrics.files().blobFastOnlyHeld > heldBefore) 1 else 0 }
+
+        bob.manager.downloadAttachment(hash)
+        lab.assertConverged(listOf(alice, bob), atLeast = 1) { Conversations.NEARBY }
+        assertTrue("the tap's ask is plain: ${bob.asksFor(hash)}", bob.asksFor(hash).run { isNotEmpty() && none { it.fastOnly } })
+        assertEquals("one copy", 1, alice.filesTo(bob, hash))
+    }
+
+    /**
+     * A room post's row written in the middle of the database re-arm (#141's finding 6). Custody's read of the carried
+     * frames loads a room post's declared size only while no row names its hash (ADR 2026-10.hmfe), so a row the re-arm's
+     * row read missed and custody's read then found left the post judged by neither: wanted plain, the hold lifted and
+     * the video asked for over Bluetooth before the tap. A row landing between the reads is judged now: custody is read
+     * first, and a row-covered post with no size is held until the next re-arm (ADR 2026-10.js2p). This scenario passes
+     * on either half alone; the swept-row scenario below pins the second.
+     */
+    @Test
+    fun aRoomPostRowWrittenBetweenTheReArmsReadsKeepsItsHold() =
+        runBlocking {
+            val alice = lab.node("alice").apply { setDisplayName("Alice") }
+            val bob = lab.node("bob").apply { setDisplayName("Bob") }
+            val (id, hash, row) = heldRoomVideo(alice, bob, seed = 2009)
+
+            bob.db.messageDao().deleteById(id)
+            val fired = AtomicBoolean(false)
+            bob.manager.betweenRewantReads = {
+                bob.manager.betweenRewantReads = null
+                bob.db.messageDao().insertIfAbsent(row) // the delivery's row, landing between the reads
+                fired.set(true)
+            }
+            reArmHoldsThenTheTapFetchesOnce(alice, bob, hash, fired)
+        }
+
+    /**
+     * The mirror: the row goes between the reads (a room cap's sweep, while custody keeps the frame). Custody read the
+     * frame row-covered, so it loaded no size, and the row read then found no row: the post is held fast-only until the
+     * next re-arm loads its size, never wanted plain on a guess (ADR 2026-10.js2p).
+     */
+    @Test
+    fun aRoomPostRowSweptBetweenTheReArmsReadsKeepsItsHold() =
+        runBlocking {
+            val alice = lab.node("alice").apply { setDisplayName("Alice") }
+            val bob = lab.node("bob").apply { setDisplayName("Bob") }
+            val (id, hash, row) = heldRoomVideo(alice, bob, seed = 2010)
+
+            val fired = AtomicBoolean(false)
+            bob.manager.betweenRewantReads = {
+                bob.manager.betweenRewantReads = null
+                bob.db.messageDao().deleteById(id)
+                fired.set(true)
+            }
+            val heldBefore = bob.metrics.files().blobFastOnlyHeld
+            bob.reoffer()
+            assertTrue("the hook ran inside a re-arm", fired.get())
+            lab.settle() // lab-lint: allow sleep-as-sync — a pause before checking nothing went over Bluetooth
+            assertTrue("no plain ask over Bluetooth: ${bob.asksFor(hash)}", bob.asksFor(hash).none { !it.fastOnly })
+            assertTrue("no holder query: ${bob.transport.blobQueries}", bob.transport.blobQueries.none { hash in it.hashes })
+            assertEquals("no copy", 0, alice.filesTo(bob, hash))
+            lab.await(1) { if (bob.metrics.files().blobFastOnlyHeld > heldBefore) 1 else 0 }
+
+            // The row comes back (as a re-served post would bring it), and the next re-arm judges it by the row again.
+            bob.db.messageDao().insertIfAbsent(row)
+            reArmHoldsThenTheTapFetchesOnce(alice, bob, hash, fired = null)
         }
 
     /** Wi-Fi Aware linked: the large room video is fetched without a tap, asking fast-only, one copy. */

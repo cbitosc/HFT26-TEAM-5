@@ -142,7 +142,10 @@ Adjacent routing that stays where its owner is, because another subsystem owns i
   clear since ADR 2026-10.hmfe (`ChatContent.attachmentSize`, the sealed path's `declaresSize` rule): it is every node's,
   so `onCarriedFrame` — which runs ahead of `deliverChat` — judges it by that size folded with the rows, and the tick
   counts a carried room post no row names (`CarriedAttachment.declaredSize`, read off its signed bytes) as ours when it
-  declares over the limit; a post declaring nothing is never held.
+  declares over the limit; a post declaring nothing is never held. The re-arm reads custody before the rows, since
+  custody's read loads that size only while no row names the hash, and holds what it cannot judge between its reads
+  (`CarriedAttachment.rowCovered`, a frame trimmed between custody's two reads) until the next re-arm (js2p's
+  2026-10-19 amendment).
   Lab: `LargeAttachmentLabTest`, `AttachmentLabTest`'s two #132 cases; unit: `BlobExchangeTest`'s fast-only cases,
   `CompositeMeshTransportTest`, `BluetoothFetchGateTest`.
 - **When touching `KeyExchange`'s cache / `profileFor` / `serveKey`, `peer_profiles` (`PeerProfileEntity`,

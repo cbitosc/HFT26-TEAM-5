@@ -206,6 +206,14 @@ class ForwardDaoTest : RoomDbTest() {
                 mapOf("room" to true, "group" to false),
                 dao.carriedAttachments(now = 0L).associate { (if (it.groupId != null) "group" else "room") to (it.signed == null) },
             )
+            // And each says a row named it, so the re-arm can tell a post it brought no size for (#141's finding 6).
+            assertTrue(dao.carriedAttachments(now = 0L).all { it.rowCovered })
+            db.messageDao().deleteById("m")
+            assertEquals(
+                "no row: the room post's bytes come back, and nothing is row-covered",
+                listOf(false to false, false to false),
+                dao.carriedAttachments(now = 0L).map { (it.signed == null) to it.rowCovered },
+            )
         }
 
     @Test

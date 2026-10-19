@@ -240,6 +240,7 @@ class ForwardRepository(
                 roster = roster,
                 declaredSize = declaredSize,
                 sentAt = it.sentAt,
+                rowCovered = it.rowCovered,
             )
         }
 

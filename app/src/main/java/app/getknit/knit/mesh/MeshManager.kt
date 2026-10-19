@@ -322,6 +322,14 @@ class MeshManager(
     @Volatile
     internal var beforeRewantApplies: (suspend () -> Unit)? = null
 
+    /**
+     * Test seam: runs inside a re-arm between custody's reads and the rows' read, under [rewantLock] — where `mesh/lab`
+     * writes or deletes a row to race the delivery and a sweep against the re-arm's read order (#141's finding 6,
+     * `LargeAttachmentLabTest`). Null in production.
+     */
+    @Volatile
+    internal var betweenRewantReads: (suspend () -> Unit)? = null
+
     // Content-addressed image fetch over the mesh, backed by the encrypted blob store.
     private val blobExchange =
         BlobExchange(
@@ -2636,11 +2644,32 @@ class MeshManager(
      * switch to Never had just fetched, ADR 2026-10.js2p's review).
      */
     private suspend fun rewantMissingBlobsLocked() {
+        val me = identity.nodeId()
+        val limit = settings.bluetoothDownloadLimitBytes.first()
+        // Custody first, the rows after (#141's finding 6): custody's read loads a room post's declared size only while no
+        // row names its hash ([ForwardDao.carriedAttachments]), and a delivery writes its row without this lock, so a row
+        // landing between a row read and a custody read after it was judged by neither and wanted plain over Bluetooth.
+        // Read in this order every row inserted before the last read is judged: by the row read, or by custody's size
+        // when it landed after custody's read. A room post's row inserted after the row read is judged by the same
+        // declared size; a sealed frame's row after it is held until the next re-arm (`unopenedForUs`). A row deleted
+        // between the reads leaves a row-covered post with no size: it is held until the next re-arm loads it.
+        // Carrier-only custody blobs backfill only while under the byte budget (the same pull-time soft cap
+        // onCarriedFrame applies), so a restart re-attempts pulls that a live-session over-budget skip left missing.
+        val (carried, frames) =
+            if (blobs.carrierOnlyBlobBytes() < CARRIER_BLOB_BUDGET_BYTES) {
+                val now = clock()
+                // Live frames only (#195): a frame past its TTL is carried by nobody, and a re-arm from it minted a root.
+                val carried = forwardStore.attachmentsNeedingFetch(now)
+                // One read of custody's per-frame rows for the judgements below: the deferral, the fast-only hold and the
+                // deadline a DM's carrier pulls it through by.
+                carried to if (carried.isNotEmpty()) carriedFrames(me, now) else emptyList()
+            } else {
+                emptyMap<String, String>() to emptyList()
+            }
+        betweenRewantReads?.invoke()
         // Own/received message attachments: always re-pull (uncapped, kept alive by their message row). Each is
         // wanted with its row's sender, so a want re-armed after a restart or the sweep asks the author first.
         // All of it goes to the exchange in one batch, so a link-up's holder queries share one frame per neighbour.
-        val me = identity.nodeId()
-        val limit = settings.bluetoothDownloadLimitBytes.first()
         val needed = messages.attachmentsNeedingFetch(me = me)
         val ownHashes = needed.mapTo(HashSet()) { it.hash }
         val wanted = needed.mapTo(mutableListOf<Pair<String, String?>>()) { it.hash to it.senderId }
@@ -2651,19 +2680,11 @@ class MeshManager(
         // And until when its neighbours may be asked to pull it through (#195, ADR 2026-10.2drc): a DM's custody window
         // from its latest row, carried on every ask so nobody echoes it past the window; none for a group's or a room's.
         val until = needed.mapNotNull { m -> PullThroughGate.until(m.rows)?.let { m.hash to it } }.toMap(HashMap())
-        // Carrier-only custody blobs backfill only while under the byte budget (the same pull-time soft cap
-        // onCarriedFrame applies), so a restart re-attempts pulls that a live-session over-budget skip left
-        // missing; skip ones already re-requested above as our own/received attachments, and ones a DM's linked
-        // recipient is fetching now ([CarrierPullPolicy], ADR 2026-10.g24x) — this tick re-reads them, so the hold
-        // ends by itself when the recipient's link goes or the window passes.
-        if (blobs.carrierOnlyBlobBytes() < CARRIER_BLOB_BUDGET_BYTES) {
-            val now = clock()
-            // Live frames only (#195): a frame past its TTL is carried by nobody, and a re-arm from it minted a root.
-            val carried = forwardStore.attachmentsNeedingFetch(now)
+        // The carried ones skip those already re-requested above as our own/received attachments, and ones a DM's
+        // linked recipient is fetching now ([CarrierPullPolicy], ADR 2026-10.g24x) — this tick re-reads them, so the
+        // hold ends by itself when the recipient's link goes or the window passes.
+        if (carried.isNotEmpty()) {
             val linked = transport.neighbors.value.mapTo(HashSet()) { it.nodeId }
-            // One read of custody's per-frame rows for the judgements below: the deferral, the fast-only hold and the
-            // deadline a DM's carrier pulls it through by.
-            val frames = if (carried.isNotEmpty()) carriedFrames(me, now) else emptyList()
             val held = heldForLinkedRecipients(carried.keys, frames, linked)
             val carriedUntil = carrierDeadlines(frames)
             carried.forEach { (hash, author) ->
@@ -2723,7 +2744,9 @@ class MeshManager(
      * covers the tick that lands between custody's write and the delivery's row, and a post whose row is never written
      * (a blocked sender) or was swept: judged by the size it declares, as its row would be. Folded as the rows are: one
      * frame we carry for somebody else, or a room post declaring nothing or under the limit, keeps the pull plain, so a
-     * stranger's frame naming a hash can lift the gate on our side and never impose it.
+     * stranger's frame naming a hash can lift the gate on our side and never impose it. A hash among [hashes] with no
+     * frame left in [frames] was trimmed between custody's two reads (#141's finding 6): nothing says what it was, so it
+     * is held until the next re-arm, which no longer names it — js2p's "never plain on a guess".
      */
     private fun unopenedForUs(
         hashes: Set<String>,
@@ -2732,21 +2755,28 @@ class MeshManager(
         limit: Long,
     ): Set<String> {
         if (hashes.isEmpty()) return emptySet()
-        return frames
-            .groupBy { it.hash }
-            .filter { (hash, named) -> hash in hashes && named.all { it.recipientId == me || it.member || roomPostWaits(it, me, limit) } }
-            .keys
+        val byHash = frames.groupBy { it.hash }
+        return hashes.filterTo(HashSet()) { hash ->
+            byHash[hash]?.all { it.recipientId == me || it.member || roomPostWaits(it, me, limit) } ?: true
+        }
     }
 
-    /** Whether [frame] is a room post whose own declared size holds its fetch to Wi-Fi Aware under [limit] (ADR 2026-10.hmfe). */
+    /**
+     * Whether [frame] is a room post whose own declared size holds its fetch to Wi-Fi Aware under [limit] (ADR 2026-10.hmfe).
+     * One a row named when custody read it ([CarriedAttachment.rowCovered]) brought no size, and its hash is here only
+     * because the rows' read after it found no row (a room cap's sweep in between, #141's finding 6): held until the next
+     * re-arm loads the size it declares.
+     */
     private fun roomPostWaits(
         frame: CarriedAttachment,
         me: String,
         limit: Long,
-    ): Boolean =
-        frame.recipientId == null &&
-            frame.groupId == null &&
-            BluetoothFetchGate.fastOnly(frame.declaredSize, limit, approved = false, own = frame.senderId == me)
+    ): Boolean {
+        if (frame.recipientId != null || frame.groupId != null) return false
+        val own = frame.senderId == me
+        if (frame.declaredSize == null && frame.rowCovered) return !own
+        return BluetoothFetchGate.fastOnly(frame.declaredSize, limit, approved = false, own = own)
+    }
 
     /** The carried attachments among [hashes] whose pull [CarrierPullPolicy] holds back now, [linked] being who is. */
     private fun heldForLinkedRecipients(

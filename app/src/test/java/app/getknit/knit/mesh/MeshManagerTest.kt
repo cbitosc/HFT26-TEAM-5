@@ -263,7 +263,14 @@ class MeshManagerTest {
         @Volatile
         var carried: List<CarriedAttachment> = emptyList()
 
-        override suspend fun attachmentsNeedingFetch(now: Long): Map<String, String> = carried.associate { it.hash to (it.senderId ?: "") }
+        /** Hashes custody's first read names and its per-frame read no longer has: a frame trimmed between the two (#141). */
+        @Volatile
+        var trimmed: Map<String, String> = emptyMap()
+
+        // The trimmed hashes go first: the re-arm steps its wants in this order, so a test whose control is the last
+        // carried hash has stepped every held one by the time its ask is seen.
+        override suspend fun attachmentsNeedingFetch(now: Long): Map<String, String> =
+            trimmed + carried.associate { it.hash to (it.senderId ?: "") }
 
         override suspend fun carriedAttachments(now: Long): List<CarriedAttachment> = carried
 
@@ -3016,6 +3023,37 @@ class MeshManagerTest {
             rig.bluetoothDownloadLimit.value = null // "Never ask": the room post is fetched as a carrier pull
             rig.await(3) { rig.blobAsks().size }
             assertEquals(author to BlobReqContent("big-clip", pull = BlobExchange.PULL_BUDGET), rig.blobAsks().last())
+            rig.manager.stop()
+        }
+
+    @Test
+    fun aCarriedHashCustodyCouldNotJudgeBetweenTheReArmsReadsIsHeldUntilTheNext() =
+        runTest(UnconfinedTestDispatcher()) {
+            // #141's finding 6: a room post a row named when custody read it brought no size, and the rows' read after it
+            // found no row (a room cap's sweep between them); a carried hash whose frame was trimmed between custody's own
+            // two reads has no frame to judge at all. Neither is wanted plain on a guess: both are held to Wi-Fi Aware
+            // until the next re-arm. The small post is the control: the rule still lifts what declares under the limit.
+            val rig = Rig(backgroundScope)
+            val author = "author-node"
+            rig.bluetoothDownloadLimit.value = 1_000_000L
+            rig.forwardStore.carried =
+                listOf(
+                    CarriedAttachment("swept-row", recipientId = null, carriedAt = 0L, senderId = author, rowCovered = true),
+                    CarriedAttachment("small-clip", recipientId = null, carriedAt = 0L, senderId = author, declaredSize = 400_000L),
+                )
+            rig.forwardStore.trimmed = mapOf("trimmed" to author)
+            rig.transport.nearby.value = setOf(Peer(author)) // a Bluetooth link only: no Wi-Fi Aware route
+            rig.stubProfileState(MutableStateFlow(0L))
+            coEvery { rig.groups.observeGroups() } returns flowOf(emptyList())
+
+            rig.manager.start()
+            rig.await(1) { rig.blobAsks().size }
+            assertEquals("only the small post is asked for", setOf("small-clip"), rig.blobAsks().mapTo(HashSet()) { it.second.hash })
+
+            rig.bluetoothDownloadLimit.value = null // "Never ask": nothing is held, so both are carrier pulls again
+            rig.await(3) { rig.blobAsks().size }
+            assertEquals(setOf("small-clip", "swept-row", "trimmed"), rig.blobAsks().mapTo(HashSet()) { it.second.hash })
+            assertTrue(rig.blobAsks().none { it.second.fastOnly != null })
             rig.manager.stop()
         }
 

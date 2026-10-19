@@ -149,13 +149,22 @@ interface ForwardDao {
      * declares (ADR 2026-10.hmfe) — brings its signed bytes; a DM's are never loaded. A room post's only while no
      * message row names its hash: the tick reads the declared size only for hashes no row covers (`unopenedForUs`),
      * and a delivered, untapped room video would otherwise reload its poster-sized frame on every re-arm. Live rows only,
-     * as [attachmentsNeedingFetch]; each with its frame's `sentAt`, the clock a DM's pull deadline keys on (#195).
+     * as [attachmentsNeedingFetch]; each with its frame's `sentAt`, the clock a DM's pull deadline keys on (#195), and
+     * whether a row named its hash (`rowCovered`, the CASE's other half).
+     *
+     * Because the CASE reads `messages`, the re-arm reads this *before* the rows (`MeshManager.rewantMissingBlobsLocked`,
+     * #141's finding 6): read after, a row written between the two reads was judged by neither and the post wanted plain.
+     * That order closes every insert before the last read; a room post inserted after it is judged by the same declared
+     * size; a sealed frame's row after it is held until the next re-arm. A row deleted between the reads leaves a
+     * `rowCovered` post with no size, which the re-arm holds until the next one loads it.
      */
     @Query(
         "SELECT attachmentHash AS hash, recipientId, receivedAt, senderId, groupId, sentAt, " +
             "CASE WHEN recipientId IS NULL AND (groupId IS NOT NULL OR NOT EXISTS " +
             "(SELECT 1 FROM messages AS m WHERE m.attachmentHash = forward_store.attachmentHash)) " +
-            "THEN signed END AS signed FROM forward_store " +
+            "THEN signed END AS signed, " +
+            "EXISTS (SELECT 1 FROM messages AS m WHERE m.attachmentHash = forward_store.attachmentHash) AS rowCovered " +
+            "FROM forward_store " +
             "WHERE attachmentHash IS NOT NULL AND expiresAt >= :now AND attachmentHash NOT IN (SELECT hash FROM blobs)",
     )
     suspend fun carriedAttachments(now: Long): List<CarriedAttachmentRow>
@@ -269,4 +278,6 @@ class CarriedAttachmentRow(
     val sentAt: Long,
     /** A group frame's or a room post's signed bytes (its roster, its declared size); null for a DM, never loaded. */
     val signed: ByteArray?,
+    /** Whether a message row named [hash] when this was read: a room post's [signed] is then not loaded (#141). */
+    val rowCovered: Boolean,
 )

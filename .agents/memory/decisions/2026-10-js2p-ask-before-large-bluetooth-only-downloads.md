@@ -115,3 +115,22 @@ fold and inheritance cases, `MeshManagerTest`'s re-arm and tap cases, the 23→2
 `ChatViewModelTest.aLargeReceivedAttachmentAwaitsTheTap…`, and `mesh/lab/LargeAttachmentLabTest` (Bluetooth-only held
 then one copy after the tap; the tap racing the tick, no withdrawal; Linked and Reachable fetched untapped; undeclared
 and Never fetched).
+
+## Amendment 2026-10-19: the re-arm reads custody before the rows
+
+**Observed** (#141's chaos sweep, finding 6; seeds 589344076–589344112). `rewantMissingBlobsLocked` read the rows, then
+custody. Custody's per-frame read (`ForwardDao.carriedAttachments`) loads a room post's signed bytes, and so its
+declared size, only while no message row names the hash (ADR 2026-10.hmfe), and `deliverChat` writes its row without
+`rewantLock`. A row written between the two reads was in neither: the rows' read missed it, custody's brought no size,
+and the post was wanted plain — the hold lifted and a `pull=3` ask went over Bluetooth before the tap (items 3 and 6).
+
+**Decided.** Custody is read first (`forwardStore.attachmentsNeedingFetch`, then `carriedFrames`), the rows after, and
+the wants are built as before, own rows first. That closes every insert before the last read; a room post inserted
+after it is judged by the same declared size; a sealed frame's row after it is held until the next re-arm. Two gaps
+the order cannot close are held rather than guessed: a room post a row covered when custody read it
+(`CarriedAttachment.rowCovered`, projected beside the CASE) whose row was gone by the rows' read — a room cap's sweep —
+and a carried hash whose frame was trimmed between custody's own two reads. While a limit is set both are fast-only
+until the next re-arm, which reads them again. No wire, schema or convergence change: a projection, and the order of
+three local reads. Guards: `LargeAttachmentLabTest`'s two between-the-reads scenarios (the hook
+`MeshManager.betweenRewantReads`), `MeshManagerTest.aCarriedHashCustodyCouldNotJudgeBetweenTheReArmsReadsIsHeldUntilTheNext`,
+`ForwardDaoTest`'s row-covered case.

@@ -99,7 +99,9 @@ interface ForwardStore {
     /**
      * Every carried frame naming an attachment whose blob we don't yet hold, one entry per frame: whom it is for and
      * when we took it into custody. What [CarrierPullPolicy] reads to hold a pull back while the recipient is linked
-     * (ADR 2026-10.g24x). The default holds nothing back, for the fakes; the Room implementation reads the rows.
+     * (ADR 2026-10.g24x). The default reads no frames, so with a Bluetooth limit set every carried hash is held
+     * fast-only (`MeshManager.unopenedForUs`): a fake that carries attachments overrides it; the Room implementation
+     * reads the rows.
      */
     suspend fun carriedAttachments(now: Long): List<CarriedAttachment> = emptyList()
 
@@ -155,4 +157,7 @@ data class CarriedAttachment(
     val declaredSize: Long? = null,
     // The frame's own `sentAt`: a DM's carrier pulls it through until a custody window past it (#195, ADR 2026-10.2drc).
     val sentAt: Long? = null,
+    // Whether a message row named the hash when custody read it, so a room post's [declaredSize] was not loaded
+    // ([ForwardDao.carriedAttachments]): the re-arm holds such a post whose row went before its rows' read (#141).
+    val rowCovered: Boolean = false,
 )

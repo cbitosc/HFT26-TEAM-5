@@ -270,6 +270,8 @@ free). Two invariants that are easy to break:
   is what moves a hop-by-hop pull since ADR 2026-09.4tx5 — gate it on `arrivingFiles()`, never remove it. The same re-read
   re-derives each want's fast-only flag (ADR 2026-10.js2p: declared over the user's Bluetooth download limit, not
   tapped — Wi-Fi Aware only), so a swept or restarted want never asks over Bluetooth on a stale flag or stays held on one.
+  It reads custody before the rows (js2p's 2026-10-19 amendment): custody's read loads a room post's declared size only
+  while no row names the hash, so read after the rows it lost a row written between them, and the post went plain.
 - **Group-root minting is damped; group-root adoption is not** (`GroupRootPolicy`, spec §3.2). Several
   members minting version 1 at once is normal and self-healing — `(version, minter)` collapses the
   lineages. Refusing to *adopt* a strictly-greater root is the failure mode: the device keeps gossiping
