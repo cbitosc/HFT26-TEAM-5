@@ -21,8 +21,8 @@ import org.robolectric.annotation.GraphicsMode
 
 /**
  * The walkie transcript on the call screen (docs/VOICE_CALLS.md C-3.11-9): the diagnostics toggle trades the walkie's
- * card for the transcript, the card offers the model's download while it is missing, and a live call keeps its toggle
- * as it was.
+ * card for the transcript, the header's CC button turns the transcript off and on, the card offers the model's download
+ * while it is missing, and a live call keeps its toggle as it was.
  */
 @RunWith(AndroidJUnit4::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
@@ -84,7 +84,7 @@ class WalkieTranscriptScreenTest {
     fun theToggleTradesTheWalkieDiagnosticsForTheTranscript() {
         render(ui(lines = listOf(TranscriptLine(0, 0, TranscriptLine.State.Text("Meet me at the north gate")))))
         compose.onNodeWithText("Walkie diagnostics").assertIsDisplayed()
-        compose.onNodeWithContentDescription("Show transcript").performClick()
+        compose.onNodeWithContentDescription("Hide walkie diagnostics").performClick()
         compose.onNodeWithText("Meet me at the north gate").assertIsDisplayed()
         compose.onNodeWithText("Walkie diagnostics").assertDoesNotExist()
         compose.onNodeWithContentDescription("Show walkie diagnostics").performClick()
@@ -92,9 +92,23 @@ class WalkieTranscriptScreenTest {
     }
 
     @Test
+    fun theCcButtonTurnsTheTranscriptOffAndBackOverTheDiagnostics() {
+        render(ui(lines = listOf(TranscriptLine(0, 0, TranscriptLine.State.Text("Meet me at the north gate")))))
+        compose.onNodeWithContentDescription("Hide walkie diagnostics").performClick()
+        compose.onNodeWithContentDescription("Hide captions").performClick()
+        compose.onNodeWithText("Meet me at the north gate").assertDoesNotExist()
+        compose.onNodeWithContentDescription("Show walkie diagnostics").performClick()
+        compose.onNodeWithText("Walkie diagnostics").assertIsDisplayed()
+        // Turning the transcript back on puts it in the card's place, so the diagnostics give way.
+        compose.onNodeWithContentDescription("Show captions").performClick()
+        compose.onNodeWithText("Meet me at the north gate").assertIsDisplayed()
+        compose.onNodeWithText("Walkie diagnostics").assertDoesNotExist()
+    }
+
+    @Test
     fun aBurstStillPlayingShowsTheWordsSoFar() {
         render(ui(lines = listOf(TranscriptLine(0, 0, TranscriptLine.State.Listening, live = "Meet me at"))))
-        compose.onNodeWithContentDescription("Show transcript").performClick()
+        compose.onNodeWithContentDescription("Hide walkie diagnostics").performClick()
         compose.onNodeWithText("Meet me at…").assertIsDisplayed()
         compose.onNodeWithText("Listening…").assertDoesNotExist()
     }
@@ -102,7 +116,7 @@ class WalkieTranscriptScreenTest {
     @Test
     fun withoutTheModelTheCardOffersItsDownload() {
         render(ui(model = SttModelState.Absent, lines = listOf(TranscriptLine(0, 0, TranscriptLine.State.NoModel))))
-        compose.onNodeWithContentDescription("Show transcript").performClick()
+        compose.onNodeWithContentDescription("Hide walkie diagnostics").performClick()
         compose.onNodeWithText("44 MB", substring = true).assertIsDisplayed()
         compose.onNodeWithText("Not transcribed", substring = true).assertIsDisplayed()
         compose.onNodeWithText("Download").performClick()
@@ -112,7 +126,7 @@ class WalkieTranscriptScreenTest {
     @Test
     fun theDownloadsOfferCanBeClosedButTheTranscriptCannot() {
         render(ui(model = SttModelState.Absent))
-        compose.onNodeWithContentDescription("Show transcript").performClick()
+        compose.onNodeWithContentDescription("Hide walkie diagnostics").performClick()
         compose.onNodeWithText("Settings › Calls", substring = true).assertIsDisplayed()
         compose.onNodeWithText("Dismiss").performClick()
         assertEquals(1, dismisses)
@@ -121,14 +135,14 @@ class WalkieTranscriptScreenTest {
     @Test
     fun aTranscriptWithItsModelHasNoClose() {
         render(ui(lines = listOf(TranscriptLine(0, 0, TranscriptLine.State.Text("Meet me at the north gate")))))
-        compose.onNodeWithContentDescription("Show transcript").performClick()
+        compose.onNodeWithContentDescription("Hide walkie diagnostics").performClick()
         compose.onNodeWithText("Dismiss").assertDoesNotExist()
     }
 
     @Test
     fun aDownloadUnderWayCanBeCancelled() {
         render(ui(model = SttModelState.Downloading(done = 17_400_000, total = 44_256_550)))
-        compose.onNodeWithContentDescription("Show transcript").performClick()
+        compose.onNodeWithContentDescription("Hide walkie diagnostics").performClick()
         compose.onNodeWithText("17 MB of 44 MB", substring = true).assertIsDisplayed()
         compose.onNodeWithText("Cancel").performClick()
         assertEquals(1, cancels)
@@ -137,7 +151,7 @@ class WalkieTranscriptScreenTest {
     @Test
     fun aFailedDownloadSaysWhyAndOffersAnotherTry() {
         render(ui(model = SttModelState.Failed("No Internet connection")))
-        compose.onNodeWithContentDescription("Show transcript").performClick()
+        compose.onNodeWithContentDescription("Hide walkie diagnostics").performClick()
         compose.onNodeWithText("No Internet connection", substring = true).assertIsDisplayed()
         compose.onNodeWithText("Try again").performClick()
         assertEquals(1, downloads)
@@ -146,7 +160,9 @@ class WalkieTranscriptScreenTest {
     @Test
     fun aLiveCallKeepsItsToggleAsItWas() {
         render(ui(lines = listOf(TranscriptLine(0, 0, TranscriptLine.State.Text("never shown")))), walkie = false)
-        compose.onNodeWithContentDescription("Show transcript").assertDoesNotExist()
+        compose.onNodeWithContentDescription("Hide call diagnostics").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Hide captions").assertDoesNotExist()
+        compose.onNodeWithContentDescription("Show captions").assertDoesNotExist()
         compose.onNodeWithText("never shown").assertDoesNotExist()
     }
 }
