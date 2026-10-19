@@ -657,7 +657,9 @@ class MeshLab {
      * each way until presence is stamped (it is stamped only on a frame the spool *pulls*, and everything
      * from the link phase is already in both custodies). Returns with every receipt landed, so a scenario
      * reads its baselines from a settled pair. Without an [air] the presence half is skipped: no board, no
-     * cover to prove.
+     * cover to prove. With one, a DM that fans out before its peer's presence reaches the sender's board goes
+     * as that board's probe into the dark air (ADR 2026-10.a4pm) and spends the window, so a scenario that
+     * later needs a DM on the air has the peer's board heard first rather than count on the probe.
      */
     internal suspend fun meetOnTheRelay(
         alice: LabNode,

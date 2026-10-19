@@ -134,6 +134,12 @@ class RoomTickPlanesLabTest {
                 assertTrue("${node.name}'s board kept the cover of a relay it left", lab.tryAwait(1) { 1 - node.internetCovered() })
             }
             val skippedBefore = alice.metrics.lora().loraSkippedInternet
+            // Reachable only over LoRa means heard there: Bob's board speaks first. Unheard, the DM could ride only
+            // as the window's probe (ADR 2026-10.a4pm), and the meeting can have spent it — its first DM fans out
+            // before Bob's spool presence reaches Alice's board whenever the relay is slow to show him, and goes as
+            // the probe into the dark air. This DM would then be held for a hearing nothing here provokes.
+            assertTrue(bob.sendRoom("on the board"))
+            assertTrue("alice's board never heard bob", lab.tryAwait(1) { alice.hearsOnTheBoard(bob) })
 
             assertTrue(alice.sendDm(bob, "over the board now"))
             val dm = alice.ownMessageId(alice.dmWith(bob), "over the board now")
@@ -147,6 +153,10 @@ class RoomTickPlanesLabTest {
 
     /** How many peers [this] node's board counts as covered by the Internet: 1 or 0 here, a `tryAwait` count. */
     private fun LabNode.internetCovered(): Int = checkNotNull(lora) { "$name has no board" }.status.value.internetCovered
+
+    /** 1 once [this] node's board has heard [peer] within the linger — the reach its DM gate reads — else 0. */
+    private fun LabNode.hearsOnTheBoard(peer: LabNode): Int =
+        if (checkNotNull(lora) { "$name has no board" }.reachable.value.any { it.nodeId == peer.nodeId }) 1 else 0
 
     @Test
     fun aRoomTickWithNoRideIsPushedStraightToTheSpoolWhenItsAuthorIsThere() =
