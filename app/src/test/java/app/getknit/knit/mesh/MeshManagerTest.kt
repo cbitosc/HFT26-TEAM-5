@@ -2862,6 +2862,12 @@ class MeshManagerTest {
                 ?.let { env -> WireCodec.decodePayload<BlobReqContent>(env.payload)?.let { to?.nodeId to it } }
         }
 
+    /**
+     * The distinct hashes asked for. A start-up with a link already up re-arms twice — the limit collector's first value
+     * and the newcomer's pass, whose `linked` + `reask` may ask the author again — so a wait counts hashes, never asks.
+     */
+    private fun Rig.askedHashes(): Set<String> = blobAsks().mapTo(HashSet()) { it.second.hash }
+
     @Test
     fun theDatabaseReArmHoldsAnAttachmentOverTheLimitToWifiAwareAndChoosingNeverFetchesItAtOnce() =
         runTest(UnconfinedTestDispatcher()) {
@@ -2888,7 +2894,7 @@ class MeshManagerTest {
             coEvery { rig.groups.observeGroups() } returns flowOf(emptyList()) // the startup storage sweep's read
 
             rig.manager.start()
-            rig.await(3) { rig.blobAsks().size }
+            rig.await(3) { rig.askedHashes().size }
             assertEquals(
                 "the tapped, the small and the shared one asked plain; the large one not at all",
                 setOf("tapped", "small", "shared"),
@@ -2897,8 +2903,11 @@ class MeshManagerTest {
             assertTrue(rig.blobAsks().none { it.second.fastOnly != null })
 
             rig.bluetoothDownloadLimit.value = null // the user chose "Never ask"
-            rig.await(4) { rig.blobAsks().size }
-            assertEquals(author to BlobReqContent("big", pull = BlobExchange.PULL_BUDGET), rig.blobAsks().last())
+            rig.await(4) { rig.askedHashes().size }
+            assertEquals(
+                author to BlobReqContent("big", pull = BlobExchange.PULL_BUDGET),
+                rig.blobAsks().first { it.second.hash == "big" },
+            )
             rig.manager.stop()
         }
 
@@ -2927,7 +2936,7 @@ class MeshManagerTest {
             coEvery { rig.groups.observeGroups() } returns flowOf(emptyList())
 
             rig.manager.start()
-            rig.await(2) { rig.blobAsks().size }
+            rig.await(2) { rig.askedHashes().size }
             val asks = rig.blobAsks().associate { it.second.hash to it.second }
             assertEquals(sentAt + ForwardRepository.DEFAULT_TTL_MS, asks.getValue("dm").until)
             assertEquals(null, asks.getValue("group").until)
@@ -2953,7 +2962,7 @@ class MeshManagerTest {
             coEvery { rig.groups.observeGroups() } returns flowOf(emptyList())
 
             rig.manager.start()
-            rig.await(2) { rig.blobAsks().size }
+            rig.await(2) { rig.askedHashes().size }
             val asks = rig.blobAsks().associate { it.second.hash to it.second }
             assertEquals(sentAt + ForwardRepository.DEFAULT_TTL_MS, asks.getValue("dm").until)
             assertEquals(null, asks.getValue("group").until)
@@ -2980,7 +2989,7 @@ class MeshManagerTest {
             coEvery { rig.groups.observeGroups() } returns flowOf(emptyList())
 
             rig.manager.start()
-            rig.await(1) { rig.blobAsks().size }
+            rig.await(1) { rig.askedHashes().size }
             assertEquals(
                 "the carrier pull stays plain; the unopened DM to us is held",
                 setOf("carried"),
@@ -3012,7 +3021,7 @@ class MeshManagerTest {
             coEvery { rig.groups.observeGroups() } returns flowOf(emptyList())
 
             rig.manager.start()
-            rig.await(2) { rig.blobAsks().size }
+            rig.await(2) { rig.askedHashes().size }
             assertEquals(
                 "the large room post is held to Wi-Fi Aware; the small and the lifted one asked plain",
                 setOf("small-clip", "lifted"),
@@ -3021,8 +3030,11 @@ class MeshManagerTest {
             assertTrue(rig.blobAsks().none { it.second.fastOnly != null })
 
             rig.bluetoothDownloadLimit.value = null // "Never ask": the room post is fetched as a carrier pull
-            rig.await(3) { rig.blobAsks().size }
-            assertEquals(author to BlobReqContent("big-clip", pull = BlobExchange.PULL_BUDGET), rig.blobAsks().last())
+            rig.await(3) { rig.askedHashes().size }
+            assertEquals(
+                author to BlobReqContent("big-clip", pull = BlobExchange.PULL_BUDGET),
+                rig.blobAsks().first { it.second.hash == "big-clip" },
+            )
             rig.manager.stop()
         }
 
@@ -3047,11 +3059,11 @@ class MeshManagerTest {
             coEvery { rig.groups.observeGroups() } returns flowOf(emptyList())
 
             rig.manager.start()
-            rig.await(1) { rig.blobAsks().size }
+            rig.await(1) { rig.askedHashes().size }
             assertEquals("only the small post is asked for", setOf("small-clip"), rig.blobAsks().mapTo(HashSet()) { it.second.hash })
 
             rig.bluetoothDownloadLimit.value = null // "Never ask": nothing is held, so both are carrier pulls again
-            rig.await(3) { rig.blobAsks().size }
+            rig.await(3) { rig.askedHashes().size }
             assertEquals(setOf("small-clip", "swept-row", "trimmed"), rig.blobAsks().mapTo(HashSet()) { it.second.hash })
             assertTrue(rig.blobAsks().none { it.second.fastOnly != null })
             rig.manager.stop()
