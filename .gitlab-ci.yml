@@ -88,13 +88,14 @@ workflow:
     # CI memory profile for the 1 vCPU / 2 GB runner — relies on the host's 2 GB swap being
     # active. Written to $GRADLE_USER_HOME so it overrides the project gradle.properties.
     # NO metaspace cap: a 384m cap starved Metaspace and crashed the daemon (job 462). Heap is
-    # 1280m — big enough for Kotlin/Compose yet small enough to stay resident in 1.9 GiB of RAM
-    # so GC pages don't thrash; Metaspace/native/launcher-JVM spikes spill to swap instead of
-    # tripping the OOM killer. SerialGC because there is only one core to GC on. Self-contained.
+    # 1664m: a clean :app:compileDebugKotlin peaks at ~1.26 GB live (GC log, 2026-10-18), so the old
+    # 1280m OOMed both compiles in pipeline 1121 once the call code landed. Metaspace/native/launcher-JVM
+    # spikes spill to swap instead of tripping the OOM killer. SerialGC because there is only one core
+    # to GC on. Self-contained.
     - |
       mkdir -p "$GRADLE_USER_HOME"
       cat > "$GRADLE_USER_HOME/gradle.properties" <<'EOF'
-      org.gradle.jvmargs=-Xmx1280m -XX:+UseSerialGC -Dfile.encoding=UTF-8
+      org.gradle.jvmargs=-Xmx1664m -XX:+UseSerialGC -Dfile.encoding=UTF-8
       org.gradle.workers.max=1
       kotlin.compiler.execution.strategy=in-process
       org.gradle.daemon=false
