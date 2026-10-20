@@ -7,6 +7,7 @@ import app.getknit.knit.data.ByteArrayMediaSource
 import java.io.ByteArrayOutputStream
 import kotlin.math.abs
 import kotlin.math.sqrt
+import kotlin.random.Random
 
 /** What a held video's own bytes say about it: what the bubble and the player trust once the bytes are local. */
 data class VideoMeta(
@@ -25,7 +26,8 @@ data class VideoMeta(
  * [meta] is the received side's "derive, don't carry" read (`voiceDurationMs`'s rule): the sender's declared duration
  * and dimensions label the bubble before the bytes land, and these replace them after. [poster] is the sender's still,
  * carried inline in the message (ADR 2026-10.hmfe), the best-looking of a few frames across the clip ([posterScore]).
- * [sample] is what screening classifies.
+ * [sample] is what screening classifies: the exact frame at each of its instants ([screenTimes]), where the poster takes
+ * the keyframe nearest each of its own.
  */
 object VideoFrames {
     private const val TAG = "VideoFrames"
@@ -176,21 +178,47 @@ object VideoFrames {
     private fun Bitmap.argb(): IntArray = IntArray(width * height).also { getPixels(it, 0, width, 0, 0, width, height) }
 
     /**
-     * [count] frames spread evenly across [bytes], each at most [longSide] on its long side: what the NSFW screen
-     * classifies. Fewer when a frame does not decode; empty when nothing does (the caller then fails open, as the
-     * image screen does on bytes it cannot decode).
+     * [count] frames across [bytes], one at a random instant in each of [count] equal slices ([screenTimes]), each at
+     * most [longSide] on its long side: what the NSFW screen classifies. Fewer when a frame does not decode; empty when
+     * nothing does (the caller then fails open, as the image screen does on bytes it cannot decode).
+     *
+     * Each is the frame at its instant (`OPTION_CLOSEST`), decoded on from the keyframe before it, never that keyframe
+     * itself: a received clip's keyframes are its sender's to space, and one with a single keyframe would otherwise be
+     * screened as its first frame, [count] times (`VideoScreeningInstrumentedTest`). The decode from a keyframe is
+     * what the screen pays for that, which is why it screens no clip longer than Knit sends.
      */
     fun sample(
         bytes: ByteArray,
         count: Int,
         longSide: Int,
+        random: Random = Random.Default,
     ): List<Bitmap> {
         val meta = meta(bytes) ?: return emptyList()
-        val times = sampleTimes(meta.durationMs, count)
-        return withRetriever(bytes) { r -> times.mapNotNull { r.scaledFrame(it, longSide, meta) } }.orEmpty()
+        val times = screenTimes(meta.durationMs, count, random)
+        return withRetriever(bytes) { r ->
+            times.mapNotNull { r.scaledFrame(it, longSide, meta, MediaMetadataRetriever.OPTION_CLOSEST) }
+        }.orEmpty()
     }
 
-    /** [count] instants evenly inside a clip of [durationMs], neither at its very start nor its very end. */
+    /**
+     * [count] instants across a clip of [durationMs], one drawn from [random] inside each of [count] equal slices:
+     * every stretch of the clip is looked at, and no sender can know beforehand which of its frames will be, as it
+     * could with fixed instants. In clip order.
+     */
+    fun screenTimes(
+        durationMs: Long,
+        count: Int,
+        random: Random,
+    ): List<Long> {
+        if (count <= 0 || durationMs <= 0) return listOf(0L)
+        return (0 until count).map { i ->
+            val start = durationMs * i / count
+            val end = durationMs * (i + 1) / count
+            if (end > start) random.nextLong(start, end) else start
+        }
+    }
+
+    /** [count] instants evenly inside a clip of [durationMs], neither at its very start nor its very end: the poster's. */
     fun sampleTimes(
         durationMs: Long,
         count: Int,
@@ -213,9 +241,10 @@ object VideoFrames {
         atMs: Long,
         longSide: Int,
         meta: VideoMeta,
+        option: Int = MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
     ): Bitmap? {
         val (w, h) = bounded(meta.width, meta.height, longSide)
-        return getScaledFrameAtTime(atMs * US_PER_MS, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, w, h)
+        return getScaledFrameAtTime(atMs * US_PER_MS, option, w, h)
     }
 
     /** [width] × [height] scaled so the long side is at most [longSide], aspect kept, never upscaled. */

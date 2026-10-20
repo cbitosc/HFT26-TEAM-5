@@ -42,6 +42,11 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   `hash` to poll for on receivers (the plaintext's, as staged) and `reused`: the identity a pick of bytes this phone
   already holds went out under, else null (ADR 2026-10.mptm). `--ez file true` takes the file picker's door
   (`ingestFile`) instead, for a PDF or any non-image; a file:// path has no display name, so the file's own name stands in.
+  `--ez video true` takes the video door (`ingestVideo`) as the composer does: re-encoded, and for the Nearby room
+  screened (poster and 12 frames, ADR 2026-10.hmfe) and refused when flagged — the reply is `blocked` with `flagged:
+  true` and nothing is sent. The image door never screens; only this one does. A sent video's reply adds
+  `videoDurationMs` and `posterBytes`. The room-send half of a video screening trial; the receiver's half is
+  `STATE`'s `attachmentFlagged` / `videoPosterFlagged`, and the classifier itself is `VideoScreeningInstrumentedTest`.
 - `…debug.SAVEATT` — the chat's Save, into the app's own storage instead of the gallery: `--es id <messageId>
   --es out /data/data/app.getknit.knit/files/<name>` writes the attachment's plaintext (opened with the row's key
   when sealed, recording its plaintext name as a real save does). Pair it with `SENDIMG --es path <out>` for the
@@ -54,7 +59,10 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   on the other device without a screenshot**: the body turning up in the receiver's `messages[]`. Each row
   with an attachment carries `attachmentHash` (the hash the frame names), `attachmentKeyed` (sealed or not),
   `attachmentPlainHash`, `attachmentHeld` (the bytes are here) and `attachmentAnimated` — a forward trial compares
-  the first across rows and reads the fourth instead of the blob store (ADR 2026-10.mptm). Each row
+  the first across rows and reads the fourth instead of the blob store (ADR 2026-10.mptm). `attachmentFlagged` and
+  `attachmentScore` are this phone's NSFW verdict on the attachment (null until it is screened; a video's score is its
+  highest frame's), and `videoPosterFlagged` the verdict on a video's inline poster, judged on arrival (ADR
+  2026-10.hmfe). Each row
   also carries `received`, which on the sender's own row (`mine: true`) is the ✓✓ — the delivery tick
   coming home — plus its `reactions`; the top-level `typing` map shows a cue that landed. A reply carries
   `replyToId` / `replyToAuthor` / `replyToSnippet` and the receiver's verdict on the quote (ADR 2026-10.gpa3):

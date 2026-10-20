@@ -448,8 +448,10 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   orientation. Its description and poster ride inside the message; a room post declares its size so js2p holds it.
   A video is its description on a video MIME, tested ahead of the name; a video picked with either button is
   re-encoded, and only an undescribed `.mp4` that arrives (an older build's) stays a file (the amendment).
-  Tests: `VideoEncodePolicyTest`, `MemoryMp4MuxerTest`, `AttachmentStoreVideoTest`; on hardware
-  `VideoTranscoderInstrumentedTest` (run one test class on one device with `am instrument`, never
+  The NSFW screen reads the exact frame at a random instant in each twelfth and screens no clip longer than Knit sends
+  (the 2026-10-19 amendment). Tests: `VideoEncodePolicyTest`, `MemoryMp4MuxerTest`, `AttachmentStoreVideoTest`; on
+  hardware `VideoTranscoderInstrumentedTest` and `VideoScreeningInstrumentedTest` (which also screens a labelled
+  folder of real clips pushed to the device; run one test class on one device with `am instrument`, never
   `connectedDebugAndroidTest` with lab phones attached).
 - **When touching a presence dot or an online / offline label** (Profile Details, Diagnostics' node
   sections, the Contacts dot): the four evidence tiers live in `ui/Reach.kt` — `Direct` is

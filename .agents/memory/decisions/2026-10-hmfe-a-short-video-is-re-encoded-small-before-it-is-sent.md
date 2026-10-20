@@ -8,7 +8,7 @@ topics: [attachments, wire, moderation]
 
 # ADR 2026-10.hmfe — A short video is re-encoded small before it is sent
 
-Status: Accepted (2026-10-16); amended 2026-10-17 (below: the file button, the receiver's re-label, the poster). Amends ADR 2026-10.js2p (a room post now declares its size, so a large room
+Status: Accepted (2026-10-16); amended 2026-10-17 (below: the file button, the receiver's re-label, the poster) and 2026-10-19 (below: the screen's frames). Amends ADR 2026-10.js2p (a room post now declares its size, so a large room
 attachment is held like a sealed one), ADR 2026-10.9rh6 (the room screens a video's frames on the way out) and ADR
 2026-10.unqn (a video is never passed through). Additive wire: `ChatContent.attachmentSize` and `.video`,
 `MessageContent.video` (`MessageContentV2` label 16), all null and omitted by default; three vectors added, none
@@ -123,3 +123,34 @@ The photo button's icon is the gallery (`PhotoLibrary`) and its label "Attach ph
 offered videos since point 1. Guards: `ChatViewModelTest.aVideoFromTheFileButtonIsEncodedAndOneTheEncoderCannotReadGoesAsAFile`,
 `MessageDaoTest`'s `setVideoMeta` case, `VideoFramesTest`'s three poster cases. Device trial owed: a file-button video
 over 8 MB, P9 to P7, both sides drawing the video bubble with a picture.
+
+## Amendment 2026-10-19 — the screen reads the frame at a random instant in each twelfth
+
+Point 5's 12 frames were read at fixed instants (the middle of each twelfth) through `OPTION_CLOSEST_SYNC`, the
+keyframe nearest each. Our own encode spaces keyframes a second apart, so a send was screened as meant, but a receiver
+screens the bytes as they arrive, and their keyframes are the sender's to place. `VideoScreeningInstrumentedTest` built
+a 60 s clip of twelve coloured stills with one keyframe: all 12 frames came back as the first still. A sender could
+have opened a clip with one clean frame, or put clean frames at the 12 instants anyone could compute, and the
+receiver's blur would never have seen the rest.
+
+1. **The exact frame** (`VideoFrames.sample`, `OPTION_CLOSEST`): decoded on from the keyframe before the instant, never
+   that keyframe. The poster keeps the nearest keyframe; it is the sender's own choice and screened as a picture.
+2. **At a random instant inside each twelfth** (`VideoFrames.screenTimes`): every stretch of the clip is looked at,
+   and no sender can know which frames will be. The send screen and each receiver draw their own.
+3. **No longer than Knit sends.** The decode from a keyframe is what an exact frame costs, and on a clip with one
+   keyframe it is the clip up to the instant. A received clip longer than `VideoAttachment.MAX_SCREENED_DURATION_MS`
+   (the 61 s cut plus 2 s of slack for a container's rounding) is not decoded at all: `screenVideo` stores it as
+   flagged, so it shows behind tap-to-view. What a longer video from another client should do is still open; this
+   bounds the screen's cost meanwhile.
+
+Measured on the emulator: 12 exact frames of our own encode in 0.3 s, of the one-keyframe 60 s clip in 4.7 s; every
+real clip's 12 frames are now 12 different pictures (7 or 8 before, on 7 s clips). Both screens log each frame's score
+in clip order. Guards: `VideoFramesTest.theScreenLooksOnceInsideEachSliceAtAnInstantNobodyCanPredict`, and on hardware
+`VideoScreeningInstrumentedTest` (frames at their instants on our encode and on a one-keyframe clip, the length bound,
+and a labelled corpus of real clips pushed to the device).
+
+First explicit run (2026-10-20, emulator): four explicit videos (36 s to 39 min; 144p to 1080p) cut into 57 one-minute
+segments, each through the send encode and the screen: all 57 flagged, 91% of the 684 frames over the 0.9 threshold,
+4% under 0.5, and the weakest segment still 3 of its 12. A send of the 36 s one to the room through the bridge
+(`SENDIMG --ez video true`) was blocked on its poster alone (0.9999). Owed: a larger licensed explicit set, the clean
+half's false-positive run, and the receiver-blur trial on phones.

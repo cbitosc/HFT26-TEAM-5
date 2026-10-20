@@ -7,6 +7,13 @@ object VideoAttachment {
     /** The longest a received description may claim: what a newer build might send, never what this one does. */
     const val MAX_CLAIMED_DURATION_MS = 10 * 60_000L
 
+    /**
+     * The longest video the NSFW screen decodes frame by frame: the longest Knit sends, with slack for the container's
+     * own rounding of it. Each screened frame is decoded on from the keyframe before it, and a received clip's
+     * keyframes are its sender's to space, so a longer clip would cost the screen what its sender chose.
+     */
+    const val MAX_SCREENED_DURATION_MS = VideoEncodePolicy.MAX_DURATION_MS + 2_000L
+
     /** The largest side a received description may claim. */
     const val MAX_CLAIMED_SIDE = 8192
 

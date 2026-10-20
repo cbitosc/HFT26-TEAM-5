@@ -48,6 +48,7 @@ import app.getknit.knit.data.MessageRepository
 import app.getknit.knit.data.PeerRepository
 import app.getknit.knit.data.ReactionRepository
 import app.getknit.knit.data.blob.BlobEntity
+import app.getknit.knit.data.blob.BlobVerdictDao
 import app.getknit.knit.data.decodeBoundedFromBytes
 import app.getknit.knit.data.downscale
 import app.getknit.knit.data.forward.ForwardDao
@@ -196,6 +197,8 @@ import java.util.concurrent.ConcurrentLinkedQueue
  *   Runs the exact production pipeline (AttachmentStore.ingest → MeshManager.sendChat), so the image
  *   send→pull→verify loop is fully scriptable; replies with the attachment `hash` to poll for on receivers.
  *   `--ez file true` takes the file picker's door instead (a PDF); `reused` names the identity a pick reused.
+ *   `--ez video true` takes the video door (`ingestVideo`): re-encoded, and screened for the room and blocked there
+ *   when flagged, as the composer does — the room-send half of a video screening trial.
  * - [ACTION_SAVEATT] — the chat's Save into the app's own storage: `--es id <messageId> --es out <path>` writes
  *   the attachment's plaintext there, so [ACTION_SENDIMG] can pick it again (the forward loop, ADR 2026-10.mptm).
  * - [ACTION_STATE] — self id/name, transport health, the reachable peer set, and the mesh metrics; add
@@ -366,6 +369,7 @@ class DebugBridgeReceiver :
     private val peers: PeerRepository by inject()
     private val groups: GroupRepository by inject()
     private val blobs: BlobRepository by inject()
+    private val verdicts: BlobVerdictDao by inject()
     private val identities: AttachmentIdentities by inject()
     private val metrics: MeshMetrics by inject()
     private val startGate: MeshStartGate by inject()
@@ -752,6 +756,10 @@ class DebugBridgeReceiver :
         // sent. A file:// Uri offers no display name, so a non-image falls back to the file's own name, as a
         // document provider would give it.
         val asFile = intent.getBooleanExtra(EXTRA_FILE, false)
+        // `--ez video true` takes the video door as the composer does: re-encoded, and for the room screened (poster and
+        // frames, ADR 2026-10.hmfe) with a flagged one dropped and refused, as `ChatViewModel.stage` does.
+        val asVideo = intent.getBooleanExtra(EXTRA_VIDEO, false)
+        val isRoom = Conversations.kindFor(conv) == ConversationKind.NEARBY
         // `--ez fit true` fits a photo to the relays' ticket `am` exactly as the composer does (ADR 2026-10.s3ep): the
         // same `FreeUploads.photoChunks`, the same `photoFitBytes`. Off by default, so every older script is unchanged.
         val fitBytes =
@@ -766,7 +774,15 @@ class DebugBridgeReceiver :
                 null
             }
         val picked =
-            if (asFile) attachments.ingestFile(Uri.fromFile(file)) else attachments.ingest(Uri.fromFile(file), fitBytes = fitBytes)
+            when {
+                asVideo -> attachments.ingestVideo(Uri.fromFile(file), screen = isRoom)
+                asFile -> attachments.ingestFile(Uri.fromFile(file))
+                else -> attachments.ingest(Uri.fromFile(file), fitBytes = fitBytes)
+            }
+        if (asVideo && isRoom && picked is AttachmentStore.IngestResult.Success && picked.flagged) {
+            blobs.deleteIfUnreferenced(picked.ingested.hash)
+            return reply("blocked", "video blocked by on-device content filter").put("conversation", conv).put("flagged", true)
+        }
         val ingested =
             when (picked) {
                 is AttachmentStore.IngestResult.Success -> {
@@ -805,7 +821,7 @@ class DebugBridgeReceiver :
             }
         return when (sent) {
             null -> reply("error", "unknown group (not joined on this device): $conv")
-            true -> reply("ok", "sent image to $conv")
+            true -> reply("ok", "sent ${if (asVideo) "video" else "image"} to $conv")
             false -> reply("blocked", "blocked by on-device content filter")
         }.put("conversation", conv)
             .put("hash", ingested.hash)
@@ -815,6 +831,9 @@ class DebugBridgeReceiver :
             .put("fitBytes", fitBytes ?: JSONObject.NULL)
             // The identity this pick reused (ADR 2026-10.mptm): the hash the frame names, null for a fresh seal.
             .put("reused", ingested.reuse?.hash ?: JSONObject.NULL)
+            // A video's own description, as the bubble draws it (ADR 2026-10.hmfe).
+            .put("videoDurationMs", ingested.video?.durationMs ?: JSONObject.NULL)
+            .put("posterBytes", ingested.video?.poster?.size ?: JSONObject.NULL)
     }
 
     /**
@@ -1140,6 +1159,7 @@ class DebugBridgeReceiver :
             val from = if (m.senderId == selfId) selfName else nameByNode[m.senderId] ?: ""
             val rx = JSONObject()
             reactionsByMessage[m.id].orEmpty().forEach { r -> r.emoji?.let { rx.put(r.reactorNodeId, it) } }
+            val verdict = m.attachmentHash?.let { verdicts.find(it) }
             arr.put(
                 JSONObject()
                     .put("id", m.id)
@@ -1163,7 +1183,12 @@ class DebugBridgeReceiver :
                     .put("attachmentKeyed", m.attachmentKey != null)
                     .put("attachmentPlainHash", m.attachmentPlainHash ?: JSONObject.NULL)
                     .put("attachmentHeld", m.attachmentHash?.let { blobs.exists(it) } ?: JSONObject.NULL)
-                    .put("attachmentAnimated", m.attachmentAnimated),
+                    .put("attachmentAnimated", m.attachmentAnimated)
+                    // This phone's NSFW screen (ADR 2026-10.hmfe): the attachment's verdict, null until it is screened,
+                    // with its score (a video's highest frame), and a video poster's own verdict, kept on the row.
+                    .put("attachmentFlagged", verdict?.flagged ?: JSONObject.NULL)
+                    .put("attachmentScore", verdict?.score?.toDouble() ?: JSONObject.NULL)
+                    .put("videoPosterFlagged", m.videoPosterFlagged),
             )
         }
         return arr
@@ -3803,6 +3828,7 @@ class DebugBridgeReceiver :
         const val EXTRA_LIMIT = "limit"
         const val EXTRA_PATH = "path"
         const val EXTRA_FILE = "file"
+        const val EXTRA_VIDEO = "video"
         const val EXTRA_OUT = "out"
         const val EXTRA_COUNT = "count"
         const val EXTRA_FROM = "from"

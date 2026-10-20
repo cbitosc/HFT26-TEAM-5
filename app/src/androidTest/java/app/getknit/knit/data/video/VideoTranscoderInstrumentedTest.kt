@@ -1,27 +1,17 @@
 package app.getknit.knit.data.video
 
-import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.net.Uri
-import android.os.Handler
-import android.os.HandlerThread
 import androidx.annotation.OptIn
 import androidx.core.graphics.createBitmap
-import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.container.Mp4LocationData
-import androidx.media3.transformer.Composition
-import androidx.media3.transformer.EditedMediaItem
-import androidx.media3.transformer.EditedMediaItemSequence
-import androidx.media3.transformer.ExportException
-import androidx.media3.transformer.ExportResult
 import androidx.media3.transformer.InAppMp4Muxer
-import androidx.media3.transformer.Transformer
 import androidx.test.platform.app.InstrumentationRegistry
 import app.getknit.knit.data.ByteArrayMediaSource
 import kotlinx.coroutines.runBlocking
@@ -33,8 +23,6 @@ import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.Test
 import java.io.File
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.TimeUnit
 
 /**
  * The whole short-video encode on a real codec stack (ADR 2026-10.hmfe): a 70 s 720 × 1280 clip carrying a GPS
@@ -120,58 +108,17 @@ class VideoTranscoderInstrumentedTest {
 
     /** A [durationMs] portrait clip made from one drawn still, carrying a location, written to [dir]. */
     private fun geotaggedClip(durationMs: Long): File {
-        val still = File(dir, "still.png")
         val bitmap = createBitmap(720, 1280)
         Canvas(bitmap).apply {
             drawColor(Color.rgb(40, 90, 160))
             drawCircle(360f, 640f, 200f, Paint().apply { color = Color.YELLOW })
         }
-        still.outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
-        val out = File(dir, "source.mp4")
-        val item =
-            EditedMediaItem
-                .Builder(
-                    MediaItem
-                        .Builder()
-                        .setUri(Uri.fromFile(still))
-                        .setImageDurationMs(durationMs)
-                        .build(),
-                ).setFrameRate(30)
-                .build()
         val muxers = InAppMp4Muxer.Factory { entries -> entries.add(Mp4LocationData(37.4219f, -122.084f)) }
-        val done = CountDownLatch(1)
-        var failure: ExportException? = null
-        val thread = HandlerThread("fixture").apply { start() }
-        Handler(thread.looper).post {
-            Transformer
-                .Builder(context)
-                .setLooper(thread.looper)
-                // H.264: the emulator's software HEVC encoder stops at 512 x 512, which would shrink the fixture.
-                .setVideoMimeType(MimeTypes.VIDEO_H264)
-                .setMuxerFactory(muxers)
-                .addListener(
-                    object : Transformer.Listener {
-                        override fun onCompleted(
-                            composition: Composition,
-                            exportResult: ExportResult,
-                        ) = done.countDown()
-
-                        override fun onError(
-                            composition: Composition,
-                            exportResult: ExportResult,
-                            exportException: ExportException,
-                        ) {
-                            failure = exportException
-                            done.countDown()
-                        }
-                    },
-                ).build()
-                .start(Composition.Builder(EditedMediaItemSequence.withVideoFrom(listOf(item))).build(), out.path)
+        return ClipFixtures.stillsClip(context, listOf(bitmap), durationMs, File(dir, "source.mp4")) {
+            // H.264: the emulator's software HEVC encoder stops at 512 x 512, which would shrink the fixture.
+            setVideoMimeType(MimeTypes.VIDEO_H264)
+            setMuxerFactory(muxers)
         }
-        assertTrue("fixture timed out", done.await(10, TimeUnit.MINUTES))
-        thread.quitSafely()
-        failure?.let { throw it }
-        return out
     }
 
     private fun videoMimeOf(bytes: ByteArray): String? {

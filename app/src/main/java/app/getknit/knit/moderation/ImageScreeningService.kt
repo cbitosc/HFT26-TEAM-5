@@ -1,12 +1,15 @@
 package app.getknit.knit.moderation
 
+import android.graphics.Bitmap
 import android.util.Log
 import app.getknit.knit.data.blob.BlobVerdictDao
 import app.getknit.knit.data.blob.BlobVerdictEntity
 import app.getknit.knit.data.decodeBoundedFromBytes
+import app.getknit.knit.data.video.VideoAttachment
 import app.getknit.knit.data.video.VideoFrames
 import app.getknit.knit.mesh.protocol.LinkPreviewBlob
 import kotlinx.coroutines.flow.Flow
+import java.util.Locale
 
 /**
  * On-device attachment-moderation service: screens images against [imageModerator] and caches the NSFW verdict
@@ -82,25 +85,51 @@ class ImageScreeningService(
     suspend fun isVideoExplicit(
         bytes: ByteArray,
         poster: ByteArray,
-    ): Boolean = (poster.isNotEmpty() && isImageExplicit(poster)) || anyFrameExplicit(bytes, "outgoing video")
+    ): Boolean {
+        if (poster.isNotEmpty() && isImageExplicit(poster)) return true
+        val frames = videoFrameVerdicts(bytes)
+        val flagged = frames.any { it.flagged }
+        Log.d(TAG, "outgoing video frames=${frames.size} flagged=$flagged scores=${frames.scores()}")
+        return flagged
+    }
 
     /**
      * Receive-side screen for a held video, cached under [hash] like [screenImage]: [VIDEO_SAMPLES] frames, flagged
      * if any one is. Bytes with no frame to read go to [screenImage] instead: the MIME is the sender's claim, and a
-     * picture labelled a video must still meet the image screen.
+     * picture labelled a video must still meet the image screen. A clip longer than any Knit sends
+     * ([VideoAttachment.MAX_SCREENED_DURATION_MS]) is flagged unscreened: its frames would cost what its sender chose.
      */
     suspend fun screenVideo(
         hash: String,
         bytes: ByteArray,
     ) {
         if (verdicts.find(hash) != null) return
-        val frames = VideoFrames.sample(bytes, VIDEO_SAMPLES, SCREEN_MAX_DIM)
+        val durationMs = VideoFrames.meta(bytes)?.durationMs
+        if (durationMs != null && durationMs > VideoAttachment.MAX_SCREENED_DURATION_MS) {
+            Log.d(TAG, "incoming video hash=$hash duration=$durationMs longer than Knit sends: flagged unscreened")
+            verdicts.upsert(BlobVerdictEntity(hash, flagged = true, score = 0f))
+            return
+        }
+        val frames = videoFrameVerdicts(bytes)
         // No video in them: screened as the picture they may be, so a mislabel can only pick a screen, not skip one.
         if (frames.isEmpty()) return screenImage(hash, bytes)
-        val scores = frames.map { frame -> imageModerator.classify(frame).also { frame.recycle() } }
-        val flagged = scores.any { it.flagged }
-        Log.d(TAG, "incoming video hash=$hash frames=${scores.size} flagged=$flagged")
-        verdicts.upsert(BlobVerdictEntity(hash, flagged, scores.maxOf { it.score }))
+        val flagged = frames.any { it.flagged }
+        Log.d(TAG, "incoming video hash=$hash frames=${frames.size} flagged=$flagged scores=${frames.scores()}")
+        verdicts.upsert(BlobVerdictEntity(hash, flagged, frames.maxOf { it.score }))
+    }
+
+    /**
+     * [VIDEO_SAMPLES] frames spread across [bytes], each through the image classifier, in clip order; empty when no
+     * frame decodes. What [isVideoExplicit] and [screenVideo] judge by, and what `VideoScreeningInstrumentedTest`
+     * reads each frame's score from.
+     */
+    suspend fun videoFrameVerdicts(bytes: ByteArray): List<ImageVerdict> {
+        val frames = VideoFrames.sample(bytes, VIDEO_SAMPLES, SCREEN_MAX_DIM)
+        return try {
+            frames.map { imageModerator.classify(it) }
+        } finally {
+            frames.forEach(Bitmap::recycle)
+        }
     }
 
     /**
@@ -115,19 +144,8 @@ class ImageScreeningService(
         return verdict.flagged
     }
 
-    private suspend fun anyFrameExplicit(
-        bytes: ByteArray,
-        what: String,
-    ): Boolean {
-        val frames = VideoFrames.sample(bytes, VIDEO_SAMPLES, SCREEN_MAX_DIM)
-        var flagged = false
-        for (frame in frames) {
-            if (!flagged) flagged = imageModerator.classify(frame).flagged
-            frame.recycle()
-        }
-        Log.d(TAG, "$what frames=${frames.size} flagged=$flagged")
-        return flagged
-    }
+    /** Each frame's score, in clip order, for the log: a near miss under the threshold shows there. */
+    private fun List<ImageVerdict>.scores(): String = joinToString(",") { "%.3f".format(Locale.ROOT, it.score) }
 
     /**
      * Receive-side screening for a stored blob: when no verdict is cached yet for [hash], decode [bytes]

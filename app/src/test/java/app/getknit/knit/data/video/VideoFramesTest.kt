@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.random.Random
 
 /**
  * The pure halves of [VideoFrames]: where frames are sampled, how big they are decoded, which one the poster is and
@@ -14,6 +15,23 @@ class VideoFramesTest {
     fun samplesSitEvenlyInsideTheClip() {
         assertEquals(listOf(5_000L, 15_000L, 25_000L), VideoFrames.sampleTimes(30_000, 3))
         assertEquals(listOf(0L), VideoFrames.sampleTimes(0, 3))
+    }
+
+    @Test
+    fun theScreenLooksOnceInsideEachSliceAtAnInstantNobodyCanPredict() {
+        val draws = (1..50).map { seed -> VideoFrames.screenTimes(60_000, 12, Random(seed)) }
+        draws.forEach { times ->
+            assertEquals(12, times.size)
+            times.forEachIndexed { i, t -> assertTrue("$t in slice $i", t >= i * 5_000L && t < (i + 1) * 5_000L) }
+        }
+        // Not the fixed instants a sender could dodge: the draws differ from each other.
+        assertTrue(draws.distinct().size > 1)
+        assertEquals(listOf(0L), VideoFrames.screenTimes(0, 12, Random(1)))
+        assertEquals(listOf(0L), VideoFrames.screenTimes(60_000, 0, Random(1)))
+        // Slices shorter than a millisecond are their own start.
+        assertEquals(listOf(0L, 0L, 1L), VideoFrames.screenTimes(2, 3, Random(1)))
+        // A slice's end is never drawn: a 1 ms slice can only be its start, whatever the draw.
+        (1..20).forEach { seed -> assertEquals(listOf(0L, 1L, 2L), VideoFrames.screenTimes(3, 3, Random(seed))) }
     }
 
     @Test

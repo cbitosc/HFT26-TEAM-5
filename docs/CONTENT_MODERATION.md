@@ -347,7 +347,7 @@ A short video (ADR 2026-10.hmfe) is pictures and sound. The pictures are screene
 sound is not screened, like a voice note's. Three things get a verdict:
 
 - **On the sender, for the Nearby room only**: `ImageScreeningService.isVideoExplicit` classifies the poster and 12
-  frames sampled evenly across the encoded clip, and a flagged video is refused like a flagged room picture. A DM's or
+  frames of the encoded clip, and a flagged video is refused like a flagged room picture. A DM's or
   a group's video is not screened on the sender (ADR 2026-10.9rh6).
 - **The poster, on the recipient, when the message arrives** (`isPosterExplicit`, from `InboundPipeline.deliverChat`,
   after the row commits and guarded so it can never cost the receipt): the bubble shows it before the video is
@@ -356,10 +356,27 @@ sound is not screened, like a voice note's. Three things get a verdict:
 - **The frames, on the recipient, once the bytes are held** (`screenVideo`): a room video in `MeshBlobStore.ingest`
   (a key-less `video/` row), a sealed one after decryption in `screenHeldAttachment`, 12 frames, flagged if any is.
   Every frame is decoded bounded (`getScaledFrameAtTime`). Bytes with no frame to read go to `screenImage` instead,
-  so a picture labelled a video still meets the image screen.
+  so a picture labelled a video still meets the image screen. A clip longer than Knit sends
+  (`VideoAttachment.MAX_SCREENED_DURATION_MS`) is flagged without a frame decoded.
+
+The 12 frames (`VideoFrames.sample`) are one at a random instant inside each twelfth of the clip, and each is the
+exact frame there, not the keyframe nearest it (ADR 2026-10.hmfe's 2026-10-19 amendment). A received clip's keyframes
+and the instants anyone could compute were both the sender's to exploit: a clip with one clean keyframe was screened
+as that frame twelve times. Decoding on from a keyframe is why the screen stops at Knit's own length.
 
 A flagged poster or flagged frames hide the bubble behind the same tap-to-view as a flagged photo, under the same
-toggle. An `.mp4` sent through "Send a file" carries no video description, is never played, and stays a file (§7).
+toggle. A video picked with "Send a file" takes the same door and meets the same screens (ADR 2026-10.hmfe's
+amendment); only an undescribed `.mp4` that arrives from an older build stays a file (§7).
+
+Both screens log every frame's score in clip order (`ImageModeration`: `outgoing video` / `incoming video … scores=`),
+so a near miss under the 0.9 threshold shows. On hardware, `VideoScreeningInstrumentedTest` checks that the 12 frames
+are 12 different moments of the clip, and screens a labelled folder of real clips (`explicit/` must be flagged,
+`clean/` must not) pushed to `/data/local/tmp/knit-screen-clips` on one device, through the real encode and the
+bundled model, writing each clip's scores to a report file in the app's external files dir. The clips never enter the
+repo, and come off the device again after the run. Hard negatives — clips an image classifier is likely to mistake
+for explicit (beaches, swimwear, wrestling, massage, kissing, dunes, dough) — make the `clean/` half. The
+debug bridge's `SENDIMG --ez video true` is the room's send screen without the UI, and `STATE` reports a receiver's
+`attachmentFlagged` and `videoPosterFlagged`.
 
 ## 8. When a model crashes the process: the poison-pill
 
