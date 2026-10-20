@@ -161,7 +161,7 @@ object TicketRefreshPolicy {
  * `missing` or `expired` behind a relay's files gate, which wakes the loop and marks the host waiting for
  * [WANT_TTL_MS] (the plane re-marks it on every look while the upload stays locked). A customer key's schedule already
  * asks for a missing ticket, so for it the mark is only the wake. A free key asks for nothing else. With no key, where
- * [free] knows a free issuer for the host and the person allowed it (C-7.6-33, C-7.6-34), the loop makes a free
+ * [free] knows a free issuer for the host and the person has not turned it off (C-7.6-33, C-7.6-34), the loop makes a free
  * account through [accounts] first — `GET` the parameters, mine the stamp off the main thread, `POST` — holds its key
  * and swaps it at once (C-7.6-35, C-7.6-36); a customer key last answered `ended` falls back to one the same way. A
  * free key answered 401 or 403 is forgotten, and the next account waits for the next UTC day (C-7.6-37). The account
@@ -309,10 +309,13 @@ class TicketRefresher(
         }
     }
 
-    /** The free issuer for [host] when the person allowed it there (C-7.6-33, C-7.6-34), else null. */
+    /**
+     * The free issuer for [host] unless the person turned free tickets off there (C-7.6-33, C-7.6-34: on by default, the
+     * notice informs rather than asks), else null.
+     */
     private suspend fun freeIssuerFor(host: String): String? {
         val journal = free ?: return null
-        if (accounts == null || journal.freeConsent.first()[host] != true) return null
+        if (accounts == null || journal.freeConsent.first()[host] == false) return null
         return journal.freeIssuers.first()[host]?.takeIf { IssuerOrigin.isAcceptable(it, allowCleartext) }
     }
 

@@ -263,12 +263,19 @@ class RelayDetailScreenContentTest {
     }
 
     @Test
-    fun theFreeTicketsSwitchNamesItsIssuerAndReportsTheAnswer() {
+    fun theFreeTicketsSwitchIsOnUntilTurnedOffAndReportsTheAnswer() {
+        // C-7.6-34 amended: not answered yet counts as on.
         val answers = mutableListOf<Boolean>()
         render(relay(freeUploads = FreeUploadChoice("free.example.org", allowed = null)), onSetFreeUploads = { answers += it })
         compose.onNodeWithText("Fetched from free.example.org on days this phone sends files here").performScrollTo().assertIsDisplayed()
-        compose.onNodeWithTag("relay_free_uploads_$HOST").assertIsOff().performClick()
-        assertEquals(listOf(true), answers)
+        compose.onNodeWithTag("relay_free_uploads_$HOST").assertIsOn().performClick()
+        assertEquals(listOf(false), answers)
+    }
+
+    @Test
+    fun aFreeTicketsSwitchTurnedOffStaysOff() {
+        render(relay(freeUploads = FreeUploadChoice("free.example.org", allowed = false)))
+        compose.onNodeWithTag("relay_free_uploads_$HOST").performScrollTo().assertIsOff()
     }
 
     @Test

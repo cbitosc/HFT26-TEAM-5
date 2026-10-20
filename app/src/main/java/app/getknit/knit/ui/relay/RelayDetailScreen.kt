@@ -378,8 +378,8 @@ private fun TicketsSection(
 }
 
 /**
- * Free tickets for a relay (docs/VOICE_CALLS.md C-7.6-34): one labelled switch saying which host the phone would
- * contact, on only once the person said yes. Turning it off forgets a free key held there.
+ * Free tickets for a relay (docs/VOICE_CALLS.md C-7.6-34): one labelled switch saying which host the phone contacts,
+ * on unless the person turned it off. Turning it off forgets a free key held there.
  */
 @Composable
 private fun FreeUploadsSwitch(
@@ -387,7 +387,7 @@ private fun FreeUploadsSwitch(
     choice: FreeUploadChoice,
     onSet: (Boolean) -> Unit,
 ) {
-    val on = choice.allowed == true
+    val on = choice.allowed != false
     Row(
         modifier =
             Modifier

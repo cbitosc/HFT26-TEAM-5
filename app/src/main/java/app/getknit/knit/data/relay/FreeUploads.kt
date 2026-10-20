@@ -19,18 +19,20 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 
 /**
- * A connected relay this phone could send files through with a free account (docs/VOICE_CALLS.md C-7.6-33 to
- * C-7.6-35), waiting on the person's answer to the notice (C-7.6-34): its host, and the free issuer's host the notice
- * names.
+ * A connected relay this phone sends, or is about to send, files through with a free account (docs/VOICE_CALLS.md
+ * C-7.6-33 to C-7.6-35), whose notice the person has not acknowledged yet (C-7.6-34): its host, the free issuer's host
+ * the notice names, and whether a free key is already held there — on by default, the account may be made before the
+ * notice is read, and the notice must still show then.
  */
 data class FreeUploadOffer(
     val relayHost: String,
     val issuerHost: String,
+    val freeKeyHeld: Boolean = false,
 )
 
 /**
- * What the relay row's switch shows for a relay with a free issuer: the issuer's host, and the person's answer —
- * null while they have not been asked.
+ * What the relay screen's switch shows for a relay with a free issuer: the issuer's host, and the person's answer —
+ * null while they have not answered, which counts as on (C-7.6-34).
  */
 data class FreeUploadChoice(
     val issuerHost: String,
@@ -38,8 +40,8 @@ data class FreeUploadChoice(
 )
 
 /**
- * The person's side of free accounts (C-7.6-34): the offers the chat's notice asks about, the choice each relay row's
- * switch shows, and the one write both make. Built only where Knit Anywhere is wired (`ANYWHERE_WIRED`); null elsewhere, and
+ * The person's side of free accounts (C-7.6-34): the offers the chat's notice tells about, the choice each relay
+ * screen's switch shows, and the one write both make. Built only where Knit Anywhere is wired (`ANYWHERE_WIRED`); null elsewhere, and
  * then nothing asks.
  */
 class FreeUploads(
@@ -72,7 +74,7 @@ class FreeUploads(
             issuers.mapValues { (host, origin) -> FreeUploadChoice(IssuerOrigin.host(origin), consent[host]) }
         }.distinctUntilChanged()
 
-    /** Records the person's answer for [relayHost]; turning it off forgets the free key held there. */
+    /** Records the person's answer for [relayHost]: true acknowledges the notice; false forgets the free key held there. */
     suspend fun answer(
         relayHost: String,
         allowed: Boolean,
@@ -80,10 +82,11 @@ class FreeUploads(
 }
 
 /**
- * The offers the notice asks about: each connected relay whose files gate holds this phone's uploads for want of a
- * ticket (`missing` or `expired`, C-7.6-24), whose host has a free issuer the person has not answered for, and where
- * no key could fetch one instead — none held, or a customer key whose account ended (C-7.6-28). Sorted by host, so
- * the notice is stable.
+ * The offers the notice tells about: each connected relay behind a files gate whose host has a free issuer the person
+ * has not answered for, where a free account is made or about to be — a free key held there, or uploads held for want
+ * of a ticket (`missing` or `expired`, C-7.6-24) with no key that could fetch one instead (none held, or a customer
+ * key whose account ended, C-7.6-28). Free tickets are on by default, so the account can come before the notice is
+ * read; an offer with the free key held keeps the notice up until it is. Sorted by host, so the notice is stable.
  */
 internal fun freeUploadOffers(
     statuses: List<SpoolStatus>,
@@ -95,14 +98,28 @@ internal fun freeUploadOffers(
     statuses
         .asSequence()
         .filter { it.connected && it.entGates and SpoolTicket.FL_FILES != 0L }
-        .filter { (it.uploads as? SpoolUploads.Locked)?.reason in WAITING }
         .mapNotNull { status ->
             val host = SpoolUrl.hostname(status.url) ?: return@mapNotNull null
             val origin = issuers[host] ?: return@mapNotNull null
             if (host in consent) return@mapNotNull null
             val key = keys[host]
-            if (key != null && (key.free || keyStates[host]?.answer != KeyAnswer.ENDED)) return@mapNotNull null
-            FreeUploadOffer(host, IssuerOrigin.host(origin))
+            when {
+                key?.free == true -> {
+                    FreeUploadOffer(host, IssuerOrigin.host(origin), freeKeyHeld = true)
+                }
+
+                (status.uploads as? SpoolUploads.Locked)?.reason !in WAITING -> {
+                    null
+                }
+
+                key != null && keyStates[host]?.answer != KeyAnswer.ENDED -> {
+                    null
+                }
+
+                else -> {
+                    FreeUploadOffer(host, IssuerOrigin.host(origin))
+                }
+            }
         }.distinct()
         .sortedBy { it.relayHost }
         .toList()

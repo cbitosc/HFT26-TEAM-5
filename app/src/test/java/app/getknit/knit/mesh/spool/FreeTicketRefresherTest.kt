@@ -375,16 +375,50 @@ class FreeTicketRefresherTest {
         }
 
     @Test
-    fun nothingIsAskedOfTheIssuerWithoutThePersonsLeave() =
+    fun freeTicketsAreOnUntilThePersonTurnsThemOff() =
         runTest {
+            // C-7.6-34 amended: an unanswered relay counts as on; the notice informs, it does not gate the account.
             store.setFreeIssuer(HOST, FREE_ISSUER)
+            accounts.created += AccountAnswer.Created(KEY, HOST)
+            swap.next = { issued() }
             val r = refresher()
             r.uploadWanted(URL)
             r.runOnce()
+            assertEquals(listOf(FREE_ISSUER to HOST), accounts.gets)
+            assertEquals(freeKey, store.held.value[HOST])
+        }
+
+    @Test
+    fun nothingIsAskedOfTheIssuerOnceThePersonTurnedItOff() =
+        runTest {
+            store.setFreeIssuer(HOST, FREE_ISSUER)
             store.setFreeConsent(HOST, false)
+            val r = refresher()
+            r.uploadWanted(URL)
             r.runOnce()
             assertTrue(accounts.gets.isEmpty())
             assertTrue(swap.asks.isEmpty())
+        }
+
+    @Test
+    fun aRelayThatIsTurnedOffGetsNoFreeAccountWhateverWaits() =
+        runTest {
+            // Only the relays the plane dials are asked for: a parked relay (or the plane off) leaves `urls` without it,
+            // and an upload that waited there before it was parked asks nothing — neither the account nor the swap.
+            store.setFreeIssuer(HOST, FREE_ISSUER)
+            accounts.created += AccountAnswer.Created(KEY, HOST)
+            swap.next = { issued() }
+            urls.value = emptySet()
+            val r = refresher()
+            r.uploadWanted(URL)
+            assertNull(r.runOnce())
+            assertTrue(accounts.gets.isEmpty())
+            assertTrue(swap.asks.isEmpty())
+            // Back on, the upload still waiting: the account is made then.
+            urls.value = setOf(URL)
+            r.uploadWanted(URL)
+            r.runOnce()
+            assertEquals(listOf(FREE_ISSUER to HOST), accounts.gets)
         }
 
     @Test

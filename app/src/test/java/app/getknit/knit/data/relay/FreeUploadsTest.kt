@@ -23,9 +23,9 @@ import org.junit.rules.TemporaryFolder
 import java.io.File
 
 /**
- * Which relays the free-ticket notice asks about (docs/VOICE_CALLS.md C-7.6-34): a connected relay whose files gate
- * holds this phone's uploads for want of a ticket, with a free issuer the person has not answered for, and no key
- * that could fetch one instead. Then the size a photo is fitted to (C-7.6-32), and the class that serves both to the
+ * Which relays the free-ticket notice tells about (docs/VOICE_CALLS.md C-7.6-34): a connected relay behind a files gate,
+ * with a free issuer the person has not answered for, where a free key is held or uploads wait for want of a ticket
+ * with no key that could fetch one instead. Then the size a photo is fitted to (C-7.6-32), and the class that serves both to the
  * chat's notice and the relay rows, over the real key and ticket stores.
  */
 class FreeUploadsTest {
@@ -90,7 +90,18 @@ class FreeUploadsTest {
         val held = mapOf("lax.spool.getknit.app" to key)
         assertEquals(emptyList<FreeUploadOffer>(), offers(keys = held))
         assertEquals(offer, offers(keys = held, states = mapOf("lax.spool.getknit.app" to KeyState(KeyAnswer.ENDED))))
-        assertEquals(emptyList<FreeUploadOffer>(), offers(keys = mapOf("lax.spool.getknit.app" to key.copy(free = true))))
+    }
+
+    @Test
+    fun aFreeKeyAlreadyHeldKeepsTheNoticeUpUntilItIsAcknowledged() {
+        // On by default, the account can be made before the notice is read: it must not vanish when the ticket opens
+        // the uploads.
+        val free = mapOf("lax.spool.getknit.app" to HeldKey("https://anywhere.getknit.app", "kak1_x", free = true))
+        val held = listOf(FreeUploadOffer("lax.spool.getknit.app", "anywhere.getknit.app", freeKeyHeld = true))
+        assertEquals(held, offers(keys = free))
+        assertEquals(held, offers(status(uploads = SpoolUploads.Open), keys = free))
+        assertEquals(emptyList<FreeUploadOffer>(), offers(keys = free, consent = mapOf("lax.spool.getknit.app" to true)))
+        assertEquals(emptyList<FreeUploadOffer>(), offers(status(connected = false), keys = free))
     }
 
     // ── the size a photo is fitted to (C-7.6-32) ───────────────────────────────────────────────────────
@@ -289,7 +300,7 @@ class FreeUploadsTest {
     }
 
     @Test
-    fun theNoticeAsksUntilThePersonAnswersAndTheRowShowsTheAnswer() =
+    fun theNoticeShowsUntilThePersonAnswersAndTheSwitchShowsTheAnswer() =
         runTest {
             val rig = rig(status())
             assertEquals(offer, rig.uploads.offers.first())
@@ -326,9 +337,12 @@ class FreeUploadsTest {
             rig.settings.putSpoolTicket(host, ticket.text)
             assertEquals(2, rig.uploads.photoChunks.first())
 
-            // Uploads open with no `am` on the live ticket: the relay takes the photo as it is, and nothing is asked.
+            // Uploads open with no `am` on the live ticket: the relay takes the photo as it is. The free key's notice
+            // stays until it is acknowledged, then goes.
             rig.statuses.value = listOf(status(uploads = SpoolUploads.Open))
             assertNull(rig.uploads.photoChunks.first())
+            assertEquals(listOf(FreeUploadOffer(host, "anywhere.getknit.app", freeKeyHeld = true)), rig.uploads.offers.first())
+            rig.uploads.answer(host, true)
             assertEquals(emptyList<FreeUploadOffer>(), rig.uploads.offers.first())
         }
 }

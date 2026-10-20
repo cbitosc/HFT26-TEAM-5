@@ -670,8 +670,9 @@ fun ChatScreen(
         )
     }
 
-    // The free-account notice (docs/VOICE_CALLS.md C-7.6-34): once, before this phone contacts a free issuer. Allow and
-    // Not now are answers and end it; a tap outside answers nothing and only puts it off for this visit.
+    // The free-tickets notice (docs/VOICE_CALLS.md C-7.6-34): once, when this phone first sends through a relay with a
+    // free issuer. Free tickets are on by default, so it informs: OK and Turn off are answers and end it; a tap outside
+    // answers nothing and only puts it off for this visit.
     var freeOfferPutOff by rememberSaveable { mutableStateOf<String?>(null) }
     freeUploadOffer?.takeIf { it.relayHost != freeOfferPutOff }?.let { offer ->
         FreeUploadsNotice(
@@ -683,8 +684,9 @@ fun ChatScreen(
 }
 
 /**
- * Asks once whether this phone may get free tickets from [offer]'s issuer to send small files through its relay
- * (C-7.6-34): names the host it will contact and how often, and nothing about a product, a price or a way to buy one.
+ * Tells the person once that this phone gets free tickets from [offer]'s issuer to send small files through its relay
+ * (C-7.6-34): names the host it contacts and how often, offers to turn it off, and says nothing about a product, a
+ * price or a way to buy one.
  */
 @Composable
 internal fun FreeUploadsNotice(
@@ -698,13 +700,13 @@ internal fun FreeUploadsNotice(
         title = { Text(stringResource(R.string.chat_free_uploads_title)) },
         text = { Text(stringResource(R.string.chat_free_uploads_body, offer.issuerHost)) },
         confirmButton = {
-            TextButton(onClick = { onAnswer(true) }, modifier = Modifier.testTag("free_uploads_allow")) {
-                Text(stringResource(R.string.chat_free_uploads_allow))
+            TextButton(onClick = { onAnswer(true) }, modifier = Modifier.testTag("free_uploads_ok")) {
+                Text(stringResource(R.string.chat_free_uploads_ok))
             }
         },
         dismissButton = {
-            TextButton(onClick = { onAnswer(false) }, modifier = Modifier.testTag("free_uploads_decline")) {
-                Text(stringResource(R.string.chat_free_uploads_decline))
+            TextButton(onClick = { onAnswer(false) }, modifier = Modifier.testTag("free_uploads_turn_off")) {
+                Text(stringResource(R.string.chat_free_uploads_turn_off))
             }
         },
     )

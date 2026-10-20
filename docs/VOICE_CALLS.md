@@ -298,8 +298,8 @@ the address's count.
 | ID           | Requirement |
 |--------------|-------------|
 | **C-7.6-33** | A client makes a free account for a relay only at a free issuer origin it is configured with for that relay's host name, under C-7.6-29's origin rule. It never takes one from a spool, a peer or an invite: an invite's `i` comes with a customer key and is that key's issuer. The reference client knows one, `https://anywhere.getknit.app` for its seeded `lax.spool.getknit.app`; its debug build may set one for any host. |
-| **C-7.6-34** | Before its first account request to an issuer, a client tells the person, once, that the phone will contact that host, named, about once a day it sends files through the relay, and asks the issuer nothing unless they allow it. They may decline, and may turn it off later; turning it off forgets the free key. |
-| **C-7.6-35** | A client with no key for a relay, or with a customer key last answered 403 `ended`, where C-7.6-33 gives it a free issuer and C-7.6-34 the person's leave, makes a free account when an upload of its own is locked `missing` or `expired` on a connection to that relay whose `entGates` has bit 1, and at no other time. It `GET`s the parameters for the relay's host name, mines a stamp, `POST`s it, holds the 201's key, and swaps it for a ticket at once (C-7.6-27). An answer whose `aud` is not that host name is not acted on. With the plane off, or with no route, it waits; a phone that comes online with an upload still locked asks then. |
+| **C-7.6-34** | Free tickets are on for a relay until the person turns them off. The first time an upload of theirs waits on that relay for want of a ticket, a client tells the person, once, that the phone contacts that host, named, on each day it sends files through the relay, and keeps telling until they acknowledge it or turn it off, even after the account is made. Once turned off it asks the issuer nothing for that relay; turning it off forgets the free key. |
+| **C-7.6-35** | A client with no key for a relay, or with a customer key last answered 403 `ended`, where C-7.6-33 gives it a free issuer and the person has not turned free tickets off there (C-7.6-34), makes a free account when an upload of its own is locked `missing` or `expired` on a connection to that relay whose `entGates` has bit 1, and at no other time — so never for a relay the person has turned off, nor with the plane off. It `GET`s the parameters for the relay's host name, mines a stamp, `POST`s it, holds the 201's key, and swaps it for a ticket at once (C-7.6-27). An answer whose `aud` is not that host name is not acted on. With the plane off, or with no route, it waits; a phone that comes online with an upload still locked asks then. |
 | **C-7.6-36** | A client mines with the `day` and `bits` of the 200 it just got, never its own clock's day, and a fresh `nonce` for each account request, counting `n` up from 0. A 400 `bad-stamp` is re-mined once, with the `bits` and `day` it carries; a second one backs off as a 503 does. |
 | **C-7.6-37** | A free key is held in the relay host's one key slot, marked free. A customer key that arrives for that host replaces it. It goes only to the issuer origin that made it, under C-7.6-29's other rules, and never rides a backup. Answered 401 or 403, it is forgotten with its state, and a new account is made at the next locked upload, no sooner than the next UTC day. |
 | **C-7.6-38** | On the account route, a 429 waits `retry-after` seconds, and a 503 waits `retry-after`, or without one 1 h, doubling to 24 h. Anything else, a failed request included, backs off from 1 min, doubling to 1 h, as C-7.6-28's "anything else" does: the issuer never answered, so nothing was asked of its cap. |
@@ -315,8 +315,9 @@ the address's count.
 > stamp cannot be mined ahead or spent twice.
 >
 > **Why the notice.** The relay's own consent covers the relay. A free account makes the phone contact a second host
-> the person did not name, which links one day's pseudonym to an account (`docs/SPOOL_PROTOCOL.md` §10.1), so it
-> asks first.
+> the person did not name, which links one day's pseudonym to an account (`docs/SPOOL_PROTOCOL.md` §10.1), so the
+> person is told, by name, and can turn it off. It informs rather than asks, so small photos go through by default (knit-next
+> ADR 2026-10.s3ep's 2026-10-20 amendment).
 >
 > **Why a free key is not backed up.** It is anonymous and cheap to make again. A restored phone makes its own.
 >

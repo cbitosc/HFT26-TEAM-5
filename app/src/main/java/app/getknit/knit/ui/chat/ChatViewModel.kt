@@ -1387,10 +1387,11 @@ class ChatViewModel(
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AttachmentRelay.Silent)
 
     /**
-     * The free-account notice for this thread (C-7.6-34), or null. It shows once something sent here is held back for
-     * want of a files ticket — the staged attachment, or one of ours already in the thread, reads
-     * [AttachmentRelay.Locked] — on a relay whose free issuer the person has not answered for. Their answer removes
-     * the offer, so it shows once.
+     * The free-tickets notice for this thread (C-7.6-34), or null. Free tickets are on by default, so the notice informs
+     * rather than asks: it shows once something sent here is held back for want of a files ticket — the staged
+     * attachment, or one of ours already in the thread, reads [AttachmentRelay.Locked] — on a relay whose notice the
+     * person has not acknowledged, and stays up once the free key is held (the upload then goes through, and the notice
+     * must not vanish unread). OK or Turn off removes the offer, so it shows once.
      */
     val freeUploadOffer: StateFlow<FreeUploadOffer?> =
         if (freeUploads == null) {
@@ -1398,7 +1399,7 @@ class ChatViewModel(
         } else {
             combine(freeUploads.offers, stagedAttachmentRelay, state) { offers, staged, ui ->
                 val held = staged == AttachmentRelay.Locked || ui.rows.any { it.attachmentRelay == AttachmentRelay.Locked }
-                offers.firstOrNull()?.takeIf { held }
+                offers.firstOrNull { it.freeKeyHeld || held }
             }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
         }
 
@@ -1412,7 +1413,10 @@ class ChatViewModel(
         return freeUploads?.photoChunks?.first()?.let(::photoFitBytes)
     }
 
-    /** The person's answer to [offer]'s notice. Written past the screen's life: a Back must not lose it. */
+    /**
+     * The person's answer to [offer]'s notice — true for OK, false for Turn off. Written past the screen's life: a Back
+     * must not lose it.
+     */
     fun answerFreeUploads(
         offer: FreeUploadOffer,
         allowed: Boolean,

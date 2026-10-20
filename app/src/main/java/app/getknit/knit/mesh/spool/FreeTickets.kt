@@ -311,7 +311,7 @@ interface FreeKeyJournal {
     /** Relay host name → free issuer origin: the seeded ones, and a debug build's own. */
     val freeIssuers: Flow<Map<String, String>>
 
-    /** Relay host name → whether the person allowed a free account there (true) or declined (false); absent: not asked. */
+    /** Relay host name → whether the person acknowledged free tickets there (true) or turned them off (false); absent: on, not yet told. */
     val freeConsent: Flow<Map<String, Boolean>>
 
     /** Relay host name → the account route's backoff there. */

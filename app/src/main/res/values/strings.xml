@@ -1571,10 +1571,10 @@
     <!-- The free-ticket notice (docs/VOICE_CALLS.md C-7.6-34), shown once before this phone first contacts a free
          issuer; %1$s is that issuer's host name. Name no product, price or shop, and never "Get" or "Upgrade"; the
          daily amount is a sending allowance, never storage. -->
-    <string name="chat_free_uploads_title">Send small photos through your relay?</string>
-    <string name="chat_free_uploads_body">With a free ticket, your relay carries small photos and files from this phone, up to a daily amount. To fetch the ticket, the phone contacts %1$s on each day it sends something through the relay. You can turn this off any time in Internet relays.</string>
-    <string name="chat_free_uploads_allow">Allow</string>
-    <string name="chat_free_uploads_decline">Not now</string>
+    <string name="chat_free_uploads_title">Small photos go through your relay</string>
+    <string name="chat_free_uploads_body">This phone uses a free ticket so your relay carries its small photos and files, up to a daily amount. To get the ticket, it contacts %1$s on each day it sends something through the relay. You can turn this off any time in Internet relays.</string>
+    <string name="chat_free_uploads_ok">OK</string>
+    <string name="chat_free_uploads_turn_off">Turn off</string>
     <!-- LoRa plane (ADR 040): a DM whose peer only the board has heard lately, and the composer's length hint -->
     <string name="chat_lora_only">Reachable over LoRa only</string>
     <string name="chat_lora_only_title">Over LoRa only</string>

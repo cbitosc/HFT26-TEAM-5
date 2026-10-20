@@ -616,7 +616,8 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   `TicketRefresher.uploadWanted` / `freeDueAt`, `data/relay/FreeUploads`, `FreeUploadsNotice`, the `spool_free_` keys,
   `free_issuers` / `free_issuer_am`) or `AttachmentStore.fitted`: READ ADR 2026-10.s3ep and `docs/VOICE_CALLS.md` §2.6
   (C-7.6-32 to C-7.6-38) — an attachment over `am` is never `aput` and `size` locks nothing; a free key asks only
-  while an upload waits (no 6 h margin, the hour floor kept) and only after the person's yes; it never rides a backup
+  while an upload waits (no 6 h margin, the hour floor kept), only for a relay in use, and never once the person turned
+  free tickets off (on by default; the notice informs, s3ep's amendment); it never rides a backup
   or asks for a badge; a photo is fitted at staging, to the hint only with a free key or none.
 - **When creating or modifying anything under `app/src/test/java/app/getknit/knit/mesh/lab/`:** keep
   `scripts/lab-lint.py` clean (a `PostToolUse` hook runs it on every scenario edit, `lab-chaos.sh` before every sweep,

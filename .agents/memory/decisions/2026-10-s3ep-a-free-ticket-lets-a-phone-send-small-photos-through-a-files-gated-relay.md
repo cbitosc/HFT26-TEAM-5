@@ -118,3 +118,19 @@ an issuer only from an invite's `i`.
 Getting tickets moved from `CALLS_WIRED` to `ANYWHERE_WIRED` (`BuildConfig.KNIT_ANYWHERE`, `-PknitAnywhere=`, ADR
 2026-10.swvp), which needs no calls. That covers the issuer, free uploads, an invite's customer key, the own badge's
 switch and the relay rows' free switch. Reading a relay's gates still ships in every build.
+
+## Amendment (2026-10-20): free tickets are on by default, and the notice informs
+
+The maintainer's call: a relay with a free issuer gets free tickets unless the person turns them off. An unanswered
+`spool_free_consent:<host>` now counts as on (`TicketRefresher.freeIssuerFor` refuses only an explicit `false`, as
+`refreshFree` already did), and the relay screen's `FreeUploadsSwitch` shows it on. Everything else holds: a free
+account is still made only for a waiting upload (C-7.6-35), only for a relay the plane dials — `TicketRefresher` reads
+`SettingsStore.activeSpoolUrls`, so a relay the person parked, or the plane off, is never asked for
+(`FreeTicketRefresherTest.aRelayThatIsTurnedOffGetsNoFreeAccountWhateverWaits`) — and turning the switch off forgets
+the free key.
+
+The notice (`FreeUploadsNotice`) now tells rather than asks, with OK and Turn off. Because the account can now be made
+before the person reads it, `FreeUploadOffer.freeKeyHeld` keeps an unacknowledged relay's notice up after its free
+key arrives and the upload opens; OK writes `true`, which ends it. `docs/VOICE_CALLS.md` C-7.6-34 and C-7.6-35 are
+amended to match. What the iOS port must copy changes the same way: on by default, a notice that informs and stays
+until acknowledged, and nothing asked for a relay that is turned off.

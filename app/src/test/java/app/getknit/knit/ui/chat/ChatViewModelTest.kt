@@ -35,6 +35,8 @@ import app.getknit.knit.data.message.withReply
 import app.getknit.knit.data.peer.PeerEntity
 import app.getknit.knit.data.reaction.ReactionEntity
 import app.getknit.knit.data.relay.AttachmentWait
+import app.getknit.knit.data.relay.FreeUploadOffer
+import app.getknit.knit.data.relay.FreeUploads
 import app.getknit.knit.data.relay.RelayFacts
 import app.getknit.knit.data.relay.RelayReach
 import app.getknit.knit.data.settings.SettingsStore
@@ -64,6 +66,13 @@ import app.getknit.knit.mesh.protocol.Protocol
 import app.getknit.knit.mesh.protocol.ReplyRef
 import app.getknit.knit.mesh.protocol.VideoInfo
 import app.getknit.knit.mesh.sha256Hex
+import app.getknit.knit.mesh.spool.FreeKeyJournal
+import app.getknit.knit.mesh.spool.HeldKey
+import app.getknit.knit.mesh.spool.SpoolStatus
+import app.getknit.knit.mesh.spool.SpoolTicket
+import app.getknit.knit.mesh.spool.SpoolTicketJournal
+import app.getknit.knit.mesh.spool.SpoolUploads
+import app.getknit.knit.mesh.spool.TicketKeyJournal
 import app.getknit.knit.moderation.ImageScreeningService
 import app.getknit.knit.notifications.Notifier
 import app.getknit.knit.transfer.OfferOutcome
@@ -254,6 +263,9 @@ class ChatViewModelTest {
     // The call layer a case hands the chat (experimental); null, as in a build without calls, unless a case sets it.
     private var calls: CallManager? = null
 
+    // Free tickets (C-7.6-34); null, as in a build without Knit Anywhere, unless a case sets it.
+    private var freeUploads: FreeUploads? = null
+
     private fun vm(conversationId: String = Conversations.NEARBY) =
         ChatViewModel(
             conversationId,
@@ -283,6 +295,7 @@ class ChatViewModelTest {
             context,
             transfers,
             calls = calls,
+            freeUploads = freeUploads,
         )
 
     @Test
@@ -3593,5 +3606,60 @@ class ChatViewModelTest {
             advanceUntilIdle()
             assertTrue(live.state.value.canCall)
             assertTrue(live.state.value.canMeshCall)
+        }
+
+    @Test
+    fun theFreeTicketsNoticeStaysUpOnceAFreeKeyIsHeldUntilItIsAcknowledged() =
+        runTest {
+            // C-7.6-34 amended: free tickets are on by default, so the account can be made and the upload go through
+            // before the person reads the notice. A held free key keeps it up in a thread with nothing held back, and OK
+            // ends it; with no key and nothing held back there is nothing to tell.
+            val host = "lax.spool.getknit.app"
+            val status =
+                SpoolStatus(
+                    "wss://$host/spool/v1",
+                    true,
+                    0,
+                    null,
+                    emptyList(),
+                    maxAttachBytes = 16 shl 20,
+                    ent = true,
+                    entGates = SpoolTicket.FL_FILES,
+                    uploads = SpoolUploads.Open,
+                )
+            val keys = MutableStateFlow(mapOf(host to HeldKey("https://anywhere.getknit.app", "kak1_x", free = true)))
+            val consent = MutableStateFlow(emptyMap<String, Boolean>())
+            val free = mockk<FreeKeyJournal>()
+            every { free.freeIssuers } returns MutableStateFlow(mapOf(host to "https://anywhere.getknit.app"))
+            every { free.freeConsent } returns consent
+            coEvery { free.setFreeConsent(any(), any()) } answers {
+                val allowed = secondArg<Boolean?>()
+                consent.value = if (allowed == null) consent.value - firstArg<String>() else consent.value + (firstArg<String>() to allowed)
+            }
+            val keyJournal = mockk<TicketKeyJournal>()
+            every { keyJournal.keys } returns keys
+            every { keyJournal.keyStates } returns MutableStateFlow(emptyMap())
+            val tickets = mockk<SpoolTicketJournal>()
+            every { tickets.spoolTickets } returns MutableStateFlow(emptyMap())
+            freeUploads = FreeUploads(MutableStateFlow(listOf(status)), free, keyJournal, tickets)
+            stubDm("bob")
+            val vm = vm("bob")
+            backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.freeUploadOffer.collect {} }
+            advanceUntilIdle()
+
+            val offer = vm.freeUploadOffer.value
+            assertEquals(FreeUploadOffer(host, "anywhere.getknit.app", freeKeyHeld = true), offer)
+
+            keys.value = emptyMap()
+            advanceUntilIdle()
+            assertNull("no key and nothing held back: nothing to tell", vm.freeUploadOffer.value)
+
+            keys.value = mapOf(host to HeldKey("https://anywhere.getknit.app", "kak1_x", free = true))
+            advanceUntilIdle()
+            assertEquals("the notice is back before OK", offer, vm.freeUploadOffer.value)
+            vm.answerFreeUploads(offer!!, true)
+            advanceUntilIdle()
+            assertNull("OK acknowledged it", vm.freeUploadOffer.value)
+            assertEquals(mapOf(host to true), consent.value)
         }
 }
