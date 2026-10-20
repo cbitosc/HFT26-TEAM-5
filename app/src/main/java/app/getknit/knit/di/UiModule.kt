@@ -4,6 +4,7 @@ import app.getknit.knit.BuildConfig
 import app.getknit.knit.badge.BadgeKeys
 import app.getknit.knit.call.CallManager
 import app.getknit.knit.call.CaptureHealth
+import app.getknit.knit.call.OwnIceServers
 import app.getknit.knit.data.AttachmentIdentities
 import app.getknit.knit.data.KnitDatabase
 import app.getknit.knit.data.LinkCardStore
@@ -47,6 +48,7 @@ import app.getknit.knit.ui.search.SearchViewModel
 import app.getknit.knit.ui.settings.SettingsViewModel
 import app.getknit.knit.ui.yourmesh.YourMeshViewModel
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.flowOf
 import org.koin.android.ext.koin.androidContext
 import org.koin.core.module.dsl.viewModel
 import org.koin.dsl.module
@@ -157,7 +159,8 @@ val uiModule =
                 get(),
                 get<RelayStatusRepository>().facts,
                 get<LoraStatusRepository>().facts,
-                get<OwnIceStore>().ownIce,
+                // A build without own servers (OWN_ICE_WIRED off) never names one, whatever the store holds.
+                if (OWN_ICE_WIRED) get<OwnIceStore>().ownIce else flowOf(OwnIceServers()),
                 get(),
                 get<LowPowerSource>().posture,
                 intake = get<IncomingCallStore>().intake,

@@ -65,8 +65,9 @@ import org.koin.androidx.compose.koinViewModel
 
 /**
  * Calls (experimental, docs/VOICE_CALLS.md §3.14, ADR 2026-10.mr88): whether this phone takes incoming live and mesh
- * calls (C-3.3-7), a switch per kind the build wires; "Relay all calls", and the person's own STUN and
- * TURN servers, each replacing what the relays supply, where live calls are wired (`LIVE_CALLS_WIRED`); the transcripts
+ * calls (C-3.3-7), a switch per kind the build wires; "Relay all calls" where live calls are wired (`LIVE_CALLS_WIRED`),
+ * and the person's own STUN and TURN servers, each replacing what the relays supply, where own servers are too
+ * (`OWN_ICE_WIRED`, debug builds only for now); the transcripts
  * and captions switch and their speech model (C-3.11-9, C-3.7-5) where speech is (`STT_WIRED`). Reached only where a
  * call kind is wired (`CALL_SETTINGS_WIRED`): the route is not registered otherwise.
  */
@@ -95,6 +96,7 @@ fun CallSettingsScreen(
     CallSettingsScreenContent(
         state = state,
         live = viewModel.live,
+        ownServers = viewModel.ownServers,
         walkie = viewModel.walkie,
         intake = intake,
         onToggleTakeLive = viewModel::setTakeLive,
@@ -121,8 +123,10 @@ fun CallSettingsScreen(
 internal fun CallSettingsScreenContent(
     state: CallSettingsUiState,
     onBack: () -> Unit,
-    // The live calls' rows: "Relay all calls", the own servers, their Test and Save. Off where live calls are not wired.
+    // "Relay all calls" and the live switch in "Incoming calls". Off where live calls are not wired.
     live: Boolean = true,
+    // The own servers' rows, their Test and Save. Off where own servers are not wired (release builds for now).
+    ownServers: Boolean = live,
     // Whether mesh calls are wired, so "Incoming calls" has a mesh switch.
     walkie: Boolean = false,
     intake: CallIntake = CallIntake(),
@@ -155,7 +159,7 @@ internal fun CallSettingsScreenContent(
                 },
                 title = { Text(stringResource(R.string.settings_calls_title)) },
                 actions = {
-                    if (live) {
+                    if (ownServers) {
                         TextButton(onClick = onSave, enabled = state.canSave, modifier = Modifier.testTag("call_settings_save")) {
                             Text(stringResource(R.string.action_save))
                         }
@@ -183,6 +187,8 @@ internal fun CallSettingsScreenContent(
                     onToggle = onToggleRelayAll,
                     modifier = Modifier.testTag("call_settings_relay_all"),
                 )
+            }
+            if (ownServers) {
                 HorizontalDivider()
                 ToggleRow(
                     title = stringResource(R.string.call_settings_stun_title),

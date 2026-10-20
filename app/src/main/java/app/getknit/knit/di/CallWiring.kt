@@ -124,6 +124,14 @@ const val CALLS_WIRED: Boolean = LIVE_CALLS_WIRED || WALKIE_WIRED
  */
 const val STT_WIRED: Boolean = CALLS_WIRED && BuildConfig.STT
 
+/**
+ * The person's own STUN and TURN servers (§3.14, ADR 2026-10.mr88): debug builds only for now, and only with live calls.
+ * Off, the Calls screen shows no server rows, Test or Save, the Settings row never names an own server, and every call
+ * takes the spools' servers whatever [OwnIceStore] holds — [OverridingTurnSource] is not built. Not `const`:
+ * `BuildConfig.DEBUG` is a `parseBoolean` AGP emits, which R8 folds but the compiler cannot.
+ */
+val OWN_ICE_WIRED: Boolean = LIVE_CALLS_WIRED && BuildConfig.DEBUG
+
 /** The Calls screen's route and Settings row: which incoming calls it takes, then its live rows and speech section. */
 const val CALL_SETTINGS_WIRED: Boolean = CALLS_WIRED
 
@@ -159,11 +167,12 @@ private fun callGraph(): Module =
                 CallSettingsViewModel(
                     settings = get(),
                     ownIce = get(),
-                    probe = if (LIVE_CALLS_WIRED) get<IceProbe>() else null,
+                    probe = if (OWN_ICE_WIRED) get<IceProbe>() else null,
                     stt = if (STT_WIRED) get<SttModelStore>() else null,
                     transcriptStore = if (STT_WIRED) get<TranscriptStore>() else null,
                     incoming = get(),
                     walkie = WALKIE_WIRED,
+                    live = LIVE_CALLS_WIRED,
                 )
             }
         }
@@ -302,7 +311,7 @@ private fun Module.liveGraph() {
         )
     }
     // The Calls screen's Test (C-3.14-5): the same factory, and refused while a call holds it.
-    single<IceProbe> { get<WebRtcCallMedia>() }
+    if (OWN_ICE_WIRED) single<IceProbe> { get<WebRtcCallMedia>() }
     single {
         // C-3.7-3's "Relay all calls", read as each call opens its media. Until the store's first read lands it
         // reads as on: a call in that instant goes through TURN rather than showing the peer an address it hides.
@@ -314,6 +323,13 @@ private fun Module.liveGraph() {
         RelayAllCalls { relayAll.value ?: true }
     }
     single<TurnSource> {
+        val spool =
+            object : TurnSource {
+                override suspend fun turnServers(peerId: String) = get<MeshManager>().turnServers(peerId)
+
+                override fun stunUrls() = get<MeshManager>().stunUrls()
+            }
+        if (!OWN_ICE_WIRED) return@single spool
         // §3.14 (ADR 2026-10.mr88): the person's own servers, each kind replacing the spools'. Until the store's
         // first read lands they read as none, so that instant's call asks the spools as it always did.
         val ownIce =
@@ -321,15 +337,7 @@ private fun Module.liveGraph() {
                 .ownIce
                 .map { it.effective() }
                 .stateIn(get<CoroutineScope>(), SharingStarted.Eagerly, CustomIce.NONE)
-        OverridingTurnSource(
-            custom = { ownIce.value },
-            spool =
-                object : TurnSource {
-                    override suspend fun turnServers(peerId: String) = get<MeshManager>().turnServers(peerId)
-
-                    override fun stunUrls() = get<MeshManager>().stunUrls()
-                },
-        )
+        OverridingTurnSource(custom = { ownIce.value }, spool = spool)
     }
 }
 

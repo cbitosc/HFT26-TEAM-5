@@ -38,6 +38,7 @@ class CallSettingsScreenContentTest {
     private fun render(
         state: CallSettingsUiState,
         live: Boolean = true,
+        ownServers: Boolean = live,
         onToggleRelayAll: (Boolean) -> Unit = {},
         onToggleTurn: (Boolean) -> Unit = {},
         onTest: () -> Unit = {},
@@ -53,6 +54,7 @@ class CallSettingsScreenContentTest {
                     state = state,
                     onBack = {},
                     live = live,
+                    ownServers = ownServers,
                     onToggleRelayAll = onToggleRelayAll,
                     onToggleTurn = onToggleTurn,
                     onTest = onTest,
@@ -136,6 +138,18 @@ class CallSettingsScreenContentTest {
         compose.onNodeWithTag("call_settings_transcripts").assertIsDisplayed()
         val liveRows = listOf("call_settings_relay_all", "call_settings_stun_switch", "call_settings_turn_switch", "call_settings_test")
         for (tag in liveRows + "call_settings_save") {
+            compose.onNodeWithTag(tag).assertDoesNotExist()
+        }
+    }
+
+    // A release build with live calls (OWN_ICE_WIRED off, ADR 2026-10.mr88's amendment): "Relay all calls" stays, the
+    // own servers' rows, their Test and Save go.
+    @Test
+    fun aBuildWithoutOwnServersKeepsTheRelayRowAlone() {
+        render(CallSettingsUiState(), live = true, ownServers = false)
+        compose.onNodeWithTag("call_settings_relay_all").assertIsDisplayed()
+        val serverRows = listOf("call_settings_stun_switch", "call_settings_turn_switch", "call_settings_test")
+        for (tag in serverRows + "call_settings_save") {
             compose.onNodeWithTag(tag).assertDoesNotExist()
         }
     }

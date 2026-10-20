@@ -38,3 +38,11 @@ does (§2.5); the screen says so. libwebrtc checks `turns:` against its own root
 a `turns:` server on such a certificate gathers no relay (the `turntls` diagnosis switch still applies). Kept true by
 `CustomIceTest` (the URL rule, the redacted `toString`), `OverridingTurnSourceTest` (no `turnreq` with an own TURN),
 `OwnIceStoreTest`, `ProbeVerdictTest` and docs/VOICE_CALLS.md §3.14.
+
+## Amendment 2026-10-20 — debug builds only for now
+
+The own servers are offered only where `OWN_ICE_WIRED` (`di/CallWiring`: live calls wired and `BuildConfig.DEBUG`)
+holds, so a release built with `-PliveCalls=true` keeps "Relay all calls" and the incoming switches but shows no server
+rows, Test or Save, never names an own server on the Settings row, and builds no `IceProbe` or `OverridingTurnSource`:
+every call takes the spools' servers, whatever `OwnIceStore` holds. The feature stays behind the switch until it has
+had more use; flipping the constant to `LIVE_CALLS_WIRED` brings it back unchanged.

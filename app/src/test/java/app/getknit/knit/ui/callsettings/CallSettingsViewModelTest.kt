@@ -73,8 +73,16 @@ class CallSettingsViewModelTest {
     private fun kotlinx.coroutines.test.TestScope.vm(
         speech: SttModelStore? = null,
         live: Boolean = true,
+        ownServers: Boolean = live,
     ): CallSettingsViewModel =
-        CallSettingsViewModel(settings, store, probe.takeIf { live }, speech, transcriptStore.takeIf { speech != null }).also { vm ->
+        CallSettingsViewModel(
+            settings,
+            store,
+            probe.takeIf { live && ownServers },
+            speech,
+            transcriptStore.takeIf { speech != null },
+            live = live,
+        ).also { vm ->
             backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.state.collect {} }
             backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.transcripts.collect {} }
         }
@@ -92,6 +100,33 @@ class CallSettingsViewModelTest {
             advanceUntilIdle()
             assertNull(probed)
             assertFalse(vm.state.value.testing)
+        }
+
+    /**
+     * A release build with live calls (`OWN_ICE_WIRED` off, ADR 2026-10.mr88's amendment) hands no probe: "Relay all
+     * calls" stays, the own servers' rows go, and neither their switches, Save nor Test write or ask anything.
+     */
+    @Test
+    fun withoutOwnServersTheLiveRowsStayAndTheServerRowsWriteNothing() =
+        runTest {
+            val vm = vm(live = true, ownServers = false)
+            advanceUntilIdle()
+            assertTrue(vm.live)
+            assertFalse(vm.ownServers)
+            vm.setRelayAll(true)
+            vm.setStunOn(true)
+            vm.setTurnOn(true)
+            vm.editDraft { it.copy(stunText = "stun:new.example.org") }
+            // Savable, so the refused write below is the guard's and not the draft's rule.
+            assertTrue(vm.state.value.canSave)
+            vm.save()
+            vm.test()
+            advanceUntilIdle()
+            coVerify { settings.setCallsRelayAll(true) }
+            coVerify(exactly = 0) { store.setStunOn(any()) }
+            coVerify(exactly = 0) { store.setTurnOn(any()) }
+            coVerify(exactly = 0) { store.setStunUrls(any()) }
+            assertNull(probed)
         }
 
     @Test

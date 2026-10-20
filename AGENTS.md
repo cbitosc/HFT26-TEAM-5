@@ -161,7 +161,8 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   (`WebRtcCallMedia.probe`), `data/settings/OwnIceStore`, the `calls_stun_` / `calls_turn_` keys or `ui/callsettings/`:**
   READ ADR 2026-10.mr88 and `docs/VOICE_CALLS.md` §3.14 — the person's own STUN and TURN each replace the spools' for
   that kind (an own TURN sends no `turnreq`), a stored value is re-validated on every read, the password is never
-  logged, and the Test opens no microphone and never runs under a call.
+  logged, and the Test opens no microphone and never runs under a call. Debug builds only for now (`OWN_ICE_WIRED`, the
+  ADR's 2026-10-20 amendment): elsewhere no server row, no Test and no `OverridingTurnSource`.
   **Before touching casts — `SpoolCast`, `SpoolConnection.castOut` / `canCast` / `ticketedCast`, `ScopeSync.cast` /
   `canCast` / `handleCast`, `ScopeCrypto.sealCast` / `openCast`, `ScopeFrames.castEligible`, `CallPayload.ct` or
   `TalkLink.SPOOL`:** READ `docs/VOICE_CALLS.md` §2.7 and ADR 2026-10.79yb's sixth amendment — a chunk with no mesh path

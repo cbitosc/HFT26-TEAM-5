@@ -943,7 +943,8 @@ Every ICE server a call uses comes from the spools by default (§2.2, §2.6). Th
 own instead: up to four STUN URLs, and one TURN server with a static long-term username and password (coturn's
 `lt-cred-mech`). Each kind has its own switch and **replaces** what the spools supply for that kind; it never adds to
 it. `call/OverridingTurnSource` is the seam, `data/settings/OwnIceStore` holds the fields, and ADR 2026-10.mr88 records
-why.
+why. For now only a debug build with live calls offers them (`OWN_ICE_WIRED`): elsewhere the screen shows no server
+rows and every call takes the spools' servers, whatever the store holds.
 
 | ID           | Requirement |
 |--------------|-------------|

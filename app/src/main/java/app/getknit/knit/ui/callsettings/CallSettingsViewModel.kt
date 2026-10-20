@@ -121,15 +121,15 @@ sealed interface CallSettingsEvent {
 
 /**
  * The Calls screen (docs/VOICE_CALLS.md §3.14, ADR 2026-10.mr88): which incoming calls this phone takes (C-3.3-7),
- * one switch per kind the build wires, "Relay all calls", the person's own STUN and TURN
- * servers and the walkie's transcripts and live calls' captions with their speech model (C-3.11-9, C-3.7-5). The switches write as they
- * are touched, as every Settings switch does; the fields are a draft, loaded once and written by Save, and a Test tries
- * the draft before it is saved.
+ * one switch per kind the build wires, "Relay all calls", the person's own STUN and TURN servers (debug builds only,
+ * `OWN_ICE_WIRED`) and the walkie's transcripts and live calls' captions with their speech model (C-3.11-9, C-3.7-5).
+ * The switches write as they are touched, as every Settings switch does; the fields are a draft, loaded once and
+ * written by Save, and a Test tries the draft before it is saved.
  */
 class CallSettingsViewModel(
     private val settings: SettingsStore,
     private val ownIce: OwnIceStore,
-    // The live calls' Test; null, and no relay, server or Test rows, where live calls are not wired.
+    // The own servers' Test; null, and no server, Test or Save rows, where own servers are not wired (OWN_ICE_WIRED).
     private val probe: IceProbe? = null,
     // The speech model and the transcripts switch; null, and no section, where they are not wired.
     private val stt: SttModelStore? = null,
@@ -138,9 +138,11 @@ class CallSettingsViewModel(
     private val incoming: IncomingCallStore? = null,
     /** Whether mesh calls are wired, so "Incoming calls" has a mesh switch. */
     val walkie: Boolean = false,
+    /** Whether live calls are wired, so "Incoming calls" has a live switch and "Relay all calls" shows. */
+    val live: Boolean = probe != null,
 ) : ViewModel() {
-    /** Whether the live calls' rows show: "Relay all calls", the own servers and their Test. */
-    val live: Boolean = probe != null
+    /** Whether the own servers' rows show: the STUN and TURN switches and fields, their Test and Save. */
+    val ownServers: Boolean = live && probe != null
 
     /** "Incoming calls": what each switch holds, on until the store's first read. */
     val intake: StateFlow<CallIntake> =
@@ -197,10 +199,12 @@ class CallSettingsViewModel(
     }
 
     fun setStunOn(value: Boolean) {
+        if (!ownServers) return
         viewModelScope.launch { ownIce.setStunOn(value) }
     }
 
     fun setTurnOn(value: Boolean) {
+        if (!ownServers) return
         viewModelScope.launch { ownIce.setTurnOn(value) }
     }
 
@@ -231,6 +235,7 @@ class CallSettingsViewModel(
     /** Writes the fields as typed, each kind in one edit. Refused while anything typed fails its rule. */
     fun save() {
         val now = draft.value
+        if (!ownServers) return
         if (!now.stunSavable || !now.turnSavable) return
         viewModelScope.launch {
             ownIce.setStunUrls(now.stunUrls)
