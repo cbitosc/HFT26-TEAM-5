@@ -30,6 +30,9 @@ dependencyResolutionManagement {
 
 rootProject.name = "Knit"
 include(":app")
+// Knit's own detekt rules (the `knit` ruleset), which :app's detekt task loads. Tool-only: nothing depends on it but
+// :app's detektPlugins configuration, so an ordinary build, F-Droid's included, configures it and never builds it.
+include(":detekt-rules")
 
 // The baseline-profile generator is maintainer-only: a `com.android.test` module that drives the app on a
 // device to produce `app/src/main/baseline-prof.txt`, which is what actually ships. Nothing in the module

@@ -102,3 +102,13 @@ style:
   ReturnCount:
     max: 4
     excludeGuardClauses: true
+
+# Knit's own rules, from the :detekt-rules module (loaded through :app's detektPlugins; .agents/context/toolchain.md).
+knit:
+  BarePeriodicLoop:
+    active: true                           # #206: a launched endless delay-loop whose round can throw dies for good
+    guards:                                # calls that run their block and catch what it throws
+      - 'runCatching'
+      - 'runRound'                         # mesh/MeshCoroutines.kt, what everyRound runs each round through
+    excludes:
+      - '**/test/**'                       # a test's loop ending early fails that test; production loops are the hazard

@@ -815,6 +815,12 @@ class MeshLab {
         const val RIDE_HOLD_MS = 300L
 
         /**
+         * The field's re-offer interval (`MeshManager.NEIGHBOR_REOFFER_INTERVAL_MS`, private to its companion): a node
+         * boots with it unless a scenario about the loop shortens it ([LabLimits.reofferIntervalMs]).
+         */
+        const val REOFFER_INTERVAL_MS = 60_000L
+
+        /**
          * A blob round's first ask, lengthened ([app.getknit.knit.mesh.BlobExchange.FIRST_ASK_GRACE_MS] is 5 s): its
          * timer runs on wall time, and a scenario that counts copies must not race a slow runner's stall. A scenario
          * widens a round by advancing the clock this far and running a tick. Below
@@ -907,6 +913,12 @@ data class LabLimits(
      * 2026-10.vy27): on the wall clock, so longer than production's, which a stalled node could outlast.
      */
     val proofWaitMs: Long = MeshLab.PROOF_WAIT_MS,
+    /**
+     * How often the manager's re-offer round runs ([MeshLab.REOFFER_INTERVAL_MS], the field value by default, so no
+     * scenario's loop moves). A scenario about the loop itself shortens it; every other one pokes a round
+     * with [LabNode.reoffer].
+     */
+    val reofferIntervalMs: Long = MeshLab.REOFFER_INTERVAL_MS,
     /**
      * How long a held pipe's feed reads as live before it stalls ([MeshLab.FEED_STALL_MS]; ADR 2026-10.nsr7): a parked
      * ask waits that long behind it. Short by default: a held pipe is a feed that never ends, and only a scenario about
@@ -1319,6 +1331,7 @@ class LabNode internal constructor(
                 spoolAttachmentRetryMs = limits.spoolAttachmentRetryMs,
                 firstAskGraceMs = limits.firstAskGraceMs,
                 proofWaitMs = limits.proofWaitMs,
+                reofferIntervalMs = limits.reofferIntervalMs,
                 blobHolderQuery =
                     BlobExchange.HolderQuery(
                         enabled = limits.blobQuery,

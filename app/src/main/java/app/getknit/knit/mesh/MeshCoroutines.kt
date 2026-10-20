@@ -5,6 +5,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
@@ -41,15 +42,28 @@ internal fun CoroutineScope.everyRound(
     launch {
         while (true) {
             delay(intervalMs)
-            try {
-                round()
-            } catch (e: CancellationException) {
-                ensureActive()
-                onFailure(e)
-            } catch (
-                @Suppress("TooGenericExceptionCaught") e: Exception, // any failure costs this round alone
-            ) {
-                onFailure(e)
-            }
+            runRound(onFailure) { round() }
         }
     }
+
+/**
+ * Runs one [round], handing a throw to [onFailure] instead of letting it end the caller: [everyRound]'s round, and a
+ * pass of a long-lived collector (`MeshManager.watchNeighbors`) whose next emission must still be acted on (#206). A
+ * [CancellationException] while the caller is still active is a failure like any other; the caller's own cancellation
+ * is rethrown. An [Error] is not caught.
+ */
+internal suspend inline fun runRound(
+    onFailure: (Exception) -> Unit,
+    round: () -> Unit,
+) {
+    try {
+        round()
+    } catch (e: CancellationException) {
+        currentCoroutineContext().ensureActive()
+        onFailure(e)
+    } catch (
+        @Suppress("TooGenericExceptionCaught") e: Exception, // any failure costs this round alone
+    ) {
+        onFailure(e)
+    }
+}

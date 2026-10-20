@@ -235,6 +235,9 @@ class MeshManager(
     // ([AttachmentDeferPolicy.PROOF_WAIT_MS], ADR 2026-10.vy27). Injectable for `mesh/lab`, whose wall-clock hold a stall
     // must not outlast.
     proofWaitMs: Long = AttachmentDeferPolicy.PROOF_WAIT_MS,
+    // How often the re-offer round runs for the linked neighbours ([NEIGHBOR_REOFFER_INTERVAL_MS]). Injectable for
+    // `mesh/lab`, whose scenario that a failing round does not end the loop (#206) must let the real loop run.
+    private val reofferIntervalMs: Long = NEIGHBOR_REOFFER_INTERVAL_MS,
     // Whether this build queries neighbours for a blob's holders before it asks (ADR 2026-10.6e5t;
     // `BuildConfig.BLOB_QUERY`, on in every build by default), and how long it waits for their answers.
     // Off, every neighbour gets ADR 2026-10.f7gg's blind round; answering a query is never gated.
@@ -2858,7 +2861,7 @@ class MeshManager(
      * a peer no longer holding a live link is a no-op (the send routes to no transport).
      */
     private fun reofferToNeighborsPeriodically(session: CoroutineScope) {
-        session.everyRound(NEIGHBOR_REOFFER_INTERVAL_MS, onFailure = { roundFailed(MeshRound.REOFFER, it) }) {
+        session.everyRound(reofferIntervalMs, onFailure = { roundFailed(MeshRound.REOFFER, it) }) {
             reofferToNeighbors()
         }
     }
@@ -2868,6 +2871,10 @@ class MeshManager(
      * inside a scenario, whose `delay()`-based loop a lab clock jump never wakes.
      */
     internal suspend fun reofferToNeighbors() {
+        // A link-set pass that failed part-way runs again now: the link set may never change again to re-run it (#206).
+        // On the set the watcher was last handed, never a newer `neighbors.value`: the watcher may hold that one queued
+        // on the lock, and would then act on it after the newer one, departing a peer still linked.
+        if (neighborPassOwed) neighborPassLock.withLock { neighborPass(neighborsHanded) }
         // First, and outside the link-set guards: a reset's second re-seal is due by the clock, not by a link, and a
         // pass due with nobody linked still takes its long-range and coordination-plane sends (ADR 2026-10.dmgw).
         resealSecondPass()
@@ -2897,45 +2904,108 @@ class MeshManager(
     internal var linksActedOn: Set<String> = emptySet()
         private set
 
+    // One [neighborPass] at a time: the watcher's on each change, and the re-offer round's retry of a failed one.
+    private val neighborPassLock = Mutex()
+
+    // The links whose newcomer hooks all ran: what picks a pass's newcomers. A departure leaves it at once, so a peer
+    // that comes back is a newcomer whatever became of the pass that saw it go; a newcomer joins it only once every hook
+    // ran. Guarded by [neighborPassLock]; emptied when a session starts watching.
+    private var knownLinks = emptySet<String>()
+
+    // The link set the last pass saw, whether or not it ran to its end: what picks a pass's departures. A newcomer whose
+    // pass failed after `linked` / the re-ask may already hold our ask, so its departure is acted on like any other
+    // (#140). Guarded by [neighborPassLock]; emptied when a session starts watching.
+    private var lastLinks = emptySet<String>()
+
+    // Departures whose step has not run to its end: carried into the next pass until it does (#206). Guarded by
+    // [neighborPassLock].
+    private var owedDepartures = emptySet<String>()
+
+    /**
+     * Whether a [neighborPass] failed part-way and is owed again: set by the failure, cleared by the next pass that runs
+     * to its end. `neighbors` emits only on a change, so a steady link set would never re-run it; the re-offer round
+     * reads this and runs the pass itself.
+     */
+    @Volatile
+    private var neighborPassOwed = false
+
+    // The link set the watcher was last handed, written before it queues on [neighborPassLock]: the set a retry of a
+    // failed pass acts on, so the two never act out of order (each pass's set is one the watcher has already seen).
+    @Volatile
+    private var neighborsHanded: Set<Peer> = emptySet()
+
     private fun watchNeighbors(session: CoroutineScope) {
         session.launch {
-            var known = emptySet<String>()
-            transport.neighbors.collect { current ->
-                val currentIds = current.map { it.nodeId }.toSet()
-                val newcomers = current.filter { it.nodeId !in known }
-                // No departure cleanup: under the cue-driven transport a data-path link is ephemeral and
-                // reconnects on every sync, so we deliberately keep sentAvatarHashes across the flap —
-                // clearing it would re-push every avatar on each brief contact. A peer that truly leaves
-                // ages out by TTL. (ForwardSync, by contrast, *does* re-offer its whole carried set on each
-                // join now: the digest gate makes a fresh link mean the stores differ, so re-pushing is how
-                // an offer lost to a torn-down link self-heals — see ForwardSync.onNeighborAdded. A persistent
-                // link (Bluetooth) only joins once, so reofferToNeighborsPeriodically re-runs these hooks on a
-                // timer for currently-linked neighbors — the anti-entropy a non-flapping link needs.)
-                val departed = known - currentIds
-                known = currentIds
-                // The one departure step: a blob whose ask or hold sat on a link that went asks its next holder now,
-                // not at the next tick (#140) — an ask stands on a live link until its floor, never on one that is gone.
-                // Ahead of [linksActedOn], which `mesh/lab` reads as "the departure has been acted on".
-                blobExchange.unlinked(departed)
-                linksActedOn = currentIds
-                // A newcomer may be the holder of bytes whose want the sweep already reclaimed — re-arm from
-                // the database first, so the re-ask below has the full missing set to ask it for.
-                // A newcomer holds no ask of ours — one sent before may have died with its old link — so each round
-                // may ask it again (ADR 2026-10.f7gg). Ahead of the re-arm, whose wants step at once.
-                blobExchange.linked(newcomers.map { it.nodeId })
-                if (newcomers.isNotEmpty()) rewantMissingBlobs()
-                // Blobs we still need take their next step of asks, which reaches a newcomer at once in a round
-                // already widened (ADR 2026-10.f7gg). Ahead of the per-newcomer hooks, so the digest stays the
-                // batch's last send — the step `mesh/lab` waits on.
-                if (newcomers.isNotEmpty()) blobExchange.reask()
-                newcomers.forEach {
-                    pushProfileTo(it)
-                    forwardSync.onNeighborAdded(it) // re-offer carried DMs addressed to / routable via it
-                    keyExchange.onNeighborAdded(it) // re-ask the new neighbor for keys we're still missing
-                    ackSync.onNeighborAdded(it) // re-send any broadcast/group delivery tick we owe it, over the link
-                    flushPendingGroupKeysFor(it.nodeId) // re-send unacked group epoch seeds (partition merge)
-                }
+            neighborPassLock.withLock {
+                knownLinks = emptySet()
+                lastLinks = emptySet()
+                owedDepartures = emptySet()
+                neighborPassOwed = false
+                neighborsHanded = emptySet()
             }
+            // A direct collector, on purpose: `neighbors` conflates, and `mesh/lab` reads this body's return as the
+            // link set handled (`LabTransport.awaitNeighborsHandled`).
+            transport.neighbors.collect {
+                neighborsHanded = it
+                neighborPassLock.withLock { neighborPass(it) }
+            }
+        }
+    }
+
+    /**
+     * Acts on the link set [current]: the departures' step, then the newcomers' hooks. One pass is one round (#206): a
+     * throw out of any step is logged and counted ([MeshRound.NEIGHBORS]), and the watcher lives on for the next change.
+     * What failed is owed, not marked done — the departures stay in [owedDepartures] until their step returns, the
+     * newcomers stay out of [knownLinks] until all their hooks ran (each hook is idempotent: the re-offer round re-runs
+     * most of them every minute) — and the next pass, a change or the re-offer round's retry, runs them again. A
+     * departure is read against the set the last pass saw ([lastLinks]), not against [knownLinks]: a newcomer whose pass
+     * failed after its asks went out is departed like any other. Under [neighborPassLock].
+     */
+    private suspend fun neighborPass(current: Set<Peer>) {
+        val currentIds = current.map { it.nodeId }.toSet()
+        val newcomers = current.filter { it.nodeId !in knownLinks }
+        // No departure cleanup: under the cue-driven transport a data-path link is ephemeral and
+        // reconnects on every sync, so we deliberately keep sentAvatarHashes across the flap —
+        // clearing it would re-push every avatar on each brief contact. A peer that truly leaves
+        // ages out by TTL. (ForwardSync, by contrast, *does* re-offer its whole carried set on each
+        // join now: the digest gate makes a fresh link mean the stores differ, so re-pushing is how
+        // an offer lost to a torn-down link self-heals — see ForwardSync.onNeighborAdded. A persistent
+        // link (Bluetooth) only joins once, so reofferToNeighborsPeriodically re-runs these hooks on a
+        // timer for currently-linked neighbors — the anti-entropy a non-flapping link needs.)
+        // An owed departure whose peer is back is moot: `linked` below starts that peer's asks over.
+        val departed = (lastLinks - currentIds) + (owedDepartures - currentIds)
+        lastLinks = currentIds
+        owedDepartures = departed
+        knownLinks = knownLinks intersect currentIds
+        runRound(onFailure = {
+            neighborPassOwed = true
+            roundFailed(MeshRound.NEIGHBORS, it)
+        }) {
+            // The one departure step: a blob whose ask or hold sat on a link that went asks its next holder now,
+            // not at the next tick (#140) — an ask stands on a live link until its floor, never on one that is gone.
+            // Ahead of [linksActedOn], which `mesh/lab` reads as "the departure has been acted on".
+            blobExchange.unlinked(departed)
+            owedDepartures = emptySet()
+            linksActedOn = currentIds
+            // A newcomer may be the holder of bytes whose want the sweep already reclaimed — re-arm from
+            // the database first, so the re-ask below has the full missing set to ask it for.
+            // A newcomer holds no ask of ours — one sent before may have died with its old link — so each round
+            // may ask it again (ADR 2026-10.f7gg). Ahead of the re-arm, whose wants step at once.
+            blobExchange.linked(newcomers.map { it.nodeId })
+            if (newcomers.isNotEmpty()) rewantMissingBlobs()
+            // Blobs we still need take their next step of asks, which reaches a newcomer at once in a round
+            // already widened (ADR 2026-10.f7gg). Ahead of the per-newcomer hooks, so the digest stays the
+            // batch's last send — the step `mesh/lab` waits on.
+            if (newcomers.isNotEmpty()) blobExchange.reask()
+            newcomers.forEach {
+                pushProfileTo(it)
+                forwardSync.onNeighborAdded(it) // re-offer carried DMs addressed to / routable via it
+                keyExchange.onNeighborAdded(it) // re-ask the new neighbor for keys we're still missing
+                ackSync.onNeighborAdded(it) // re-send any broadcast/group delivery tick we owe it, over the link
+                flushPendingGroupKeysFor(it.nodeId) // re-send unacked group epoch seeds (partition merge)
+            }
+            knownLinks = currentIds
+            neighborPassOwed = false
         }
     }
 

@@ -14,6 +14,7 @@ import app.getknit.knit.mesh.protocol.WireCodec
 import app.getknit.knit.mesh.protocol.WireEnvelope
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -279,8 +280,7 @@ class BlobExchange(
                     asker != null && pull == null,
             )
         recordWant(hash, now(), author, via, asker, fastOnly, approved, reach)
-        step(hash, linkedNow())
-        flushQueries()
+        stepping { step(hash, linkedNow()) }
     }
 
     /**
@@ -296,6 +296,16 @@ class BlobExchange(
     ) {
         if (wanted.isEmpty()) return
         val linked = linkedNow()
+        stepping { stepEach(wanted, linked, fastOnly, until) }
+    }
+
+    /** [wantAll]'s body: each of [wanted] recorded and stepped, the queries left for the caller to flush. */
+    private suspend fun stepEach(
+        wanted: List<Pair<String, String?>>,
+        linked: List<Candidate>,
+        fastOnly: Set<String>,
+        until: Map<String, Long>,
+    ) {
         for ((hash, author) in wanted) {
             if (onTheWayOrHeld(hash)) continue
             recordWant(
@@ -317,7 +327,6 @@ class BlobExchange(
             )
             step(hash, linked)
         }
-        flushQueries()
     }
 
     /**
@@ -344,8 +353,7 @@ class BlobExchange(
         val wanted = snapshotFetching()
         if (wanted.isEmpty()) return
         val linked = linkedNow()
-        wanted.forEach { step(it, linked) }
-        flushQueries()
+        stepping { wanted.forEach { step(it, linked) } }
     }
 
     /**
@@ -395,8 +403,7 @@ class BlobExchange(
             }
         if (affected.isEmpty()) return
         val linked = linkedNow()
-        affected.forEach { step(it, linked) }
-        flushQueries()
+        stepping { affected.forEach { step(it, linked) } }
     }
 
     /**
@@ -419,8 +426,7 @@ class BlobExchange(
             }
         if (held.isEmpty()) return
         val linked = linkedNow()
-        held.forEach { step(it, linked) }
-        flushQueries()
+        stepping { held.forEach { step(it, linked) } }
     }
 
     /**
@@ -1213,8 +1219,7 @@ class BlobExchange(
                 val due = takeDue(hash, token, at) // cleared before the steps, which may arm the next
                 if (due.isEmpty()) return@launch
                 val linked = linkedNow()
-                due.forEach { step(it, linked) }
-                flushQueries()
+                stepping { due.forEach { step(it, linked) } }
             }.invokeOnCompletion { cause ->
                 // Cancelled with the session it ran on: the next session's first step arms afresh.
                 if (cause != null) clearTimer(hash, token)
@@ -1248,6 +1253,34 @@ class BlobExchange(
                     key
                 }
         }
+
+    /**
+     * Runs [steps], then [flushQueries]: a step queues its holder queries into [outbox] and marks them asked, and only a
+     * flush sends them. A step that throws still has the queries the steps before it queued flushed — left in the
+     * outbox, they would stand as asked with nothing sent until some later entry point flushed — and its own throw is
+     * the one the caller sees. Not while this coroutine is cancelled: a stopped session sends nothing, and a `finally`
+     * would have its suspend sends run during the cancellation. A [CancellationException] the steps let out while the
+     * coroutine is still active (a leaked timeout) is a failure like any other, and flushes.
+     */
+    private suspend inline fun stepping(steps: () -> Unit) {
+        try {
+            steps()
+        } catch (
+            @Suppress("TooGenericExceptionCaught") e: Exception, // rethrown below: only the flush is added
+        ) {
+            if (currentCoroutineContext().isActive) {
+                try {
+                    flushQueries()
+                } catch (
+                    @Suppress("TooGenericExceptionCaught") flush: Exception, // the step's throw is the one to report
+                ) {
+                    e.addSuppressed(flush)
+                }
+            }
+            throw e
+        }
+        flushQueries()
+    }
 
     /** Sends the queries the steps since the last flush queued: one frame per neighbour, at most [MAX_QUERY_HASHES] each. */
     private suspend fun flushQueries() {
@@ -1357,8 +1390,7 @@ class BlobExchange(
         val inMs = latency?.let { " in $it ms" } ?: ""
         log("blob answer ← $from$idPart$inMs: ${touched.joinToString { itemLabel(it) }} load=${content.load ?: 0}")
         val linked = linkedNow()
-        touched.forEach { step(it.hash, linked) }
-        flushQueries()
+        stepping { touched.forEach { step(it.hash, linked) } }
         // Counted once the answer's steps have run, so a count read means what they decided has been sent too.
         onEvent(BlobEvent.AnswerTaken)
     }
@@ -2023,8 +2055,7 @@ class BlobExchange(
             w.openCycle(t, natural = false)
             from?.let { w.failed += it }
         }
-        step(hash, linkedNow())
-        flushQueries()
+        stepping { step(hash, linkedNow()) }
     }
 
     /** Drops fetches whose last-want time has aged past the TTL — a never-arriving blob is reclaimed and

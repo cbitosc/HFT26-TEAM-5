@@ -239,6 +239,10 @@ androidx-media3-muxer = { group = "androidx.media3", name = "media3-muxer", vers
 androidx-core-telecom = { group = "androidx.core", name = "core-telecom", version.ref = "coreTelecom" }
 androidx-exifinterface = { group = "androidx.exifinterface", name = "exifinterface", version.ref = "exifinterface" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
+# detekt's rule API and test harness, for :detekt-rules (the `knit` ruleset). Same version as the plugin, which loads
+# the rules: detekt-api is compileOnly there, so neither reaches :app or any APK.
+detekt-api = { group = "dev.detekt", name = "detekt-api", version.ref = "detekt" }
+detekt-test = { group = "dev.detekt", name = "detekt-test", version.ref = "detekt" }
 androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "junitVersion" }
 androidx-espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espressoCore" }
 androidx-lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycle" }

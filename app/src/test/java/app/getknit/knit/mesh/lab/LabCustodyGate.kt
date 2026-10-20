@@ -4,6 +4,7 @@ import app.getknit.knit.mesh.CarriedFrame
 import app.getknit.knit.mesh.ForwardStore
 import app.getknit.knit.mesh.protocol.RelayEnvelope
 import kotlinx.coroutines.CompletableDeferred
+import java.io.IOException
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -11,6 +12,10 @@ import java.util.concurrent.atomic.AtomicInteger
  * [release] — a phone whose database is slow to commit (a busy pool, a core taken away mid-write) while its radio is
  * not. Only the stack's own writes go through it (`LabNode.boot` hands the manager [over]); a scenario's reads of the
  * store do not. Kept across restarts, like the rest of the node's persistent state.
+ *
+ * It can also fail the stack's custody id read ([failLiveIds]): the digest a link-up or a re-offer round sends throws
+ * with it, so a scenario can make a session loop's round fail (#206). The scenario's own reads (`LabNode.custodyIds`)
+ * go to the raw repository, untouched.
  */
 class LabCustodyGate {
     @Volatile
@@ -20,6 +25,9 @@ class LabCustodyGate {
     private var opened = CompletableDeferred<Unit>()
 
     private val waiting = AtomicInteger()
+
+    @Volatile
+    private var liveIdsFail = false
 
     /**
      * How many writes are waiting at the gate right now — the event a scenario holds its next step on. A write leaves
@@ -32,6 +40,16 @@ class LabCustodyGate {
         check(matches == null) { "the gate is already holding: release it first" }
         opened = CompletableDeferred()
         matches = which
+    }
+
+    /** From now on until [healLiveIds], the stack's custody id read throws an [IOException]: a database read that failed. */
+    fun failLiveIds() {
+        liveIdsFail = true
+    }
+
+    /** The custody id read answers again. */
+    fun healLiveIds() {
+        liveIdsFail = false
     }
 
     /** Lets every waiting write through and stops holding. */
@@ -58,6 +76,11 @@ class LabCustodyGate {
                     }
                 }
                 return store.store(frame, origin, now)
+            }
+
+            override suspend fun liveIds(now: Long): List<String> {
+                if (liveIdsFail) throw IOException("lab: the custody id read failed")
+                return store.liveIds(now)
             }
         }
 }

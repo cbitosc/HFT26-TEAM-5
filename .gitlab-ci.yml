@@ -402,14 +402,15 @@ verify:fieldlog:
 # --------------- verify (advisory) -------
 # detekt/ktlint run as Gradle plugins now (was: a downloaded detekt-cli jar). Both are advisory
 # (allow_failure) to mirror the prior detekt job and keep the pass/fail test signal clean; locally they
-# are enforced by the Stop hooks. Reports land under build/reports/{detekt,ktlint}/.
+# are enforced by the Stop hooks. Reports land under build/reports/{detekt,ktlint}/. The detekt job also runs the
+# tests of Knit's own rules (:detekt-rules, the `knit` ruleset), which nothing else runs.
 verify:detekt:
   extends: .android
   stage: verify
   needs: []
   allow_failure: true
   script:
-    - ./gradlew detekt --stacktrace --console=plain
+    - ./gradlew :detekt-rules:test detekt --stacktrace --console=plain
   artifacts:
     when: always
     paths:

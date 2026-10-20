@@ -143,6 +143,23 @@ renamed several config keys — `LongParameterList.constructorThreshold/function
 `allowedConstructorParameters/allowedFunctionParameters`, `TooManyFunctions.thresholdIn*` →
 `allowedFunctionsPer*`, and the style rule `UnusedImports` → singular `UnusedImport`.)
 
+**Knit's own detekt rules live in `:detekt-rules`**: a plain Kotlin JVM module holding the `knit` ruleset
+(`KnitRuleSetProvider`), configured under `knit:` in `detekt.yml` and loaded into `:app`'s detekt task through
+`detektPlugins(project(":detekt-rules"))`, and nowhere else.
+
+- It applies `org.jetbrains.kotlin.jvm` from the root buildscript's KGP (the Kotlin-2.4 override above), compiles
+  against `detekt-api` (compileOnly, the plugin's version) and adds no stdlib of its own (its `gradle.properties`).
+  So nothing reaches `:app`'s classpaths, and F-Droid's rebuild only configures it.
+- A rule reads the tree alone, since detekt runs here without type resolution. Its tests parse their snippets without
+  compiling them (`lint(code, compile = false)`), and CI's detekt jobs run them (`./gradlew :detekt-rules:test detekt`).
+- The plugin caches the rules' classloader by the jar's *path* for the daemon's life (`DefaultClassLoaderCache`). After
+  editing a rule, run detekt with `--no-daemon`: a warm daemon keeps running the rule it first loaded.
+- `BarePeriodicLoop` (#206) fails a launched endless loop that ticks on `delay` with a round nothing catches
+  (`rules/coding.md`); its `guards` list names the calls that catch (`runCatching`, `runRound`). The loops it
+  found when it arrived are in `config/detekt/baseline.xml` (#207). An entry is keyed on the loop's text, so editing a
+  baselined loop fails detekt until it is guarded: guard it then and delete its entry. Never add an entry, and never
+  regenerate the file to silence a new finding.
+
 `ktlint` runs via the **`org.jlleitschuh.gradle.ktlint` plugin**, applied on the root project (which
 lints the `*.gradle.kts` scripts) and on `:app` (which lints the Kotlin sources). The ktlint *tool*
 version is pinned to `libs.versions.ktlint` — independent of the plugin version (`ktlintPlugin`) — so rule

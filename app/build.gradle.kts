@@ -986,6 +986,13 @@ detekt {
     buildUponDefaultConfig = true
     config.setFrom(files("$rootDir/config/detekt/detekt.yml"))
     source.setFrom(files("src/main/java", "src/test/java"))
+    // The loops BarePeriodicLoop found when it arrived (#207); fix one rather than add to it.
+    baseline = file("$rootDir/config/detekt/baseline.xml")
+}
+
+dependencies {
+    // Knit's own rules (ruleset `knit`): BarePeriodicLoop, #206. Loaded into the detekt task only.
+    detektPlugins(project(":detekt-rules"))
 }
 
 ktlint {

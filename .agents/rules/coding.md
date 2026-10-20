@@ -54,3 +54,13 @@ Invariants for all Kotlin/Compose/data code. (Mesh-specific invariants are in `r
   image's own pixel dimensions, and for anything off the mesh — a peer's avatar, an attachment — those are
   attacker-chosen: a ~30 kB PNG at 12000² decodes to ~576 MB. detekt's `ForbiddenImport` enforces this on
   our sources and `scripts/dex-bitmap-gate.sh` enforces it on the release dex, libraries included. ADR 051.
+
+## Coroutines
+
+- **A launched periodic loop runs its rounds through `everyRound` (`mesh/MeshCoroutines.kt`).** On a
+  `SupervisorJob` scope, a throw ends only the coroutine that threw: a bare `while (true) { delay(n); round() }`
+  loses every later round for the session, and the only trace is one `MeshScope` warning (#206). `everyRound`
+  hands a failed round to its `onFailure` and runs the next on time. A collector or a loop that must act first and
+  wait after guards each pass with `runRound` instead. Both treat a `CancellationException` as a failed round while
+  the caller is still active, so a leaked timeout cannot end the loop either. detekt's `BarePeriodicLoop` fails the
+  bare shape, except the loops in its baseline (#207, `context/toolchain.md`).

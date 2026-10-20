@@ -82,9 +82,12 @@ import io.mockk.coVerify
 import io.mockk.mockk
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.ExperimentalForInheritanceCoroutinesApi
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -96,6 +99,7 @@ import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -113,8 +117,11 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import java.io.File
+import java.io.IOException
 import java.nio.file.Files
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -162,7 +169,38 @@ class MeshManagerTest {
 
         /** Drivable, so a test can bring a peer into range (the met-peers watcher reads the nearby set). */
         val nearby = MutableStateFlow<Set<Peer>>(emptySet())
-        override val neighbors = nearby.asStateFlow()
+
+        // Per live collector of [neighbors], the set it was last handed, and the one whose body it last returned from.
+        private val handed = ConcurrentHashMap<Any, Set<Peer>>()
+        private val handled = ConcurrentHashMap<Any, Set<Peer>>()
+
+        /** [nearby] with the `StateFlow` contract kept, recording each collector's hand-off and its return. */
+        @OptIn(ExperimentalForInheritanceCoroutinesApi::class) // value, replayCache and collect are the whole contract
+        override val neighbors: StateFlow<Set<Peer>> =
+            object : StateFlow<Set<Peer>> {
+                override val value: Set<Peer> get() = nearby.value
+                override val replayCache: List<Set<Peer>> get() = nearby.replayCache
+
+                override suspend fun collect(collector: FlowCollector<Set<Peer>>): Nothing {
+                    val token = Any()
+                    try {
+                        nearby.collect {
+                            handed[token] = it
+                            collector.emit(it)
+                            handled[token] = it
+                        }
+                    } finally {
+                        handed.remove(token)
+                        handled.remove(token)
+                    }
+                }
+            }
+
+        /** Every collector of [neighbors] has been handed [links] — one busy elsewhere may not have acted on it yet. */
+        fun everyCollectorHanded(links: Set<Peer>): Boolean = handed.isNotEmpty() && handed.values.all { it == links }
+
+        /** Every collector of [neighbors] has returned from [links]. */
+        fun everyCollectorHandled(links: Set<Peer>): Boolean = handed.isNotEmpty() && handed.keys.all { handled[it] == links }
 
         /** Peers sighted but not linked — an author heard only over a board. [reachable] is the union. */
         val sighted = MutableStateFlow<Set<Peer>>(emptySet())
@@ -224,10 +262,15 @@ class MeshManagerTest {
             meta: FileMeta,
         ): Boolean = true
 
+        /** Whom each custody digest went to, in order — the newcomer batch's digest and the re-offer round's. */
+        val digestsTo = CopyOnWriteArrayList<String>()
+
         override suspend fun sendDigest(
             to: Peer,
             ids: List<String>,
-        ) = Unit
+        ) {
+            digestsTo += to.nodeId
+        }
     }
 
     /** Minimal in-memory [ForwardStore] so a test can assert what the send path captured for custody. */
@@ -257,7 +300,23 @@ class MeshManagerTest {
             return super.liveGroupChatFrames(excludingSender, now)
         }
 
-        override suspend fun liveIds(now: Long): List<String> = synchronized(frames) { frames.keys.toList() }
+        /** While set, the custody id read throws: the digest a link-up or a re-offer round sends fails with it (#206). */
+        @Volatile
+        var liveIdsFail = false
+
+        /** While set, the custody id read waits for it: a digest held mid-pass. [liveIdsWaiting] counts the reads held. */
+        @Volatile
+        var liveIdsGate: CompletableDeferred<Unit>? = null
+        val liveIdsWaiting = AtomicInteger()
+
+        override suspend fun liveIds(now: Long): List<String> {
+            if (liveIdsFail) throw IOException("the custody read failed")
+            liveIdsGate?.let {
+                liveIdsWaiting.incrementAndGet()
+                it.await()
+            }
+            return synchronized(frames) { frames.keys.toList() }
+        }
 
         /** Carried frames naming an attachment we lack, as a test sets them (ADR 2026-10.js2p's custody re-arm). */
         @Volatile
@@ -3156,6 +3215,162 @@ class MeshManagerTest {
             sendEpochStartedAt = 1L,
             highestPeAcked = 0,
         )
+
+    // --- the link-set watcher outlives a failed pass (#206) ---
+
+    /**
+     * A newcomer hook that throws ends that pass, not the watcher: the next link-set change is acted on, and the newcomer
+     * whose hooks failed is a newcomer again, never marked acted on. Before, the throw ended the collector for the
+     * session, and no later departure or link-up was acted on.
+     */
+    @Test
+    fun aLinkSetPassThatThrowsCostsThatPassAloneAndItsNewcomerIsActedOnAgain() =
+        runTest(UnconfinedTestDispatcher()) {
+            val rig = Rig(backgroundScope)
+            rig.stubProfileState(MutableStateFlow(0L))
+            coEvery { rig.groups.observeGroups() } returns flowOf(emptyList())
+            rig.forwardStore.liveIdsFail = true
+            rig.manager.start()
+            val bob = Peer(rig.bob.nodeId)
+
+            rig.transport.nearby.value = setOf(bob)
+            rig.await(1) { rig.failedPasses() }
+            assertEquals("its departure step ran before the throw", setOf(bob.nodeId), rig.manager.linksActedOn)
+            assertTrue(rig.transport.digestsTo.isEmpty())
+
+            rig.forwardStore.liveIdsFail = false
+            val carol = Peer("carol-node")
+            rig.transport.nearby.value = setOf(bob, carol)
+            rig.await(2) { rig.digestedPeers() }
+            assertEquals(setOf(bob.nodeId, carol.nodeId), rig.manager.linksActedOn)
+            assertEquals("bob's hooks ran again, beside carol's", setOf(bob.nodeId, carol.nodeId), rig.transport.digestsTo.toSet())
+            assertEquals(1L, rig.metrics.frames().roundsFailedBy[MeshRound.NEIGHBORS])
+            rig.manager.stop()
+        }
+
+    /**
+     * `neighbors` emits only on a change, so a pass that failed on a link set that then holds still is re-run by the
+     * re-offer round: the newcomer's profile push, which the round alone never sends, goes again.
+     */
+    @Test
+    fun aFailedLinkSetPassIsRunAgainByTheReofferRound() =
+        runTest(UnconfinedTestDispatcher()) {
+            val rig = Rig(backgroundScope)
+            rig.stubProfileState(MutableStateFlow(0L))
+            coEvery { rig.groups.observeGroups() } returns flowOf(emptyList())
+            rig.forwardStore.liveIdsFail = true
+            rig.manager.start()
+            val bob = Peer(rig.bob.nodeId)
+
+            fun profilePushes() =
+                rig.transport.sent.count { (wire, to) -> to == bob && WireCodec.decodeEnvelope(wire.signed)?.type == FrameType.PROFILE }
+
+            rig.transport.nearby.value = setOf(bob)
+            rig.await(1) { rig.failedPasses() }
+            assertEquals("the push ran before the digest threw", 1, profilePushes())
+
+            rig.forwardStore.liveIdsFail = false
+            rig.manager.reofferToNeighbors()
+            assertEquals("the owed pass ran inside the round", 2, profilePushes())
+            assertEquals("its digest and the round's own", listOf(bob.nodeId, bob.nodeId), rig.transport.digestsTo.toList())
+
+            rig.manager.reofferToNeighbors()
+            assertEquals("and once it ran to its end, nothing more is owed", 2, profilePushes())
+            rig.manager.stop()
+        }
+
+    /**
+     * A newcomer whose pass failed after its asks went out is still departed when it goes (#140): the ask on it moves to
+     * the next holder at once, not at the first ask's grace. The pass never marked it known, and departures read against
+     * the known links would never see it go.
+     */
+    @Test
+    fun aNewcomerWhosePassFailedIsStillDepartedAndItsAskMovesOnAtOnce() =
+        runTest(UnconfinedTestDispatcher()) {
+            val rig = Rig(backgroundScope)
+            rig.stubProfileState(MutableStateFlow(0L))
+            coEvery { rig.groups.observeGroups() } returns flowOf(emptyList())
+            val p = Peer(rig.bob.nodeId)
+            val q = Peer("q-node")
+            val wanted = AtomicBoolean(false)
+            coEvery { rig.messages.attachmentsNeedingFetch(any()) } answers {
+                if (wanted.get()) listOf(missing("h", p.nodeId, null)) else emptyList()
+            }
+            val passes = rig.countReArms()
+            rig.manager.start()
+            rig.transport.nearby.value = setOf(q)
+            rig.awaitStartupReArms(passes) // the limit collector's re-arm and q's newcomer pass, so neither asks q
+            rig.await(1) { if (rig.transport.everyCollectorHandled(setOf(q))) 1 else 0 } // and q's pass has run to its end
+
+            wanted.set(true)
+            rig.forwardStore.liveIdsFail = true
+            rig.transport.nearby.value = setOf(q, p)
+            rig.await(1) { rig.failedPasses() }
+            assertEquals("p, the author, is asked alone; its pass then threw", listOf(p.nodeId to "h"), rig.hAsks())
+
+            rig.forwardStore.liveIdsFail = false
+            rig.transport.nearby.value = setOf(q)
+            rig.await(1) { if (rig.manager.linksActedOn == setOf(q.nodeId)) 1 else 0 }
+            assertEquals(
+                "p's departure moved the ask to q before the pass marked it acted on",
+                listOf(p.nodeId to "h", q.nodeId to "h"),
+                rig.hAsks(),
+            )
+            rig.manager.stop()
+        }
+
+    /**
+     * A retry of a failed pass and the watcher's own pass act in the order the watcher was handed the link sets: a retry
+     * that read a newer set than one the watcher holds queued would be undone by it, departing a peer still linked and
+     * acting on it as a newcomer twice.
+     */
+    @Test
+    fun aRetryNeverActsOnALinkSetNewerThanTheWatcherHolds() =
+        runTest(UnconfinedTestDispatcher()) {
+            val rig = Rig(backgroundScope)
+            rig.stubProfileState(MutableStateFlow(0L))
+            coEvery { rig.groups.observeGroups() } returns flowOf(emptyList())
+            rig.forwardStore.liveIdsFail = true
+            rig.manager.start()
+            val p = Peer(rig.bob.nodeId)
+            val s = Peer("s-node")
+            val r = Peer("r-node")
+            rig.transport.nearby.value = setOf(p)
+            rig.await(1) { rig.failedPasses() }
+
+            // The first retry holds the pass lock in its digest; the second queues behind it, then the watcher behind that.
+            rig.forwardStore.liveIdsFail = false
+            val gate = CompletableDeferred<Unit>()
+            rig.forwardStore.liveIdsGate = gate
+            val first = launch(start = CoroutineStart.UNDISPATCHED) { rig.manager.reofferToNeighbors() }
+            rig.await(1) { rig.forwardStore.liveIdsWaiting.get() }
+            // Undispatched: it has reached the lock, queued behind the first, when launch returns.
+            val second = launch(start = CoroutineStart.UNDISPATCHED) { rig.manager.reofferToNeighbors() }
+            rig.transport.nearby.value = setOf(p, s)
+            rig.await(1) { if (rig.transport.everyCollectorHanded(setOf(p, s))) 1 else 0 }
+            rig.transport.nearby.value = setOf(p, s, r)
+            gate.complete(Unit)
+            first.join()
+            second.join()
+            rig.await(1) { if (rig.transport.everyCollectorHandled(setOf(p, s, r))) 1 else 0 }
+
+            assertEquals("r is a newcomer once", 1, rig.profilePushesTo(r))
+            assertEquals(setOf(p.nodeId, s.nodeId, r.nodeId), rig.manager.linksActedOn)
+            rig.manager.stop()
+        }
+
+    /** How many link-set passes failed ([MeshRound.NEIGHBORS]). */
+    private fun Rig.failedPasses(): Int = metrics.frames().roundsFailedBy[MeshRound.NEIGHBORS]?.toInt() ?: 0
+
+    /** Every blob request for the hash `h`, as (to, hash), in send order. */
+    private fun Rig.hAsks(): List<Pair<String?, String>> = blobAsks().map { it.first to it.second.hash }.filter { it.second == "h" }
+
+    /** How many profile pushes went to [peer] point to point — a newcomer pass's, never a round's. */
+    private fun Rig.profilePushesTo(peer: Peer): Int =
+        transport.sent.count { (wire, to) -> to == peer && WireCodec.decodeEnvelope(wire.signed)?.type == FrameType.PROFILE }
+
+    /** How many peers got a custody digest. */
+    private fun Rig.digestedPeers(): Int = transport.digestsTo.toSet().size
 
     // --- people met ---
 

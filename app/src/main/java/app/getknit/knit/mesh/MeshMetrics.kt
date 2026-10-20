@@ -202,7 +202,7 @@ enum class BleSideDrop {
 }
 
 /**
- * A [MeshManager] session loop whose round threw ([everyRound]). Surfaced in
+ * A [MeshManager] session loop whose round threw ([everyRound], [runRound]). Surfaced in
  * [MeshMetrics.Snapshot.Frames.roundsFailedBy] and the field log's `roundFail_<ROUND>` counters, so a tester's log
  * shows a loop failing without logcat (#206). The loop itself runs on: the next round is on time.
  */
@@ -215,6 +215,12 @@ enum class MeshRound {
 
     /** The 60 s metrics tick, which also banks the contribution ledger and sweeps the indirect-reach table. */
     METRICS,
+
+    /**
+     * A pass of the neighbour watcher on a link-set change: the departures' blob step and the newcomers' hooks. Not
+     * timed; what a failed pass owed runs on the next change or the next re-offer round.
+     */
+    NEIGHBORS,
 }
 
 /**

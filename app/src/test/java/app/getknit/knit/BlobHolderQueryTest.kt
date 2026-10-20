@@ -19,8 +19,11 @@ import app.getknit.knit.mesh.protocol.Protocol
 import app.getknit.knit.mesh.protocol.RelayEnvelope
 import app.getknit.knit.mesh.protocol.WireCodec
 import app.getknit.knit.mesh.sha256Hex
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -31,6 +34,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
+import java.io.IOException
 import java.nio.file.Files
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
@@ -53,9 +57,15 @@ class BlobHolderQueryTest {
         val storingNow = ConcurrentHashMap.newKeySet<String>()
         val lying = ConcurrentHashMap<String, Long>()
 
+        // Runs at every [has], before it answers: a read that throws, or the session stopped mid-step.
+        @Volatile var onHas: (String) -> Unit = {}
+
         fun seed(bytes: ByteArray): String = sha256Hex(bytes).also { blobs[it] = bytes }
 
-        override suspend fun has(hash: String) = blobs.containsKey(hash)
+        override suspend fun has(hash: String): Boolean {
+            onHas(hash)
+            return blobs.containsKey(hash)
+        }
 
         override suspend fun fileFor(hash: String): File? = blobs[hash]?.let { b -> File(dir, "$hash.tx").apply { writeBytes(b) } }
 
@@ -2550,6 +2560,72 @@ class BlobHolderQueryTest {
             assertEquals("the newest stamp stands", 300, b.queriesFrom("a").size)
             a.exchange.confirmHeld(hashes.first(), "b")
             assertEquals("the eldest was evicted: asked again inside its floor", 301, b.queriesFrom("a").size)
+        }
+
+    @Test
+    fun aStepThatThrowsStillSendsTheQueriesTheStepsBeforeItQueued() =
+        runTest(UnconfinedTestDispatcher()) {
+            // #206's follow-up: a step queues its queries and marks them asked, and only the flush at the end sends them.
+            val a = Node("a", backgroundScope)
+            val b = Node("b", backgroundScope)
+            a.transport.connect(b.transport)
+            val first = sha256Hex(picture(2_100))
+            val broken = sha256Hex(picture(2_200))
+            a.store.onHas = { if (it == broken) throw IOException("the blob table read failed") }
+
+            val thrown = runCatching { a.exchange.wantAll(listOf(first to null, broken to null)) }.exceptionOrNull()
+
+            assertTrue("the step's own throw reaches the caller", thrown is IOException)
+
+            assertEquals("the query the first step marked went out", listOf(listOf(first)), b.queriesFrom("a"))
+        }
+
+    @Test
+    fun aReaskWhoseStepThrowsStillSendsTheQueriesTheStepsBeforeItQueued() =
+        runTest(UnconfinedTestDispatcher()) {
+            val a = Node("a", backgroundScope)
+            val b = Node("b", backgroundScope)
+            val first = sha256Hex(picture(2_300))
+            val broken = sha256Hex(picture(2_400))
+            a.exchange.want(first) // nobody linked: wanted, nobody queried
+            a.exchange.want(broken)
+            a.transport.connect(b.transport)
+            a.store.onHas = { if (it == broken) throw IOException("the blob table read failed") }
+
+            val thrown = runCatching { a.exchange.reask() }.exceptionOrNull()
+
+            assertTrue(thrown is IOException)
+            assertEquals(listOf(listOf(first)), b.queriesFrom("a"))
+            a.store.onHas = {}
+            a.exchange.reask()
+            assertEquals(
+                "the flushed query stands as asked: the next round queries only the other",
+                listOf(listOf(first), listOf(broken)),
+                b.queriesFrom("a"),
+            )
+        }
+
+    @Test
+    fun aStepCancelledWithItsSessionSendsNothing() =
+        runTest(UnconfinedTestDispatcher()) {
+            val a = Node("a", backgroundScope)
+            val b = Node("b", backgroundScope)
+            a.transport.connect(b.transport)
+            val first = sha256Hex(picture(2_500))
+            val second = sha256Hex(picture(2_600))
+            lateinit var session: Job
+            a.store.onHas = {
+                if (it == second) {
+                    session.cancel()
+                    throw CancellationException("the session stopped")
+                }
+            }
+            session = launch(start = CoroutineStart.LAZY) { a.exchange.wantAll(listOf(first to null, second to null)) }
+
+            session.start()
+
+            assertTrue(session.isCancelled)
+            assertTrue("a stopped session flushes nothing", b.queriesFrom("a").isEmpty())
         }
 
     @Test

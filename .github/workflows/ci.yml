@@ -270,7 +270,7 @@ jobs:
           packages: platform-tools # NOT the default `tools platform-tools` — see ACTION PINS above
       - uses: gradle/actions/setup-gradle@v5
       - name: detekt
-        run: ./gradlew detekt --stacktrace --console=plain
+        run: ./gradlew :detekt-rules:test detekt --stacktrace --console=plain # with the tests of our own rules
       - name: ktlint
         run: ./gradlew ktlintCheck --stacktrace --console=plain
 
