@@ -85,6 +85,8 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import java.util.Collections
+import java.util.WeakHashMap
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
@@ -275,6 +277,31 @@ class BluetoothMeshTransport(
     // Live L2CAP links, keyed by peer nodeId (many, unlike NAN's ≤1).
     private val links = ConcurrentHashMap<String, FramedLink>()
 
+    // Each link's silence verdict and the stamps of its socket's bytes (#203, ADR 2026-10.697m), keyed by link like
+    // [doorbells]: one loop ([silenceLoop]) reads them all, woken by [silenceWake] when a keepalive comes or goes, a PHY
+    // handle reports, an edge lands or a link comes up.
+    private val silences = ConcurrentHashMap<FramedLink, SilentLink>()
+    private val silenceWake = Channel<Unit>(Channel.CONFLATED)
+
+    private class SilentLink(
+        val policy: LinkSilence,
+        val stamps: SocketStamps,
+    )
+
+    // Links this transport closed for silence: their reader's end is our close, not the peer's, so it bumps no streak and
+    // logs no `(eof)` line (#203). Weak, as a reader or a blocked writer may outlive the link by any length of time.
+    private val closedSilent: MutableSet<FramedLink> = Collections.synchronizedSet(Collections.newSetFromMap(WeakHashMap()))
+
+    // The addresses of links closed on this phone's own controller's word (#203), until [checkOrphans] reports their ACL:
+    // kept with this phone holding more LE connections than links, the stack is suspect (`bt stack suspect`, for #204).
+    private val localCloses = ConcurrentHashMap<String, LocalClose>()
+
+    private class LocalClose(
+        val nodeId: String,
+        val why: LinkSilence.Why,
+        val at: Long,
+    )
+
     // Held links whose peer the scan has not once sighted since the link came up — an inbound iPhone this phone has
     // not read the GATT payload of (a backgrounded one, or any while the reader is dark). They score the promotion
     // floor for eviction, not the absent-peer −127 (ADR 2026-09.shzv). A sighting drops one.
@@ -435,6 +462,7 @@ class BluetoothMeshTransport(
     private var capJob: Job? = null
     private var phyJob: Job? = null
     private var advertJob: Job? = null
+    private var silenceJob: Job? = null
 
     // The debug link cap as last read from [linkCap]; null runs the shipped budget untouched.
     @Volatile private var debugCap: Int? = null
@@ -489,6 +517,8 @@ class BluetoothMeshTransport(
 
         override fun onLinkDown(nodeId: String) {
             val released = teardownLink(nodeId, "eof", only = link)
+            // Closed for silence (#203): the end its reader or writer reports is our close, not a flap.
+            if (!released && link in closedSilent) return
             // Replaced by a fresh link from the same peer: that link holds the slot, and the peer did not flap.
             if (!ConnectBackoffs.flapped(released, replaced = links[nodeId] != null)) return
             // A flapping link escalates on the same per-peer streak as a failed connect, so a peer that keeps
@@ -532,6 +562,7 @@ class BluetoothMeshTransport(
             powerJob = scope.launch { powerState.state.drop(1).collect { onPowerChange() } }
             diagJob = scope.launch { diagLoop() }
             advertJob = scope.launch { advertLoop() }
+            silenceJob = scope.launch { silenceLoop() }
             // A2DP forces the scan to its floor (audio contends the radio); wake the scan loop on any change so
             // the falling edge (audio stopped) resumes the normal cadence promptly instead of after the floor gap.
             audioJob = scope.launch { audioMonitor.contended.drop(1).collect { onAudioChange() } }
@@ -585,6 +616,7 @@ class BluetoothMeshTransport(
         capJob?.cancel()
         phyJob?.cancel()
         advertJob?.cancel()
+        silenceJob?.cancel()
         paceJob?.cancel()
         CodedPhyDiag.status = null
         CodedPhyDiag.setTxPower = null
@@ -1456,12 +1488,33 @@ class BluetoothMeshTransport(
                         "bt acl orphan ${action.nodeId} ${action.address} ${if (action.cleared) "cleared" else "kept"} " +
                             "tries=${action.tries} armed=${action.armed} age=${action.ageMs}ms",
                     )
+                    suspectStack(action)
                     field.record(
                         FieldEvent.BtOrphan(action.nodeId, action.linked, action.armed, action.tries, action.cleared, action.ageMs),
                     )
                 }
             }
         }
+    }
+
+    /**
+     * A link this phone closed on its own controller's word (#203) whose ACL the arm could not clear, while this phone
+     * still holds more LE connections than links: the stack lost a disconnect and keeps a connection nothing owns.
+     * Logged as `bt stack suspect`, which #204's verdict will read; nothing acts on it here. Entries past
+     * [LOCAL_CLOSE_KEEP_MS] go unreported.
+     */
+    private fun suspectStack(report: OrphanAclPolicy.Report) {
+        val now = elapsed()
+        localCloses.entries.removeIf { now - it.value.at > LOCAL_CLOSE_KEEP_MS }
+        val close = localCloses.remove(report.address) ?: return
+        if (report.cleared) return
+        val le = leLinkCount()
+        if (le <= links.size) return
+        Log.w(
+            TAG,
+            "bt stack suspect ${report.address} (${close.nodeId} closed on ${close.why.wire} ${now - close.at}ms ago, " +
+                "le=$le links=${links.size})",
+        )
     }
 
     /** The addresses our dials in flight target, on either PHY. */
@@ -1595,6 +1648,7 @@ class BluetoothMeshTransport(
                 onGiveUp = metrics::onBlePhyGiveUp,
                 now = SystemClock::elapsedRealtime,
                 onPhyKnown = ::publishLinkPhys,
+                onEvidence = { lost -> onPhyEvidence(link, lost) },
             )
         if (phyControls.putIfAbsent(link, control) == null) control.start()
     }
@@ -2402,7 +2456,7 @@ class BluetoothMeshTransport(
     private fun registerLink(
         nodeId: String,
         advert: Protocol.PeerWire,
-        link: app.getknit.knit.mesh.link.LinkSocket,
+        link: BluetoothSocketLink,
         sighted: Boolean = true, // an initiator dials only a peer presence holds
         // The peer's device, for its doorbell and its address. [advert] is the peer's HELLO either way — the dialer's
         // on an accepted link, the reply on a dialed one — so its capabilities are full width and carry CAP_DOORBELL.
@@ -2430,8 +2484,13 @@ class BluetoothMeshTransport(
                 onRxProgress = { key, held, ms -> rxProgress.tryEmit(FileProgress(nodeId, key, held, ms)) },
                 // A sender of ours windows only while our own switch is on: the lab's builds share it (ADR 2026-10.5buf).
                 windowedReports = { LinkTuneDiag.feedWindow },
+                onKeepalive = { onKeepaliveIn(events.link) },
+                onKeepaliveWritten = { onKeepaliveWritten(events.link) },
             )
         events.link = framed
+        // Before framed.start(), so the peer's announce finds it. An iPhone's is exempt from the whole check (#203).
+        val silence = LinkSilence(exempt = DoorbellPolicy.serves(advert.capabilities))
+        silences[framed] = SilentLink(silence, link.stamps)
         crossings.forget(nodeId) // a fresh stream starts clean: the peer may have restarted with an empty SeenSet
         if (!sighted) neverSighted.add(framed)
         device?.let {
@@ -2450,6 +2509,7 @@ class BluetoothMeshTransport(
             lastPace.remove(prev)
             phyControls.remove(prev)?.close()
             publishLinkPhys()
+            silences.remove(prev)
             doorbells.remove(prev)?.close() // teardownLink(only = prev) will find it replaced and release nothing
             closeTuning(prev, sharedAcl = true)
             prev.close() // a stale link to the same peer — never leak it; its own end releases nothing now
@@ -2488,6 +2548,7 @@ class BluetoothMeshTransport(
         } // success resets the peer's streak
         metrics.onBtLinkEstablished()
         framed.start()
+        announce(framed, silence)
         refreshNeighbors()
         publishReachable() // a live link ⇒ reachable, even for an inbound peer we never scan-sighted
         wake() // inFlight cleared + link count changed → resume connectLoop and re-evaluate scan demand
@@ -2496,11 +2557,16 @@ class BluetoothMeshTransport(
         Log.i(TAG, "bt link up: $nodeId (${links.size} live)")
     }
 
-    /** Closes [nodeId]'s link — only if it is still [only], when given — and says whether one was released. */
+    /**
+     * Closes [nodeId]'s link — only if it is still [only], when given — and says whether one was released. With
+     * [closeLater] (a silent link's, #203) the socket is closed after the neighbour set and `reachable` have moved, on an
+     * IO coroutine nothing waits for: a stack that lost the connection may not return from `close()` (2ec2eb5b).
+     */
     private fun teardownLink(
         nodeId: String,
         reason: String,
         only: FramedLink? = null,
+        closeLater: Boolean = false,
     ): Boolean {
         val fl = (if (only == null) links.remove(nodeId) else only.takeIf { links.remove(nodeId, it) }) ?: return false
         if (links.isEmpty()) noLinkSince = elapsed() // the lonely dial's clock runs from the last link's end (hj4a)
@@ -2528,9 +2594,10 @@ class BluetoothMeshTransport(
                 ),
             )
         }
+        silences.remove(fl)
         doorbells.remove(fl)?.close()
         closeTuning(fl, sharedAcl = false)
-        fl.close()
+        if (!closeLater) fl.close()
         crossings.forget(nodeId)
         // The peer was here until now: its side-channel flag lingers from the link's end, not from a sighting the
         // floored scan may have made hours ago — a dropped or evicted flagged peer is exactly whom a page reaches.
@@ -2540,7 +2607,133 @@ class BluetoothMeshTransport(
         wakeSide() // the audience may have gone unlinked (the eviction path has no other side wake)
         advertEdge()
         Log.i(TAG, "bt link down: $nodeId ($reason)")
+        if (closeLater) closeOffThread(fl)
         return true
+    }
+
+    /**
+     * Closes [fl] on an IO coroutine nothing waits for, and logs `bt link close slow` if it has not returned within
+     * [CLOSE_SLOW_MS] (#203): a writer sitting in a write the stack will never finish holds nothing up but its own thread.
+     */
+    private fun closeOffThread(fl: FramedLink) {
+        val closing = scope.launch(Dispatchers.IO) { fl.close() }
+        scope.launch {
+            if (elapsedWait.runWithin(CLOSE_SLOW_MS) { closing.join() } == null) Log.w(TAG, "bt link close slow ${fl.nodeId}")
+        }
+    }
+
+    // --- Silent links (#203, ADR 2026-10.697m) ---
+
+    /**
+     * One loop over every link's [LinkSilence]: each is stepped, then the loop sleeps on the elapsed clock until the
+     * earliest is due, or until [silenceWake]. No tick per link and no poke per byte: a byte in only moves a link's due
+     * time later, which the next look reads. With no link to judge, it waits for one.
+     */
+    private suspend fun silenceLoop() {
+        while (scope.isActive) {
+            val now = elapsed()
+            var due: Long? = null
+            silences.entries.toList().forEach { (link, s) ->
+                if (links[link.nodeId] !== link) return@forEach
+                val rxAt = s.stamps.lastByteAt
+                val blocked = s.stamps.writeBlockedSince
+                val local = localReading(link, rxAt)
+                when (val action = s.policy.step(now, rxAt, blocked, local)) {
+                    is LinkSilence.Action.Probe -> {
+                        Log.i(TAG, "bt link probe ${link.nodeId} #${action.n} (quiet=${now - rxAt}ms)")
+                        link.sendKeepalive()
+                    }
+
+                    is LinkSilence.Action.Close -> {
+                        closeSilent(link, action, s.policy.answers)
+                    }
+
+                    LinkSilence.Action.None -> {}
+                }
+                if (links[link.nodeId] === link) {
+                    s.policy.msUntilDue(now, rxAt, blocked, local)?.let { ms -> due = minOf(due ?: ms, ms) }
+                }
+            }
+            val wait = due
+            if (wait == null) silenceWake.receive() else elapsedWait.receiveWithin(silenceWake, wait.coerceAtLeast(SILENCE_MIN_LOOK_MS))
+        }
+    }
+
+    /** The announce (#203): no shipped build sends a `KEEPALIVE`, so the peer's tells this side it answers one. */
+    private fun announce(
+        link: FramedLink,
+        silence: LinkSilence,
+    ) {
+        if (silence.announce()) link.sendKeepalive()
+        silenceWake.trySend(Unit)
+    }
+
+    /** What [link]'s PHY handle says since its last byte in at [rxAt] (#203); null for a link with none. */
+    private fun localReading(
+        link: FramedLink,
+        rxAt: Long,
+    ): LinkSilence.Local? =
+        phyControls[link]?.let { control ->
+            // A loss before a byte that came in after it was not this link's connection ending.
+            LinkSilence.Local(control.unansweredSince(rxAt), lost = control.lostAt?.let { it >= rxAt } == true)
+        }
+
+    /** A `KEEPALIVE` came in on [link]: answered when its policy says so (#203). On the link's reader. */
+    private fun onKeepaliveIn(link: FramedLink) {
+        val s = silences[link] ?: return
+        val first = !s.policy.answers
+        if (s.policy.onKeepaliveIn()) link.sendKeepalive()
+        if (first && s.policy.answers) Log.i(TAG, "bt link answers ${link.nodeId}")
+        silenceWake.trySend(Unit) // the link's probes may be due from here on
+    }
+
+    /** One of our keepalives on [link] went to the socket: a probe's answer is timed from here. On the link's writer. */
+    private fun onKeepaliveWritten(link: FramedLink) {
+        silences[link]?.policy?.onKeepaliveWritten(elapsed()) ?: return
+        silenceWake.trySend(Unit)
+    }
+
+    /** [link]'s PHY handle reported an unanswered read or its client's loss ([lost]): the loop looks again now. */
+    private fun onPhyEvidence(
+        link: FramedLink,
+        lost: Boolean,
+    ) {
+        if (lost) onLinkEdge(link, "phy lost") else silenceWake.trySend(Unit)
+    }
+
+    /**
+     * The stack hinted that [link]'s connection is gone ([what]: an LE ACL disconnect for its address, or its PHY client's
+     * loss): logged, and a link whose peer answers is probed at once. Never closed on the edge alone — it names no handle,
+     * and #142 saw two ACLs to one peer. Cheap: the ACL receiver runs on the main thread.
+     */
+    private fun onLinkEdge(
+        link: FramedLink,
+        what: String,
+    ) {
+        val s = silences[link] ?: return
+        if (links[link.nodeId] !== link || !s.policy.onEdge(elapsed())) return
+        Log.i(TAG, "bt link edge ${link.nodeId} $what (answers=${s.policy.answers})")
+        silenceWake.trySend(Unit)
+    }
+
+    /**
+     * Closes [link] for silence through the ordinary teardown (`only = link`), the neighbour set and `reachable` moved
+     * before its socket closes. A close on this phone's own controller's word is remembered by address for
+     * `bt stack suspect` ([checkOrphans]).
+     */
+    private fun closeSilent(
+        link: FramedLink,
+        close: LinkSilence.Action.Close,
+        answers: Boolean,
+    ) {
+        val nodeId = link.nodeId
+        if (links[nodeId] !== link) return
+        closedSilent.add(link)
+        val address = linkAddresses[link]
+        Log.i(TAG, "bt link silent $nodeId (${close.why.wire} quiet=${close.quietMs}ms answers=$answers)")
+        if (!teardownLink(nodeId, "silent", only = link, closeLater = true)) return
+        wake() // as the eof path does: the connect loop may redial now, and the scan and side scan re-read their demand
+        if (close.why.local && address != null) localCloses[address] = LocalClose(nodeId, close.why, elapsed())
     }
 
     private fun beginConnect(nodeId: String): Boolean {
@@ -2738,7 +2931,11 @@ class BluetoothMeshTransport(
                         BluetoothDevice.TRANSPORT_AUTO
                     }
                 val up = action == BluetoothDevice.ACTION_ACL_CONNECTED
-                if (device != null && transport != BluetoothDevice.TRANSPORT_BREDR) orphans.onAcl(device.address, up, elapsed())
+                if (device != null && transport != BluetoothDevice.TRANSPORT_BREDR) {
+                    orphans.onAcl(device.address, up, elapsed())
+                    // A live link's own address went down: probe it (#203), never close on this alone.
+                    if (!up) linkAddresses.filterValues { it == device.address }.keys.forEach { onLinkEdge(it, "acl down") }
+                }
                 Log.d(
                     TAG,
                     "bt acl edge ${action?.substringAfterLast('.')} ${device?.address}" +
@@ -2997,6 +3194,16 @@ class BluetoothMeshTransport(
         // How long a channel that never became a link waits before its ACL is armed and watched ([armUnlinked]): the
         // ACL's connect edge comes from the Bluetooth app's process and can trail the channel.
         private const val UNLINKED_SETTLE_MS = 2_000L
+
+        // A silent link's close (#203) that has not returned by now is logged `bt link close slow`: it holds nothing up.
+        private const val CLOSE_SLOW_MS = 5_000L
+
+        // The silent-link loop's shortest wait: a link due now was just stepped, and the next look is never a busy loop.
+        private const val SILENCE_MIN_LOOK_MS = 1_000L
+
+        // How long a close on local evidence waits for its ACL's orphan report before `bt stack suspect` forgets it: past
+        // the arm's two releases on the minute's net, stretched by a sleeping CPU.
+        private const val LOCAL_CLOSE_KEEP_MS = 30 * 60_000L
 
         // The node id an unlinked arm and its watch go by when the channel closed before its HELLO came.
         private const val NO_HELLO = "(no hello)"

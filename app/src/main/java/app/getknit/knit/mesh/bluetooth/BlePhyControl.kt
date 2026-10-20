@@ -47,6 +47,10 @@ data class PhyLinkStatus(
  * so a link whose reads stop answering is called fading rather than read silently at its last value; [status] carries
  * the verdict to `BluetoothMeshTransport.liveLinkFading`.
  *
+ * Two raw readings go to [LinkSilence] beside it (#203), never the fade verdict: the times of the current run of
+ * unanswered reads ([unansweredSince]), and when the GATT client was told the connection ended while it held it
+ * ([lostAt]). Each reports through [onEvidence] as it happens, so the transport's silent-link check looks again then.
+ *
  * Device-verified only — there is no host GATT stack; the rules are [PhyStepper]'s, which are JVM-tested.
  */
 @SuppressLint("MissingPermission")
@@ -64,6 +68,8 @@ internal class BlePhyControl(
     private val now: () -> Long,
     // After every PHY report — the first read and each change — so the transport can republish what links are on.
     private val onPhyKnown: () -> Unit = {},
+    // After each unanswered read and on the client's loss ([lostAt]), off every lock: the silent-link check's look (#203).
+    private val onEvidence: (lost: Boolean) -> Unit = {},
 ) {
     private val stepper = PhyStepper(tuning)
     private val fade = LinkFade(tuning)
@@ -79,6 +85,27 @@ internal class BlePhyControl(
     @Volatile private var attached = false
 
     @Volatile private var disconnected = false
+
+    // The client reported itself connected once, and [loop]'s finally has begun letting it go: a disconnect is the
+    // stack's word only between the two.
+    @Volatile private var connected = false
+
+    @Volatile private var closing = false
+
+    // The times of the current run of unanswered reads, oldest first, the last [LinkSilence.STALE_READS] kept. An answered
+    // read empties it. Guarded by itself.
+    private val unanswered = ArrayDeque<Long>()
+
+    /**
+     * When the client, attached to the link's own ACL, was told the connection ended while it held it (#203); null while
+     * it never was. Kept past the client's end, as the control is kept past it.
+     */
+    @Volatile
+    var lostAt: Long? = null
+        private set
+
+    /** How many reads of the current unanswered run came after [t]: what [LinkSilence.Local] counts since the last byte. */
+    fun unansweredSince(t: Long): Int = synchronized(unanswered) { unanswered.count { it > t } }
 
     fun start() {
         job = scope.launch(Dispatchers.IO) { loop() }
@@ -143,6 +170,7 @@ internal class BlePhyControl(
                 if (!disconnected) readRssi(g)
             }
         } finally {
+            closing = true
             attached = false
             gatt?.let {
                 // disconnect() drops this client's hold on the link (the channel keeps the ACL); close() unregisters it.
@@ -185,14 +213,20 @@ internal class BlePhyControl(
             Log.i(TAG, "bt phy $nodeId step-up hold ${hold.name.lowercase()} (rssi=${smoothed.toInt()})")
         }
         if (smoothed <= tuning().edgeDbm) Log.d(TAG, "bt phy $nodeId rssi=$rssi smoothed=${smoothed.toInt()}")
+        synchronized(unanswered) { unanswered.clear() }
         logFade(fade.onRead(smoothed, at))
     }
 
     /** A read that did not answer — [why] in the log — counted toward [fade]'s staleness instead of dropped. */
     private fun onUnanswered(why: String) {
         val edge = fade.onUnanswered()
+        synchronized(unanswered) {
+            unanswered.addLast(now())
+            while (unanswered.size > LinkSilence.STALE_READS) unanswered.removeFirst()
+        }
         Log.d(TAG, "bt phy $nodeId rssi read unanswered (${fade.unansweredInRow} in a row, $why)")
         logFade(edge)
+        onEvidence(false)
     }
 
     /** One line per fade edge, at info (the step lines' level), so a walk's logcat has it without debug lines on. */
@@ -309,6 +343,7 @@ internal class BlePhyControl(
             ) {
                 when (newState) {
                     BluetoothProfile.STATE_CONNECTED -> {
+                        connected = true
                         attachedSignal.complete(true)
                     }
 
@@ -316,6 +351,13 @@ internal class BlePhyControl(
                         disconnected = true
                         attachedSignal.complete(false)
                         pokes.trySend(Unit)
+                        // Not our own disconnect() in the loop's finally, and not an attach that never came: the stack
+                        // says the ACL under a live link is gone (#203).
+                        if (connected && !closing && lostAt == null) {
+                            lostAt = now()
+                            Log.i(TAG, "bt phy $nodeId client lost (status=$status)")
+                            onEvidence(true)
+                        }
                     }
                 }
             }

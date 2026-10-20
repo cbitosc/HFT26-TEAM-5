@@ -1,6 +1,7 @@
 package app.getknit.knit.mesh.bluetooth
 
 import android.bluetooth.BluetoothSocket
+import android.os.SystemClock
 import app.getknit.knit.mesh.link.LinkSocket
 import app.getknit.knit.mesh.link.SegmentingOutputStream
 import java.io.BufferedInputStream
@@ -16,11 +17,17 @@ import java.io.OutputStream
  * [output] is wrapped in a [SegmentingOutputStream] so no single write exceeds one L2CAP SDU — a whole
  * 64 KiB FILE_CHUNK record otherwise emitted a 65541-byte write past the 16-bit (65535) SDU ceiling, which a
  * weaker vendor stack (Moto G `cherokee`, API 30) crashed reassembling. See [SegmentingOutputStream].
+ *
+ * Both raw streams pass through [stamps] beneath the buffering and the segmenting (#203): when a byte last came in, and
+ * whether the writer sits in a write, read by the transport's silent-link check ([LinkSilence]).
  */
 internal class BluetoothSocketLink(
     private val socket: BluetoothSocket,
+    now: () -> Long = SystemClock::elapsedRealtime,
 ) : LinkSocket {
-    override val input: InputStream by lazy { BufferedInputStream(socket.inputStream) }
+    val stamps = SocketStamps(now)
+
+    override val input: InputStream by lazy { BufferedInputStream(stamps.input(socket.inputStream)) }
 
     // Segment each L2CAP write to the negotiated per-packet size, capped well below the 65535-byte SDU
     // ceiling. getMaxTransmitPacketSize() is API 23 (safe at minSdk 29); some stacks report the 65535 SDU
@@ -29,7 +36,7 @@ internal class BluetoothSocketLink(
     private val txChunk: Int =
         socket.maxTransmitPacketSize.let { if (it in 1 until L2CAP_TX_CHUNK) it else L2CAP_TX_CHUNK }
 
-    override val output: OutputStream by lazy { SegmentingOutputStream(socket.outputStream, txChunk) }
+    override val output: OutputStream by lazy { SegmentingOutputStream(stamps.output(socket.outputStream), txChunk) }
 
     override fun close() {
         runCatching { socket.close() }

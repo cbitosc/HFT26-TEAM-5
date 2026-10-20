@@ -112,6 +112,8 @@ class FramedLinkTest {
         now: () -> Long = { 0L },
         onRxProgress: (String, Long, Long) -> Unit = { _, _, _ -> },
         windowedReports: Boolean = false,
+        onKeepalive: () -> Unit = {},
+        onKeepaliveWritten: () -> Unit = {},
     ): Harness {
         val toLink = PipedOutputStream()
         val linkInput = PipedInputStream(toLink, 1 shl 18)
@@ -144,6 +146,8 @@ class FramedLinkTest {
                 onFeedChanged = onFeedChanged,
                 onRxProgress = onRxProgress,
                 windowedReports = { windowedReports },
+                onKeepalive = onKeepalive,
+                onKeepaliveWritten = onKeepaliveWritten,
             )
         link.start()
         return Harness(link, toLink, fromLink, callbacks)
@@ -873,6 +877,58 @@ class FramedLinkTest {
             rec = LinkFraming.read(h.fromLink)
         }
         assertArrayEquals(body, received.toByteArray())
+    }
+
+    @Test
+    fun aKeepaliveInGoesToTheOwnerAloneAndCountsAsNoActivity() {
+        // #203: the Bluetooth transport answers it; Wi-Fi Aware's quiescence clock must not see it.
+        val clock = AtomicLong(1_000)
+        val heard = AtomicInteger()
+        val h = harness(now = clock::get, onKeepalive = { heard.incrementAndGet() })
+        clock.set(9_000)
+        writeRecord(h.toLink, LinkFraming.Type.KEEPALIVE)
+        writeRecord(h.toLink, LinkFraming.Type.DIGEST, LinkFraming.encodeDigest(DigestWire(listOf("a"))))
+        assertNotNull("a record behind it still lands", h.callbacks.digests.poll(2, TimeUnit.SECONDS))
+        assertEquals(1, heard.get())
+        assertNull(h.callbacks.inbound.poll())
+        clock.set(20_000)
+        writeRecord(h.toLink, LinkFraming.Type.KEEPALIVE)
+        assertTrue(awaitUntil { heard.get() == 2 })
+        assertEquals("the digest moved the clock, the keepalive did not", 9_000L, h.link.lastActivityAt)
+    }
+
+    @Test
+    fun aKeepaliveSentIsOneEmptyRecordReportedOnceWritten() {
+        val written = LinkedBlockingQueue<Unit>()
+        val h = harness(onKeepaliveWritten = { written.add(Unit) })
+        assertTrue(h.link.sendKeepalive())
+        val rec = LinkFraming.read(h.fromLink)!!
+        assertEquals(LinkFraming.Type.KEEPALIVE, rec.type)
+        assertEquals(0, rec.payload.size)
+        assertNotNull(written.poll(2, TimeUnit.SECONDS))
+        h.link.close()
+        assertFalse("a closed link queues none", h.link.sendKeepalive())
+    }
+
+    @Test
+    fun aKeepaliveRidesBetweenFileChunksAheadOfTheEnd() {
+        // N5 of #203's design pass: an answer never waits behind a stream. The small out-pipe holds the writer mid-file.
+        val written = AtomicInteger()
+        val h = harness(fromLinkBuffer = 16 * 1024, onKeepaliveWritten = { written.incrementAndGet() })
+        val body = ByteArray(80 * 1024) { (it % 251).toByte() }
+        val file = tmp.newFile("keepalive.bin").apply { writeBytes(body) }
+        h.link.sendFile(file, FileMeta(FileKind.ATTACHMENT, "d".repeat(64), "image/webp"))
+        h.link.sendKeepalive()
+        val types = ArrayList<LinkFraming.Type>()
+        var rec = LinkFraming.read(h.fromLink)
+        while (rec != null) {
+            types.add(rec.type)
+            if (rec.type == LinkFraming.Type.FILE_END) break
+            rec = LinkFraming.read(h.fromLink)
+        }
+        val at = types.indexOf(LinkFraming.Type.KEEPALIVE)
+        assertTrue("a KEEPALIVE between the header and the end, saw $types", at in 1 until types.indexOf(LinkFraming.Type.FILE_END))
+        assertEquals(1, written.get())
     }
 
     @Test

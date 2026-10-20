@@ -81,6 +81,11 @@ class FieldEventSchemaTest {
             """{"t":42,"e":"bt_down","peer":"$p","reason":"EOF","life":300000,"links":0,"phy":"CODED","rssi":-88}""",
             line(FieldEvent.BtDown(peer, BtDownReason.EOF, lifetimeMs = 300_000, links = 0, phy = LinkPhy.CODED, rssi = -88)),
         )
+        // A link closed for its silence (#203): the teardown's "silent" reason, by name.
+        assertEquals(
+            """{"t":42,"e":"bt_down","peer":"$p","reason":"SILENT","life":2160000,"links":1}""",
+            line(FieldEvent.BtDown(peer, BtDownReason.of("silent"), lifetimeMs = 2_160_000, links = 1)),
+        )
         assertEquals(
             """{"t":42,"e":"bt_fail","peer":"$p","reason":"TIMEOUT","dur":12000,"streak":3}""",
             line(FieldEvent.BtFail(peer, ConnectFailReason.TIMEOUT, durationMs = 12_000, streak = 3)),

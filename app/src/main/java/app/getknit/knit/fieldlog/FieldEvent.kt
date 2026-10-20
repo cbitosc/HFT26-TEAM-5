@@ -970,6 +970,9 @@ enum class BtDownReason {
 
     /** A new link to the same peer took this one's place. */
     REPLACED,
+
+    /** We closed it: it was shown dead by its silence, its own controller or a write that never returned (#203). */
+    SILENT,
     OTHER,
     ;
 
@@ -980,6 +983,7 @@ enum class BtDownReason {
                 "stop" -> STOP
                 "evicted" -> EVICTED
                 "adapter off" -> ADAPTER_OFF
+                "silent" -> SILENT
                 else -> OTHER
             }
     }

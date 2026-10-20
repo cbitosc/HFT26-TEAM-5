@@ -56,7 +56,7 @@ interface LinkCallbacks {
  * JVM-unit-testable over a piped [LinkSocket] ([app.getknit.knit.FramedLinkTest]). Callers pass
  * `SystemClock::elapsedRealtime` for [now] so the quiescence props share the supervisor's clock.
  */
-@Suppress("LongParameterList") // a link needs its identity, socket, scope, cache dir, partials, metrics, callbacks, clock
+@Suppress("LongParameterList", "LargeClass") // a link's identity, socket, scope, store, callbacks, clock; one link's loops (#203)
 class FramedLink(
     val nodeId: String,
     val peer: Peer,
@@ -91,6 +91,11 @@ class FramedLink(
     // [WINDOWED_PROGRESS_EVERY_MS], and once more that long after the last chunk if no other came. Off, every
     // [PROGRESS_EVERY_MS] of chunks only, as nsr7 shipped it. Read at each report.
     windowedReports: () -> Boolean = { false },
+    // Called on the reader when a [LinkFraming.Type.KEEPALIVE] arrives, and on the writer once one of ours went to the
+    // socket: the Bluetooth transport's silent-link probe and its answer (#203). Wi-Fi Aware passes neither, and never
+    // calls [sendKeepalive], so its links read and write exactly what they did.
+    private val onKeepalive: () -> Unit = {},
+    private val onKeepaliveWritten: () -> Unit = {},
 ) {
     private val outbound = Channel<Outbound>(Channel.UNLIMITED)
 
@@ -242,6 +247,16 @@ class FramedLink(
         metrics.onBytesSent(bytes.size.toLong())
         wake.trySend(Unit) // a windowed writer waiting for room drains it first
     }
+
+    /**
+     * Enqueue one empty [LinkFraming.Type.KEEPALIVE] (#203). It goes out ahead of a file's next chunk, between chunks like
+     * a frame, so an answer never waits behind a stream; [onKeepaliveWritten] says when the write returned. False once the
+     * link is closed. Nothing about it counts as data: it neither touches [lastActivityAt] nor moves a feed's clock.
+     */
+    fun sendKeepalive(): Boolean =
+        outbound.trySend(Outbound.Keepalive).isSuccess.also {
+            if (it) wake.trySend(Unit) // a windowed writer waiting for room drains it first
+        }
 
     /**
      * Enqueue a store-and-forward custody digest ([LinkFraming.Type.DIGEST]) for this peer. A link holds at most
@@ -573,7 +588,8 @@ class FramedLink(
                     }
 
                     LinkFraming.Type.KEEPALIVE -> {
-                        // The record's arrival is the whole point; there is nothing in it to handle.
+                        // Its arrival is the whole point: the owner reads it as a probe to answer (#203).
+                        onKeepalive()
                     }
 
                     LinkFraming.Type.HELLO -> {
@@ -637,6 +653,10 @@ class FramedLink(
                         }
                     }
 
+                    Outbound.Keepalive -> {
+                        writeKeepalive(out)
+                    }
+
                     is Outbound.FileSend -> {
                         if (beginOrSkip(item.meta.key)) {
                             streamFile(out, item)
@@ -671,6 +691,16 @@ class FramedLink(
         } catch (e: IllegalArgumentException) {
             log("dropping oversized $type record for $nodeId: ${e.message}")
         }
+    }
+
+    /**
+     * Writes one [LinkFraming.Type.KEEPALIVE] and flushes it, ahead of anything written after it, then says so: the
+     * owner times the peer's answer from the write's return, not its enqueue (#203).
+     */
+    private fun writeKeepalive(out: OutputStream) {
+        LinkFraming.write(out, LinkFraming.Type.KEEPALIVE)
+        out.flush()
+        onKeepaliveWritten()
     }
 
     /** How a stream's feed ended: the pace it last read, and whether its window clocked it (its `file …` line names both). */
@@ -871,6 +901,11 @@ class FramedLink(
                     wrote = writePendingDigest(out) || wrote
                 }
 
+                // Flushed with what came before it, between chunks (#203): an answer waits for no stream.
+                Outbound.Keepalive -> {
+                    writeKeepalive(out)
+                }
+
                 is Outbound.FileSend -> {
                     stash.addLast(item)
                 }
@@ -912,6 +947,9 @@ class FramedLink(
 
         // A digest is due; its ids are whatever [pendingDigest] holds when the writer gets here.
         data object DigestDue : Outbound
+
+        // One empty keepalive record, a probe or its answer (#203).
+        data object Keepalive : Outbound
 
         class FileSend(
             val file: File,

@@ -215,6 +215,7 @@ carries; never renumber an old one.
 | [2026-10.59fu](decisions/2026-10-59fu-a-reaction-to-your-message-notifies-and-can-head-the-chat-list.md) | A reaction to your message notifies and can head the chat list | ui, notifications, receipts |
 | [2026-10.5buf](decisions/2026-10-5buf-a-bluetooth-file-feed-is-clocked-by-its-receiver-s-reports.md) | A Bluetooth file feed is clocked by its receiver's reports | ble, mesh, blobs |
 | [2026-10.5hzt](decisions/2026-10-5hzt-a-transfer-s-ready-is-sent-until-the-receiver-connects.md) | A transfer's READY is sent until the receiver connects, and a send that ended short is retried from its card | transfer, ui |
+| [2026-10.697m](decisions/2026-10-697m-a-bluetooth-link-this-phone-can-show-is-dead-goes-down.md) | A Bluetooth link this phone can show is dead goes down, and a peer that has sent a KEEPALIVE answers one | ble, transport, wire |
 | [2026-10.6e5t](decisions/2026-10-6e5t-a-blob-is-fetched-from-the-best-neighbour-that-says-it-holds-it.md) | A blob is fetched from the best neighbour that says it holds it | mesh, wire, blobs |
 | [2026-10.6h2g](decisions/2026-10-6h2g-everyone-is-one-mention-per-member.md) | @everyone is one mention per member | mentions, groups |
 | [2026-10.79yb](decisions/2026-10-79yb-a-call-with-no-live-path-is-a-walkie-talkie-over-the-mesh.md) | A call with no live path is a walkie-talkie over the mesh | calls, voice |

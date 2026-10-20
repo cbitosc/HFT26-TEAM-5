@@ -56,7 +56,7 @@ Schema 1. A new field is additive. Renaming or removing a field, or changing a f
 | `radio` | A radio's health, link count or flags changed; also every 15 min as a sample | `radio` Bluetooth/WifiAware/LoRa, `health` Healthy/ForegroundOnly/Degraded/Unavailable, `linked`, `nearby` (smoothed), `contended` (BT audio), `held` (NAN initiator hold) |
 | `counters` | Every 15 min and at stop | Each `MeshMetrics` counter that moved, by its increase since the last `counters`. `…Peak…` values are high-water marks, written when they change. Reason maps are spread as `drop_<REASON>`, `btFail_<REASON>`, `bleSideDrop_<REASON>`, `fastDrop_<REASON>`. Names: `FieldCounters.flatten` |
 | `bt_up` | A Bluetooth link came up | `peer`, `dialed`, `dial` (ms, connect → HELLO, ours only), `sighted`, `links` (live after), `relink` (ms since this peer's last `bt_down` in this log) |
-| `bt_down` | A Bluetooth link ended | `peer`, `reason` EOF/STOP/EVICTED/ADAPTER_OFF/REPLACED/OTHER, `life` ms, `links` (live after), `phy`, `rssi` (link RSSI; only with a PHY handle) |
+| `bt_down` | A Bluetooth link ended | `peer`, `reason` EOF/STOP/EVICTED/ADAPTER_OFF/REPLACED/SILENT/OTHER, `life` ms, `links` (live after), `phy`, `rssi` (link RSSI; only with a PHY handle) |
 | `bt_fail` | A Bluetooth dial failed | `peer`, `reason` (ConnectFailReason), `dur` ms, `streak` |
 | `bt_phy` | A link stepped PHY (Coded experiment) | `peer`, `coded` (to Coded, else up to 1M/2M), `rssi` |
 | `bt_scan` | Every 5 min | `links`, `le` (LE connections the phone holds), `sighted`, `hunting`, `coded` (Coded mode) |
