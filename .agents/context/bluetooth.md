@@ -142,14 +142,16 @@ Bluetooth-adjacent routing that stays in `AGENTS.md`, because another subsystem 
   `closeSilent` / `closeOffThread` / `onLinkEdge` / `suspectStack`, `BlePhyControl.lostAt` / `onLost`,
   `FramedLink.sendKeepalive` / `onKeepalive`, or what a `LinkFraming.Type.KEEPALIVE` does:** READ ADR 2026-10.697m
   (#203). A link this phone can show is dead goes down through the ordinary teardown, `neighbors` and `reachable` moved
-  before its socket closes off-thread: probes toward a peer that announced itself with a `KEEPALIVE` (90 s quiet, two
-  probes 30 s apart, about 150 s); toward a peer that does not answer, its PHY client's loss after 90 s quiet; and on any
+  before its socket closes off-thread: probes toward a peer that announced itself with a `KEEPALIVE` (90 s quiet; the
+  first probe rides the next record this side queues anyway, in practice the 60 s re-offer digest, through
+  `LinkSilence.carry` in `sendDigest` / `writeOnce` / `sendFile`, else falls back after `CARRIER_WAIT_MS` on the uptime
+  clock; the second 30 s after it on the timer; about 210 s); toward a peer that does not answer, its PHY client's loss after 90 s quiet; and on any
   non-doorbell link, one `write()` sitting 120 s. Toward an answering peer a client loss only probes early, as an edge.
   Unanswered link-RSSI reads close nothing: after a process freeze they timed out 27 in a row on healthy links (the
   2026-10-19 trial). A peer that has sent a `KEEPALIVE` answers each one except one meeting an announce or probe of its
   own still unmatched — a cross-platform rule, though iPhone (`CAP_DOORBELL`) links are exempt from all of it. Stamps are
   bytes on the raw socket streams, never `FramedLink.lastActivityAt` (Wi-Fi Aware's), and a keepalive is never data. An
-  edge probes, never closes. `bt link silent`, `bt link probe`, `bt link answers`, `bt link edge`, `bt link close slow`
+  edge probes, never closes. `bt link silent`, `bt link probe … via=<trigger>`, `bt link answers`, `bt link edge`, `bt link close slow`
   and `bt stack suspect` (after `LOST` closes only, a soft signal) are new lines; `bt link down: <id> (silent)` is the
   harness's `down`. Tests: `LinkSilenceTest`, `SocketStampsTest`, `FramedLinkTest`.
 - **When touching `mesh/bluetooth/GattPayloads`, `BleGattPayloadReader`, `BleAdvertPayload.FLAG_DIALS_GATT_PEERS`,

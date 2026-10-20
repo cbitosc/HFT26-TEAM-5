@@ -137,3 +137,44 @@ as an initiator: it is one of the side's own keepalives awaiting a match, exactl
 that crosses it is not answered. The comment at
 `Sources/KnitWire/Link/LinkRecord.swift:13` ("Android never sends one and ignores it") goes stale. Android now sends one at
 link-up on every non-doorbell link and answers one, though never on a link to an iPhone.
+
+## Amendment (2026-10-20): the first probe rides traffic this side already sends
+
+**Why.** A probe never wakes this phone (its wait is `ElapsedWait`), but its arrival wakes a dozing peer, which then
+writes its answer. In the 2026-10-19 hour asleep the P8, kept awake by its other links, probed the deep-dozing P3 about
+every 90 s: some 40 extra wake-ups an hour (23 probes an hour at `bf93901f`).
+
+**What changed.**
+
+- **The first probe of a silence rides a carrier.** Once a link whose peer answers has been quiet for 90 s, its first
+  probe goes right behind the next record this side queues to the link anyway: the transport asks
+  `LinkSilence.carry(now, lastByteAt)` after a successful enqueue in `sendDigest`, in `writeOnce` after `link.send` (not
+  on a crossings skip) and in `sendFile` on acceptance. In practice the carrier is the 60 s re-offer digest
+  (`MeshManager.reofferToNeighbors` → `ForwardSync.onNeighborAdded` → `sendDigest`), which reaches every neighbour, empty
+  custody included. The peer is woken by that digest already and answers in the same wake, so the probe adds no wake-up
+  on either side.
+- **Decided at the enqueue, never armed.** `carry` checks the whole condition at that moment: the peer answers, the link
+  is not exempt, no probe of this silence has gone, none is queued, and the link has been quiet for 90 s. Only then does
+  it count the probe for the answer rule. An unsent probe never counts, so a peer's keepalive that arrives while this side
+  is due with no carrier is the peer's own and is answered. A byte that arrives first means no probe.
+- **A fallback, on the uptime clock.** The re-offer is one `while (true)` that nothing restarts if it throws, so the wait
+  for a carrier is bounded. A first probe due for `LinkSilence.CARRIER_WAIT_MS` (120 s, two re-offers) with no carrier
+  goes on the timer (`via=fallback`): 120 s of this phone's awake time, not of wall time. That bound is measured on
+  `SystemClock.uptimeMillis` (CLOCK_MONOTONIC), the clock
+  the re-offer's `delay` runs on: on the elapsed clock this side's own doze would trip the fallback at every wake, though
+  its re-offer stopped exactly as long. The wait starts at the first look that finds the probe due. While the policy
+  waits, the loop's next look is the fallback's deadline (its uptime left, waited on `elapsedWait`, read again after any
+  sleep), never the quiet's passed deadline, so it never looks once a second.
+- **Unchanged.** The second probe still goes on the timer, 30 s after the first's write returned: a live peer that missed
+  one answer is rare, and a dead one cannot be woken. An edge still probes at once (`via=edge`). The P clock still starts
+  at the probe's own write return, so a probe that waits behind a file chunk starts it after the chunk. The announce, the
+  answer rule, the doorbell exemption, the `LOST` close toward older peers, the write stall and publish-before-close stay
+  as they were. `FramedLink` is untouched, and Wi-Fi Aware with it. No wire change.
+- **The log line names its trigger.** `bt link probe <id> #<n> (quiet=…ms) via=digest|frame|file|timer|edge|fallback`.
+  No harness reads it.
+
+**What it costs.** The close bound toward a peer that answers grows from about 150 s to about 210 s on this side's awake
+clock: 90 s of quiet, up to 60 s for the next carrier, then two answer waits. With no carrier it is 90 s + 120 s of
+uptime + 60 s. Longer while this side dozes, but a dozing phone sends nothing, and the first record it sends on waking
+carries the probe. Tests: `LinkSilenceTest` (the carrier, the fallback on uptime, a doze that never trips it, no armed
+state, no 1 Hz look, and a seeded pair whose dozing carriers ride the first probes over six silences' worth of time).

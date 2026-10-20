@@ -712,6 +712,7 @@ class BluetoothMeshTransport(
             return
         }
         link.send(bytes)
+        carryProbe(link, "frame")
         val doorbell = doorbells[link] ?: return
         if (DoorbellPolicy.rings((env ?: WireCodec.decodeEnvelope(wire.signed))?.type)) doorbell.poke()
     }
@@ -752,8 +753,12 @@ class BluetoothMeshTransport(
         to: Peer,
         meta: FileMeta,
     ): Boolean {
-        val accepted = links[to.nodeId]?.sendFile(file, meta) ?: false
-        if (accepted) metrics.onFileSent(TransportKind.Bluetooth)
+        val link = links[to.nodeId] ?: return false
+        val accepted = link.sendFile(file, meta)
+        if (accepted) {
+            metrics.onFileSent(TransportKind.Bluetooth)
+            carryProbe(link, "file")
+        }
         return accepted
     }
 
@@ -902,7 +907,9 @@ class BluetoothMeshTransport(
         to: Peer,
         ids: List<String>,
     ) {
-        links[to.nodeId]?.sendDigest(ids)
+        val link = links[to.nodeId] ?: return
+        link.sendDigest(ids)
+        carryProbe(link, "digest") // the 60 s re-offer: every link's carrier (#203)
     }
 
     // --- Radio bring-up / teardown ---
@@ -2489,7 +2496,7 @@ class BluetoothMeshTransport(
             )
         events.link = framed
         // Before framed.start(), so the peer's announce finds it. An iPhone's is exempt from the whole check (#203).
-        val silence = LinkSilence(exempt = DoorbellPolicy.serves(advert.capabilities))
+        val silence = LinkSilence(exempt = DoorbellPolicy.serves(advert.capabilities), uptime = SystemClock::uptimeMillis)
         silences[framed] = SilentLink(silence, link.stamps)
         crossings.forget(nodeId) // a fresh stream starts clean: the peer may have restarted with an empty SeenSet
         if (!sighted) neverSighted.add(framed)
@@ -2640,8 +2647,7 @@ class BluetoothMeshTransport(
                 val local = localReading(link, rxAt)
                 when (val action = s.policy.step(now, rxAt, blocked, local)) {
                     is LinkSilence.Action.Probe -> {
-                        Log.i(TAG, "bt link probe ${link.nodeId} #${action.n} (quiet=${now - rxAt}ms)")
-                        link.sendKeepalive()
+                        sendProbe(link, action, now - rxAt, action.via.name.lowercase())
                     }
 
                     is LinkSilence.Action.Close -> {
@@ -2665,6 +2671,33 @@ class BluetoothMeshTransport(
         silence: LinkSilence,
     ) {
         if (silence.announce()) link.sendKeepalive()
+        silenceWake.trySend(Unit)
+    }
+
+    /**
+     * This side just queued a [what] (`digest`, `frame` or `file`) to [link]: a due first probe rides right behind it, so a
+     * dozing peer that record wakes answers in the same wake (#203). Off every lock; the policy decides at once.
+     */
+    private fun carryProbe(
+        link: FramedLink,
+        what: String,
+    ) {
+        val s = silences[link] ?: return
+        val now = elapsed()
+        val rxAt = s.stamps.lastByteAt
+        val action = s.policy.carry(now, rxAt)
+        if (action is LinkSilence.Action.Probe) sendProbe(link, action, now - rxAt, what)
+    }
+
+    /** Queues [probe] on [link], [quietMs] after its last byte in, logged with what sent it ([via]). */
+    private fun sendProbe(
+        link: FramedLink,
+        probe: LinkSilence.Action.Probe,
+        quietMs: Long,
+        via: String,
+    ) {
+        Log.i(TAG, "bt link probe ${link.nodeId} #${probe.n} (quiet=${quietMs}ms) via=$via")
+        link.sendKeepalive()
         silenceWake.trySend(Unit)
     }
 

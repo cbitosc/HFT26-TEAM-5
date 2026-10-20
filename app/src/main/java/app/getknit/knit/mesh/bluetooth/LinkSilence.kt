@@ -18,10 +18,15 @@ package app.getknit.knit.mesh.bluetooth
  *   other's answer, an answer is never answered, and every exchange ends however long each keepalive took to cross.
  *   (The design pass's rule — no answer within [Config.answerMs] of writing one — answers an answer whose legs each took
  *   over half that wait, a keepalive behind a full stack buffer, and the pair then bounce for good; it also left a
- *   second probe sent while the first one's answer was crossing unmatched for ever.) On such a link, no byte in for
- *   [Config.quietMs] writes a probe; no byte in for [Config.answerMs] after its write returned writes one more; after
- *   [Config.probes] unanswered, it closes: about 150 s from the last byte, on this side's awake clock — a live peer's
- *   answer wakes this CPU, so the wait for it runs on the elapsed clock soundly.
+ *   second probe sent while the first one's answer was crossing unmatched for ever.) On such a link, once no byte has
+ *   come in for [Config.quietMs], the first probe rides the next record this side queues to the link anyway ([carry]) —
+ *   in practice the 60 s custody re-offer — so the peer, woken by that record already, answers in the same wake and the
+ *   probe costs a dozing peer no wake-up (the 2026-10-19 hour asleep: about 40 extra an hour at `bf93901f`). No carrier
+ *   within [Config.carrierWaitMs] of being due, on the uptime clock, and it goes on its own ([Trigger.FALLBACK]): the
+ *   re-offer is one loop nothing restarts if it throws. An edge still probes at once. No byte in for [Config.answerMs]
+ *   after the probe's write returned writes a second, on the timer; after [Config.probes] unanswered, it closes: about
+ *   150–210 s from the last byte on this side's awake clock — a live peer's answer wakes this CPU, so the wait for it
+ *   runs on the elapsed clock soundly.
  * - **Its own controller, toward a peer that does not answer, on a link with a PHY handle** ([Local]): no byte in for
  *   [Config.quietMs] after the handle's GATT client was told the connection ended. Toward a peer that answers it is
  *   ignored, and only the probes close: the stack can be wrong both ways. Unanswered link-RSSI reads are no evidence at
@@ -35,12 +40,17 @@ package app.getknit.knit.mesh.bluetooth
  * silent by design, and resumes it for a GATT write, not for L2CAP data (ADR 2026-09.dqvb), so it gets no announce, no
  * probe, no answer and no stall close; its bytes are what they were.
  *
- * Pure and clock-injected (the transport's `elapsedRealtime`); synchronized, because the reader, the writer and the loop
- * all call in.
+ * Pure and clock-injected: every `now` is the transport's `elapsedRealtime`, and [uptime] its `uptimeMillis`, which the
+ * carrier wait alone reads; synchronized, because the reader, the writer, the send paths and the loop all call in.
  */
 class LinkSilence(
     /** A `CAP_DOORBELL` link: never announced, probed, answered or closed here. */
     val exempt: Boolean,
+    /**
+     * The uptime clock (CLOCK_MONOTONIC, stopped while the CPU sleeps): the clock the re-offer's `delay` runs on, so a
+     * carrier is waited for as long as the re-offer would take, and this side's own doze never trips the fallback.
+     */
+    private val uptime: () -> Long,
     private val config: Config = Config(),
 ) {
     /** The bounds, with why each is what it is on [LinkSilence]'s constants. */
@@ -49,7 +59,23 @@ class LinkSilence(
         val answerMs: Long = ANSWER_MS,
         val probes: Int = PROBES,
         val writeStallMs: Long = WRITE_STALL_MS,
+        val carrierWaitMs: Long = CARRIER_WAIT_MS,
     )
+
+    /** What sent a probe, as its `bt link probe … via=` names it (the transport names a carrier's kind itself). */
+    enum class Trigger {
+        /** Rode a record this side queued anyway ([carry]). */
+        CARRIER,
+
+        /** The second probe, an answer wait after the first. */
+        TIMER,
+
+        /** An edge from the stack. */
+        EDGE,
+
+        /** Due for [Config.carrierWaitMs] of uptime with no carrier. */
+        FALLBACK,
+    }
 
     /** Why a link was closed, as its `bt link silent` line names it. */
     enum class Why(
@@ -65,9 +91,10 @@ class LinkSilence(
     sealed interface Action {
         data object None : Action
 
-        /** Write one `KEEPALIVE` now: the [n]th probe of this silence. */
+        /** Write one `KEEPALIVE` now: the [n]th probe of this silence, sent by [via]. */
         data class Probe(
             val n: Int,
+            val via: Trigger,
         ) : Action
 
         /** Close the link: [why], [quietMs] after its last byte in. */
@@ -108,6 +135,11 @@ class LinkSilence(
     // A hint that the connection may be gone (an ACL disconnect for the link's address, its PHY client's loss): probe now.
     private var edgeAt: Long? = null
 
+    // When, on [uptime], a look first found the first probe due for the silence that began at [dueRxAt]; null before.
+    // Not a probe: nothing counts until one is queued. A byte in starts a new silence, and a new wait.
+    private var dueSinceUp: Long? = null
+    private var dueRxAt: Long? = null
+
     /** The link came up: true when this side writes its announce now (not when an answer to the peer's went first). */
     @Synchronized
     fun announce(): Boolean {
@@ -139,6 +171,23 @@ class LinkSilence(
         if (queued.removeFirstOrNull() == Kind.PROBE) probeWrittenAt = now
     }
 
+    /**
+     * This side just queued a record to the link (a digest, a frame, a file), at [now] with its last byte in at [rxAt]:
+     * a [Action.Probe] when the first probe of a silence is due, to queue right behind it. Decided here, at the enqueue,
+     * on the whole condition — the peer answers, no probe of this silence went yet, none is queued, and the link has been
+     * quiet for [Config.quietMs] — so nothing is armed: a byte that came first means no probe, and an unsent one never
+     * counts.
+     */
+    @Synchronized
+    fun carry(
+        now: Long,
+        rxAt: Long,
+    ): Action {
+        if (exempt || !answers || Kind.PROBE in queued) return Action.None
+        endRunIfAnswered(rxAt)
+        return if (probesSent == 0 && now - rxAt >= config.quietMs) probe(now, Trigger.CARRIER) else Action.None
+    }
+
     /** The connection may be gone (an edge from the stack, which names no handle): probe now, never close on it alone. */
     @Synchronized
     fun onEdge(now: Long): Boolean {
@@ -161,13 +210,18 @@ class LinkSilence(
         if (exempt) return Action.None
         val quiet = now - rxAt
         if (blockedSince != null && now - blockedSince >= config.writeStallMs) return Action.Close(Why.WRITE, quiet)
-        val began = runSince ?: edgeAt
-        if (began != null && rxAt > began) endRun()
+        endRunIfAnswered(rxAt)
         // Toward an older peer our controller's word is all there is. Toward one that answers it is ignored: a stack refuses
         // reads, and an ATT timeout reports a disconnect to every client while the CoC keeps the ACL up, so only the probes
         // close (the bluetooth-reviewer's finding). A client's loss still probes early, as an edge (the transport's).
         if (!answers) localClose(quiet, local)?.let { return it }
-        return if (!answers || Kind.PROBE in queued) Action.None else probeStep(now, quiet)
+        return if (!answers || Kind.PROBE in queued) Action.None else probeStep(now, rxAt, quiet)
+    }
+
+    /** A byte in after this silence's run began ends it. */
+    private fun endRunIfAnswered(rxAt: Long) {
+        val began = runSince ?: edgeAt
+        if (began != null && rxAt > began) endRun()
     }
 
     /** Its own controller's close, once the link has been quiet long enough for one; else null. */
@@ -184,15 +238,41 @@ class LinkSilence(
     /** The probes' next step on a link whose peer answers and with no probe of ours queued. */
     private fun probeStep(
         now: Long,
+        rxAt: Long,
         quiet: Long,
     ): Action {
+        if (probesSent == 0) return firstProbe(now, rxAt, quiet)
         val sinceProbe = probeWrittenAt?.let { now - it }
         return when {
-            probesSent == 0 && (quiet >= config.quietMs || edgeAt != null) -> probe(now)
-            probesSent == 0 || sinceProbe == null || sinceProbe < config.answerMs -> Action.None
-            probesSent < config.probes -> probe(now)
+            sinceProbe == null || sinceProbe < config.answerMs -> Action.None
+            probesSent < config.probes -> probe(now, Trigger.TIMER)
             quiet >= config.quietMs -> Action.Close(Why.PROBES, quiet)
             else -> Action.None
+        }
+    }
+
+    /**
+     * The first probe from the loop: at once on an edge; otherwise only once it has waited [Config.carrierWaitMs] of
+     * uptime for a carrier since a look first found it due. Before that, [carry] sends it.
+     */
+    private fun firstProbe(
+        now: Long,
+        rxAt: Long,
+        quiet: Long,
+    ): Action {
+        if (edgeAt != null) return probe(now, Trigger.EDGE)
+        if (quiet < config.quietMs) return Action.None
+        val since = dueSince(rxAt)
+        return if (uptime() - since >= config.carrierWaitMs) probe(now, Trigger.FALLBACK) else Action.None
+    }
+
+    /** When, on [uptime], the first probe of the silence since [rxAt] was first found due: now, at the first look. */
+    private fun dueSince(rxAt: Long): Long {
+        val known = dueSinceUp
+        if (known != null && dueRxAt == rxAt) return known
+        return uptime().also {
+            dueSinceUp = it
+            dueRxAt = rxAt
         }
     }
 
@@ -236,7 +316,7 @@ class LinkSilence(
             // A byte ended the run: the next look ends it, and the next silence starts from that byte.
             began != null && rxAt > began -> quietDue
 
-            probesSent == 0 -> if (edgeAt != null) now else quietDue
+            probesSent == 0 -> firstProbeDueAt(now, rxAt, quietDue)
 
             // The writer reports the write, and the loop looks again then.
             written == null -> null
@@ -247,13 +327,33 @@ class LinkSilence(
         }
     }
 
-    /** This silence's next probe, queued now. */
-    private fun probe(now: Long): Action {
+    /**
+     * When the loop's first probe falls due: now on an edge; while the link is not yet quiet, the moment it is, for one look
+     * that starts the carrier wait; once due, the end of that wait, its uptime left counted as elapsed time (a wait that
+     * spans a sleep ends early, and the next look reads the uptime again). Never the quiet's deadline once it has passed,
+     * which would look every second while a carrier is awaited.
+     */
+    private fun firstProbeDueAt(
+        now: Long,
+        rxAt: Long,
+        quietDue: Long,
+    ): Long =
+        when {
+            edgeAt != null -> now
+            now < quietDue -> quietDue
+            else -> now + (dueSince(rxAt) + config.carrierWaitMs - uptime()).coerceAtLeast(0L)
+        }
+
+    /** This silence's next probe, sent by [via], queued now. */
+    private fun probe(
+        now: Long,
+        via: Trigger,
+    ): Action {
         probesSent++
         queued.addLast(Kind.PROBE)
         awaiting++
         if (runSince == null) runSince = now
-        return Action.Probe(probesSent)
+        return Action.Probe(probesSent, via)
     }
 
     private fun endRun() {
@@ -261,6 +361,8 @@ class LinkSilence(
         probeWrittenAt = null
         runSince = null
         edgeAt = null
+        dueSinceUp = null
+        dueRxAt = null
     }
 
     companion object {
@@ -285,5 +387,11 @@ class LinkSilence(
          * at its edge drains that in seconds; a feed is paced or windowed between writes, never inside one.
          */
         const val WRITE_STALL_MS = 120_000L
+
+        /**
+         * How long a due first probe waits for a carrier, on the uptime clock, before it goes on its own: two of the 60 s
+         * re-offers this side sends every link, on the clock their `delay` runs on, so a live re-offer always lands first.
+         */
+        const val CARRIER_WAIT_MS = 120_000L
     }
 }
