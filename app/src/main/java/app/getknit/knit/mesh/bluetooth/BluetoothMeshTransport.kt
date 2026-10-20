@@ -498,6 +498,7 @@ class BluetoothMeshTransport(
     // never the replacement's (ADR 2026-09.shzv).
     private inner class LinkEvents : LinkCallbacks {
         lateinit var link: FramedLink
+        private val down = LinkDownOnce() // both loops report the end; only the first may tear down and bump (#205)
 
         override fun onInbound(frame: InboundFrame) {
             // In counts as a crossing too: nothing we later hand this link may be the frame it just gave us.
@@ -516,11 +517,16 @@ class BluetoothMeshTransport(
         }
 
         override fun onLinkDown(nodeId: String) {
-            val released = teardownLink(nodeId, "eof", only = link)
-            // Closed for silence (#203): the end its reader or writer reports is our close, not a flap.
-            if (!released && link in closedSilent) return
-            // Replaced by a fresh link from the same peer: that link holds the slot, and the peer did not flap.
-            if (!ConnectBackoffs.flapped(released, replaced = links[nodeId] != null)) return
+            // Only the first of the two loops' reports tears down (#205). Closed for silence (#203): the end its reader or
+            // writer reports is our close, not a flap. Replaced by a fresh link from the same peer: that link holds the
+            // slot, and the peer did not flap.
+            val flapped =
+                down.flapped(
+                    teardown = { teardownLink(nodeId, "eof", only = link) },
+                    replaced = { links[nodeId] != null },
+                    ownClose = { link in closedSilent },
+                )
+            if (!flapped) return
             // A flapping link escalates on the same per-peer streak as a failed connect, so a peer that keeps
             // dropping isn't reconnected on a tight loop (which would black out scanning each attempt).
             val (streak, nextAt) = synchronized(lock) { bumpBackoffLocked(nodeId) }
