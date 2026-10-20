@@ -6,7 +6,6 @@ import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
 import androidx.compose.ui.test.assertTextEquals
-import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
@@ -16,16 +15,13 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
-import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import app.getknit.knit.data.relay.RelayInviteApplier
-import app.getknit.knit.mesh.spool.CommonsInvite
 import app.getknit.knit.mesh.spool.HeldKey
 import app.getknit.knit.mesh.spool.KeyAnswer
 import app.getknit.knit.ui.theme.KnitTheme
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -34,16 +30,14 @@ import org.robolectric.annotation.GraphicsMode
 
 /**
  * The relay editor's load-bearing behaviours: the switch reflects the stored setting, a relay's live
- * state reaches its row, the empty list explains itself, and — the one that protects a release build —
- * an unacceptable URL cannot be added.
+ * state reaches its row, a row opens its relay and its switch parks it, the empty list explains itself, and — the
+ * one that protects a release build — an unacceptable URL cannot be added. A relay's own screen is
+ * [RelayDetailScreenContentTest]'s.
  */
 @RunWith(AndroidJUnit4::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 class InternetRelayScreenContentTest {
     private companion object {
-        /** The §13 fixture invite — 32 bytes, unpadded base64url, the daemon's own grammar. */
-        const val INVITE = "knit-commons:v1:ChEYHyYtNDtCSVBXXmVsc3qBiI-WnaSrsrnAx87V3OM"
-
         /** A customer key's shape; the sheet must never show it. */
         const val KEY = "kak1_FBsiKTA3PkVMU1phaG92fYSLkpmgp661vMPK0djf5u0"
     }
@@ -57,16 +51,12 @@ class InternetRelayScreenContentTest {
         showConsent: Boolean = false,
         onToggle: (Boolean) -> Unit = {},
         onAddRelay: (String) -> Unit = {},
-        onRemoveRelay: (String) -> Unit = {},
+        onOpenRelay: (String) -> Unit = {},
         onSetRelayEnabled: (String, Boolean) -> Unit = { _, _ -> },
         onAcceptConsent: () -> Unit = {},
-        onJoinCommons: (String, String) -> Unit = { _, _ -> },
-        onLeaveCommons: (String) -> Unit = {},
         invitePreview: RelayInviteApplier.Preview? = null,
         onConfirmInvite: () -> Unit = {},
         onDismissInvite: () -> Unit = {},
-        onShareInvite: (String) -> Unit = {},
-        onCopyInvite: (String) -> Unit = {},
     ) {
         compose.setContent {
             KnitTheme {
@@ -77,17 +67,12 @@ class InternetRelayScreenContentTest {
                     onToggle = onToggle,
                     onAcceptConsent = onAcceptConsent,
                     onAddRelay = onAddRelay,
-                    onRemoveRelay = onRemoveRelay,
+                    onOpenRelay = onOpenRelay,
                     onSetRelayEnabled = onSetRelayEnabled,
                     isValidUrl = { it.startsWith("wss://") },
-                    onJoinCommons = onJoinCommons,
-                    onLeaveCommons = onLeaveCommons,
-                    isValidInvite = { CommonsInvite.looksLikeInvite(it) },
                     invitePreview = invitePreview,
                     onConfirmInvite = onConfirmInvite,
                     onDismissInvite = onDismissInvite,
-                    onShareInvite = onShareInvite,
-                    onCopyInvite = onCopyInvite,
                 )
             }
         }
@@ -193,94 +178,6 @@ class InternetRelayScreenContentTest {
     fun aFramesOnlyRelaySaysSoBeforeAPhotoFailsToUpload() {
         render(InternetRelayUiState(enabled = true, relays = listOf(relay(carriesPhotos = false))))
         compose.onNodeWithText("Carries messages only — no photos").assertIsDisplayed()
-    }
-
-    @Test
-    fun aRelayWithCallFeaturesNamesThemItsTicketAndItsKey() {
-        render(
-            InternetRelayUiState(
-                enabled = true,
-                relays =
-                    listOf(
-                        relay(
-                            host = "lab.lax.spool.getknit.app",
-                            calls =
-                                RelayCalls(
-                                    turn = true,
-                                    stunServers = 2,
-                                    walkie = true,
-                                    ticket = RelayTicket.Live(exp = 1_800_086_400L, turn = true, walkie = true),
-                                ),
-                            account = RelayAccount("issuer.example.org", KeyAnswer.OK, endsAt = 1_801_000_000_000L, failures = 0),
-                        ),
-                        relay(host = "plain.example.org"),
-                    ),
-            ),
-        )
-        compose.onNodeWithText("Calls · TURN, walkie, 2 STUN servers").assertIsDisplayed()
-        compose
-            .onNode(hasText("Ticket good until", substring = true) and hasText("· TURN, walkie", substring = true))
-            .assertIsDisplayed()
-        compose.onNodeWithText("Ticket key from issuer.example.org · account ends", substring = true).assertIsDisplayed()
-        // A relay that offers calls nothing says nothing about them.
-        compose.onAllNodesWithTag("relay_calls_plain.example.org").assertCountEquals(0)
-    }
-
-    @Test
-    fun aFilesTicketNamesFilesAndASpentDaySaysSo() {
-        render(
-            InternetRelayUiState(
-                enabled = true,
-                relays =
-                    listOf(
-                        relay(
-                            host = "lab.lax.spool.getknit.app",
-                            calls =
-                                RelayCalls(
-                                    turn = true,
-                                    stunServers = 1,
-                                    walkie = true,
-                                    ticket = RelayTicket.Live(exp = 1_800_086_400L, turn = true, walkie = true, files = true),
-                                    uploadsSpent = true,
-                                ),
-                        ),
-                    ),
-            ),
-        )
-        compose
-            .onNode(hasText("Ticket good until", substring = true) and hasText("· TURN, walkie, files", substring = true))
-            .assertIsDisplayed()
-        compose.onNodeWithText("Today's uploads here are used up").assertIsDisplayed()
-    }
-
-    @Test
-    fun aTicketedRelayWithoutATicketSaysWhatTurnNeeds() {
-        render(
-            InternetRelayUiState(
-                enabled = true,
-                relays =
-                    listOf(
-                        relay(
-                            calls = RelayCalls(turn = true, stunServers = 1, walkie = false, ticket = RelayTicket.None),
-                            account = RelayAccount("issuer.example.org", KeyAnswer.UNKNOWN_KEY, endsAt = null, failures = 0),
-                        ),
-                        relay(
-                            host = "refused.example.org",
-                            calls = RelayCalls(turn = false, stunServers = 0, walkie = true, ticket = RelayTicket.Refused("audience")),
-                        ),
-                        relay(
-                            host = "down.example.org",
-                            connected = false,
-                            account = RelayAccount("issuer.example.org", answer = null, endsAt = null, failures = 3),
-                        ),
-                    ),
-            ),
-        )
-        compose.onNodeWithText("Calls · TURN, 1 STUN server").assertIsDisplayed()
-        compose.onNodeWithText("No ticket — TURN here needs one").assertIsDisplayed()
-        compose.onNodeWithText("issuer.example.org doesn't recognise this ticket key").assertIsDisplayed()
-        compose.onNodeWithText("Ticket refused (audience)").performScrollTo().assertIsDisplayed()
-        compose.onNodeWithText("Ticket key from issuer.example.org · not answering").performScrollTo().assertIsDisplayed()
     }
 
     @Test
@@ -409,7 +306,7 @@ class InternetRelayScreenContentTest {
             ),
         )
         compose.onNodeWithText("Turned off").assertIsDisplayed()
-        compose.onNodeWithTag("relay_row_lax.spool.getknit.app").assertIsOff()
+        compose.onNodeWithTag("relay_switch_lax.spool.getknit.app").assertIsOff()
     }
 
     @Test
@@ -432,7 +329,7 @@ class InternetRelayScreenContentTest {
             ),
             onSetRelayEnabled = { url, on -> flipped += url to on },
         )
-        compose.onNodeWithTag("relay_row_two.example.org").performClick()
+        compose.onNodeWithTag("relay_switch_two.example.org").performClick()
         assertEquals(listOf("wss://two.example.org/spool/v1" to true), flipped)
     }
 
@@ -445,62 +342,53 @@ class InternetRelayScreenContentTest {
             InternetRelayUiState(enabled = false, relays = listOf(relay())),
             onSetRelayEnabled = { url, _ -> flipped += url },
         )
-        compose.onNodeWithTag("relay_row_lax.spool.getknit.app").assertIsNotEnabled().performClick()
+        compose.onNodeWithTag("relay_switch_lax.spool.getknit.app").assertIsNotEnabled().performClick()
         assertEquals(emptyList<String>(), flipped)
         // And it says why: the whole plane is off, which is a different statement from this one relay being.
         compose.onNodeWithText("Not in use").assertIsDisplayed()
     }
 
     @Test
-    fun aParkedRelayCanStillBeRemoved() {
-        // The delete button is a sibling of the toggle rather than nested inside it, so parking a relay
-        // must not take away the way to forget it entirely.
-        var removed: String? = null
+    fun tappingARowOpensItsOwnRelayAndFlipsNothing() {
+        // The row opens the relay's screen; only its switch parks it.
+        val opened = mutableListOf<String>()
+        val flipped = mutableListOf<String>()
         render(
-            InternetRelayUiState(enabled = true, relays = listOf(relay(enabled = false))),
-            onRemoveRelay = { removed = it },
+            InternetRelayUiState(enabled = true, relays = listOf(relay(host = "one.example.org"), relay(host = "two.example.org"))),
+            onOpenRelay = { opened += it },
+            onSetRelayEnabled = { url, _ -> flipped += url },
         )
-        compose.onNodeWithContentDescription("Remove relay lax.spool.getknit.app").performClick()
-        compose.onAllNodesWithText("Remove").onLast().performClick()
-        assertEquals("wss://lax.spool.getknit.app/spool/v1", removed)
+        compose.onNodeWithTag("relay_row_two.example.org").performClick()
+        assertEquals(listOf("wss://two.example.org/spool/v1"), opened)
+        assertEquals(emptyList<String>(), flipped)
     }
 
     @Test
-    fun aRelayWithoutACommonsOffersNothingToJoin() {
+    fun aRowsSwitchIsLabelledWithItsRelay() {
         render(InternetRelayUiState(enabled = true, relays = listOf(relay())))
+        compose.onNodeWithContentDescription("Use lax.spool.getknit.app").assertIsOn()
+    }
+
+    @Test
+    fun theListLeavesCallsTicketsAndTheRoomToTheRelaysOwnScreen() {
+        render(
+            InternetRelayUiState(
+                enabled = true,
+                relays =
+                    listOf(
+                        relay(
+                            commons = RelayCommons(name = "Home", joinedId = null),
+                            calls = RelayCalls(turn = true, stunServers = 2, walkie = true, ticket = RelayTicket.None),
+                            account = RelayAccount("issuer.example.org", KeyAnswer.OK, endsAt = null, failures = 0),
+                        ),
+                    ),
+            ),
+        )
+        compose.onAllNodesWithTag("relay_calls_lax.spool.getknit.app").assertCountEquals(0)
+        compose.onAllNodesWithText("No ticket", substring = true).assertCountEquals(0)
+        compose.onAllNodesWithText("issuer.example.org", substring = true).assertCountEquals(0)
         compose.onAllNodesWithText("Join").assertCountEquals(0)
-        compose.onAllNodesWithText("Leave").assertCountEquals(0)
-    }
-
-    @Test
-    fun aRelayThatRunsACommonsShowsItsNameAndAJoinThatTakesOnlyARealInvite() {
-        var joined: Pair<String, String>? = null
-        val row = relay(commons = RelayCommons(name = "Home", joinedId = null))
-        render(InternetRelayUiState(enabled = true, relays = listOf(row)), onJoinCommons = { url, invite -> joined = url to invite })
-        compose.onNodeWithText("Commons · Home").assertIsDisplayed()
-        compose.onNodeWithTag("relay_commons_join_${row.host}").performClick()
-        // The invite is the room's whole key: a near-miss is refused at the field, never turned into a scope id.
-        compose.onNodeWithTag("relay_commons_invite_field").performTextInput("knit-commons:v1:not-really")
-        compose.onNodeWithText("That is not a commons invite").assertIsDisplayed()
-        compose.onNodeWithTag("relay_commons_join_confirm").assertIsNotEnabled()
-        assertEquals(null, joined)
-        compose.onNodeWithTag("relay_commons_invite_field").performTextClearance()
-        compose.onNodeWithTag("relay_commons_invite_field").performTextInput(INVITE)
-        compose.onNodeWithTag("relay_commons_join_confirm").performClick()
-        assertEquals(row.url to INVITE, joined)
-    }
-
-    @Test
-    fun aJoinedCommonsOffersLeaveAndNamesWhatStays() {
-        var left: String? = null
-        val row = relay(commons = RelayCommons(name = null, joinedId = "c-abc"))
-        render(InternetRelayUiState(enabled = true, relays = listOf(row)), onLeaveCommons = { left = it })
-        // No operator name: the generic title stands in.
-        compose.onNodeWithText("Commons · Commons").assertIsDisplayed()
-        compose.onNodeWithTag("relay_commons_leave_${row.host}").performClick()
-        compose.onNodeWithText("The people in it stay in your contacts.", substring = true).assertIsDisplayed()
-        compose.onNodeWithTag("relay_commons_leave_confirm").performClick()
-        assertEquals("c-abc", left)
+        compose.onAllNodesWithTag("relay_invite_lax.spool.getknit.app").assertCountEquals(0)
     }
 
     @Test
@@ -613,26 +501,6 @@ class InternetRelayScreenContentTest {
         )
         compose.onNodeWithTag("relay_invite_key_held").assertIsDisplayed()
         compose.onNodeWithTag("relay_invite_confirm").assertTextEquals("OK")
-    }
-
-    @Test
-    fun theRowsShareMenuReportsItsOwnUrl() {
-        var shared: String? = null
-        var copied: String? = null
-        val row = relay()
-        render(
-            InternetRelayUiState(enabled = true, relays = listOf(row)),
-            onShareInvite = { shared = it },
-            onCopyInvite = { copied = it },
-        )
-        compose.onNodeWithTag("relay_invite_${row.host}").performClick()
-        compose.onNodeWithTag("relay_invite_share_${row.host}").performClick()
-        assertEquals(row.url, shared)
-        assertEquals(null, copied)
-        compose.onNodeWithTag("relay_invite_${row.host}").performClick()
-        compose.onNodeWithTag("relay_invite_copy_${row.host}").performClick()
-        assertEquals(row.url, copied)
-        assertFalse(shared == null)
     }
 
     @Test

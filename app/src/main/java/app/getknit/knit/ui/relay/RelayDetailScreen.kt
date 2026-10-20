@@ -1,0 +1,501 @@
+package app.getknit.knit.ui.relay
+
+import android.text.format.Formatter
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import app.getknit.knit.R
+import app.getknit.knit.data.relay.FreeUploadChoice
+import app.getknit.knit.mesh.spool.KeyAnswer
+import app.getknit.knit.mesh.spool.SpoolUrl
+import app.getknit.knit.ui.preview.KnitPreview
+
+/**
+ * One relay's own screen: its status and switch, what the live connection says about it, what it offers calls,
+ * where this phone stands with its tickets, its room, the invite, and the way to remove it. The list row keeps only
+ * the status and the switch, so the relays list stays a list.
+ *
+ * [relayKey] is the relay's [SpoolUrl.redact]ed URL, its identity everywhere else (an invite that adds a token is the
+ * same relay): the bearer token never goes into a route or a saved back stack. [viewModel] is the list's own
+ * instance, so this screen re-derives nothing and its verbs are the list's.
+ */
+@Composable
+fun RelayDetailScreen(
+    relayKey: String,
+    viewModel: InternetRelayViewModel,
+    onBack: () -> Unit,
+) {
+    val state by viewModel.state.collectAsStateWithLifecycle()
+    val relay = state.relays.firstOrNull { SpoolUrl.redact(it.url) == relayKey }
+    val snackbarHostState = remember { SnackbarHostState() }
+    RelayEventsEffect(viewModel.events, snackbarHostState)
+    // Gone from the list — removed here, or elsewhere while this was open: nothing is left to show. The one way
+    // out after a removal too, so Remove and an outside change leave by the same door.
+    LaunchedEffect(state.loaded, relay == null) {
+        if (state.loaded && relay == null) onBack()
+    }
+
+    RelayDetailScreenContent(
+        relay = relay,
+        planeEnabled = state.enabled,
+        offline = state.offline,
+        snackbarHostState = snackbarHostState,
+        onBack = onBack,
+        onSetEnabled = { on -> relay?.let { viewModel.setRelayEnabled(it.url, on) } },
+        onRemove = { relay?.let { viewModel.removeRelay(it.url) } },
+        onJoinCommons = { invite -> relay?.let { viewModel.joinCommons(it.url, invite) } },
+        onLeaveCommons = viewModel::leaveCommons,
+        isValidInvite = viewModel::isValidInvite,
+        onShareInvite = { relay?.let { viewModel.shareInvite(it.url) } },
+        onCopyInvite = { relay?.let { viewModel.copyInvite(it.url) } },
+        onSetFreeUploads = { allowed -> relay?.let { SpoolUrl.hostname(it.url) }?.let { viewModel.setFreeUploads(it, allowed) } },
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Suppress("LongMethod", "LongParameterList") // one screen's sections, its dialogs and its verbs, mirrored in one place
+@Composable
+internal fun RelayDetailScreenContent(
+    relay: RelayRow?,
+    planeEnabled: Boolean,
+    offline: Boolean,
+    snackbarHostState: SnackbarHostState = remember { SnackbarHostState() },
+    onBack: () -> Unit,
+    onSetEnabled: (Boolean) -> Unit = {},
+    onRemove: () -> Unit = {},
+    onJoinCommons: (String) -> Unit = {},
+    onLeaveCommons: (String) -> Unit = {},
+    isValidInvite: (String) -> Boolean = { it.startsWith("knit-commons:v1:") },
+    onShareInvite: () -> Unit = {},
+    onCopyInvite: () -> Unit = {},
+    onSetFreeUploads: (Boolean) -> Unit = {},
+) {
+    var removing by remember { mutableStateOf(false) }
+    var joining by remember { mutableStateOf(false) }
+    var leaving by remember { mutableStateOf(false) }
+
+    Scaffold(
+        modifier = Modifier.testTag("screen_relay_detail"),
+        snackbarHost = { SnackbarHost(snackbarHostState) },
+        topBar = {
+            TopAppBar(
+                navigationIcon = {
+                    IconButton(onClick = onBack, modifier = Modifier.size(48.dp)) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = stringResource(R.string.action_back),
+                        )
+                    }
+                },
+                title = {
+                    Text(text = relay?.host.orEmpty(), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                },
+                actions = {
+                    if (relay != null) RelayInviteMenu(relay = relay, onShare = onShareInvite, onCopy = onCopyInvite)
+                },
+            )
+        },
+    ) { padding ->
+        // Not read yet: an empty page for the frame before the list's state lands, never a half-drawn relay.
+        if (relay == null) return@Scaffold
+        Column(
+            modifier =
+                Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .verticalScroll(rememberScrollState())
+                    .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            UseRelayRow(relay, planeEnabled, offline, onSetEnabled)
+            ConnectionSection(relay)
+            CallsSection(relay)
+            TicketsSection(relay, onSetFreeUploads)
+            relay.commons?.let { room ->
+                RoomSection(relay, room, onJoin = { joining = true }, onLeave = { leaving = true })
+            }
+            TextButton(
+                onClick = { removing = true },
+                colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                modifier = Modifier.testTag("relay_remove"),
+            ) {
+                Icon(Icons.Filled.Delete, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(stringResource(R.string.relays_detail_remove))
+            }
+        }
+    }
+
+    if (relay == null) return
+
+    if (joining) {
+        JoinCommonsDialog(
+            relay = relay,
+            isValidInvite = isValidInvite,
+            onJoin = {
+                onJoinCommons(it)
+                joining = false
+            },
+            onDismiss = { joining = false },
+        )
+    }
+
+    if (leaving) {
+        val joinedId = relay.commons?.joinedId
+        AlertDialog(
+            onDismissRequest = { leaving = false },
+            title = { Text(stringResource(R.string.relays_commons_leave)) },
+            text = { Text(stringResource(R.string.relays_commons_leave_body)) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        if (joinedId != null) onLeaveCommons(joinedId)
+                        leaving = false
+                    },
+                    modifier = Modifier.testTag("relay_commons_leave_confirm"),
+                ) {
+                    Text(stringResource(R.string.relays_commons_leave))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { leaving = false }) {
+                    Text(stringResource(R.string.action_cancel))
+                }
+            },
+        )
+    }
+
+    if (removing) {
+        AlertDialog(
+            onDismissRequest = { removing = false },
+            title = { Text(stringResource(R.string.relays_remove)) },
+            text = { Text(relay.host) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        removing = false
+                        onRemove()
+                    },
+                    modifier = Modifier.testTag("relay_remove_confirm"),
+                ) {
+                    Text(stringResource(R.string.relays_remove))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { removing = false }) {
+                    Text(stringResource(R.string.action_cancel))
+                }
+            },
+        )
+    }
+}
+
+/**
+ * The relay's own switch with its status under it. The row owns the `toggleable` and the [Switch] takes a null
+ * handler, the house toggle-row shape, so a screen reader announces one switch labelled with the relay's state. It
+ * greys out while the plane is off, and the status line says so ("Not in use").
+ */
+@Composable
+private fun UseRelayRow(
+    relay: RelayRow,
+    planeEnabled: Boolean,
+    offline: Boolean,
+    onSetEnabled: (Boolean) -> Unit,
+) {
+    Row(
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .toggleable(value = relay.enabled, enabled = planeEnabled, onValueChange = onSetEnabled, role = Role.Switch)
+                .testTag("relay_detail_switch"),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(text = stringResource(R.string.relays_detail_use), style = MaterialTheme.typography.titleMedium)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Spacer(Modifier.size(8.dp).clip(CircleShape).background(relayDotColor(relay, planeEnabled, offline)))
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = relayStatusLine(relay, planeEnabled, offline),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        Spacer(Modifier.width(12.dp))
+        Switch(checked = relay.enabled, onCheckedChange = null, enabled = planeEnabled)
+    }
+}
+
+/**
+ * What the live connection says: how many of our conversations it holds, how large an attachment it takes, whether
+ * its HELLO asks for proof of work, and the software its `/source` named. All facts about the connection, so while it
+ * is down one line says they will come back.
+ */
+@Composable
+private fun ConnectionSection(relay: RelayRow) {
+    Section(stringResource(R.string.relays_detail_section_connection), Modifier.testTag("relay_connection_${relay.host}")) {
+        if (!relay.connected) {
+            Text(
+                text = stringResource(R.string.relays_detail_disconnected),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            return@Section
+        }
+        DetailLine(stringResource(R.string.relays_detail_conversations), (relay.scopeCount ?: 0).toString())
+        DetailLine(
+            stringResource(R.string.relays_detail_attachments),
+            relay.maxAttachBytes?.let {
+                stringResource(R.string.relays_detail_attach_limit, Formatter.formatShortFileSize(LocalContext.current, it.toLong()))
+            } ?: stringResource(R.string.relays_detail_attach_none),
+        )
+        DetailLine(
+            stringResource(R.string.relays_detail_pow),
+            relay.powBits?.takeIf { it > 0 }?.let { pluralStringResource(R.plurals.relays_detail_pow_bits, it, it) }
+                ?: stringResource(R.string.relays_detail_pow_none),
+        )
+        relay.software?.let { DetailLine(stringResource(R.string.relays_detail_software), it) }
+    }
+}
+
+/** What the relay's HELLO offers calls (docs/VOICE_CALLS.md §2): TURN, the walkie's casts and its STUN servers. */
+@Composable
+private fun CallsSection(relay: RelayRow) {
+    val calls = relay.calls ?: return
+    // A relay that takes tickets and offers calls nothing has its ticket below and no section here.
+    if (!calls.turn && !calls.walkie && calls.stunServers == 0) return
+    Section(stringResource(R.string.relays_detail_section_calls), Modifier.testTag("relay_calls_${relay.host}")) {
+        DetailLine(stringResource(R.string.relays_detail_turn), offered(calls.turn))
+        DetailLine(stringResource(R.string.relays_detail_walkie), offered(calls.walkie))
+        DetailLine(stringResource(R.string.relays_detail_stun), calls.stunServers.toString())
+    }
+}
+
+/**
+ * Where this phone stands with the relay's tickets (§2.6): the ticket on this connection with what it unlocks, the
+ * day's uploads when spent, the ticket key held for the relay's host (ADR 2026-10.3sk7) and the free tickets' switch
+ * (C-7.6-34). Names the issuer's host and the ticket's claims only — never the key, the ticket or a STUN URI.
+ */
+@Composable
+private fun TicketsSection(
+    relay: RelayRow,
+    onSetFreeUploads: (Boolean) -> Unit,
+) {
+    val calls = relay.calls
+    val ticket = calls?.ticket
+    val lines =
+        buildList {
+            if (ticket != null) {
+                add(ticketLine(ticket, calls.turn))
+                if (ticket is RelayTicket.Live) addAll(ticketGrantLines(ticket))
+            }
+            if (calls?.uploadsSpent == true) add(stringResource(R.string.relays_calls_uploads_spent))
+            relay.account?.let { add(accountLine(it)) }
+        }
+    if (lines.isEmpty() && relay.freeUploads == null) return
+    Section(stringResource(R.string.relays_detail_section_tickets), Modifier.testTag("relay_ticket_${relay.host}")) {
+        lines.forEach { line ->
+            Text(text = line, style = MaterialTheme.typography.bodyMedium)
+        }
+        relay.freeUploads?.let { FreeUploadsSwitch(relay.host, it, onSetFreeUploads) }
+    }
+}
+
+/**
+ * Free tickets for a relay (docs/VOICE_CALLS.md C-7.6-34): one labelled switch saying which host the phone would
+ * contact, on only once the person said yes. Turning it off forgets a free key held there.
+ */
+@Composable
+private fun FreeUploadsSwitch(
+    host: String,
+    choice: FreeUploadChoice,
+    onSet: (Boolean) -> Unit,
+) {
+    val on = choice.allowed == true
+    Row(
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .testTag("relay_free_uploads_$host")
+                .toggleable(value = on, onValueChange = onSet, role = Role.Switch),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(text = stringResource(R.string.relays_free_uploads_title), style = MaterialTheme.typography.bodyMedium)
+            Text(
+                text = stringResource(R.string.relays_free_uploads_summary, choice.issuerHost),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Spacer(Modifier.width(12.dp))
+        Switch(checked = on, onCheckedChange = null)
+    }
+}
+
+/** The relay's commons (§7.4): the room's name and one verb — Join while this phone is outside it, Leave once in. */
+@Composable
+private fun RoomSection(
+    relay: RelayRow,
+    room: RelayCommons,
+    onJoin: () -> Unit,
+    onLeave: () -> Unit,
+) {
+    Section(stringResource(R.string.relays_detail_section_room)) {
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = stringResource(R.string.relays_commons_label, room.name ?: stringResource(R.string.commons_title)),
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (room.joinedId == null) {
+                TextButton(onClick = onJoin, modifier = Modifier.testTag("relay_commons_join_${relay.host}")) {
+                    Text(stringResource(R.string.relays_commons_join))
+                }
+            } else {
+                TextButton(onClick = onLeave, modifier = Modifier.testTag("relay_commons_leave_${relay.host}")) {
+                    Text(stringResource(R.string.relays_commons_leave))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun Section(
+    title: String,
+    modifier: Modifier = Modifier,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(text = title, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
+        content()
+    }
+}
+
+/** A label and its value on one line, the value trailing. */
+@Composable
+private fun DetailLine(
+    label: String,
+    value: String,
+) {
+    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(text = label, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+        Spacer(Modifier.width(12.dp))
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.End,
+        )
+    }
+}
+
+@Composable
+private fun offered(on: Boolean): String = stringResource(if (on) R.string.relays_detail_offered else R.string.relays_detail_not_offered)
+
+@Preview(showBackground = true)
+@Composable
+fun RelayDetailScreenPreview() =
+    KnitPreview {
+        RelayDetailScreenContent(
+            relay =
+                RelayRow(
+                    url = "wss://lab.lax.spool.getknit.app/spool/v1",
+                    host = "lab.lax.spool.getknit.app",
+                    enabled = true,
+                    connected = true,
+                    scopeCount = 4,
+                    carriesPhotos = true,
+                    commons = RelayCommons(name = "Lab", joinedId = null),
+                    calls =
+                        RelayCalls(
+                            turn = true,
+                            stunServers = 1,
+                            walkie = true,
+                            // 2026-10-14 16:00 UTC.
+                            ticket = RelayTicket.Live(exp = 1_791_993_600L, turn = true, walkie = true, files = true, am = 2_000_000L),
+                            uploadsSpent = true,
+                        ),
+                    // 2026-11-30 UTC.
+                    account = RelayAccount("issuer.example.org", KeyAnswer.OK, endsAt = 1_796_000_000_000L, failures = 0),
+                    freeUploads = FreeUploadChoice(issuerHost = "free.example.org", allowed = true),
+                    maxAttachBytes = 26_214_400,
+                    software = "knit-spool 0.9.0 (e8a7790)",
+                    powBits = 0,
+                ),
+            planeEnabled = true,
+            offline = false,
+            onBack = {},
+        )
+    }
+
+@Preview(showBackground = true)
+@Composable
+fun RelayDetailScreenDisconnectedPreview() =
+    KnitPreview {
+        RelayDetailScreenContent(
+            relay =
+                RelayRow(
+                    url = "wss://ended.example.org/spool/v1",
+                    host = "ended.example.org",
+                    enabled = true,
+                    connected = false,
+                    lastError = "unreachable",
+                    account = RelayAccount("issuer.example.org", KeyAnswer.ENDED, endsAt = 1_790_000_000_000L, failures = 0),
+                ),
+            planeEnabled = true,
+            offline = false,
+            onBack = {},
+        )
+    }

@@ -73,8 +73,14 @@ data class RelayRow(
     // connection, so it shows while disconnected too; null when no key is held, and in a build without calls.
     val account: RelayAccount? = null,
     // Free tickets for this relay (docs/VOICE_CALLS.md C-7.6-34): the free issuer's host and the person's answer, what
-    // the row's switch shows. Null where the relay has no free issuer, and in a build without calls.
+    // the relay screen's switch shows. Null where the relay has no free issuer, and in a build without calls.
     val freeUploads: FreeUploadChoice? = null,
+    // What the relay's own screen adds, all facts about the live connection and so null while disconnected: the
+    // largest attachment it takes in bytes (null too when it takes none, which [carriesPhotos] says), the software its
+    // `/source` named (`SpoolSoftware.label`), and the proof-of-work bits its HELLO asks a stamp to carry (0: none).
+    val maxAttachBytes: Int? = null,
+    val software: String? = null,
+    val powBits: Int? = null,
 )
 
 /** A relay's commons as the row shows it: the operator's name for it, and our thread id when joined. */
@@ -100,7 +106,7 @@ data class RelayCalls(
 )
 
 /**
- * Where this phone stands with a relay's ticket, for the row. The live connection's answer wins; with none there,
+ * Where this phone stands with a relay's ticket, for the relay's screen. The live connection's answer wins; with none there,
  * the stored ticket's verdict says why (a refusal that keeps it from going out again, or an `exp` past).
  */
 sealed interface RelayTicket {
@@ -154,6 +160,8 @@ data class InternetRelayUiState(
     // The platform reports no validated route to the Internet at all (`InternetGate.online`): a fact about
     // the phone, not any relay, which is why it lives here and not on the rows.
     val offline: Boolean = false,
+    // False only before the stores' first answer, so a relay's own screen can tell "not read yet" from "removed".
+    val loaded: Boolean = false,
 )
 
 /** One-shot outcomes for the screen's snackbar and share sheet. */
@@ -207,7 +215,7 @@ class InternetRelayViewModel(
     // Where a relay's customer key, its ask state and its ticket live (ADR 2026-10.3sk7), so removing the relay
     // forgets them (C-7.6-29). Null in the screen tests' rig, which removes the row alone.
     private val ticketKeys: TicketKeyJournal? = null,
-    // Where a relay's held ticket and its verdict live (`SettingsStore`), and the one seam for a row's call details:
+    // Where a relay's held ticket and its verdict live (`SettingsStore`), and the one seam for a relay's call details:
     // production passes it only where calls or Knit Anywhere are wired (`CALLS_WIRED`, `ANYWHERE_WIRED`), and without it
     // no row shows any, nor the key.
     private val spoolTickets: SpoolTicketJournal? = null,
@@ -219,7 +227,7 @@ class InternetRelayViewModel(
         combine(rows(relayStatus), gate?.online ?: MutableStateFlow(true)) { rows, online -> rows.copy(offline = !online) }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), InternetRelayUiState())
 
-    /** The stored tickets and keys a row's call details read, or null in a build without calls. */
+    /** The stored tickets and keys a relay's call details read, or null in a build without calls. */
     private class CallStores(
         val tickets: Map<String, StoredSpoolTicket>,
         val keys: Map<String, HeldKey>,
@@ -250,6 +258,7 @@ class InternetRelayViewModel(
             val joinedByUrl = rooms.associateBy { it.spoolUrl }
             InternetRelayUiState(
                 enabled = enabled,
+                loaded = true,
                 relays =
                     urls.sorted().map { url ->
                         val live = byUrl[url]?.takeIf { it.connected }
@@ -272,6 +281,9 @@ class InternetRelayViewModel(
                             calls = stores?.let { live?.let { relayCalls(it, SpoolUrl.hostname(url)?.let(stores.tickets::get), clock()) } },
                             account = stores?.let { relayAccount(SpoolUrl.hostname(url), stores.keys, stores.keyStates) },
                             freeUploads = stores?.let { SpoolUrl.hostname(url)?.let(stores.free::get) },
+                            maxAttachBytes = live?.maxAttachBytes,
+                            software = live?.software?.label,
+                            powBits = live?.powBits,
                         )
                     },
             )

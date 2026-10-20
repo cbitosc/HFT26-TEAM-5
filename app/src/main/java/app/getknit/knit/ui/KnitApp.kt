@@ -42,6 +42,7 @@ import app.getknit.knit.legal.License
 import app.getknit.knit.mesh.MeshController
 import app.getknit.knit.mesh.MeshService
 import app.getknit.knit.mesh.MeshStartGate
+import app.getknit.knit.mesh.spool.SpoolUrl
 import app.getknit.knit.moderation.MlTextModerator
 import app.getknit.knit.notifications.ConversationGate
 import app.getknit.knit.review.ReviewPrompter
@@ -68,6 +69,7 @@ import app.getknit.knit.ui.onboarding.OnboardingScreen
 import app.getknit.knit.ui.profile.ProfileDetailsScreen
 import app.getknit.knit.ui.profile.ProfileScreen
 import app.getknit.knit.ui.relay.InternetRelayScreen
+import app.getknit.knit.ui.relay.RelayDetailScreen
 import app.getknit.knit.ui.relay.RelayInviteInbox
 import app.getknit.knit.ui.requests.MessageRequestsScreen
 import app.getknit.knit.ui.review.RateReviewDialog
@@ -84,6 +86,7 @@ import app.getknit.knit.ui.yourmesh.YourMeshScreen
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import org.koin.androidx.compose.koinViewModel
 import org.koin.compose.koinInject
 
 // How far a screen slides as it fades: a twenty-fourth of the width. Enough to give the fade a direction
@@ -105,6 +108,13 @@ private object Routes {
     const val DONATE = "donate"
     const val ADD_CONTACT = "addContact"
     const val INTERNET_RELAYS = "relays"
+
+    // One relay's own screen, keyed by its redacted URL (`SpoolUrl.redact`): a private relay's `?k=` token is its
+    // whole access control, so it never goes into a route or a saved back stack.
+    const val RELAY_DETAIL = "relays/detail?relay={relay}"
+
+    fun relayDetail(url: String) = "relays/detail?relay=${Uri.encode(SpoolUrl.redact(url))}"
+
     const val LORA_RADIO = "lora"
     const val CALLS = "calls"
     const val SHARE = "share"
@@ -317,7 +327,11 @@ fun KnitApp(startRoute: String? = null) {
             relayInviteInbox.clear()
             return@LaunchedEffect
         }
-        navController.navigate(Routes.INTERNET_RELAYS) { launchSingleTop = true }
+        navController.navigate(Routes.INTERNET_RELAYS) {
+            // From a relay's own screen, back to the list under it rather than a second list on top.
+            popUpTo(Routes.INTERNET_RELAYS)
+            launchSingleTop = true
+        }
     }
 
     // One transition for the whole graph rather than per-destination overrides: every route here is a peer
@@ -583,7 +597,32 @@ fun KnitApp(startRoute: String? = null) {
             // flag, so nothing navigates here. See app/build.gradle.kts for what INTERNET_PLANE gates.
             if (BuildConfig.INTERNET_PLANE) {
                 composable(Routes.INTERNET_RELAYS) {
-                    InternetRelayScreen(onBack = { navController.popBackStack() })
+                    InternetRelayScreen(
+                        onBack = { navController.popBackStack() },
+                        onOpenRelay = { navController.navigate(Routes.relayDetail(it)) },
+                    )
+                }
+                // A relay's own screen shares the list's view model, so it reads the same rows and its verbs are the
+                // list's. It is only ever opened from the list; without that entry (nothing else navigates here) it
+                // has nothing to show and goes. Its pop names itself, so leaving twice — Remove, then the row going
+                // — cannot take the list with it.
+                composable(
+                    route = Routes.RELAY_DETAIL,
+                    arguments = listOf(navArgument("relay") { type = NavType.StringType }),
+                ) { backStackEntry ->
+                    val leave = { navController.popBackStack(Routes.RELAY_DETAIL, inclusive = true) }
+                    val relayKey = backStackEntry.arguments?.getString("relay")
+                    val listEntry =
+                        remember(backStackEntry) { runCatching { navController.getBackStackEntry(Routes.INTERNET_RELAYS) }.getOrNull() }
+                    if (relayKey == null || listEntry == null) {
+                        LaunchedEffect(Unit) { leave() }
+                        return@composable
+                    }
+                    RelayDetailScreen(
+                        relayKey = relayKey,
+                        viewModel = koinViewModel(viewModelStoreOwner = listEntry),
+                        onBack = { leave() },
+                    )
                 }
             }
             // The LoRa radio screen exists only in builds that introduce the feature; the route is not

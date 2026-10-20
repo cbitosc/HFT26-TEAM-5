@@ -101,7 +101,7 @@ without a sheet, and the sheet is built around one question — *do you trust th
 
 ## 4. Minting
 
-- **On the phone:** the relay row's Share / Copy actions mint `u` as stored (token included) plus the
+- **On the phone:** the relay screen's Share / Copy actions mint `u` as stored (token included) plus the
   room's `c`/`n` when this device has joined it. "Invite to my instance" means the room; a member who
   wants to share the relay alone leaves the room first. The phone **never** writes `i` or `k`, whatever key it
   holds: a forwarded customer key lends out the customer's own quota, so `RelayInvite.mint` has no way to.

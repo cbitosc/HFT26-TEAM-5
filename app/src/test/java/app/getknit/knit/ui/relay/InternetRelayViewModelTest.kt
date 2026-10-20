@@ -16,6 +16,7 @@ import app.getknit.knit.mesh.spool.KeyState
 import app.getknit.knit.mesh.spool.RelayInvite
 import app.getknit.knit.mesh.spool.ScopeSync
 import app.getknit.knit.mesh.spool.SpoolCastInfo
+import app.getknit.knit.mesh.spool.SpoolSoftware
 import app.getknit.knit.mesh.spool.SpoolStatus
 import app.getknit.knit.mesh.spool.SpoolTicket
 import app.getknit.knit.mesh.spool.SpoolTicketJournal
@@ -32,6 +33,7 @@ import io.mockk.mockk
 import io.mockk.slot
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
@@ -225,6 +227,62 @@ class InternetRelayViewModelTest {
             assertFalse(parked.enabled)
             assertTrue(parked.connected)
             assertEquals(true, parked.carriesPhotos)
+        }
+
+    @Test
+    fun aRelaysOwnScreenFactsComeFromTheLiveConnectionOnly() =
+        runTest {
+            // A status that is down keeps nothing it last heard: its size, software and stamp are a connection's facts.
+            every { settings.spoolUrls } returns flowOf(setOf(TOKENED, OTHER))
+            every { relayStatus.statuses } returns
+                flowOf(
+                    listOf(
+                        SpoolStatus(
+                            url = TOKENED,
+                            connected = true,
+                            powBits = 12,
+                            lastError = null,
+                            scopes = emptyList(),
+                            maxAttachBytes = 26_214_400,
+                            software = SpoolSoftware(name = "knit-spool", version = "0.9.0"),
+                        ),
+                        SpoolStatus(
+                            url = OTHER,
+                            connected = false,
+                            powBits = 12,
+                            lastError = ScopeSync.UNREACHABLE,
+                            scopes = emptyList(),
+                            maxAttachBytes = 26_214_400,
+                            software = SpoolSoftware(name = "knit-spool", version = "0.9.0"),
+                        ),
+                    ),
+                )
+
+            val rows = state(vm()).relays.associateBy { it.url }
+            val live = rows.getValue(TOKENED)
+            assertEquals(26_214_400, live.maxAttachBytes)
+            assertEquals("knit-spool 0.9.0", live.software)
+            assertEquals(12, live.powBits)
+            val down = rows.getValue(OTHER)
+            assertNull(down.maxAttachBytes)
+            assertNull(down.software)
+            assertNull(down.powBits)
+        }
+
+    @Test
+    fun theStateSaysLoadedOnlyOnceTheStoresAnswered() =
+        runTest {
+            // A relay's own screen leaves when its row is missing, so "not read yet" must not read as "removed": with
+            // one store still silent, a collected state stays unloaded, and it loads on that store's first answer.
+            val statuses = MutableSharedFlow<List<SpoolStatus>>()
+            every { relayStatus.statuses } returns statuses
+            val vm = vm()
+            val before = state(vm)
+            assertFalse(before.loaded)
+            assertEquals(emptyList<RelayRow>(), before.relays)
+            statuses.emit(emptyList())
+            advanceUntilIdle()
+            assertTrue(vm.state.value.loaded)
         }
 
     @Test

@@ -1318,7 +1318,6 @@
     <string name="relays_commons_invite_invalid">That is not a commons invite</string>
     <string name="relays_commons_leave_body">The room and its history leave this phone. The people in it stay in your contacts.</string>
     <string name="relays_remove">Remove</string>
-    <string name="relays_remove_desc">Remove relay %1$s</string>
     <string name="relays_status_connected">Connected</string>
     <string name="relays_status_connecting">Connecting…</string>
     <string name="relays_status_off">Not in use</string>
@@ -1421,15 +1420,10 @@
     <string name="relays_no_photos">Carries messages only — no photos</string>
     <!-- A relay's call details (experimental, docs/VOICE_CALLS.md §2), drawn only in a build with calls. TURN and STUN
          are the protocols' own names; "walkie" is the push-to-talk call. -->
-    <string name="relays_calls_label">Calls · %1$s</string>
     <string name="relays_calls_turn">TURN</string>
     <string name="relays_calls_walkie">walkie</string>
     <!-- A ticket's grant to send photos and files through this relay (knit-spool ADR 2026-10.h6pt). -->
     <string name="relays_calls_files">files</string>
-    <plurals name="relays_calls_stun">
-        <item quantity="one">%d STUN server</item>
-        <item quantity="other">%d STUN servers</item>
-    </plurals>
     <string name="relays_calls_ticket_none">No ticket</string>
     <string name="relays_calls_ticket_none_turn">No ticket — TURN here needs one</string>
     <string name="relays_calls_ticket_presenting">Presenting a ticket…</string>
@@ -1452,9 +1446,41 @@
     <string name="relays_free_key_waiting">Free tickets from %1$s · asking for one</string>
     <string name="relays_free_key_unanswered">Free tickets from %1$s · not answering</string>
     <string name="relays_free_key_held">Free tickets from %1$s</string>
-    <!-- The relay row's switch for free tickets (C-7.6-34); %1$s is the free issuer's host name. -->
+    <!-- The relay screen's switch for free tickets (C-7.6-34); %1$s is the free issuer's host name. -->
     <string name="relays_free_uploads_title">Free tickets for small photos</string>
     <string name="relays_free_uploads_summary">Fetched from %1$s on days this phone sends files here</string>
+    <!-- A relay's own screen (ui/relay/RelayDetailScreen); the list row opens it. %1$s in relays_switch_desc is the
+         relay's host. -->
+    <string name="relays_switch_desc">Use %1$s</string>
+    <string name="relays_open_details">Open details</string>
+    <string name="relays_detail_use">Use this relay</string>
+    <string name="relays_detail_section_connection">Connection</string>
+    <string name="relays_detail_section_calls">Calls</string>
+    <string name="relays_detail_section_tickets">Tickets</string>
+    <string name="relays_detail_section_room">Room</string>
+    <string name="relays_detail_disconnected">The rest shows here once it connects.</string>
+    <string name="relays_detail_conversations">Conversations</string>
+    <string name="relays_detail_attachments">Photos and files</string>
+    <!-- %1$s is a size, e.g. "25 MB". -->
+    <string name="relays_detail_attach_limit">Up to %1$s each</string>
+    <string name="relays_detail_attach_none">Messages only</string>
+    <string name="relays_detail_pow">Proof of work</string>
+    <string name="relays_detail_pow_none">Not asked</string>
+    <plurals name="relays_detail_pow_bits">
+        <item quantity="one">%1$d bit</item>
+        <item quantity="other">%1$d bits</item>
+    </plurals>
+    <string name="relays_detail_software">Software</string>
+    <string name="relays_detail_turn">TURN</string>
+    <string name="relays_detail_walkie">Walkie-talkie casts</string>
+    <string name="relays_detail_stun">STUN servers</string>
+    <string name="relays_detail_offered">Offered</string>
+    <string name="relays_detail_not_offered">Not offered</string>
+    <!-- %1$s lists what a live ticket unlocks, from relays_calls_turn / _walkie / _files. -->
+    <string name="relays_detail_ticket_grants">Unlocks %1$s</string>
+    <!-- %1$s joins relays_calls_files_each and relays_calls_files_day. -->
+    <string name="relays_detail_ticket_limits">Files %1$s</string>
+    <string name="relays_detail_remove">Remove relay</string>
     <string name="relays_error_unreachable">Cannot be reached</string>
     <string name="relays_error_busy">Busy — it is not taking new connections right now</string>
     <string name="relays_error_auth">Rejected the access token</string>
