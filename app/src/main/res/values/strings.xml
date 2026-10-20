@@ -1424,28 +1424,27 @@
     <string name="relays_calls_walkie">walkie</string>
     <!-- A ticket's grant to send photos and files through this relay (knit-spool ADR 2026-10.h6pt). -->
     <string name="relays_calls_files">files</string>
-    <string name="relays_calls_ticket_none">No ticket</string>
-    <string name="relays_calls_ticket_none_turn">No ticket — TURN here needs one</string>
-    <string name="relays_calls_ticket_presenting">Presenting a ticket…</string>
-    <string name="relays_calls_ticket_live">Ticket good until %1$s</string>
-    <string name="relays_calls_ticket_refused">Ticket refused (%1$s)</string>
-    <string name="relays_calls_ticket_expired">Ticket ran out %1$s</string>
+    <string name="relays_calls_ticket_none">None</string>
+    <string name="relays_calls_ticket_none_turn">None — TURN here needs one</string>
+    <string name="relays_calls_ticket_presenting">Presenting…</string>
+    <string name="relays_calls_ticket_live">Good until %1$s</string>
+    <string name="relays_calls_ticket_refused">Refused (%1$s)</string>
+    <string name="relays_calls_ticket_expired">Ran out %1$s</string>
     <!-- The ticket's upload allowance at this relay is used up for its day; a daily sending allowance, not storage. -->
-    <string name="relays_calls_uploads_spent">Today\'s uploads here are used up</string>
-    <string name="relays_calls_key_waiting">Ticket key from %1$s · asking for a ticket</string>
-    <string name="relays_calls_key_unanswered">Ticket key from %1$s · not answering</string>
-    <string name="relays_calls_key_ok">Ticket key from %1$s · account ends %2$s</string>
-    <string name="relays_calls_key_ok_open">Ticket key from %1$s</string>
-    <string name="relays_calls_key_unknown">%1$s doesn\'t recognise this ticket key</string>
-    <string name="relays_calls_key_ended">Account at %1$s ended %2$s</string>
-    <string name="relays_calls_key_ended_undated">Account at %1$s has ended</string>
+    <string name="relays_calls_key_waiting">%1$s · asking for a ticket</string>
+    <string name="relays_calls_key_unanswered">%1$s · not answering</string>
+    <string name="relays_calls_key_ok">%1$s · account ends %2$s</string>
+    <string name="relays_calls_key_ok_open">%1$s</string>
+    <string name="relays_calls_key_unknown">%1$s doesn\'t recognise this key</string>
+    <string name="relays_calls_key_ended">%1$s · account ended %2$s</string>
+    <string name="relays_calls_key_ended_undated">%1$s · account has ended</string>
     <!-- A ticket's own limits (S-7.6-22, S-7.6-31) after its grants: %1$s is a size such as "256 kB". -->
-    <string name="relays_calls_files_each">up to %1$s each</string>
+    <string name="relays_calls_files_each">Up to %1$s each</string>
     <string name="relays_calls_files_day">%1$s a day</string>
     <!-- A free key (C-7.6-37): no account, no end date. %1$s is the free issuer's host name. -->
-    <string name="relays_free_key_waiting">Free tickets from %1$s · asking for one</string>
-    <string name="relays_free_key_unanswered">Free tickets from %1$s · not answering</string>
-    <string name="relays_free_key_held">Free tickets from %1$s</string>
+    <string name="relays_free_key_waiting">%1$s · asking for one</string>
+    <string name="relays_free_key_unanswered">%1$s · not answering</string>
+    <string name="relays_free_key_held">From %1$s</string>
     <!-- The relay screen's switch for free tickets (C-7.6-34); %1$s is the free issuer's host name. -->
     <string name="relays_free_uploads_title">Free tickets for small photos</string>
     <string name="relays_free_uploads_summary">Fetched from %1$s on days this phone sends files here</string>
@@ -1460,10 +1459,19 @@
     <string name="relays_detail_section_room">Room</string>
     <string name="relays_detail_disconnected">The rest shows here once it connects.</string>
     <string name="relays_detail_conversations">Conversations</string>
-    <string name="relays_detail_attachments">Photos and files</string>
-    <!-- %1$s is a size, e.g. "25 MB". -->
-    <string name="relays_detail_attach_limit">Up to %1$s each</string>
-    <string name="relays_detail_attach_none">Messages only</string>
+    <!-- What the relay carries to this phone, and whether it takes this phone's own uploads (C-7.6-24); %1$s is a
+         size, e.g. "25 MB". -->
+    <string name="relays_detail_downloads">Downloads</string>
+    <string name="relays_detail_downloads_limit">Photos and files up to %1$s each</string>
+    <string name="relays_detail_downloads_none">Messages only</string>
+    <string name="relays_detail_uploads">Your uploads</string>
+    <string name="relays_detail_uploads_open">Taken, up to %1$s each</string>
+    <string name="relays_detail_uploads_locked">Need a ticket that unlocks files</string>
+    <string name="relays_detail_uploads_pending">Waiting on a ticket</string>
+    <string name="relays_detail_uploads_spent">Used up for today</string>
+    <string name="relays_detail_ticket">Ticket</string>
+    <string name="relays_detail_key">Ticket key</string>
+    <string name="relays_detail_free_key">Free tickets</string>
     <string name="relays_detail_pow">Proof of work</string>
     <string name="relays_detail_pow_none">Not asked</string>
     <plurals name="relays_detail_pow_bits">
@@ -1476,10 +1484,8 @@
     <string name="relays_detail_stun">STUN servers</string>
     <string name="relays_detail_offered">Offered</string>
     <string name="relays_detail_not_offered">Not offered</string>
-    <!-- %1$s lists what a live ticket unlocks, from relays_calls_turn / _walkie / _files. -->
-    <string name="relays_detail_ticket_grants">Unlocks %1$s</string>
-    <!-- %1$s joins relays_calls_files_each and relays_calls_files_day. -->
-    <string name="relays_detail_ticket_limits">Files %1$s</string>
+    <string name="relays_detail_ticket_grants">Unlocks</string>
+    <string name="relays_detail_ticket_limits">File limits</string>
     <string name="relays_detail_remove">Remove relay</string>
     <string name="relays_error_unreachable">Cannot be reached</string>
     <string name="relays_error_busy">Busy — it is not taking new connections right now</string>

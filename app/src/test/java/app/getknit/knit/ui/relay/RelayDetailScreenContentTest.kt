@@ -87,6 +87,7 @@ class RelayDetailScreenContentTest {
         maxAttachBytes: Int? = if (connected) 26_214_400 else null,
         software: String? = null,
         powBits: Int? = if (connected) 0 else null,
+        uploads: RelayUploads? = maxAttachBytes?.let { RelayUploads.Open(it.toLong()) },
     ) = RelayRow(
         url = "wss://$HOST/spool/v1",
         host = HOST,
@@ -102,6 +103,7 @@ class RelayDetailScreenContentTest {
         maxAttachBytes = maxAttachBytes,
         software = software,
         powBits = powBits,
+        uploads = uploads,
     )
 
     @Test
@@ -109,7 +111,8 @@ class RelayDetailScreenContentTest {
         render(relay(software = "knit-spool 0.9.0 (e8a7790)"))
         compose.onNodeWithText(HOST).assertIsDisplayed()
         compose.onNodeWithText("Connected · 3 conversations").assertIsDisplayed()
-        compose.onNodeWithText("Up to 26 MB each").assertIsDisplayed()
+        compose.onNodeWithText("Photos and files up to 26 MB each").assertIsDisplayed()
+        compose.onNodeWithText("Taken, up to 26 MB each").assertIsDisplayed()
         compose.onNodeWithText("Not asked").assertIsDisplayed()
         compose.onNodeWithText("knit-spool 0.9.0 (e8a7790)").assertIsDisplayed()
     }
@@ -118,6 +121,8 @@ class RelayDetailScreenContentTest {
     fun aFramesOnlyRelayWhoAsksForWorkSaysBoth() {
         render(relay(maxAttachBytes = null, powBits = 12))
         compose.onNodeWithText("Messages only").assertIsDisplayed()
+        // Nothing carried, nothing of ours to take: no uploads row.
+        compose.onAllNodesWithText("Your uploads").assertCountEquals(0)
         compose.onNodeWithText("12 bits").assertIsDisplayed()
         // An unnamed build is no row rather than an empty one.
         compose.onAllNodesWithText("Software").assertCountEquals(0)
@@ -129,6 +134,29 @@ class RelayDetailScreenContentTest {
         compose.onNodeWithText("Cannot be reached").assertIsDisplayed()
         compose.onNodeWithText("The rest shows here once it connects.").assertIsDisplayed()
         compose.onAllNodesWithText("Conversations").assertCountEquals(0)
+    }
+
+    @Test
+    fun aRelayThatCarriesPhotosCanStillRefuseOurs() {
+        // C-7.6-24: what it delivers and what it takes from this phone are two lines, so a files-gated relay
+        // never reads as taking our photos.
+        render(relay(uploads = RelayUploads.Locked(pending = false)))
+        compose.onNodeWithText("Photos and files up to 26 MB each").assertIsDisplayed()
+        compose.onNodeWithTag("relay_uploads_$HOST").assertIsDisplayed()
+        compose.onNodeWithText("Need a ticket that unlocks files").assertIsDisplayed()
+        compose.onAllNodesWithText("Taken", substring = true).assertCountEquals(0)
+    }
+
+    @Test
+    fun aTicketOnItsWaySaysSoRatherThanLocked() {
+        render(relay(uploads = RelayUploads.Locked(pending = true)))
+        compose.onNodeWithText("Waiting on a ticket").assertIsDisplayed()
+    }
+
+    @Test
+    fun aSpentDaySaysItsUploadsAreUsedUp() {
+        render(relay(uploads = RelayUploads.Spent))
+        compose.onNodeWithText("Used up for today").assertIsDisplayed()
     }
 
     @Test
@@ -172,9 +200,9 @@ class RelayDetailScreenContentTest {
         compose.onNodeWithTag("relay_calls_$HOST").performScrollTo().assertIsDisplayed()
         compose.onAllNodesWithText("Offered").assertCountEquals(2)
         compose.onNodeWithText("2").assertIsDisplayed()
-        compose.onNodeWithText("Ticket good until", substring = true).performScrollTo().assertIsDisplayed()
-        compose.onNodeWithText("Unlocks TURN, walkie").performScrollTo().assertIsDisplayed()
-        compose.onNodeWithText("Ticket key from issuer.example.org · account ends", substring = true).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Good until", substring = true).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("TURN, walkie").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("issuer.example.org · account ends", substring = true).performScrollTo().assertIsDisplayed()
     }
 
     @Test
@@ -182,11 +210,11 @@ class RelayDetailScreenContentTest {
         render(relay(calls = RelayCalls(turn = false, stunServers = 0, walkie = false, ticket = RelayTicket.None)))
         compose.onAllNodesWithTag("relay_calls_$HOST").assertCountEquals(0)
         // Its ticket still has a place.
-        compose.onNodeWithText("No ticket").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("None").performScrollTo().assertIsDisplayed()
     }
 
     @Test
-    fun aFilesTicketNamesFilesItsLimitsAndASpentDay() {
+    fun aFilesTicketNamesFilesAndItsLimits() {
         render(
             relay(
                 calls =
@@ -203,13 +231,11 @@ class RelayDetailScreenContentTest {
                                 ab = 50_000_000L,
                                 am = 2_000_000L,
                             ),
-                        uploadsSpent = true,
                     ),
             ),
         )
-        compose.onNodeWithText("Unlocks TURN, walkie, files").performScrollTo().assertIsDisplayed()
-        compose.onNodeWithText("Files up to 2.0 MB each, 50 MB a day").performScrollTo().assertIsDisplayed()
-        compose.onNodeWithText("Today's uploads here are used up").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("TURN, walkie, files").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Up to 2.0 MB each, 50 MB a day").performScrollTo().assertIsDisplayed()
     }
 
     @Test
@@ -220,8 +246,8 @@ class RelayDetailScreenContentTest {
                 account = RelayAccount("issuer.example.org", KeyAnswer.UNKNOWN_KEY, endsAt = null, failures = 0),
             ),
         )
-        compose.onNodeWithText("No ticket — TURN here needs one").performScrollTo().assertIsDisplayed()
-        compose.onNodeWithText("issuer.example.org doesn't recognise this ticket key").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("None — TURN here needs one").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("issuer.example.org doesn't recognise this key").performScrollTo().assertIsDisplayed()
     }
 
     @Test
@@ -233,7 +259,7 @@ class RelayDetailScreenContentTest {
                 account = RelayAccount("issuer.example.org", answer = null, endsAt = null, failures = 3),
             ),
         )
-        compose.onNodeWithText("Ticket key from issuer.example.org · not answering").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("issuer.example.org · not answering").performScrollTo().assertIsDisplayed()
     }
 
     @Test

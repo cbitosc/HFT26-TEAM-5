@@ -385,7 +385,7 @@ class InternetRelayScreenContentTest {
             ),
         )
         compose.onAllNodesWithTag("relay_calls_lax.spool.getknit.app").assertCountEquals(0)
-        compose.onAllNodesWithText("No ticket", substring = true).assertCountEquals(0)
+        compose.onAllNodesWithText("TURN", substring = true).assertCountEquals(0)
         compose.onAllNodesWithText("issuer.example.org", substring = true).assertCountEquals(0)
         compose.onAllNodesWithText("Join").assertCountEquals(0)
         compose.onAllNodesWithTag("relay_invite_lax.spool.getknit.app").assertCountEquals(0)

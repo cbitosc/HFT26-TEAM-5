@@ -210,7 +210,7 @@ internal fun relayErrorLabel(code: String): String =
         }
     }
 
-/** Where this phone stands with the relay's ticket, in one line; a live ticket's grants are [ticketGrantLines]. */
+/** Where this phone stands with the relay's ticket, as the value of its "Ticket" row; a live one's grants are [ticketGrantRows]. */
 @Composable
 internal fun ticketLine(
     ticket: RelayTicket,
@@ -240,10 +240,10 @@ internal fun ticketLine(
 
 /**
  * What a live ticket unlocks, and its own limits where it sets them (S-7.6-22, S-7.6-31) — what a free ticket is told
- * apart by: up to two lines, none for a ticket that grants and limits nothing.
+ * apart by: up to two label/value rows, none for a ticket that grants and limits nothing.
  */
 @Composable
-internal fun ticketGrantLines(ticket: RelayTicket.Live): List<String> {
+internal fun ticketGrantRows(ticket: RelayTicket.Live): List<Pair<String, String>> {
     val context = LocalContext.current
     val grants =
         buildList {
@@ -257,12 +257,17 @@ internal fun ticketGrantLines(ticket: RelayTicket.Live): List<String> {
             ticket.ab?.let { add(stringResource(R.string.relays_calls_files_day, Formatter.formatShortFileSize(context, it))) }
         }
     return buildList {
-        if (grants.isNotEmpty()) add(stringResource(R.string.relays_detail_ticket_grants, grants.joinToString(", ")))
-        if (limits.isNotEmpty()) add(stringResource(R.string.relays_detail_ticket_limits, limits.joinToString(", ")))
+        if (grants.isNotEmpty()) add(stringResource(R.string.relays_detail_ticket_grants) to grants.joinToString(", "))
+        if (limits.isNotEmpty()) add(stringResource(R.string.relays_detail_ticket_limits) to limits.joinToString(", "))
     }
 }
 
-/** The ticket key held for the relay's host and what its issuer last said. Names the issuer's host, never the key. */
+/** The label of the key's row: a free key (C-7.6-37) is never called a ticket key or an account. */
+@Composable
+internal fun accountLabel(account: RelayAccount): String =
+    stringResource(if (account.free) R.string.relays_detail_free_key else R.string.relays_detail_key)
+
+/** The ticket key held for the relay's host and what its issuer last said, as its row's value. Names the issuer's host, never the key. */
 @Composable
 internal fun accountLine(account: RelayAccount): String =
     when {

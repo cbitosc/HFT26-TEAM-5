@@ -81,7 +81,29 @@ data class RelayRow(
     val maxAttachBytes: Int? = null,
     val software: String? = null,
     val powBits: Int? = null,
+    // Whether the relay takes this phone's own uploads (C-7.6-24), apart from [maxAttachBytes]: a relay that carries
+    // photos may still refuse ours without a files ticket. Null while disconnected and where it carries none.
+    val uploads: RelayUploads? = null,
 )
+
+/**
+ * Whether a connected relay that carries attachments takes this phone's (C-7.6-24), as the relay's screen shows it:
+ * the connection's `SpoolUploads`, with the largest one it would take when it does.
+ */
+sealed interface RelayUploads {
+    /** Taken, each up to [maxBytes]: the files ticket's `am` where it sets one under the relay's own limit. */
+    data class Open(
+        val maxBytes: Long,
+    ) : RelayUploads
+
+    /** Gated behind a files ticket this phone does not hold here; [pending] while one is on its way, unanswered. */
+    data class Locked(
+        val pending: Boolean,
+    ) : RelayUploads
+
+    /** The ticket's day of uploads here is used up (`err ticket` `budget`). */
+    data object Spent : RelayUploads
+}
 
 /** A relay's commons as the row shows it: the operator's name for it, and our thread id when joined. */
 data class RelayCommons(
@@ -93,16 +115,14 @@ data class RelayCommons(
  * What a relay offers calls (experimental, docs/VOICE_CALLS.md §2), as its HELLO said on the live connection:
  * TURN credentials ([turn], §2.1), credential-free STUN servers ([stunServers], C-7.6-20, counted after the client's
  * URL rule), casts for a walkie's bursts ([walkie], §2.7), and — only on a relay that takes tickets (`ent`, §2.6) —
- * where this phone stands with one there ([ticket]; null on a relay that takes none). [uploadsSpent] says the
- * ticket's pseudonym has sent its day's uploads there (`err ticket` `budget`, C-7.6-24), which the chat's marker shows
- * only as the one "not taking your files" case.
+ * where this phone stands with one there ([ticket]; null on a relay that takes none). Whether it takes this phone's
+ * uploads is [RelayRow.uploads], which no call kind gates.
  */
 data class RelayCalls(
     val turn: Boolean,
     val stunServers: Int,
     val walkie: Boolean,
     val ticket: RelayTicket?,
-    val uploadsSpent: Boolean = false,
 )
 
 /**
@@ -284,6 +304,7 @@ class InternetRelayViewModel(
                             maxAttachBytes = live?.maxAttachBytes,
                             software = live?.software?.label,
                             powBits = live?.powBits,
+                            uploads = live?.let(::relayUploads),
                         )
                     },
             )
@@ -504,8 +525,29 @@ internal fun relayCalls(
         stunServers = status.stun.size,
         walkie = status.cast != null,
         ticket = if (status.ent) relayTicket(status.ticket, stored, now) else null,
-        uploadsSpent = status.uploads == SpoolUploads.Spent,
     )
+}
+
+/**
+ * Whether [status] — a connected relay — takes this phone's uploads, or null when it carries no attachments at all. An
+ * open relay's limit is its own, or the files ticket's `am` (C-7.6-32) where that is smaller.
+ */
+internal fun relayUploads(status: SpoolStatus): RelayUploads? {
+    val relayMax = status.maxAttachBytes?.toLong() ?: return null
+    return when (val uploads = status.uploads) {
+        SpoolUploads.Open -> {
+            val ticketMax = (status.ticket as? SpoolTicketState.Accepted)?.am
+            RelayUploads.Open(ticketMax?.coerceAtMost(relayMax) ?: relayMax)
+        }
+
+        is SpoolUploads.Locked -> {
+            RelayUploads.Locked(pending = uploads.reason == SpoolUploads.PENDING)
+        }
+
+        SpoolUploads.Spent -> {
+            RelayUploads.Spent
+        }
+    }
 }
 
 /** The row's ticket line: the connection's own answer first, then what the store's verdict says about the held one. */

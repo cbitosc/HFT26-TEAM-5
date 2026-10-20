@@ -263,10 +263,12 @@ class InternetRelayViewModelTest {
             assertEquals(26_214_400, live.maxAttachBytes)
             assertEquals("knit-spool 0.9.0", live.software)
             assertEquals(12, live.powBits)
+            assertEquals(RelayUploads.Open(26_214_400L), live.uploads)
             val down = rows.getValue(OTHER)
             assertNull(down.maxAttachBytes)
             assertNull(down.software)
             assertNull(down.powBits)
+            assertNull(down.uploads)
         }
 
     @Test
@@ -412,28 +414,42 @@ class InternetRelayViewModelTest {
     }
 
     @Test
-    fun aFilesTicketListsFilesAndASpentDayGetsItsOwnLine() {
+    fun aFilesTicketListsFiles() {
         val now = 1_800_000_000_000L
         assertEquals(
             RelayTicket.Live(1_800_086_400L, turn = true, walkie = true, files = true),
             relayTicket(SpoolTicketState.Accepted(1_800_086_400L, 11L), null, now),
         )
+    }
 
-        fun status(uploads: SpoolUploads) =
-            SpoolStatus(
-                url = OTHER,
-                connected = true,
-                powBits = 0,
-                lastError = null,
-                scopes = emptyList(),
-                ent = true,
-                entGates = 11L,
-                ticket = SpoolTicketState.Accepted(1_800_086_400L, 11L),
-                uploads = uploads,
-            )
-        assertTrue(relayCalls(status(SpoolUploads.Spent), null, now)!!.uploadsSpent)
-        assertFalse(relayCalls(status(SpoolUploads.Open), null, now)!!.uploadsSpent)
-        assertFalse(relayCalls(status(SpoolUploads.Locked(SpoolUploads.MISSING)), null, now)!!.uploadsSpent)
+    @Test
+    fun ourUploadsAreReadApartFromWhatTheRelayCarries() {
+        // C-7.6-24: a relay that carries photos can still refuse this phone's own without a files ticket, and the
+        // ticket's `am` caps them below the relay's limit.
+        fun status(
+            uploads: SpoolUploads,
+            maxAttachBytes: Int? = 26_214_400,
+            am: Long? = null,
+        ) = SpoolStatus(
+            url = OTHER,
+            connected = true,
+            powBits = 0,
+            lastError = null,
+            scopes = emptyList(),
+            maxAttachBytes = maxAttachBytes,
+            ent = true,
+            entGates = 11L,
+            ticket = SpoolTicketState.Accepted(1_800_086_400L, 11L, am = am),
+            uploads = uploads,
+        )
+        assertEquals(RelayUploads.Open(26_214_400L), relayUploads(status(SpoolUploads.Open)))
+        assertEquals(RelayUploads.Open(2_000_000L), relayUploads(status(SpoolUploads.Open, am = 2_000_000L)))
+        assertEquals(RelayUploads.Open(26_214_400L), relayUploads(status(SpoolUploads.Open, am = 90_000_000L)))
+        assertEquals(RelayUploads.Locked(pending = false), relayUploads(status(SpoolUploads.Locked(SpoolUploads.MISSING))))
+        assertEquals(RelayUploads.Locked(pending = true), relayUploads(status(SpoolUploads.Locked(SpoolUploads.PENDING))))
+        assertEquals(RelayUploads.Spent, relayUploads(status(SpoolUploads.Spent)))
+        // A relay that carries no attachments has no uploads to speak of.
+        assertNull(relayUploads(status(SpoolUploads.Open, maxAttachBytes = null)))
     }
 
     @Test

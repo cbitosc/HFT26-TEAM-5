@@ -1,10 +1,9 @@
 package app.getknit.knit.ui.relay
 
 import android.text.format.Formatter
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -25,6 +24,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -46,7 +46,6 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -55,6 +54,9 @@ import app.getknit.knit.R
 import app.getknit.knit.data.relay.FreeUploadChoice
 import app.getknit.knit.mesh.spool.KeyAnswer
 import app.getknit.knit.mesh.spool.SpoolUrl
+import app.getknit.knit.ui.components.DetailCard
+import app.getknit.knit.ui.components.DetailRow
+import app.getknit.knit.ui.components.SectionHeader
 import app.getknit.knit.ui.preview.KnitPreview
 
 /**
@@ -145,26 +147,27 @@ internal fun RelayDetailScreenContent(
     ) { padding ->
         // Not read yet: an empty page for the frame before the list's state lands, never a half-drawn relay.
         if (relay == null) return@Scaffold
+        // The cards carry the side gutter (`DetailCard`), so the column pads only top and bottom.
         Column(
             modifier =
                 Modifier
                     .fillMaxSize()
                     .padding(padding)
                     .verticalScroll(rememberScrollState())
-                    .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
+                    .padding(vertical = 8.dp),
         ) {
-            UseRelayRow(relay, planeEnabled, offline, onSetEnabled)
+            DetailCard { UseRelayRow(relay, planeEnabled, offline, onSetEnabled) }
             ConnectionSection(relay)
             CallsSection(relay)
             TicketsSection(relay, onSetFreeUploads)
             relay.commons?.let { room ->
                 RoomSection(relay, room, onJoin = { joining = true }, onLeave = { leaving = true })
             }
-            TextButton(
+            OutlinedButton(
                 onClick = { removing = true },
-                colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
-                modifier = Modifier.testTag("relay_remove"),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.error),
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 24.dp).testTag("relay_remove"),
             ) {
                 Icon(Icons.Filled.Delete, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
@@ -254,7 +257,8 @@ private fun UseRelayRow(
             Modifier
                 .fillMaxWidth()
                 .toggleable(value = relay.enabled, enabled = planeEnabled, onValueChange = onSetEnabled, role = Role.Switch)
-                .testTag("relay_detail_switch"),
+                .testTag("relay_detail_switch")
+                .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(modifier = Modifier.weight(1f)) {
@@ -275,34 +279,59 @@ private fun UseRelayRow(
 }
 
 /**
- * What the live connection says: how many of our conversations it holds, how large an attachment it takes, whether
- * its HELLO asks for proof of work, and the software its `/source` named. All facts about the connection, so while it
- * is down one line says they will come back.
+ * What the live connection says: how many of our conversations it holds, what it carries to this phone, whether it
+ * takes this phone's own uploads (a relay can carry photos and still refuse ours without a files ticket, C-7.6-24),
+ * whether its HELLO asks for proof of work, and the software its `/source` named. All facts about the connection, so
+ * while it is down one line says they will come back.
  */
 @Composable
 private fun ConnectionSection(relay: RelayRow) {
-    Section(stringResource(R.string.relays_detail_section_connection), Modifier.testTag("relay_connection_${relay.host}")) {
+    SectionHeader(stringResource(R.string.relays_detail_section_connection))
+    DetailCard(Modifier.testTag("relay_connection_${relay.host}")) {
         if (!relay.connected) {
             Text(
                 text = stringResource(R.string.relays_detail_disconnected),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
             )
-            return@Section
+            return@DetailCard
         }
-        DetailLine(stringResource(R.string.relays_detail_conversations), (relay.scopeCount ?: 0).toString())
-        DetailLine(
-            stringResource(R.string.relays_detail_attachments),
+        val context = LocalContext.current
+        DetailRow(stringResource(R.string.relays_detail_conversations), (relay.scopeCount ?: 0).toString())
+        DetailRow(
+            stringResource(R.string.relays_detail_downloads),
             relay.maxAttachBytes?.let {
-                stringResource(R.string.relays_detail_attach_limit, Formatter.formatShortFileSize(LocalContext.current, it.toLong()))
-            } ?: stringResource(R.string.relays_detail_attach_none),
+                stringResource(R.string.relays_detail_downloads_limit, Formatter.formatShortFileSize(context, it.toLong()))
+            } ?: stringResource(R.string.relays_detail_downloads_none),
         )
-        DetailLine(
+        relay.uploads?.let { uploads ->
+            DetailRow(
+                stringResource(R.string.relays_detail_uploads),
+                when (uploads) {
+                    is RelayUploads.Open -> {
+                        stringResource(R.string.relays_detail_uploads_open, Formatter.formatShortFileSize(context, uploads.maxBytes))
+                    }
+
+                    is RelayUploads.Locked -> {
+                        stringResource(
+                            if (uploads.pending) R.string.relays_detail_uploads_pending else R.string.relays_detail_uploads_locked,
+                        )
+                    }
+
+                    RelayUploads.Spent -> {
+                        stringResource(R.string.relays_detail_uploads_spent)
+                    }
+                },
+                modifier = Modifier.testTag("relay_uploads_${relay.host}"),
+            )
+        }
+        DetailRow(
             stringResource(R.string.relays_detail_pow),
             relay.powBits?.takeIf { it > 0 }?.let { pluralStringResource(R.plurals.relays_detail_pow_bits, it, it) }
                 ?: stringResource(R.string.relays_detail_pow_none),
         )
-        relay.software?.let { DetailLine(stringResource(R.string.relays_detail_software), it) }
+        relay.software?.let { DetailRow(stringResource(R.string.relays_detail_software), it) }
     }
 }
 
@@ -312,17 +341,18 @@ private fun CallsSection(relay: RelayRow) {
     val calls = relay.calls ?: return
     // A relay that takes tickets and offers calls nothing has its ticket below and no section here.
     if (!calls.turn && !calls.walkie && calls.stunServers == 0) return
-    Section(stringResource(R.string.relays_detail_section_calls), Modifier.testTag("relay_calls_${relay.host}")) {
-        DetailLine(stringResource(R.string.relays_detail_turn), offered(calls.turn))
-        DetailLine(stringResource(R.string.relays_detail_walkie), offered(calls.walkie))
-        DetailLine(stringResource(R.string.relays_detail_stun), calls.stunServers.toString())
+    SectionHeader(stringResource(R.string.relays_detail_section_calls))
+    DetailCard(Modifier.testTag("relay_calls_${relay.host}")) {
+        DetailRow(stringResource(R.string.relays_detail_turn), offered(calls.turn))
+        DetailRow(stringResource(R.string.relays_detail_walkie), offered(calls.walkie))
+        DetailRow(stringResource(R.string.relays_detail_stun), calls.stunServers.toString())
     }
 }
 
 /**
  * Where this phone stands with the relay's tickets (§2.6): the ticket on this connection with what it unlocks, the
- * day's uploads when spent, the ticket key held for the relay's host (ADR 2026-10.3sk7) and the free tickets' switch
- * (C-7.6-34). Names the issuer's host and the ticket's claims only — never the key, the ticket or a STUN URI.
+ * ticket key held for the relay's host (ADR 2026-10.3sk7) and the free tickets' switch (C-7.6-34). Names the issuer's
+ * host and the ticket's claims only — never the key, the ticket or a STUN URI.
  */
 @Composable
 private fun TicketsSection(
@@ -331,20 +361,18 @@ private fun TicketsSection(
 ) {
     val calls = relay.calls
     val ticket = calls?.ticket
-    val lines =
+    val rows =
         buildList {
             if (ticket != null) {
-                add(ticketLine(ticket, calls.turn))
-                if (ticket is RelayTicket.Live) addAll(ticketGrantLines(ticket))
+                add(stringResource(R.string.relays_detail_ticket) to ticketLine(ticket, calls.turn))
+                if (ticket is RelayTicket.Live) addAll(ticketGrantRows(ticket))
             }
-            if (calls?.uploadsSpent == true) add(stringResource(R.string.relays_calls_uploads_spent))
-            relay.account?.let { add(accountLine(it)) }
+            relay.account?.let { add(accountLabel(it) to accountLine(it)) }
         }
-    if (lines.isEmpty() && relay.freeUploads == null) return
-    Section(stringResource(R.string.relays_detail_section_tickets), Modifier.testTag("relay_ticket_${relay.host}")) {
-        lines.forEach { line ->
-            Text(text = line, style = MaterialTheme.typography.bodyMedium)
-        }
+    if (rows.isEmpty() && relay.freeUploads == null) return
+    SectionHeader(stringResource(R.string.relays_detail_section_tickets))
+    DetailCard(Modifier.testTag("relay_ticket_${relay.host}")) {
+        rows.forEach { (label, value) -> DetailRow(label, value) }
         relay.freeUploads?.let { FreeUploadsSwitch(relay.host, it, onSetFreeUploads) }
     }
 }
@@ -365,11 +393,12 @@ private fun FreeUploadsSwitch(
             Modifier
                 .fillMaxWidth()
                 .testTag("relay_free_uploads_$host")
-                .toggleable(value = on, onValueChange = onSet, role = Role.Switch),
+                .toggleable(value = on, onValueChange = onSet, role = Role.Switch)
+                .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(modifier = Modifier.weight(1f)) {
-            Text(text = stringResource(R.string.relays_free_uploads_title), style = MaterialTheme.typography.bodyMedium)
+            Text(text = stringResource(R.string.relays_free_uploads_title), style = MaterialTheme.typography.bodyLarge)
             Text(
                 text = stringResource(R.string.relays_free_uploads_summary, choice.issuerHost),
                 style = MaterialTheme.typography.bodySmall,
@@ -389,11 +418,15 @@ private fun RoomSection(
     onJoin: () -> Unit,
     onLeave: () -> Unit,
 ) {
-    Section(stringResource(R.string.relays_detail_section_room)) {
-        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+    SectionHeader(stringResource(R.string.relays_detail_section_room))
+    DetailCard {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Text(
                 text = stringResource(R.string.relays_commons_label, room.name ?: stringResource(R.string.commons_title)),
-                style = MaterialTheme.typography.bodyMedium,
+                style = MaterialTheme.typography.bodyLarge,
                 modifier = Modifier.weight(1f),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -408,36 +441,6 @@ private fun RoomSection(
                 }
             }
         }
-    }
-}
-
-@Composable
-private fun Section(
-    title: String,
-    modifier: Modifier = Modifier,
-    content: @Composable ColumnScope.() -> Unit,
-) {
-    Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(text = title, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.primary)
-        content()
-    }
-}
-
-/** A label and its value on one line, the value trailing. */
-@Composable
-private fun DetailLine(
-    label: String,
-    value: String,
-) {
-    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Text(text = label, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
-        Spacer(Modifier.width(12.dp))
-        Text(
-            text = value,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.End,
-        )
     }
 }
 
@@ -465,7 +468,6 @@ fun RelayDetailScreenPreview() =
                             walkie = true,
                             // 2026-10-14 16:00 UTC.
                             ticket = RelayTicket.Live(exp = 1_791_993_600L, turn = true, walkie = true, files = true, am = 2_000_000L),
-                            uploadsSpent = true,
                         ),
                     // 2026-11-30 UTC.
                     account = RelayAccount("issuer.example.org", KeyAnswer.OK, endsAt = 1_796_000_000_000L, failures = 0),
@@ -473,6 +475,7 @@ fun RelayDetailScreenPreview() =
                     maxAttachBytes = 26_214_400,
                     software = "knit-spool 0.9.0 (e8a7790)",
                     powBits = 0,
+                    uploads = RelayUploads.Open(maxBytes = 2_000_000L),
                 ),
             planeEnabled = true,
             offline = false,
