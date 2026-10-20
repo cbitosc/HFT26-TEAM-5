@@ -4,6 +4,7 @@ package app.getknit.knit.ui.profile
 
 import android.content.Context
 import app.getknit.knit.R
+import app.getknit.knit.call.CallKind
 import app.getknit.knit.call.CallManager
 import app.getknit.knit.call.CallRefusal
 import app.getknit.knit.contacts.ContactRemover
@@ -282,11 +283,11 @@ class ProfileDetailsViewModelTest {
         }
 
     /**
-     * A build that takes mesh calls alone (ADR 2026-10.swvp) offers Call to a peer whose profile carries CAP_WALKIE,
-     * and to none that carries only CAP_CALL: its call would be a walkie, which that peer cannot take.
+     * A build that takes mesh calls alone (ADR 2026-10.swvp) offers Mesh call to a peer whose profile carries
+     * CAP_WALKIE, never the live Call, and nothing to a peer that carries only CAP_CALL.
      */
     @Test
-    fun aBuildWithMeshCallsAloneOffersCallToAWalkieCapablePeerOnly() =
+    fun aBuildWithMeshCallsAloneOffersMeshCallToAWalkieCapablePeerOnly() =
         runTest {
             val calls = mockk<CallManager>(relaxed = true)
             every { calls.liveEnabled } returns false
@@ -296,10 +297,41 @@ class ProfileDetailsViewModelTest {
             peersFlow.value = listOf(peer(nodeId, name = "Ada", capabilities = Protocol.CAP_CALL))
             advanceUntilIdle()
             assertFalse("a live-only peer", vm.state.value.canCall)
+            assertFalse("a live-only peer", vm.state.value.canMeshCall)
+
+            peersFlow.value = listOf(peer(nodeId, name = "Ada", capabilities = Protocol.CAP_WALKIE or Protocol.CAP_CALL))
+            advanceUntilIdle()
+            assertFalse("no live calls in this build", vm.state.value.canCall)
+            assertTrue(vm.state.value.canMeshCall)
+        }
+
+    /** A build with both kinds offers each toward the bits the peer carries: both, one, and none once blocked. */
+    @Test
+    fun aBuildWithBothKindsOffersEachCallThePeerCanTake() =
+        runTest {
+            val calls = mockk<CallManager>(relaxed = true)
+            every { calls.liveEnabled } returns true
+            every { calls.walkieEnabled } returns true
+            val vm = vm(calls)
+            backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.state.collect {} }
+            peersFlow.value = listOf(peer(nodeId, name = "Ada", capabilities = Protocol.CAP_CALL or Protocol.CAP_WALKIE))
+            advanceUntilIdle()
+            assertTrue(vm.state.value.canCall)
+            assertTrue(vm.state.value.canMeshCall)
+
+            peersFlow.value = listOf(peer(nodeId, name = "Ada", capabilities = Protocol.CAP_CALL))
+            advanceUntilIdle()
+            assertTrue(vm.state.value.canCall)
+            assertFalse("a peer without the walkie", vm.state.value.canMeshCall)
 
             peersFlow.value = listOf(peer(nodeId, name = "Ada", capabilities = Protocol.CAP_WALKIE))
             advanceUntilIdle()
-            assertTrue(vm.state.value.canCall)
+            assertFalse("a peer without live calls", vm.state.value.canCall)
+            assertTrue(vm.state.value.canMeshCall)
+
+            blockedFlow.value = setOf(nodeId)
+            advanceUntilIdle()
+            assertFalse("blocked", vm.state.value.canMeshCall)
         }
 
     @Test
@@ -310,13 +342,14 @@ class ProfileDetailsViewModelTest {
             peersFlow.value = listOf(peer(nodeId, name = "Ada", capabilities = Protocol.CAP_CALL))
             advanceUntilIdle()
             assertFalse(vm.state.value.canCall)
+            assertFalse(vm.state.value.canMeshCall)
         }
 
     @Test
-    fun startCallAcceptsThePeerThenCallsAndReportsARefusal() =
+    fun startCallAcceptsThePeerThenCallsLiveAndReportsARefusal() =
         runTest {
             val calls = mockk<CallManager>(relaxed = true)
-            coEvery { calls.start(nodeId) } returns CallRefusal.BUSY
+            coEvery { calls.start(nodeId, CallKind.LIVE) } returns CallRefusal.BUSY
             val vm = vm(calls)
             val events = mutableListOf<Int>()
             backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.events.collect { events += it } }
@@ -325,8 +358,25 @@ class ProfileDetailsViewModelTest {
             advanceUntilIdle()
 
             coVerify { settings.accept(nodeId) }
-            coVerify(exactly = 1) { calls.start(nodeId) }
+            coVerify(exactly = 1) { calls.start(nodeId, CallKind.LIVE) }
             assertEquals(listOf(R.string.chat_call_busy), events)
+        }
+
+    @Test
+    fun startMeshCallAcceptsThePeerThenPlacesAWalkieAndReportsARefusal() =
+        runTest {
+            val calls = mockk<CallManager>(relaxed = true)
+            coEvery { calls.start(nodeId, CallKind.WALKIE) } returns CallRefusal.NO_LIVE
+            val vm = vm(calls)
+            val events = mutableListOf<Int>()
+            backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.events.collect { events += it } }
+
+            vm.startMeshCall()
+            advanceUntilIdle()
+
+            coVerify { settings.accept(nodeId) }
+            coVerify(exactly = 1) { calls.start(nodeId, CallKind.WALKIE) }
+            assertEquals(listOf(R.string.chat_mesh_call_peer_too_old), events)
         }
 
     @Test

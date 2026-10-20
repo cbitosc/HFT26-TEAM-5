@@ -715,9 +715,12 @@ its media (`REASON_MEDIA`).
   no ICE servers, no connect timer and no grace. Both carry `hr = true` from a build that reports what it hears
   (C-3.11-10). A build without the walkie declines it with `rsn = 5`, because the
   audio bit is absent.
-- **C-3.11-3** A call placed without a kind (the profile's Call button) is a walkie session only when the peer carries
+- **C-3.11-3** A call placed without a kind (`CallKind.AUTO`) is a walkie session only when the peer carries
   `CAP_WALKIE` and no live path looks possible. "Possible" means a validated Internet route here, or a Wi-Fi Direct
   leg (§3.10) to a neighbour. Anything else is a live call.
+
+  The profile offers each kind as its own button beside Message, Call and Mesh call, toward a peer carrying that
+  kind's bit (`CAP_CALL`, `CAP_WALKIE`); with both offered they share a row under Message.
 
   The chat offers both kinds by the same rule: the call it prefers in its top bar, the other in its overflow.
   The Calls screen's "Prefer mesh calls" (`CallPreferenceStore`, off by default, shown only where both kinds are

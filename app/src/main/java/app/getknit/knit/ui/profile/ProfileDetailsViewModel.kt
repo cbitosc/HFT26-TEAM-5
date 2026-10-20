@@ -5,6 +5,7 @@ import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.getknit.knit.R
+import app.getknit.knit.call.CallKind
 import app.getknit.knit.call.CallManager
 import app.getknit.knit.call.CallRefusal
 import app.getknit.knit.contacts.ContactRemover
@@ -165,11 +166,13 @@ data class ProfileDetailsUiState(
     val inCommon: InCommon = InCommon.EMPTY,
     // What "Remove contact" would do, and whether the overflow offers it at all.
     val removal: ContactRemoval = ContactRemoval.NotOffered,
-    // Whether a Call button sits beside Message (experimental, docs/VOICE_CALLS.md): a build that takes a kind of call
-    // whose bit the peer's pinned profile carries (CAP_CALL for a live one, CAP_WALKIE for a mesh one), and nobody we
-    // block. Unlike the chat's button, which shows in any DM and explains a refusal on the press, this one is offered
-    // only to a peer we know can answer.
+    // Whether a live Call button sits beside Message (experimental, docs/VOICE_CALLS.md): a build that takes live calls,
+    // a peer whose pinned profile carries CAP_CALL, and nobody we block. Unlike the chat's button, which shows in any DM
+    // and explains a refusal on the press, this one is offered only to a peer we know can answer.
     val canCall: Boolean = false,
+    // Whether a Mesh call button sits beside it (§3.11), by the same rule: a build that runs the walkie and a peer whose
+    // pinned profile carries CAP_WALKIE.
+    val canMeshCall: Boolean = false,
 )
 
 /**
@@ -335,6 +338,8 @@ class ProfileDetailsViewModel(
             val label = directory.label(nodeId)
             peerBundle = peer?.pubKey
             peerDeviceTag = peer?.deviceTag
+            val capabilities = peer?.capabilities ?: 0L
+            val callable = nodeId !in blocked && nodeId != myId?.nodeId
             val safety =
                 if (peer?.pubKey != null && myId != null) {
                     SafetyNumber.compute(myId.nodeId, myId.bundle, nodeId, peer.pubKey)
@@ -359,11 +364,8 @@ class ProfileDetailsViewModel(
                 loraNodeLabel = peer?.loraNode?.let(::meshNodeLabel),
                 inCommon = shared,
                 removal = removal,
-                canCall =
-                    calls != null &&
-                        nodeId !in blocked &&
-                        nodeId != myId?.nodeId &&
-                        callable(calls, peer?.capabilities ?: 0L),
+                canCall = callable && calls?.liveEnabled == true && capabilities and Protocol.CAP_CALL != 0L,
+                canMeshCall = callable && calls?.walkieEnabled == true && capabilities and Protocol.CAP_WALKIE != 0L,
             )
         }.stateIn(
             viewModelScope,
@@ -388,14 +390,19 @@ class ProfileDetailsViewModel(
     }
 
     /**
-     * Calls this peer (experimental), accepting any pending request first as [accept] does for Message: calling is
+     * Calls this peer live (experimental), accepting any pending request first as [accept] does for Message: calling is
      * choosing to converse. The call screen opens from the call layer; a refusal lands on [events].
      */
-    fun startCall() {
+    fun startCall() = placeCall(CallKind.LIVE)
+
+    /** Calls this peer as a walkie-talkie over the mesh (§3.11), as [startCall] does a live call. */
+    fun startMeshCall() = placeCall(CallKind.WALKIE)
+
+    private fun placeCall(kind: CallKind) {
         val calls = calls ?: return
         viewModelScope.launch {
             settings.accept(nodeId)
-            when (calls.start(nodeId)) {
+            when (calls.start(nodeId, kind)) {
                 null -> Unit
                 CallRefusal.BUSY -> _events.tryEmit(R.string.chat_call_busy)
                 CallRefusal.SELF -> _events.tryEmit(R.string.chat_call_needs_dm)
@@ -456,11 +463,3 @@ class ProfileDetailsViewModel(
         _scanResult.value = null
     }
 }
-
-/** Whether a peer advertising [capabilities] can take a call of a kind this build places (ADR 2026-10.swvp). */
-private fun callable(
-    calls: CallManager,
-    capabilities: Long,
-): Boolean =
-    (calls.liveEnabled && capabilities and Protocol.CAP_CALL != 0L) ||
-        (calls.walkieEnabled && capabilities and Protocol.CAP_WALKIE != 0L)

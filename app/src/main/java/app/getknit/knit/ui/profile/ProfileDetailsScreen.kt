@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.content.res.Configuration
 import android.os.Build
 import android.text.format.DateUtils
+import androidx.annotation.StringRes
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -11,6 +12,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -28,6 +30,7 @@ import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PersonRemove
+import androidx.compose.material.icons.filled.SpeakerPhone
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material3.AlertDialog
@@ -117,7 +120,8 @@ private const val NAMED_GROUPS_MAX = 3
  * Read-only "contact details" view of another peer (keyed by [nodeId]): avatar, display name, live
  * presence (online / reachable long-range / offline), free-text status, node id, and end-to-end key
  * verification (safety number + QR scan). Offers a Message action (accepts any pending request from this
- * peer, then opens/starts a DM via [onMessage]), a Call beside it for a peer that can take one (experimental),
+ * peer, then opens/starts a DM via [onMessage]), a Call and a Mesh call beside it for a peer that can take each
+ * (experimental),
  * and Remove contact and Block/Unblock in the overflow menu.
  * Reached by tapping a peer's avatar in a chat, or a sender's avatar in the Message Requests inbox.
  * [onRemoved] runs once a confirmed removal has finished writing — the DM it deleted may be the screen below.
@@ -175,6 +179,7 @@ fun ProfileDetailsScreen(
                 onMessage(id)
             },
             onCall = viewModel::startCall,
+            onMeshCall = viewModel::startMeshCall,
             onOpenGroup = onOpenGroup,
             onScan = { scanning = true },
             onBlock = viewModel::block,
@@ -202,6 +207,8 @@ internal fun ProfileDetailsScreenContent(
     onClearVerification: () -> Unit,
     // A voice call to this peer (experimental), offered only when [ProfileDetailsUiState.canCall].
     onCall: () -> Unit = {},
+    // A mesh call — a walkie-talkie over the mesh (§3.11) — offered only when [ProfileDetailsUiState.canMeshCall].
+    onMeshCall: () -> Unit = {},
     // Whether the LoRa plane is introduced at all in this build — a peer on a debug build can name a board
     // in a profile a release build has no radio for, and a line about a feature that isn't there is noise.
     // A parameter rather than a bare BuildConfig read so the hidden case is previewable and testable.
@@ -297,21 +304,31 @@ internal fun ProfileDetailsScreenContent(
             )
 
             // The reason you opened this screen. It used to sit tenth, under four lines of metadata, as a
-            // 48dp icon button that read as weaker than the text above it. Call, when offered, shares the row
-            // as the tonal second action, so Message stays the primary one.
-            Row(
+            // 48dp icon button that read as weaker than the text above it. A call, when offered, shares the row
+            // as the tonal second action, so Message stays the primary one. With both kinds offered, three
+            // labelled buttons do not fit a phone's width: Message takes the row alone and the two calls sit
+            // side by side under it.
+            val bothCalls = state.canCall && state.canMeshCall
+            Column(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Button(
-                    onClick = { onMessage(state.nodeId) },
-                    modifier = Modifier.weight(1f).testTag("profile_details_message"),
-                ) {
-                    Icon(Icons.AutoMirrored.Filled.Message, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text(stringResource(R.string.profile_details_message))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = { onMessage(state.nodeId) },
+                        modifier = Modifier.weight(1f).testTag("profile_details_message"),
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.Message, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text(stringResource(R.string.profile_details_message))
+                    }
+                    if (!bothCalls) CallButtons(state, onCall, onMeshCall, snackbarHostState)
                 }
-                if (state.canCall) CallButton(onCall = onCall, snackbarHostState = snackbarHostState, modifier = Modifier.weight(1f))
+                if (bothCalls) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        CallButtons(state, onCall, onMeshCall, snackbarHostState)
+                    }
+                }
             }
 
             InCommonSection(state.inCommon.groups, onOpenGroup = onOpenGroup)
@@ -361,27 +378,44 @@ internal fun ProfileDetailsScreenContent(
 }
 
 /**
- * The profile's voice-call button (experimental), the chat top bar's in the profile's register. The microphone is
- * asked for on the press that finds it missing and, as there, the call does not start on the grant: the user taps
- * again. A phone with no microphone draws nothing.
+ * The profile's voice-call buttons (experimental), the chat's in the profile's register: the live Call, then the Mesh
+ * call beside it, each where [ProfileDetailsUiState] offers it. The microphone is asked for on the press that finds it
+ * missing and, as there, the call does not start on the grant: the user taps again. A phone with no microphone draws
+ * neither.
  */
 @Composable
-private fun CallButton(
+private fun RowScope.CallButtons(
+    state: ProfileDetailsUiState,
     onCall: () -> Unit,
+    onMeshCall: () -> Unit,
     snackbarHostState: SnackbarHostState,
-    modifier: Modifier = Modifier,
 ) {
+    if (!state.canCall && !state.canMeshCall) return
     val scope = rememberCoroutineScope()
     val denied = stringResource(R.string.chat_call_mic_denied)
     val gate = rememberMicGate(onDenied = { scope.launch { snackbarHostState.showSnackbar(denied) } })
     if (!gate.hasMicrophone) return
-    FilledTonalButton(
-        onClick = { gate.runOrRequest(onCall) },
-        modifier = modifier.testTag("profile_details_call"),
-    ) {
-        Icon(Icons.Filled.Call, contentDescription = null, modifier = Modifier.size(18.dp))
+    if (state.canCall) {
+        CallButton(Icons.Filled.Call, R.string.profile_details_call, "profile_details_call") { gate.runOrRequest(onCall) }
+    }
+    if (state.canMeshCall) {
+        CallButton(Icons.Filled.SpeakerPhone, R.string.chat_mesh_call, "profile_details_mesh_call") {
+            gate.runOrRequest(onMeshCall)
+        }
+    }
+}
+
+@Composable
+private fun RowScope.CallButton(
+    icon: ImageVector,
+    @StringRes label: Int,
+    tag: String,
+    onClick: () -> Unit,
+) {
+    FilledTonalButton(onClick = onClick, modifier = Modifier.weight(1f).testTag(tag)) {
+        Icon(icon, contentDescription = null, modifier = Modifier.size(18.dp))
         Spacer(Modifier.width(8.dp))
-        Text(stringResource(R.string.profile_details_call))
+        Text(stringResource(label))
     }
 }
 
