@@ -29,7 +29,9 @@ import app.getknit.knit.fieldlog.FIELD_LOG_SHARE_DIR
 import app.getknit.knit.fieldlog.FieldJournal
 import app.getknit.knit.fieldlog.FieldLog
 import app.getknit.knit.fieldlog.FieldLogExport
+import app.getknit.knit.fieldlog.batteryEdges
 import app.getknit.knit.fieldlog.netEdges
+import app.getknit.knit.fieldlog.readBattery
 import app.getknit.knit.identity.Identity
 import app.getknit.knit.mesh.BlobExchange
 import app.getknit.knit.mesh.BridgeFrameSource
@@ -169,6 +171,8 @@ val meshModule =
                 }
                 // The Internet route every spool line reads against, followed for each mesh session.
                 log.follower("net") { netEdges(get<InternetGate>()) }
+                // How Android treats the app's background battery use, at each session's start and on change.
+                log.follower("battery") { batteryEdges({ readBattery(androidContext()) }) }
             }
         }
         single { FieldLogExport(androidContext(), get(), get(), get()) }

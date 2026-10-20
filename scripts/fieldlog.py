@@ -47,6 +47,7 @@ KINDS: dict[str, set[str] | None] = {
     "mesh_on": {"vc"},
     "mesh_off": set(),
     "power": {"screen", "charging", "low"},
+    "battery": {"usage", "exempt", "bucket"},
     "radio": {"radio", "health", "linked", "nearby", "contended", "held"},
     "counters": None,
     "bt_up": {"peer", "dialed", "dial", "sighted", "links", "relink"},
@@ -227,6 +228,8 @@ def summarise(logs: list[Log]) -> dict:
                 out["lora roles"][f"{dev} {e['role']}"].append(1)
             elif kind == "lora" and "chUtil10" in e:
                 out["lora board channel use %"][dev].append(e["chUtil10"] / 10)
+            elif kind == "battery":
+                out["battery standing"][f"{dev} {e['usage']} exempt={e['exempt']} {e['bucket']}"].append(1)
             elif kind == "net":
                 out["net routes"][f"{dev} {e['route']}"].append(1)
             elif kind == "spool_up":

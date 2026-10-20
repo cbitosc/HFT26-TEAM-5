@@ -82,6 +82,26 @@ sealed interface FieldEvent {
     }
 
     /**
+     * How Android treats the app's background battery use ([batteryEdges]): the App battery usage position
+     * (`BackgroundBattery`, where Restricted wins, ADR 2026-09.gc3m), whether the battery-optimization exemption is
+     * held ([exempt], which can read true beneath Restricted), and the app standby bucket. An OEM's own battery
+     * manager is visible to none of them.
+     */
+    data class Battery(
+        val usage: Enum<*>,
+        val exempt: Boolean,
+        val bucket: StandbyBucket,
+    ) : FieldEvent {
+        override val kind get() = "battery"
+
+        override fun write(out: FieldWriter) {
+            out.enum("usage", usage)
+            out.flag("exempt", exempt)
+            out.enum("bucket", bucket)
+        }
+    }
+
+    /**
      * One radio's status changed: health, live links, or a flag. [nearby] rides along but does not by itself
      * make an event (it is smoothed and moves constantly); [FieldLog] samples it with the counters instead.
      */

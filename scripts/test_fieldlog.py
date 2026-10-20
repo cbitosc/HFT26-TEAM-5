@@ -129,6 +129,11 @@ class CheckTest(unittest.TestCase):
         ):
             self.assertEqual([], fieldlog.validate(line), line)
 
+    def test_the_battery_line_is_a_known_kind_and_takes_no_other_field(self):
+        line = {"t": 1, "e": "battery", "usage": "Restricted", "exempt": True, "bucket": "RESTRICTED"}
+        self.assertEqual([], fieldlog.validate(line))
+        self.assertEqual(["battery: unexpected field 'oem'"], fieldlog.validate({**line, "oem": "MIUI"}))
+
 
 class PairTest(unittest.TestCase):
     def setUp(self) -> None:

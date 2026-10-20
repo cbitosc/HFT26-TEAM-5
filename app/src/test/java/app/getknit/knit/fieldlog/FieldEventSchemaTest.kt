@@ -23,6 +23,7 @@ import app.getknit.knit.mesh.spool.SpoolTicketWord
 import app.getknit.knit.mesh.spool.SpoolUploadsWord
 import app.getknit.knit.mesh.spool.SpoolVerdict
 import app.getknit.knit.net.InternetGate
+import app.getknit.knit.ui.BackgroundBattery
 import app.getknit.knit.ui.call.TalkPath
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -45,6 +46,10 @@ class FieldEventSchemaTest {
         assertEquals(
             """{"t":42,"e":"power","screen":true,"charging":false,"low":true}""",
             line(FieldEvent.Power(screenOn = true, charging = false, batteryLow = true)),
+        )
+        assertEquals(
+            """{"t":42,"e":"battery","usage":"Restricted","exempt":true,"bucket":"RESTRICTED"}""",
+            line(FieldEvent.Battery(BackgroundBattery.Restricted, exempt = true, bucket = StandbyBucket.RESTRICTED)),
         )
         assertEquals(
             """{"t":42,"e":"radio","radio":"Bluetooth","health":"Healthy","linked":2,"nearby":3,"contended":false,"held":false}""",

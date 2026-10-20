@@ -161,3 +161,22 @@ three days with three relays, inside the 4 MiB. A flapping relay writes a `spool
 (fifteen minutes at the ceiling) bounds that. Tests: `FieldEventSchemaTest`'s LoRa, Internet and spool lines,
 `FieldLogTest`'s follower and LoRa relink cases, `NetEdgesTest`, `SpoolFieldLogTest`, `ScopeSyncTest`'s field-log
 cases, `LoraFieldLogTest`, and `scripts/test_fieldlog.py`'s `CheckTest`.
+
+## Amendment 2026-10-19 — the battery standing writes into it too
+
+**What was asked.** A tester's 72-hour log (#203's evidence) had three overnight holes of 9–12 hours with no line and
+no `mesh_off`, and nothing said whether Android or the phone's own manager had held the app back. The log carried the
+power state but not how the system treats the app.
+
+**What changed.** One more kind, `battery`, a follower (`fieldlog/BatteryEdges.kt`) registered beside `net`. At each
+session's start it writes the App battery usage position (`BackgroundBattery`, Restricted winning as in ADR
+2026-09.gc3m), the bare battery-optimization exemption (`PowerManager.isIgnoringBatteryOptimizations`, which can read
+true under Restricted) and the app standby bucket (`UsageStatsManager.getAppStandbyBucket`, as a `StandbyBucket`
+constant). After that it writes a line only when one of the three changes. None of them has a broadcast, so the
+follower reads them every 5 minutes. Its wait stretches while the CPU sleeps, and that costs nothing: only someone at
+the screen can change them. An OEM's own battery manager (HyperOS's, for one) is visible to none of the three, and
+the doc says so.
+
+**What it costs.** A few lines a day, mostly the bucket moving between ACTIVE and WORKING_SET as the app is opened and
+left. Three reads per tick, every 5 minutes. Tests: `FieldEventSchemaTest`'s battery line, `BatteryEdgesTest`, and
+`scripts/test_fieldlog.py`'s `CheckTest`.
