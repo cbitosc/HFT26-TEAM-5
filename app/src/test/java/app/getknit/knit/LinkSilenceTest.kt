@@ -52,7 +52,7 @@ class LinkSilenceTest {
         assertFalse(link.answers)
         // An hour of silence from an older build: only a stall or its own controller would close it.
         assertEquals(Action.None, link.step(3_600_000, 0, null, null))
-        assertEquals(Action.None, link.step(3_600_000, 0, null, LinkSilence.Local(unansweredSinceRx = 2, lost = false)))
+        assertEquals(Action.None, link.step(3_600_000, 0, null, LinkSilence.Local(lost = false)))
     }
 
     @Test
@@ -231,7 +231,7 @@ class LinkSilenceTest {
         assertFalse(link.announce())
         assertFalse(link.onKeepaliveIn())
         assertFalse(link.onEdge(100_000))
-        val local = LinkSilence.Local(unansweredSinceRx = 9, lost = true)
+        val local = LinkSilence.Local(lost = true)
         assertEquals(Action.None, link.step(3_600_000, 0, blockedSince = 0, local = local))
         assertNull(link.msUntilDue(3_600_000, 0, 0, local))
     }
@@ -252,27 +252,27 @@ class LinkSilenceTest {
     }
 
     @Test
-    fun itsOwnControllerClosesAQuietLinkOnThreeUnansweredReadsOrALostClient() {
-        val link = LinkSilence(exempt = false)
-        val stale = LinkSilence.Local(unansweredSinceRx = LinkSilence.STALE_READS, lost = false)
-        assertEquals("reads alone close nothing before the quiet", Action.None, link.step(s - 1, 0, null, stale))
-        assertEquals(s - 1, link.msUntilDue(1, 0, null, stale))
-        assertEquals(Action.Close(Why.READS, s), link.step(s, 0, null, stale))
-
-        val two = LinkSilence(exempt = false)
-        assertEquals(Action.None, two.step(10 * s, 0, null, LinkSilence.Local(unansweredSinceRx = 2, lost = false)))
+    fun towardAnOlderPeerOnlyALostClientClosesAQuietLinkNeverUnansweredReads() {
+        // The 2026-10-19 trial: after a 4-minute process freeze a P8's link-RSSI reads timed out 27 in a row on two
+        // healthy links to older peers. Unanswered reads are no input at all: a quiet link whose client was not lost
+        // stays up for as long as it is quiet, its handle's reads unanswered or not.
+        val quiet = LinkSilence(exempt = false)
+        val readsOnly = LinkSilence.Local(lost = false)
+        for (t in listOf(s, s + 27 * 6_000L, 3_600_000L)) assertEquals("at $t", Action.None, quiet.step(t, 0, null, readsOnly))
+        assertEquals("looked at again only on the stall bound", w, quiet.msUntilDue(s, 0, null, readsOnly))
 
         val lost = LinkSilence(exempt = false)
-        val gone = LinkSilence.Local(unansweredSinceRx = 0, lost = true)
+        val gone = LinkSilence.Local(lost = true)
         assertEquals(Action.None, lost.step(s - 1, 0, null, gone))
+        assertEquals(s - 1, lost.msUntilDue(1, 0, null, gone))
         assertEquals(Action.Close(Why.LOST, s), lost.step(s, 0, null, gone))
-        assertTrue(Why.LOST.local && Why.READS.local && !Why.PROBES.local && !Why.WRITE.local)
+        assertTrue(Why.LOST.local && !Why.PROBES.local && !Why.WRITE.local)
     }
 
     @Test
     fun towardAPeerThatAnswersItsOwnControllersReadingNeverClosesTheLink() {
-        // A stack refuses reads, and an ATT timeout tells every client the connection ended while the CoC holds the ACL.
-        for (local in listOf(LinkSilence.Local(0, lost = true), LinkSilence.Local(LinkSilence.STALE_READS, lost = false))) {
+        // An ATT timeout tells every client the connection ended while the CoC holds the ACL.
+        LinkSilence.Local(lost = true).let { local ->
             val link = answering()
             assertEquals(s, link.msUntilDue(0, 0, null, local))
             assertEquals("$local probes on the quiet, as any answering link does", Action.Probe(1), link.step(s, 0, null, local))
@@ -281,13 +281,13 @@ class LinkSilenceTest {
             assertEquals(p, link.msUntilDue(s + 10, 0, null, local))
             // The answer lands: a byte after the reading clears it, and the link stays up.
             val rx = s + 500
-            val after = LinkSilence.Local(0, lost = false)
+            val after = LinkSilence.Local(lost = false)
             assertEquals(Action.None, link.step(s + 10 + p, rx, null, after))
             assertEquals(Action.None, link.step(rx + s - 1, rx, null, after))
         }
         // Unanswered, the probes close it, as Why.PROBES, never on the reading.
         val link = answering()
-        val lost = LinkSilence.Local(0, lost = true)
+        val lost = LinkSilence.Local(lost = true)
         assertEquals(Action.Probe(1), link.step(s, 0, null, lost))
         link.onKeepaliveWritten(s)
         assertEquals(Action.Probe(2), link.step(s + p, 0, null, lost))

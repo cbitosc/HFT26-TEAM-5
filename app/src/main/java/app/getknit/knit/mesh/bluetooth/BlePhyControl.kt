@@ -47,9 +47,9 @@ data class PhyLinkStatus(
  * so a link whose reads stop answering is called fading rather than read silently at its last value; [status] carries
  * the verdict to `BluetoothMeshTransport.liveLinkFading`.
  *
- * Two raw readings go to [LinkSilence] beside it (#203), never the fade verdict: the times of the current run of
- * unanswered reads ([unansweredSince]), and when the GATT client was told the connection ended while it held it
- * ([lostAt]). Each reports through [onEvidence] as it happens, so the transport's silent-link check looks again then.
+ * One raw reading goes to [LinkSilence] beside it (#203), never the fade verdict: when the GATT client was told the
+ * connection ended while it held it ([lostAt]), reported through [onLost] as it happens. Unanswered reads are not
+ * evidence there: after a process freeze they timed out 27 in a row on healthy links (ADR 2026-10.697m).
  *
  * Device-verified only — there is no host GATT stack; the rules are [PhyStepper]'s, which are JVM-tested.
  */
@@ -68,8 +68,8 @@ internal class BlePhyControl(
     private val now: () -> Long,
     // After every PHY report — the first read and each change — so the transport can republish what links are on.
     private val onPhyKnown: () -> Unit = {},
-    // After each unanswered read and on the client's loss ([lostAt]), off every lock: the silent-link check's look (#203).
-    private val onEvidence: (lost: Boolean) -> Unit = {},
+    // On the client's loss ([lostAt]), off every lock: the silent-link check probes and looks again (#203).
+    private val onLost: () -> Unit = {},
 ) {
     private val stepper = PhyStepper(tuning)
     private val fade = LinkFade(tuning)
@@ -92,10 +92,6 @@ internal class BlePhyControl(
 
     @Volatile private var closing = false
 
-    // The times of the current run of unanswered reads, oldest first, the last [LinkSilence.STALE_READS] kept. An answered
-    // read empties it. Guarded by itself.
-    private val unanswered = ArrayDeque<Long>()
-
     /**
      * When the client, attached to the link's own ACL, was told the connection ended while it held it (#203); null while
      * it never was. Kept past the client's end, as the control is kept past it.
@@ -103,9 +99,6 @@ internal class BlePhyControl(
     @Volatile
     var lostAt: Long? = null
         private set
-
-    /** How many reads of the current unanswered run came after [t]: what [LinkSilence.Local] counts since the last byte. */
-    fun unansweredSince(t: Long): Int = synchronized(unanswered) { unanswered.count { it > t } }
 
     fun start() {
         job = scope.launch(Dispatchers.IO) { loop() }
@@ -213,20 +206,14 @@ internal class BlePhyControl(
             Log.i(TAG, "bt phy $nodeId step-up hold ${hold.name.lowercase()} (rssi=${smoothed.toInt()})")
         }
         if (smoothed <= tuning().edgeDbm) Log.d(TAG, "bt phy $nodeId rssi=$rssi smoothed=${smoothed.toInt()}")
-        synchronized(unanswered) { unanswered.clear() }
         logFade(fade.onRead(smoothed, at))
     }
 
     /** A read that did not answer — [why] in the log — counted toward [fade]'s staleness instead of dropped. */
     private fun onUnanswered(why: String) {
         val edge = fade.onUnanswered()
-        synchronized(unanswered) {
-            unanswered.addLast(now())
-            while (unanswered.size > LinkSilence.STALE_READS) unanswered.removeFirst()
-        }
         Log.d(TAG, "bt phy $nodeId rssi read unanswered (${fade.unansweredInRow} in a row, $why)")
         logFade(edge)
-        onEvidence(false)
     }
 
     /** One line per fade edge, at info (the step lines' level), so a walk's logcat has it without debug lines on. */
@@ -356,7 +343,7 @@ internal class BlePhyControl(
                         if (connected && !closing && lostAt == null) {
                             lostAt = now()
                             Log.i(TAG, "bt phy $nodeId client lost (status=$status)")
-                            onEvidence(true)
+                            onLost()
                         }
                     }
                 }

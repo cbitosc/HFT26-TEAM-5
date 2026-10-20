@@ -1648,7 +1648,7 @@ class BluetoothMeshTransport(
                 onGiveUp = metrics::onBlePhyGiveUp,
                 now = SystemClock::elapsedRealtime,
                 onPhyKnown = ::publishLinkPhys,
-                onEvidence = { lost -> onPhyEvidence(link, lost) },
+                onLost = { onLinkEdge(link, "phy lost") },
             )
         if (phyControls.putIfAbsent(link, control) == null) control.start()
     }
@@ -2675,7 +2675,7 @@ class BluetoothMeshTransport(
     ): LinkSilence.Local? =
         phyControls[link]?.let { control ->
             // A loss before a byte that came in after it was not this link's connection ending.
-            LinkSilence.Local(control.unansweredSince(rxAt), lost = control.lostAt?.let { it >= rxAt } == true)
+            LinkSilence.Local(lost = control.lostAt?.let { it >= rxAt } == true)
         }
 
     /** A `KEEPALIVE` came in on [link]: answered when its policy says so (#203). On the link's reader. */
@@ -2691,14 +2691,6 @@ class BluetoothMeshTransport(
     private fun onKeepaliveWritten(link: FramedLink) {
         silences[link]?.policy?.onKeepaliveWritten(elapsed()) ?: return
         silenceWake.trySend(Unit)
-    }
-
-    /** [link]'s PHY handle reported an unanswered read or its client's loss ([lost]): the loop looks again now. */
-    private fun onPhyEvidence(
-        link: FramedLink,
-        lost: Boolean,
-    ) {
-        if (lost) onLinkEdge(link, "phy lost") else silenceWake.trySend(Unit)
     }
 
     /**

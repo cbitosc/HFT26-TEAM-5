@@ -9,7 +9,9 @@ topics: [ble, transport, wire]
 # ADR 2026-10.697m — A Bluetooth link this phone can show is dead goes down, and a peer that has sent a KEEPALIVE answers one
 
 Status: Draft (2026-10-19), JVM-tested (`LinkSilenceTest`, `SocketStampsTest`, `FramedLinkTest`'s keepalive cases).
-Not device-trialled. GitLab #203. One cross-platform rule (below); the knit-ios half is a notice, not code, because
+Device trial of 2026-10-19 (P3 and P8 on `bf93901f`, the P7 on 2.10.0-alpha.0 and the P9 on alpha.1 as older peers):
+frozen-peer probes passed both ways (silent close at 150 and 152 s, the ACL gone within about 2 s, a relink after
+`kill -CONT` with no restart), and the unanswered-read rule failed and was dropped (Rejected, below). GitLab #203. One cross-platform rule (below); the knit-ios half is a notice, not code, because
 iPhone links are exempt.
 
 **What was observed.** Two Redmi 13Cs (MediaTek MT6769, Android 15, 2.10.0-alpha.0), field logs of 2026-10-19 lined up
@@ -34,15 +36,14 @@ link's PHY handle. One transport loop (`BluetoothMeshTransport.silenceLoop`) ste
    second; 30 s after that with still no byte, and at least 90 s since the last, the link closes. That is about 150 s
    from the last byte, on this side's elapsed clock. A live peer's answer is L2CAP data, which wakes this CPU, so the
    wait runs on the elapsed clock soundly.
-2. **Its own controller, on a link with a PHY handle** (`BlePhyControl`). No byte in for 90 s, and either three
-   link-RSSI reads of the current unanswered run came after that byte (`unansweredSince`) or the handle's GATT client was
-   told the connection ended after it (`lostAt`, a `STATE_DISCONNECTED` while it held the link). Our controller's word,
-   so a dozing peer cannot trip it, and it covers a peer on an older build. It never reads `LinkFade.fading()`: its
+2. **Its own controller, on a link with a PHY handle** (`BlePhyControl`). No byte in for 90 s, and the handle's GATT
+   client was told the connection ended after the last byte (`lostAt`, a `STATE_DISCONNECTED` while it held the link).
+   Our controller's word, so a dozing peer cannot trip it, and it covers a peer on an older build. Unanswered link-RSSI
+   reads are no part of it (Rejected, below). It never reads `LinkFade.fading()`: its
    −95 dBm half fades weak but live links on purpose, and its `attached = false` path hides the disconnect. **Only toward
    a peer that does not answer does it close.** Toward one that answers, the reading is ignored: the probes run on the quiet
    alone, and only they close the link (the bluetooth-reviewer's finding). A PHY client's loss still probes early there,
-   through the edge path (`onEvidence` → `onLinkEdge`). Our stack can be wrong both ways: a
-   refused read is just a non-zero status, and AOSP's ATT response timeout (`gatt_rsp_timeout` → `gatt_disconnect`)
+   through the edge path (`onLost` → `onLinkEdge`). Our stack can be wrong: AOSP's ATT response timeout (`gatt_rsp_timeout` → `gatt_disconnect`)
    reports `STATE_DISCONNECTED` to every client on the connection while the CoC keeps the ACL up. Closing on it would flap
    every relinked Coded link to a dozing peer after each 90 s of quiet.
 3. **A write that never returns.** A non-doorbell link whose writer has sat in one `write()` for 120 s. A segment is at
@@ -79,9 +80,9 @@ nothing waits for (`closeOffThread`). If that close has not returned within 5 s 
 goes into a weak set (`closedSilent`) so its reader's end bumps no backoff streak and writes no `(eof) streak=` line,
 which `scripts/ble-link-trial.py` would count as a drop. The ACL arm (ADR 2026-10.b8yf) then releases its ACL as it does
 for any link's end. When the arm reports a closed-on-local-evidence link's ACL as `kept`, and this phone still holds
-more LE connections than links, the transport logs `bt stack suspect <addr> (…)`. Probe and stall closes are not local
-evidence: a frozen peer's controller keeps the ACL up too, and since a local reading closes only a link to a peer that
-does not answer, only those links can lead to the line. It is a soft signal: the LE count comes from
+more LE connections than links, the transport logs `bt stack suspect <addr> (…)`. It follows `LOST` closes alone, the
+one close left on local evidence: probe and stall closes are not, since a frozen peer's controller keeps the ACL up too,
+and a `LOST` close happens only on a link to a peer that does not answer. It is a soft signal: the LE count comes from
 `getConnectedDevices(GATT)`, which ADR 2026-10.b8yf (#142) says is not an oracle (it lists another device's connection
 only while some GATT server is registered). #204 must weigh it, never take it as a verdict. The user-facing verdict is
 issue #204.
@@ -94,6 +95,15 @@ issue #204.
 - **Taking a fading link out of `CallReach`** (option 4). Out of scope: with the dead link closed, the case mostly goes.
 - **Releasing a previous process's ACLs at start** (option 5). Out of scope, and it waits for the trial to show whether
   the orphan outlives the close.
+- **Closing on unanswered link-RSSI reads** (the first cut: no byte for 90 s and three reads of the current unanswered
+  run after it, toward a peer that does not answer). The device trial of 2026-10-19 showed unanswered reads say nothing
+  of the connection: after the P8's process was frozen (`kill -STOP`) for 4 min and resumed, its `BlePhyControl` reads
+  on its two healthy links to older peers (the P7, the P9) timed out continuously for over 4 min, up to 27 in a row at
+  about 6 s apart (`rssi read unanswered (27 in a row, timeout)`), with no `client lost` and traffic flowing throughout.
+  The rule then reduces to "quiet for 90 s", which a dozing older peer passes routinely, so it would close healthy links
+  over and over, and OEM freezers (HyperOS, the field case's phones) freeze apps much like this. `LinkFade` still counts
+  unanswered reads for the walkie's hedge, which casts beside a link and never closes one; the
+  `bt phy … rssi read unanswered` line stays.
 - ADR 2026-10.79yb's ninth amendment rejected "a keepalive on the Bluetooth link to detect silence" for the walkie's
   hedge, on the grounds that it would need a new record. The record existed. This ADR uses it to find a dead link, not
   to hedge a weak one, and leaves the walkie's hedge as that amendment set it.
@@ -106,14 +116,13 @@ issue #204.
   link-up, nothing after.
 - **Wakes.** One more loop in the transport, on `elapsedWait`, so it looks at the clock every 2 s of awake time while a
   link is held (pj9w's cost, a comparison per look), and waits on its channel alone with no link. No tick per link and
-  no poke per byte. Pokes come from a keepalive in or written, a PHY handle's unanswered read or loss, an edge, and a
-  link coming up.
-- **The bound is not everywhere.** Toward a peer on this build: about 150 s. Toward an older Android peer on a link with a
-  PHY handle: 90 s plus three unanswered reads, **only while its stack is honest**. A ghost ACL whose controller keeps
-  answering `HCI_Read_RSSI` with a stale value never fires the read rule, and #203's own reads frozen at −73 may have
-  been exactly that. Anywhere else, only the 120 s write stall, and only once something is
-  written. An older idle peer with no PHY handle whose stack lost a disconnect still holds the link until the next write
-  sits.
+  no poke per byte. Pokes come from a keepalive in or written, a PHY client's loss, an edge, and a link coming up.
+- **The bound is not everywhere.** Toward a peer on this build: about 150 s. Toward an older Android peer: 90 s after its
+  PHY client's loss, where the link has a handle and the stack reports the loss, else only the 120 s write stall, and
+  only once something is written and sits. **#203's own field case falls back to the write stall** toward an older
+  peer: its stack lost the disconnect, so no client loss came, and its writer blocked 15–30 min after the peer's EOF —
+  the close would have come 120 s after the first blocked write, not 150 s after the last byte. An older idle peer whose
+  stack lost a disconnect still holds the link until the next write sits.
 
 **The trap.** A keepalive is not data. It must never touch `FramedLink.lastActivityAt` (the Wi-Fi Aware quiescence
 supervisor reads it) or `outAt`, and the stamps live in `BluetoothSocketLink`, not in `FramedLink`. Wi-Fi Aware links never

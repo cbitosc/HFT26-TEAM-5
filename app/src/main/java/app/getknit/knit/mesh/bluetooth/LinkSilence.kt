@@ -22,10 +22,10 @@ package app.getknit.knit.mesh.bluetooth
  *   [Config.quietMs] writes a probe; no byte in for [Config.answerMs] after its write returned writes one more; after
  *   [Config.probes] unanswered, it closes: about 150 s from the last byte, on this side's awake clock — a live peer's
  *   answer wakes this CPU, so the wait for it runs on the elapsed clock soundly.
- * - **Its own controller, on a link with a PHY handle** ([Local]): no byte in for [Config.quietMs] while the handle's
- *   link-RSSI reads went [Config.staleReads] in a row unanswered since that last byte, or its GATT client was told the
- *   connection ended after it. Our controller's word, so a dozing peer cannot trip it, and it covers a peer on an older
- *   build. Toward a peer that answers it is ignored, and only the probes close: the stack can be wrong both ways.
+ * - **Its own controller, toward a peer that does not answer, on a link with a PHY handle** ([Local]): no byte in for
+ *   [Config.quietMs] after the handle's GATT client was told the connection ended. Toward a peer that answers it is
+ *   ignored, and only the probes close: the stack can be wrong both ways. Unanswered link-RSSI reads are no evidence at
+ *   all: after a 4-minute process freeze a P8's reads timed out 27 in a row on two healthy links (the 2026-10-19 trial).
  *   Never `LinkFade.fading`: its −95 dBm half fades weak but live links on purpose.
  * - **A write that never returns** ([Config.writeStallMs]): the stack's buffer takes a write until its credits run out,
  *   and a segment (≤ 8 KiB) that has not drained in two minutes has no link under it. The only bound toward a peer
@@ -49,7 +49,6 @@ class LinkSilence(
         val answerMs: Long = ANSWER_MS,
         val probes: Int = PROBES,
         val writeStallMs: Long = WRITE_STALL_MS,
-        val staleReads: Int = STALE_READS,
     )
 
     /** Why a link was closed, as its `bt link silent` line names it. */
@@ -59,7 +58,6 @@ class LinkSilence(
         val local: Boolean,
     ) {
         PROBES("probes", local = false),
-        READS("reads", local = true),
         LOST("phy lost", local = true),
         WRITE("write stall", local = false),
     }
@@ -80,11 +78,10 @@ class LinkSilence(
     }
 
     /**
-     * What the link's PHY handle says since its last byte in: how many link-RSSI reads of the current unanswered run came
-     * after that byte, and whether its GATT client was told the connection ended after it. Null on a link with no handle.
+     * What the link's PHY handle says since its last byte in: whether its GATT client was told the connection ended after
+     * that byte. Null on a link with no handle.
      */
     data class Local(
-        val unansweredSinceRx: Int,
         val lost: Boolean,
     )
 
@@ -181,7 +178,6 @@ class LinkSilence(
         when {
             local == null || quiet < config.quietMs -> null
             local.lost -> Action.Close(Why.LOST, quiet)
-            local.unansweredSinceRx >= config.staleReads -> Action.Close(Why.READS, quiet)
             else -> null
         }
 
@@ -202,7 +198,7 @@ class LinkSilence(
 
     /**
      * How long until [step] may act with nothing new coming in, or null for never ([exempt]). A write that starts
-     * blocking, a read that goes unanswered and a keepalive written all come without a look, so: a link not sitting in a
+     * blocking, a PHY client's loss and a keepalive written all come without a look, so: a link not sitting in a
      * write is looked at again within [Config.writeStallMs], and the transport looks again when its PHY handle or the
      * writer reports.
      */
@@ -222,14 +218,10 @@ class LinkSilence(
     }
 
     /**
-     * Whether [local] shows the link dead once it is quiet: only toward a peer that does not answer, where a reading can
+     * Whether [local] shows the link dead once it is quiet: only toward a peer that does not answer, where a loss can
      * close. Toward one that answers it would put the next look in the past, every second through the probes' waits.
      */
-    private fun readingCloses(local: Local?): Boolean =
-        when {
-            answers || local == null -> false
-            else -> local.lost || local.unansweredSinceRx >= config.staleReads
-        }
+    private fun readingCloses(local: Local?): Boolean = !answers && local?.lost == true
 
     /** When the probes' next step falls due, or null: a peer that does not answer, or a probe queued and not yet written. */
     private fun probeDueAt(
@@ -293,8 +285,5 @@ class LinkSilence(
          * at its edge drains that in seconds; a feed is paced or windowed between writes, never inside one.
          */
         const val WRITE_STALL_MS = 120_000L
-
-        /** Link-RSSI reads unanswered in a row since the last byte: `LinkFade`'s count (`PhyTuning.fadeStaleReads`). */
-        const val STALE_READS = 3
     }
 }
