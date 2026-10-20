@@ -122,7 +122,6 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -2797,14 +2796,23 @@ class MeshManager(
 
     /** Periodically reclaims expired carried DMs, bounding the forward store between heartbeat sweeps. */
     private fun pruneForwardStorePeriodically(session: CoroutineScope) {
-        session.launch {
-            while (true) {
-                delay(FORWARD_SWEEP_INTERVAL_MS)
-                sweepExpired()
-                commons?.sweepOutbox(clock() - ScopeRegistry.COMMONS_DEFAULT_TTL_MS) // the room has long expired them
-                sweepLocalStorage()
-            }
+        session.everyRound(FORWARD_SWEEP_INTERVAL_MS, onFailure = { roundFailed(MeshRound.SWEEP, it) }) {
+            sweepExpired()
+            commons?.sweepOutbox(clock() - ScopeRegistry.COMMONS_DEFAULT_TTL_MS) // the room has long expired them
+            sweepLocalStorage()
         }
+    }
+
+    /**
+     * A session loop's round threw ([everyRound]): logged every time, so a round that always fails says so once per
+     * interval, and counted for the field log. The loop itself runs the next round on time (#206).
+     */
+    private fun roundFailed(
+        round: MeshRound,
+        e: Exception,
+    ) {
+        Log.w(TAG, "${round.name} round failed; the next runs on time", e)
+        metrics.onRoundFailed(round)
     }
 
     /**
@@ -2850,11 +2858,8 @@ class MeshManager(
      * a peer no longer holding a live link is a no-op (the send routes to no transport).
      */
     private fun reofferToNeighborsPeriodically(session: CoroutineScope) {
-        session.launch {
-            while (true) {
-                delay(NEIGHBOR_REOFFER_INTERVAL_MS)
-                reofferToNeighbors()
-            }
+        session.everyRound(NEIGHBOR_REOFFER_INTERVAL_MS, onFailure = { roundFailed(MeshRound.REOFFER, it) }) {
+            reofferToNeighbors()
         }
     }
 
@@ -4093,33 +4098,30 @@ class MeshManager(
 
     /** Periodically logs a transmission snapshot so flood-suppression and byte savings are visible. */
     private fun logMetricsPeriodically(session: CoroutineScope) {
-        session.launch {
-            while (true) {
-                delay(METRICS_LOG_INTERVAL_MS)
-                val s = metrics.snapshot()
-                Log.d(
-                    TAG,
-                    "metrics: originated=${s.frames.framesOriginated} delivered=${s.frames.framesDelivered} " +
-                        "relayed=${s.frames.framesRelayed} handedOn=${s.frames.framesHandedOn} suppressed=${s.frames.framesSuppressed} " +
-                        "deduped=${s.frames.framesDeduped} bytesSent=${s.frames.bytesSent} " +
-                        "dropped=${s.frames.framesDropped} drops=${s.frames.dropsByReason} " +
-                        "keyReq=${s.keys.keyRequestsSent} keyServed=${s.keys.keysServed} keyRecovered=${s.keys.keysRecovered} " +
-                        "framesHeld=${s.keys.framesHeld} framesReplayed=${s.keys.framesReplayed} " +
-                        "groupSeedsHeld=${s.groups.groupSeedsHeld} groupSeedsReplayed=${s.groups.groupSeedsReplayed} " +
-                        "receiptsResent=${s.receipts.receiptsResent} " +
-                        "receiptsSealed=${s.receipts.receiptsSealed}/${s.receipts.receiptsSealedFallback} " +
-                        "dmSealedV3=${s.seals.dmSealedV3} ticksUnsigned=${s.receipts.ticksUnsigned} " +
-                        "reactionsSealed=${s.seals.reactionsSealed}/${s.seals.reactionsSealedFallback} " +
-                        "filesNan=${s.files.filesSentNan} filesBt=${s.files.filesSentBt} bulkTimeouts=${s.nan.nanBulkGraceTimeouts}",
-                )
-                // The contribution ledger banks its deltas on the same tick: one DataStore write a minute at most.
-                ledger.flush()
-                // So do the name-clash fade's `lastSeenAt` stamps: one peers write a minute at most (ADR 2026-10.k8ge).
-                // A presentation stamp; a failed write waits for the next tick rather than ending this loop.
-                flushSeenStamps()
-                // Bounds the indirect-reach table; the linger itself is applied at read (indirectPeers).
-                relayedPresence.sweep()
-            }
+        session.everyRound(METRICS_LOG_INTERVAL_MS, onFailure = { roundFailed(MeshRound.METRICS, it) }) {
+            val s = metrics.snapshot()
+            Log.d(
+                TAG,
+                "metrics: originated=${s.frames.framesOriginated} delivered=${s.frames.framesDelivered} " +
+                    "relayed=${s.frames.framesRelayed} handedOn=${s.frames.framesHandedOn} suppressed=${s.frames.framesSuppressed} " +
+                    "deduped=${s.frames.framesDeduped} bytesSent=${s.frames.bytesSent} " +
+                    "dropped=${s.frames.framesDropped} drops=${s.frames.dropsByReason} " +
+                    "keyReq=${s.keys.keyRequestsSent} keyServed=${s.keys.keysServed} keyRecovered=${s.keys.keysRecovered} " +
+                    "framesHeld=${s.keys.framesHeld} framesReplayed=${s.keys.framesReplayed} " +
+                    "groupSeedsHeld=${s.groups.groupSeedsHeld} groupSeedsReplayed=${s.groups.groupSeedsReplayed} " +
+                    "receiptsResent=${s.receipts.receiptsResent} " +
+                    "receiptsSealed=${s.receipts.receiptsSealed}/${s.receipts.receiptsSealedFallback} " +
+                    "dmSealedV3=${s.seals.dmSealedV3} ticksUnsigned=${s.receipts.ticksUnsigned} " +
+                    "reactionsSealed=${s.seals.reactionsSealed}/${s.seals.reactionsSealedFallback} " +
+                    "filesNan=${s.files.filesSentNan} filesBt=${s.files.filesSentBt} bulkTimeouts=${s.nan.nanBulkGraceTimeouts}",
+            )
+            // The contribution ledger banks its deltas on the same tick: one DataStore write a minute at most.
+            ledger.flush()
+            // So do the name-clash fade's `lastSeenAt` stamps: one peers write a minute at most (ADR 2026-10.k8ge).
+            // A presentation stamp; a failed write waits for the next tick rather than ending this loop.
+            flushSeenStamps()
+            // Bounds the indirect-reach table; the linger itself is applied at read (indirectPeers).
+            relayedPresence.sweep()
         }
     }
 

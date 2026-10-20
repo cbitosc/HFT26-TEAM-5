@@ -202,6 +202,22 @@ enum class BleSideDrop {
 }
 
 /**
+ * A [MeshManager] session loop whose round threw ([everyRound]). Surfaced in
+ * [MeshMetrics.Snapshot.Frames.roundsFailedBy] and the field log's `roundFail_<ROUND>` counters, so a tester's log
+ * shows a loop failing without logcat (#206). The loop itself runs on: the next round is on time.
+ */
+enum class MeshRound {
+    /** The 60 s re-offer to linked neighbours: custody digests, key requests, owed ticks, group seeds, blob asks. */
+    REOFFER,
+
+    /** The 10 min sweep of expired carried frames, the commons outbox and the local storage bounds. */
+    SWEEP,
+
+    /** The 60 s metrics tick, which also banks the contribution ledger and sweeps the indirect-reach table. */
+    METRICS,
+}
+
+/**
  * Thread-safe counters for mesh transmission, so the effect of flood suppression and the CBOR wire
  * format is measurable in the field. Pure JVM (no Android dependencies) so it can live in [mesh] and
  * be asserted from the same unit tests as [MeshRouter].
@@ -265,6 +281,7 @@ class MeshMetrics {
 
     // Fixed key set → no allocation on the hot path, every reason always present.
     private val drops: Map<DropReason, AtomicLong> = DropReason.entries.associateWith { AtomicLong() }
+    private val roundsFailed: Map<MeshRound, AtomicLong> = MeshRound.entries.associateWith { AtomicLong() }
     private val connectFails: Map<ConnectFailReason, AtomicLong> =
         ConnectFailReason.entries.associateWith { AtomicLong() }
     private val btLinksEstablished = AtomicLong()
@@ -415,6 +432,11 @@ class MeshMetrics {
     /** An inbound frame we wanted was dropped for [reason] (not a policy drop — see [DropReason]). */
     fun onDropped(reason: DropReason) {
         drops.getValue(reason).incrementAndGet()
+    }
+
+    /** A session loop's round threw; the loop runs the next one on time ([everyRound], #206). */
+    fun onRoundFailed(round: MeshRound) {
+        roundsFailed.getValue(round).incrementAndGet()
     }
 
     /** A contact-card intro we originated to a pending peer (see [IntroSync]) — a sealed `CTL_PROFILE` DM. */
@@ -1254,6 +1276,7 @@ class MeshMetrics {
             dropsByReason = byReason.filterValues { it > 0 },
             digestsReplaced = digestsReplaced.get(),
             healsCompleted = healsCompleted.get(),
+            roundsFailedBy = roundsFailed.mapValues { it.value.get() }.filterValues { it > 0 },
         )
     }
 
@@ -1489,8 +1512,8 @@ class MeshMetrics {
         val meshtastic: Meshtastic = Meshtastic(),
     ) {
         /** What the router did with frames — authored, delivered, relayed, handed on, suppressed, deduped, dropped
-         * (by [DropReason]) — the bytes it put on the wire, and the sync rounds around them: heal passes, and digests a
-         * newer one replaced in a link's queue. */
+         * (by [DropReason]) — the bytes it put on the wire, and the sync rounds around them: heal passes, digests a
+         * newer one replaced in a link's queue, and session-loop rounds that threw (by [MeshRound]). */
         data class Frames(
             val framesOriginated: Long = 0,
             val framesDelivered: Long = 0,
@@ -1503,6 +1526,7 @@ class MeshMetrics {
             val dropsByReason: Map<DropReason, Long> = emptyMap(),
             val digestsReplaced: Long = 0,
             val healsCompleted: Long = 0,
+            val roundsFailedBy: Map<MeshRound, Long> = emptyMap(),
         )
 
         /**

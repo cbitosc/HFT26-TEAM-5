@@ -27,6 +27,7 @@ object FieldCounters {
                 put("digestsReplaced", digestsReplaced)
                 put("healsCompleted", healsCompleted)
                 dropsByReason.forEach { (reason, n) -> put("drop_${reason.name}", n) }
+                roundsFailedBy.forEach { (round, n) -> put("roundFail_${round.name}", n) }
             }
             with(s.receipts) {
                 put("receiptsResent", receiptsResent)

@@ -1,6 +1,7 @@
 package app.getknit.knit.fieldlog
 
 import app.getknit.knit.mesh.MeshMetrics
+import app.getknit.knit.mesh.MeshRound
 import app.getknit.knit.mesh.TransportHealth
 import app.getknit.knit.mesh.TransportKind
 import app.getknit.knit.mesh.TransportStatus
@@ -100,6 +101,20 @@ class FieldLogTest {
 
             val counters = log.lines().filter { it.contains("\"e\":\"counters\"") }
             assertEquals(listOf(""""relayed":3""", """"relayed":1"""), counters.map { Regex(""""relayed":\d+""").find(it)!!.value })
+        }
+
+    @Test
+    fun aSessionLoopsFailedRoundIsCountedUnderItsRound() =
+        runTest {
+            val log = newLog()
+            log.start(backgroundScope, statuses)
+            runCurrent()
+            repeat(2) { metrics.onRoundFailed(MeshRound.REOFFER) }
+            log.sample()
+
+            val counters = log.lines().single { it.contains("\"e\":\"counters\"") }
+            assertTrue(counters, counters.contains(""""roundFail_REOFFER":2"""))
+            assertTrue(counters, !counters.contains("roundFail_SWEEP"))
         }
 
     @Test

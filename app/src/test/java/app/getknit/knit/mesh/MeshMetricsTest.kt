@@ -50,6 +50,17 @@ class MeshMetricsTest {
     }
 
     @Test
+    fun `failed rounds are counted per session loop and a loop that never failed is left out`() {
+        val metrics = MeshMetrics()
+        assertEquals(emptyMap<MeshRound, Long>(), metrics.frames().roundsFailedBy)
+        repeat(2) { metrics.onRoundFailed(MeshRound.REOFFER) }
+        metrics.onRoundFailed(MeshRound.SWEEP)
+
+        assertEquals(mapOf(MeshRound.REOFFER to 2L, MeshRound.SWEEP to 1L), metrics.frames().roundsFailedBy)
+        assertEquals(metrics.frames(), metrics.snapshot().frames)
+    }
+
+    @Test
     fun `counters surface in the snapshot`() {
         val metrics = MeshMetrics()
         repeat(3) { metrics.onOriginated() }
