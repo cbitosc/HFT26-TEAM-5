@@ -3,7 +3,8 @@ package app.getknit.knit.crash
 import java.net.URLEncoder
 
 /**
- * Builds a prefilled URL for Knit's own GitHub bug-report form.
+ * Builds prefilled URLs for Knit's own GitHub bug-report form, from its two doors: a stored crash report
+ * ([forReport], Diagnostics' "Report on GitHub") and About's "Report a problem" ([forProblem]).
  *
  * The app never posts anything. This produces a link; the user's browser opens the form and the user
  * submits it, so there is no token, no API call, and no automatic egress.
@@ -30,6 +31,13 @@ object CrashIssueUrl {
 
     /** Marks an issue as app-filed, for the triage workflow. Mirrors `needs-info.yml`'s own comment marker. */
     const val MARKER = "<!-- knit-crash-report -->"
+
+    /**
+     * Marks an issue filed from About's "Report a problem", for `triage.yml`, which labels it `in-app` and keeps
+     * the facts block out of its keyword match. Not [MARKER]: `crash-report.yml` keys its duplicate index on that
+     * one and expects a parsable crash report behind it.
+     */
+    const val PROBLEM_MARKER = "<!-- knit-app-report -->"
 
     private const val TEMPLATE = "bug_report.yml"
     private const val TRUNCATED = "... truncated, full trace on clipboard"
@@ -63,6 +71,28 @@ object CrashIssueUrl {
         return build(issuesBase, fixed + ("logs" to logs(fit(text, headroom))))
     }
 
+    /**
+     * The prefilled new-issue URL for a problem the user is about to describe. [version] and [devices] fill the
+     * form's own fields, and [facts] (the About screen's build block) goes under "Logs / screenshots" behind
+     * [PROBLEM_MARKER]. Summary, steps, what happened, what was expected and the radios are left blank: only the
+     * reporter knows them, and the form requires every one.
+     */
+    fun forProblem(
+        issuesBase: String,
+        version: String,
+        devices: String,
+        facts: String,
+    ): String =
+        build(
+            issuesBase,
+            listOf(
+                "template" to TEMPLATE,
+                "version" to version,
+                "devices" to devices,
+                "logs" to problemLogs(facts),
+            ),
+        )
+
     /** Assembles the query. Blank values are dropped rather than emitted empty, so the form shows its own placeholder. */
     internal fun build(
         issuesBase: String,
@@ -84,6 +114,18 @@ object CrashIssueUrl {
             appendLine("```text")
             appendLine(excerpt)
             appendLine("```")
+        }
+
+    /** Ends with a blank line so the reporter's own logs start below the block, not inside it. */
+    private fun problemLogs(facts: String): String =
+        buildString {
+            appendLine(PROBLEM_MARKER)
+            appendLine("Build and device details, filled in by Knit. Add logs or screenshots below.")
+            appendLine()
+            appendLine("```text")
+            appendLine(facts.trimEnd())
+            appendLine("```")
+            appendLine()
         }
 
     /**

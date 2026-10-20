@@ -11,7 +11,6 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import app.getknit.knit.legal.InstallSource
 import app.getknit.knit.legal.License
-import app.getknit.knit.ui.ISSUES_URL
 import app.getknit.knit.ui.REPO_URL
 import app.getknit.knit.ui.WEBSITE_URL
 import app.getknit.knit.ui.theme.KnitTheme
@@ -68,7 +67,8 @@ class AboutScreenContentTest {
         compose.onNodeWithTag("about_source").performScrollTo().performClick()
         compose.onNodeWithTag("about_report").performScrollTo().performClick()
         compose.onNodeWithTag("about_website").performScrollTo().performClick()
-        assertEquals(listOf(REPO_URL, ISSUES_URL, WEBSITE_URL), opened)
+        val report = AboutBuildInfo(previewEnvironment(), InstallSource.FDROID).issueUrl()
+        assertEquals(listOf(REPO_URL, report, WEBSITE_URL), opened)
 
         compose.onNodeWithTag("about_license").performScrollTo().performClick()
         assertEquals(listOf(License.GPL_3_0_OR_LATER), licenses)

@@ -1,6 +1,7 @@
-# NOTE: the field ids below are a contract with the app. Knit's "Report on GitHub" action builds a
-# prefilled URL from them (app/src/main/java/app/getknit/knit/crash/CrashIssueUrl.kt); renaming or
-# removing one silently stops that prefill working. CrashIssueUrlTest pins them.
+# NOTE: the field ids below are a contract with the app. Knit's "Report on GitHub" (a stored crash) and
+# About's "Report a problem" build prefilled URLs from them
+# (app/src/main/java/app/getknit/knit/crash/CrashIssueUrl.kt); renaming or removing one silently stops
+# that prefill working. CrashIssueUrlTest reads this file and fails if a prefilled key is missing here.
 name: 🐛 Bug report
 description: Report a defect in Knit, the offline Android mesh messenger.
 title: "[Bug]: "
@@ -51,7 +52,9 @@ body:
     id: version
     attributes:
       label: Knit version / commit
-      description: The app version, or the commit SHA you built from.
+      description: >-
+        The app version, or the commit SHA you built from. Filled in for you when you report from
+        Knit's About screen.
     validations:
       required: true
   - type: textarea

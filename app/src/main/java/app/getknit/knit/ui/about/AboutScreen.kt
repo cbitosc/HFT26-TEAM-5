@@ -60,7 +60,6 @@ import app.getknit.knit.R
 import app.getknit.knit.crash.CrashEnvironment
 import app.getknit.knit.legal.InstallSource
 import app.getknit.knit.legal.License
-import app.getknit.knit.ui.ISSUES_URL
 import app.getknit.knit.ui.REPO_URL
 import app.getknit.knit.ui.WEBSITE_URL
 import app.getknit.knit.ui.components.DetailCard
@@ -147,7 +146,12 @@ internal fun AboutScreenContent(
         ) {
             Header(info.environment)
             Notice()
-            LinkRows(onOpenUrl = onOpenUrl, onOpenLicense = onOpenLicense, onOpenLicenses = onOpenLicenses)
+            LinkRows(
+                issueUrl = info.issueUrl(),
+                onOpenUrl = onOpenUrl,
+                onOpenLicense = onOpenLicense,
+                onOpenLicenses = onOpenLicenses,
+            )
             BuildSection(info = info, onCopy = onCopyBuildInfo)
             Spacer(Modifier.height(8.dp))
         }
@@ -210,6 +214,7 @@ private fun Notice() {
 
 @Composable
 private fun LinkRows(
+    issueUrl: String,
     onOpenUrl: (String) -> Unit,
     onOpenLicense: (License) -> Unit,
     onOpenLicenses: () -> Unit,
@@ -226,7 +231,7 @@ private fun LinkRows(
             icon = Icons.Filled.BugReport,
             title = stringResource(R.string.about_report_problem),
             subtitle = stringResource(R.string.about_report_problem_subtitle),
-            onClick = { onOpenUrl(ISSUES_URL) },
+            onClick = { onOpenUrl(issueUrl) },
             modifier = Modifier.testTag("about_report"),
         )
         LinkRow(

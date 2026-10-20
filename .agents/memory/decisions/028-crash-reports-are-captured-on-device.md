@@ -67,3 +67,11 @@ construction, so the two never speak on the same thread.
 *Amended by ADR 2026-10.fzsy (2026-10-08): ANRs are no longer out of scope. At each start the platform's
 `REASON_ANR` exit records are imported into this store with their thread dumps, condensed and redacted; native
 crashes remain out of scope.*
+
+*Amended 2026-10-19: About's "Report a problem" opens the same form through `CrashIssueUrl.forProblem`, with the
+version, the device and the About screen's build block (`AboutBuildInfo.asText`) filled in and the prose fields and
+radios left to the reporter. Its marker is `<!-- knit-app-report -->`, not the crash marker, because
+`crash-report.yml`'s duplicate index expects a parsable report behind that one; `triage.yml` labels it `in-app` and
+keeps the block out of its keyword match. GitHub applies a `labels=` query only for collaborators, so every label
+on an app-filed issue comes from a workflow. Native crashes remain out of scope (#202); getknit/knit#40 was one,
+filed by hand.*

@@ -1,5 +1,6 @@
 package app.getknit.knit.crash
 
+import app.getknit.knit.legal.repoFile
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -10,7 +11,8 @@ import java.net.URLDecoder
 /**
  * The field ids below are copied from `.github/ISSUE_TEMPLATE/bug_report.yml`. That file and
  * `CrashIssueUrl` are a contract; renaming a field there should break this test rather than silently
- * ship a form that prefills nothing.
+ * ship a form that prefills nothing — `every prefilled key is a field of the template` reads the file to
+ * make sure of it.
  */
 class CrashIssueUrlTest {
     private val base = "https://github.com/getknit/knit/issues/new"
@@ -109,7 +111,54 @@ class CrashIssueUrlTest {
         assertTrue(logs.length < CrashIssueUrl.MAX_URL_CHARS)
     }
 
+    @Test
+    fun `every prefilled key is a field of the template`() {
+        val template = repoFile(".github/ISSUE_TEMPLATE/bug_report.yml")
+        val ids = ID.findAll(template.readText()).map { it.groupValues[1] }.toSet()
+        val keys = (params(url()).keys + params(problem()).keys) - "template" - "title"
+        assertTrue("${keys - ids} not in ${template.name}", ids.containsAll(keys))
+        assertEquals(template.name, params(url()).getValue("template"))
+    }
+
+    @Test
+    fun `a problem report fills only what the app knows`() {
+        val fields = params(problem())
+        assertEquals("bug_report.yml", fields["template"])
+        assertEquals("2.3.0 (13) release", fields["version"])
+        assertEquals("Google Pixel 8 (shiba), 16 (SDK 36)", fields["devices"])
+        // The rest is the reporter's to write, radios included: the app cannot know which plane was in use.
+        assertEquals(setOf("template", "version", "devices", "logs"), fields.keys)
+    }
+
+    @Test
+    fun `a problem report carries its own marker and the facts block`() {
+        val logs = params(problem()).getValue("logs")
+        assertTrue(logs.startsWith(CrashIssueUrl.PROBLEM_MARKER))
+        // Not the crash marker: crash-report.yml would index it as a crash and find no report behind it.
+        assertFalse(logs.contains(CrashIssueUrl.MARKER))
+        assertTrue(logs.contains("```text\n$FACTS\n```"))
+    }
+
+    @Test
+    fun `a problem report drops a blank version rather than sending it empty`() {
+        val fields = params(CrashIssueUrl.forProblem(base, version = "", devices = "", facts = FACTS))
+        assertFalse(fields.containsKey("version"))
+        assertFalse(fields.containsKey("devices"))
+    }
+
+    private fun problem() =
+        CrashIssueUrl.forProblem(
+            base,
+            version = "2.3.0 (13) release",
+            devices = "Google Pixel 8 (shiba), 16 (SDK 36)",
+            facts = FACTS,
+        )
+
     private companion object {
         const val SHORT_TRACE = "java.lang.IllegalStateException: boom"
+        const val FACTS = "app: 2.3.0 (13) release\ndevice: Google Pixel 8 (shiba)"
+
+        /** A form field's `id:` line, as `bug_report.yml` writes every one. */
+        val ID = Regex("""^\s+id:\s*([\w-]+)\s*$""", RegexOption.MULTILINE)
     }
 }

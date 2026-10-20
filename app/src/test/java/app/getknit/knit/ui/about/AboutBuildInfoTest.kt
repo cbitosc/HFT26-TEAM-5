@@ -1,10 +1,17 @@
 package app.getknit.knit.ui.about
 
+import app.getknit.knit.crash.CrashIssueUrl
 import app.getknit.knit.legal.InstallSource
+import app.getknit.knit.ui.ISSUES_URL
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.net.URLDecoder
 
-/** The copied block uses the crash header's line shapes, so a paste into an issue parses the way a crash report does. */
+/**
+ * The copied block uses the crash header's line shapes, so a paste into an issue parses the way a crash report does,
+ * and Report a problem's link carries the same facts into the form's own fields.
+ */
 class AboutBuildInfoTest {
     @Test
     fun theBlockReadsLikeACrashHeader() {
@@ -14,8 +21,10 @@ class AboutBuildInfoTest {
             app: 2.5.1 (21) release
             installed from: fdroid
             device: Google Pixel 8 (shiba)
+            board: shiba  hardware: shiba  soc: Google Tensor G3
             android: 16 (SDK 36)
             abis: arm64-v8a
+            fingerprint: google/shiba/shiba:16/BP2A/0:user/release-keys
             """.trimIndent(),
             info.asText(),
         )
@@ -35,10 +44,43 @@ class AboutBuildInfoTest {
             commit: 06dd410d
             installed from: sideloaded
             device: Google Pixel 8 (shiba)
+            board: shiba  hardware: shiba  soc: Google Tensor G3
             android: 16 (SDK 36)
             abis: arm64-v8a
+            fingerprint: google/shiba/shiba:16/BP2A/0:user/release-keys
             """.trimIndent(),
             info.asText(),
         )
     }
+
+    @Test
+    fun theReportLinkFillsTheVersionTheDeviceAndTheBlock() {
+        val info = AboutBuildInfo(environment = previewEnvironment(), installSource = InstallSource.FDROID)
+        val url = info.issueUrl()
+        val fields = params(url)
+        assertTrue(url.startsWith("$ISSUES_URL/new?"))
+        assertEquals("2.5.1 (21) release", fields["version"])
+        assertEquals("Google Pixel 8 (shiba), 16 (SDK 36)", fields["devices"])
+        assertTrue(fields.getValue("logs").startsWith(CrashIssueUrl.PROBLEM_MARKER))
+        assertTrue(fields.getValue("logs").contains(info.asText()))
+    }
+
+    @Test
+    fun aDebugBuildsReportLinkNamesItsCommitInTheVersionField() {
+        val info =
+            AboutBuildInfo(
+                environment = previewEnvironment(buildType = "debug", obfuscated = false),
+                installSource = InstallSource.SIDELOADED,
+                commit = "06dd410d",
+            )
+        assertEquals("2.5.1 (21) debug, commit 06dd410d", params(info.issueUrl())["version"])
+    }
+
+    private fun params(url: String): Map<String, String> =
+        url
+            .substringAfter('?')
+            .split('&')
+            .associate { pair ->
+                pair.substringBefore('=') to URLDecoder.decode(pair.substringAfter('='), Charsets.UTF_8.name())
+            }
 }

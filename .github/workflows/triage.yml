@@ -20,6 +20,13 @@ name: Triage
 # store-and-forward") — so body keywords tagged nearly every request `area: mesh` + `area: crypto`
 # (#5, #6, #15). A regex can't read negation; the maintainer adds the real area by hand.
 #
+# Filed from the app: About's "Report a problem" opens the bug form with the build and device facts
+# filled in under "Logs / screenshots", behind `<!-- knit-app-report -->` (crash/CrashIssueUrl.kt's
+# `forProblem`). That block is the app's text, not the reporter's — an F-Droid install's
+# `installed from: fdroid` line would otherwise read as `dist: fdroid` — so it is cut from the keyword
+# match, and the issue is labeled `in-app` instead. The crash reporter's `<!-- knit-crash-report -->`
+# issues are crash-report.yml's to label.
+#
 # Third-party and first-party actions alike are pinned by commit SHA here because this job holds
 # `issues: write` and is triggered by anyone who can open an issue. (ci.yml / release.yml pin by
 # major tag; they run only on maintainer-controlled refs.)
@@ -42,7 +49,13 @@ jobs:
           script: |
             const issue = context.payload.issue;
             // GitHub delivers issue bodies with CRLF; normalize before any line-anchored matching.
-            const body = (issue.body || '').replace(/\r\n?/g, '\n');
+            const raw = (issue.body || '').replace(/\r\n?/g, '\n');
+
+            const APP_MARKER = '<!-- knit-app-report -->';
+            const APP_LABEL = 'in-app';
+            const fromApp = raw.includes(APP_MARKER);
+            // The marker, the app's one line under it and its fenced facts block, through the closing fence.
+            const body = fromApp ? raw.replace(/<!-- knit-app-report -->[\s\S]*?```text\n[\s\S]*?\n```/, '') : raw;
 
             const isFeature =
               (issue.labels || []).some((l) => l.name === 'enhancement') ||
@@ -87,6 +100,22 @@ jobs:
             if (radios && radios[1].trim() === 'Both') {
               labels.add('area: ble');
               labels.add('area: wifi-aware');
+            }
+
+            if (fromApp) {
+              labels.add(APP_LABEL);
+              // Every other label here has a colour and a description, and `addLabels` on a missing name would
+              // invent one with neither, so make it on first use (crash-report.yml does the same for its own).
+              await github.rest.issues.getLabel({ ...context.repo, name: APP_LABEL }).catch(async (err) => {
+                if (err.status !== 404) throw err;
+                await github.rest.issues.createLabel({
+                  ...context.repo,
+                  name: APP_LABEL,
+                  color: 'bfdadc',
+                  description: 'Filed from the app’s Report a problem, with build and device details filled in',
+                });
+                core.info(`created the ${APP_LABEL} label`);
+              });
             }
 
             if (labels.size === 0) {
