@@ -94,8 +94,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
@@ -266,37 +268,40 @@ class ChatViewModelTest {
     // Free tickets (C-7.6-34); null, as in a build without Knit Anywhere, unless a case sets it.
     private var freeUploads: FreeUploads? = null
 
-    private fun vm(conversationId: String = Conversations.NEARBY) =
-        ChatViewModel(
-            conversationId,
-            messages,
-            groups,
-            peers,
-            reactions,
-            receipts,
-            drafts,
-            mesh,
-            identity,
-            settings,
-            notifier,
-            attachments,
-            blobs,
-            imageScreening,
-            gallerySaver,
-            voicePlayer,
-            linkCards,
-            linkPreviews,
-            locationSource,
-            // A finite flow, not the production poller: RelayStatusRepository emits on an infinite
-            // `while(true) { emit; delay }`, and under runTest's virtual clock that delay is instant, so
-            // `advanceUntilIdle()` below would never reach idle.
-            relayFactsFlow,
-            loraFactsFlow,
-            context,
-            transfers,
-            calls = calls,
-            freeUploads = freeUploads,
-        )
+    private fun vm(
+        conversationId: String = Conversations.NEARBY,
+        preferMeshCalls: Flow<Boolean> = flowOf(false),
+    ) = ChatViewModel(
+        conversationId,
+        messages,
+        groups,
+        peers,
+        reactions,
+        receipts,
+        drafts,
+        mesh,
+        identity,
+        settings,
+        notifier,
+        attachments,
+        blobs,
+        imageScreening,
+        gallerySaver,
+        voicePlayer,
+        linkCards,
+        linkPreviews,
+        locationSource,
+        // A finite flow, not the production poller: RelayStatusRepository emits on an infinite
+        // `while(true) { emit; delay }`, and under runTest's virtual clock that delay is instant, so
+        // `advanceUntilIdle()` below would never reach idle.
+        relayFactsFlow,
+        loraFactsFlow,
+        context,
+        transfers,
+        calls = calls,
+        freeUploads = freeUploads,
+        preferMeshCalls = preferMeshCalls,
+    )
 
     @Test
     fun theThreadReadsAsLoadingUntilItsFlowsHaveFirstEmitted() =
@@ -3540,6 +3545,59 @@ class ChatViewModelTest {
             meshFirst = true
             advanceTimeBy(60_000)
             assertFalse("no re-check off screen", vm.meshCallFirst.value)
+        }
+
+    @Test
+    fun preferringMeshCallsPutsTheMeshCallFirstWhateverTheRoute() =
+        runTest {
+            val calls = mockk<CallManager>(relaxed = true).also { calls = it }
+            every { calls.walkieEnabled } returns true
+            coEvery { calls.prefersWalkie(PEER_CALL) } returns false
+            val preferred = MutableStateFlow(true)
+            val vm = vm(PEER_CALL, preferMeshCalls = preferred)
+            vm.onChatForeground()
+            runCurrent()
+            assertTrue("the route alone would put the live call first", vm.meshCallFirst.value)
+
+            preferred.value = false
+            runCurrent()
+            assertFalse("back to the route's verdict", vm.meshCallFirst.value)
+            vm.onChatBackground()
+        }
+
+    /** With "Prefer mesh calls" on, a DM offers only the kinds its peer carries the bits for (C-3.11-3). */
+    @Test
+    fun preferringMeshCallsOffersOnlyTheKindsThePeerTakes() =
+        runTest {
+            val calls = mockk<CallManager>(relaxed = true).also { calls = it }
+            every { calls.liveEnabled } returns true
+            every { calls.walkieEnabled } returns true
+            coEvery { groups.find(PEER_CALL) } returns null
+            stubDm(PEER_CALL)
+            val preferred = MutableStateFlow(true)
+            val vm = vm(PEER_CALL, preferMeshCalls = preferred)
+            backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.state.collect {} }
+
+            peersFlow.value = listOf(peer(PEER_CALL, capabilities = Protocol.CAP_CALL or Protocol.CAP_WALKIE))
+            advanceUntilIdle()
+            assertTrue(vm.state.value.canCall)
+            assertTrue(vm.state.value.canMeshCall)
+
+            peersFlow.value = listOf(peer(PEER_CALL, capabilities = Protocol.CAP_CALL))
+            advanceUntilIdle()
+            assertTrue("the live call stands in", vm.state.value.canCall)
+            assertFalse(vm.state.value.canMeshCall)
+
+            peersFlow.value = listOf(peer(PEER_CALL, capabilities = 0L))
+            advanceUntilIdle()
+            assertFalse(vm.state.value.canCall)
+            assertFalse(vm.state.value.canMeshCall)
+
+            // Switched off, both are offered again and a tap explains what the peer lacks.
+            preferred.value = false
+            advanceUntilIdle()
+            assertTrue(vm.state.value.canCall)
+            assertTrue(vm.state.value.canMeshCall)
         }
 
     @Test

@@ -49,6 +49,7 @@ import app.getknit.knit.data.ratchet.GroupRootRepository
 import app.getknit.knit.data.ratchet.RatchetRepository
 import app.getknit.knit.data.relay.RelayInviteApplier
 import app.getknit.knit.data.settings.BadgeStore
+import app.getknit.knit.data.settings.CallPreferenceStore
 import app.getknit.knit.data.settings.IncomingCallStore
 import app.getknit.knit.data.settings.OwnIceStore
 import app.getknit.knit.data.settings.ReviewPromptStore
@@ -112,6 +113,8 @@ val appModule =
         single { OwnIceStore(get()) }
         // C-3.3-7: which incoming calls this phone takes; read by the Settings row in every build, as the servers are.
         single { IncomingCallStore(get()) }
+        // C-3.11-3: whether the chat always puts the mesh call first; read by the Settings row in every build.
+        single { CallPreferenceStore(get()) }
         // The platform's per-app night mode (API 31+), the one UiModeManager user in the app.
         single<NightMode> { AndroidNightMode(androidContext()) }
         // Warmed at process start by KnitApplication so the first composition can read the Material You flag

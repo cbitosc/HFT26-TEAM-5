@@ -756,6 +756,8 @@
     <string name="call_settings_take_live_subtitle">Calls over the internet or Wi-Fi Direct. When this is off, they don\'t ring here and the caller sees \"No answer\".</string>
     <string name="call_settings_take_walkie_title">Take mesh calls</string>
     <string name="call_settings_take_walkie_subtitle">Walkie-talkie calls over the mesh radios. When this is off, they don\'t ring here and the caller sees \"No answer\".</string>
+    <string name="call_settings_prefer_mesh_title">Prefer mesh calls</string>
+    <string name="call_settings_prefer_mesh_subtitle">The call button in a chat places a mesh call. Live calls move to the chat\'s menu.</string>
     <string name="call_settings_transcripts_title">Transcripts and captions</string>
     <string name="call_settings_transcripts_subtitle">Turn what you hear on a call into text, on this phone: walkie-talkie bursts as they play, and live calls when you turn on CC. The text never leaves the phone.</string>
     <string name="call_settings_speech_model_title">Speech model</string>

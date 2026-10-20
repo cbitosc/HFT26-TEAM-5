@@ -80,6 +80,7 @@ fun CallSettingsScreen(
     val loaded by viewModel.loaded.collectAsStateWithLifecycle()
     val transcripts by viewModel.transcripts.collectAsStateWithLifecycle()
     val intake by viewModel.intake.collectAsStateWithLifecycle()
+    val preferMesh by viewModel.preferMesh.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     val saved = stringResource(R.string.call_settings_saved)
     val busy = stringResource(R.string.call_settings_test_busy)
@@ -101,6 +102,9 @@ fun CallSettingsScreen(
         intake = intake,
         onToggleTakeLive = viewModel::setTakeLive,
         onToggleTakeWalkie = viewModel::setTakeWalkie,
+        choosesFirstCall = viewModel.choosesFirstCall,
+        preferMesh = preferMesh,
+        onTogglePreferMesh = viewModel::setPreferMesh,
         loaded = loaded,
         snackbarHostState = snackbarHostState,
         onBack = onBack,
@@ -132,6 +136,10 @@ internal fun CallSettingsScreenContent(
     intake: CallIntake = CallIntake(),
     onToggleTakeLive: (Boolean) -> Unit = {},
     onToggleTakeWalkie: (Boolean) -> Unit = {},
+    // "Prefer mesh calls": shown where the build wires both kinds, so the chat has a choice of which to put first.
+    choosesFirstCall: Boolean = live && walkie,
+    preferMesh: Boolean = false,
+    onTogglePreferMesh: (Boolean) -> Unit = {},
     loaded: Boolean = true,
     snackbarHostState: SnackbarHostState = remember { SnackbarHostState() },
     onToggleRelayAll: (Boolean) -> Unit = {},
@@ -178,6 +186,16 @@ internal fun CallSettingsScreenContent(
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             IncomingCallRows(live, walkie, intake, onToggleTakeLive, onToggleTakeWalkie)
+            if (choosesFirstCall) {
+                HorizontalDivider()
+                ToggleRow(
+                    title = stringResource(R.string.call_settings_prefer_mesh_title),
+                    subtitle = stringResource(R.string.call_settings_prefer_mesh_subtitle),
+                    enabled = preferMesh,
+                    onToggle = onTogglePreferMesh,
+                    modifier = Modifier.testTag("call_settings_prefer_mesh"),
+                )
+            }
             if (live) {
                 HorizontalDivider()
                 ToggleRow(
@@ -475,7 +493,7 @@ fun CallSettingsScreenPreview() =
         CallSettingsScreenContent(state = CallSettingsUiState(), onBack = {})
     }
 
-// A build with both call kinds, the person taking mesh calls but no live ones.
+// A build with both call kinds, the person taking mesh calls but no live ones and preferring mesh calls.
 @Preview(showBackground = true)
 @Composable
 fun CallSettingsScreenIncomingPreview() =
@@ -485,6 +503,7 @@ fun CallSettingsScreenIncomingPreview() =
             onBack = {},
             walkie = true,
             intake = CallIntake(live = false, walkie = true),
+            preferMesh = true,
         )
     }
 

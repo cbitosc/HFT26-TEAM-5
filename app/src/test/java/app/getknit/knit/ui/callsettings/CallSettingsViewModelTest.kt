@@ -9,6 +9,7 @@ import app.getknit.knit.call.ProbeVerdict
 import app.getknit.knit.call.SttModel
 import app.getknit.knit.call.SttModelState
 import app.getknit.knit.call.TurnServer
+import app.getknit.knit.data.settings.CallPreferenceStore
 import app.getknit.knit.data.settings.OwnIceStore
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.data.settings.TranscriptStore
@@ -49,6 +50,8 @@ class CallSettingsViewModelTest {
             every { metered() } returns true
         }
     private val transcriptStore = mockk<TranscriptStore>(relaxed = true) { every { enabled } returns transcriptsOn }
+    private val preferMesh = MutableStateFlow(false)
+    private val preference = mockk<CallPreferenceStore>(relaxed = true).also { every { it.preferMesh } returns preferMesh }
 
     private var probed: Pair<List<String>, TurnServer?>? = null
     private var probeAnswer: ProbeResult? = ProbeResult(ProbeVerdict.Reached, ProbeVerdict.AuthFailed)
@@ -74,6 +77,7 @@ class CallSettingsViewModelTest {
         speech: SttModelStore? = null,
         live: Boolean = true,
         ownServers: Boolean = live,
+        walkie: Boolean = false,
     ): CallSettingsViewModel =
         CallSettingsViewModel(
             settings,
@@ -81,6 +85,8 @@ class CallSettingsViewModelTest {
             probe.takeIf { live && ownServers },
             speech,
             transcriptStore.takeIf { speech != null },
+            preference = preference,
+            walkie = walkie,
             live = live,
         ).also { vm ->
             backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.state.collect {} }
@@ -187,6 +193,25 @@ class CallSettingsViewModelTest {
             coVerify { settings.setCallsRelayAll(true) }
             coVerify { store.setStunOn(true) }
             coVerify { store.setTurnOn(false) }
+        }
+
+    /** "Prefer mesh calls" shows only where the build wires both kinds, and writes through like every switch. */
+    @Test
+    fun preferMeshShowsWithBothKindsAndWritesThrough() =
+        runTest {
+            assertFalse(vm(walkie = false).choosesFirstCall)
+            assertFalse(vm(live = false, walkie = true).choosesFirstCall)
+            val vm = vm(walkie = true)
+            assertTrue(vm.choosesFirstCall)
+            backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.preferMesh.collect {} }
+
+            preferMesh.value = true
+            assertTrue(vm.preferMesh.value)
+            preferMesh.value = false
+            assertFalse(vm.preferMesh.value)
+            vm.setPreferMesh(true)
+            advanceUntilIdle()
+            coVerify { preference.setPreferMesh(true) }
         }
 
     @Test

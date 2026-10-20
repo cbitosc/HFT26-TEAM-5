@@ -1133,8 +1133,8 @@ internal fun ChatScreenContent(
                     // block — its authors are not peers, and blocking the gateway would silence a contact over
                     // somebody else's post.
                     // The call this chat puts first sits in the bar and the other in the overflow (§3.11): the live one
-                    // while a live path looks possible, the mesh one while none does — or always, in a build that takes
-                    // mesh calls only.
+                    // while a live path looks possible, the mesh one while none does — or always, while the person
+                    // prefers mesh calls or in a build that takes mesh calls only.
                     val callGate = if (state.canCall || state.canMeshCall) rememberCallMicGate() else null
                     val meshFirst = state.canMeshCall && (meshCallFirst || !state.canCall)
                     if (callGate != null) {

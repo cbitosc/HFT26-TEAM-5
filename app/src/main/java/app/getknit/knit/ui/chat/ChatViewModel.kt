@@ -471,10 +471,12 @@ data class ChatUiState(
     // [ChatViewModel.attachFile].
     val canSendFile: Boolean = false,
     // Whether the top bar offers a live voice call (experimental, docs/VOICE_CALLS.md): a 1:1 thread in a build that
-    // takes them. Not gated on the peer's CAP_CALL, for [canSendFile]'s reason; [ChatViewModel.startCall] explains instead.
+    // takes them. Not gated on the peer's CAP_CALL, for [canSendFile]'s reason; [ChatViewModel.startCall] explains instead
+    // — unless the person prefers mesh calls (C-3.11-3), when each kind is offered only toward a peer that takes it.
     val canCall: Boolean = false,
     // Whether it offers a mesh call — a walkie-talkie over the mesh (docs/VOICE_CALLS.md §3.11) — in a build that runs
-    // one. Where both are offered, which the top bar shows and which the overflow is [ChatViewModel.meshCallFirst].
+    // one, gated as [canCall] is. Where both are offered, which the top bar shows and which the overflow is
+    // [ChatViewModel.meshCallFirst].
     val canMeshCall: Boolean = false,
     // True when this thread is the **Meshtastic room** — the paired radio's primary channel, mirrored into a
     // room on this phone. It is a public room like Nearby, and shares its glyph and its "no attachments"
@@ -576,6 +578,9 @@ class ChatViewModel(
     private val calls: CallManager? = null,
     // Free accounts' notice (docs/VOICE_CALLS.md C-7.6-34): null where tickets are not wired, which shows none.
     private val freeUploads: FreeUploads? = null,
+    // The Calls screen's "Prefer mesh calls" (C-3.11-3): on, [meshCallFirst] holds whatever the route says and a DM
+    // offers only the calls its peer takes. A plain parameter, read by the initializers alone.
+    preferMeshCalls: Flow<Boolean> = flowOf(false),
 ) : ViewModel() {
     /** This thread is the broadcast room (vs a 1:1 DM keyed by the peer's node id). */
     private val isRoom = conversationId == Conversations.NEARBY
@@ -665,14 +670,18 @@ class ChatViewModel(
     private var recordingTicker: Job? = null
 
     /** One-shot UI messages (a string res id), surfaced as toasts — e.g. the result of saving an image. */
-    private val _meshCallFirst = MutableStateFlow(false)
+    private val autoMeshFirst = MutableStateFlow(false)
 
     /**
-     * True while a mesh call is the one to offer first (§3.11): the peer runs the walkie and no live path looks
-     * possible. The top bar shows that call and the overflow the other. Re-read while the chat is on screen, since the
-     * Internet route and the neighbours it rests on come and go.
+     * True while a mesh call is the one to offer first (§3.11): always, while the person prefers mesh calls (the state
+     * then offers it only toward a peer carrying the walkie), else while the peer runs the walkie and no live path
+     * looks possible. The top bar shows that call and the overflow the other.
+     * The route is re-read while the chat is on screen, since the Internet route and the neighbours it rests on come
+     * and go.
      */
-    val meshCallFirst: StateFlow<Boolean> = _meshCallFirst.asStateFlow()
+    val meshCallFirst: StateFlow<Boolean> =
+        combine(autoMeshFirst, preferMeshCalls) { auto, preferred -> preferred || auto }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, false)
 
     private val _events = MutableSharedFlow<Int>(extraBufferCapacity = 1)
     val events: SharedFlow<Int> = _events.asSharedFlow()
@@ -809,7 +818,7 @@ class ChatViewModel(
             viewModelScope.launch {
                 chatForeground.collectLatest { foreground ->
                     while (foreground) {
-                        _meshCallFirst.value = calls.prefersWalkie(conversationId)
+                        autoMeshFirst.value = calls.prefersWalkie(conversationId)
                         delay(MESH_CALL_RECHECK_MS)
                     }
                 }
@@ -1030,11 +1039,13 @@ class ChatViewModel(
     // Folded ahead of the state combine, whose typed arity stops at five: who this device posts to a room
     // as, whether it may post to the foreign public channel, and — for a commons thread — the room's row and
     // its members. The two commons flows are empty everywhere else (`flowOf`), so they cost nothing there.
+    // Rides with them: whether the person prefers mesh calls, which narrows the calls a DM offers.
     private class PublicInputs(
         val myName: String,
         val publicConsented: Boolean,
         val commonsRoom: CommonsEntity?,
         val commonsMembers: List<String>,
+        val preferMeshCalls: Boolean,
     )
 
     private val publicIdentity: Flow<PublicInputs> =
@@ -1043,7 +1054,8 @@ class ChatViewModel(
             settings.meshtasticPostConsented,
             if (isCommons) commons?.observe(conversationId) ?: flowOf(null) else flowOf(null),
             if (isCommons) commons?.observeMemberIds(conversationId) ?: flowOf(emptyList()) else flowOf(emptyList()),
-        ) { name, consented, room, roster -> PublicInputs(name, consented, room, roster) }
+            preferMeshCalls,
+        ) { name, consented, room, roster, preferMesh -> PublicInputs(name, consented, room, roster, preferMesh) }
 
     val state: StateFlow<ChatUiState> =
         combine(
@@ -1079,6 +1091,13 @@ class ChatViewModel(
             val peersByNode = directory.byNode
             // A DM peer on a Knit without forward secrecy: the relay notice says so instead of "not covered yet".
             val peerLacksFs = isPeerThread && lacksForwardSecrecy(peersByNode[conversationId])
+            // A person who prefers mesh calls is offered only the calls this peer's build takes (C-3.11-3): the mesh
+            // call first where it carries the walkie, else the live call, else none. Otherwise neither is gated on
+            // the peer's bits, for [ChatUiState.canSendFile]'s reason.
+            val peerCaps = peersByNode[conversationId]?.capabilities ?: 0L
+            val callable = isPeerThread && conversationId !in blocked
+
+            fun offers(bit: Long) = !publicId.preferMeshCalls || peerCaps and bit != 0L
             // Group once, then tally per emoji within each message's bucket. Orphan reactions (no matching
             // message yet) simply never produce a row until their message arrives.
             val reactionsByMessage = reacts.groupBy { it.messageId }
@@ -1293,8 +1312,8 @@ class ChatViewModel(
                 publicChannelKeyIsPublic = mesh.lora.facts.primaryKeyIsPublic,
                 needsPublicConsent = isBridged && !publicConsented,
                 isBlocked = isPeerThread && conversationId in blocked,
-                canCall = calls?.liveEnabled == true && isPeerThread && conversationId !in blocked,
-                canMeshCall = calls?.walkieEnabled == true && isPeerThread && conversationId !in blocked,
+                canCall = calls?.liveEnabled == true && callable && offers(Protocol.CAP_CALL),
+                canMeshCall = calls?.walkieEnabled == true && callable && offers(Protocol.CAP_WALKIE),
                 verified = isPeerThread && peersByNode[conversationId]?.verified == true,
                 isGroup = isGroup,
                 memberCount = members.size,

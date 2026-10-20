@@ -15,6 +15,7 @@ import app.getknit.knit.data.forward.ForwardRepository
 import app.getknit.knit.data.relay.FreeUploads
 import app.getknit.knit.data.relay.RelayStatusRepository
 import app.getknit.knit.data.settings.BadgeStore
+import app.getknit.knit.data.settings.CallPreferenceStore
 import app.getknit.knit.data.settings.IncomingCallStore
 import app.getknit.knit.data.settings.OwnIceStore
 import app.getknit.knit.data.settings.SettingsStore
@@ -86,6 +87,7 @@ val uiModule =
                 get<AttachmentIdentities>(),
                 if (CALLS_WIRED) get<CallManager>() else null,
                 freeUploads = if (ANYWHERE_WIRED) get<FreeUploads>() else null,
+                preferMeshCalls = if (LIVE_CALLS_WIRED && WALKIE_WIRED) get<CallPreferenceStore>().preferMesh else flowOf(false),
             )
         }
         viewModel {

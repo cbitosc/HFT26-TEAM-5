@@ -9,6 +9,7 @@ import app.getknit.knit.call.SttModelState
 import app.getknit.knit.call.StunServers
 import app.getknit.knit.call.TurnUrls
 import app.getknit.knit.data.settings.CallIntake
+import app.getknit.knit.data.settings.CallPreferenceStore
 import app.getknit.knit.data.settings.IncomingCallStore
 import app.getknit.knit.data.settings.OwnIceStore
 import app.getknit.knit.data.settings.SettingsStore
@@ -121,8 +122,9 @@ sealed interface CallSettingsEvent {
 
 /**
  * The Calls screen (docs/VOICE_CALLS.md §3.14, ADR 2026-10.mr88): which incoming calls this phone takes (C-3.3-7),
- * one switch per kind the build wires, "Relay all calls", the person's own STUN and TURN servers (debug builds only,
- * `OWN_ICE_WIRED`) and the walkie's transcripts and live calls' captions with their speech model (C-3.11-9, C-3.7-5).
+ * one switch per kind the build wires, "Prefer mesh calls" where it wires both (C-3.11-3), "Relay all calls", the
+ * person's own STUN and TURN servers (debug builds only, `OWN_ICE_WIRED`) and the walkie's transcripts and live calls'
+ * captions with their speech model (C-3.11-9, C-3.7-5).
  * The switches write as they are touched, as every Settings switch does; the fields are a draft, loaded once and
  * written by Save, and a Test tries the draft before it is saved.
  */
@@ -136,6 +138,8 @@ class CallSettingsViewModel(
     private val transcriptStore: TranscriptStore? = null,
     // C-3.3-7's switches; null, and no "Incoming calls" section, in a test that does not reach them.
     private val incoming: IncomingCallStore? = null,
+    // "Prefer mesh calls" (C-3.11-3); null, and no row, in a test that does not reach it.
+    private val preference: CallPreferenceStore? = null,
     /** Whether mesh calls are wired, so "Incoming calls" has a mesh switch. */
     val walkie: Boolean = false,
     /** Whether live calls are wired, so "Incoming calls" has a live switch and "Relay all calls" shows. */
@@ -147,6 +151,13 @@ class CallSettingsViewModel(
     /** "Incoming calls": what each switch holds, on until the store's first read. */
     val intake: StateFlow<CallIntake> =
         (incoming?.intake ?: flowOf(CallIntake())).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CallIntake())
+
+    /** Whether "Prefer mesh calls" shows: only a build with both kinds has a choice of which the chat puts first. */
+    val choosesFirstCall: Boolean = live && walkie
+
+    /** "Prefer mesh calls": what the switch holds, off until the store's first read. */
+    val preferMesh: StateFlow<Boolean> =
+        (preference?.preferMesh ?: flowOf(false)).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
     private val draft = MutableStateFlow(CallServerDraft())
     private val testing = MutableStateFlow(false)
@@ -192,6 +203,11 @@ class CallSettingsViewModel(
     fun setTakeWalkie(value: Boolean) {
         val store = incoming ?: return
         viewModelScope.launch { store.setWalkie(value) }
+    }
+
+    fun setPreferMesh(value: Boolean) {
+        val store = preference ?: return
+        viewModelScope.launch { store.setPreferMesh(value) }
     }
 
     fun setRelayAll(value: Boolean) {

@@ -171,6 +171,7 @@ private fun callGraph(): Module =
                     stt = if (STT_WIRED) get<SttModelStore>() else null,
                     transcriptStore = if (STT_WIRED) get<TranscriptStore>() else null,
                     incoming = get(),
+                    preference = get(),
                     walkie = WALKIE_WIRED,
                     live = LIVE_CALLS_WIRED,
                 )
