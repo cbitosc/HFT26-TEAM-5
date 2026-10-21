@@ -98,4 +98,30 @@ class NanSyncPolicyTest {
         assertTrue(NanSyncPolicy.anyInitiatorDigestOwed(listOf(peer(initiator = true, digestWanted = true, linked = true))))
         assertFalse(NanSyncPolicy.anyInitiatorDigestOwed(listOf(peer(initiator = false, digestWanted = true))))
     }
+
+    @Test
+    fun reachableButNotNearIsNotCorroboratedWhileAForeignPlaneExists() {
+        // The P9 incident (2026-10-20): a walk-away peer held reachable by one Coded advert at −101 dBm, not near, not
+        // linked. Bluetooth exists, so its silence on "near" is evidence the peer is out of NDP range: no kill.
+        assertFalse(NanSyncPolicy.corroborated(hasForeignPlane = true, linked = false, near = false))
+        assertFalse(NanSyncPolicy.evidence(linked = false, near = false))
+    }
+
+    @Test
+    fun aNanLinkOrANearSightingCorroborates() {
+        assertTrue(
+            "a live NAN link is its own corroboration",
+            NanSyncPolicy.corroborated(hasForeignPlane = true, linked = true, near = false),
+        )
+        assertTrue("near on Bluetooth corroborates", NanSyncPolicy.corroborated(hasForeignPlane = true, linked = false, near = true))
+        assertTrue(NanSyncPolicy.evidence(linked = true, near = false))
+        assertTrue(NanSyncPolicy.evidence(linked = false, near = true))
+    }
+
+    @Test
+    fun aNanOnlyDeviceFallsBackToCorroborated() {
+        // No corroborating plane: corroboration falls back to yes, but the log line's evidence filter still names nobody.
+        assertTrue(NanSyncPolicy.corroborated(hasForeignPlane = false, linked = false, near = false))
+        assertFalse(NanSyncPolicy.evidence(linked = false, near = false))
+    }
 }

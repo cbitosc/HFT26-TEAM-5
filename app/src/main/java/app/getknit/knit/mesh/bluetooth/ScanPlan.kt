@@ -6,7 +6,7 @@ import app.getknit.knit.mesh.power.PowerState
 
 /**
  * The presence scan's glue between what it heard and its policies ([CodedPhyPolicy], [ScanDemandPolicy]): which peers
- * count as far, when Coded-only windows run and why, and what the transport publishes as reachable. Pure, so
+ * count as far, when Coded-only windows run and why, and what the transport publishes as reachable and as near. Pure, so
  * [BluetoothMeshTransport]'s choices are asserted on the JVM.
  */
 internal object ScanPlan {
@@ -106,4 +106,32 @@ internal object ScanPlan {
         linkPeers.forEach { byId[it.nodeId] = it }
         return byId.values.toSet()
     }
+
+    /**
+     * What the transport publishes as near ([app.getknit.knit.mesh.MeshTransport.near]): every peer it holds a link to
+     * ([linkPeers], any PHY), and every sighted peer not heard on Coded alone ([CodedPhyPolicy.codedOnly]) whose
+     * strongest **fresh raw** reading — 1M if [BlePresenceTracker.Snapshot.oneMFresh], Coded if
+     * [BlePresenceTracker.Snapshot.codedFresh] — reaches [floorDbm]. Never the Coded credit: it stands for the PHY's
+     * sensitivity, and raw dBm is a power reading. Never a stale reading: a walk-away peer keeps its last strong 1M one.
+     * Coded reaches far past Wi-Fi Aware's NDP range, so `reachable` held a walk-away peer from one Coded advert at raw
+     * −101 dBm and corroborated the Aware wedge watchdog's process kill on screen (P9, 2026-10-20; ADR 2026-09.9dnk).
+     * Either PHY counts, so a close peer stays near across an off-screen Coded-only window. A subset of [reachable] on
+     * the same inputs. A link's [Peer] wins over a sighting's on the same node id.
+     */
+    fun near(
+        snaps: List<BlePresenceTracker.Snapshot>,
+        linkPeers: Collection<Peer>,
+        floorDbm: Int = PromotionConfig.DEFAULT_RSSI_FLOOR_DBM,
+    ): Set<Peer> {
+        val byId = HashMap<String, Peer>()
+        snaps
+            .filter { !CodedPhyPolicy.codedOnly(it.codedLagMs) && (freshRaw(it) ?: Double.NEGATIVE_INFINITY) >= floorDbm }
+            .forEach { byId[it.nodeId] = Peer(it.nodeId, it.protoVersion, it.capabilities) }
+        linkPeers.forEach { byId[it.nodeId] = it }
+        return byId.values.toSet()
+    }
+
+    // The stronger of the snapshot's fresh raw readings, null when neither PHY was heard in the latest burst.
+    private fun freshRaw(s: BlePresenceTracker.Snapshot): Double? =
+        listOfNotNull(s.rssi1m.takeIf { s.oneMFresh }, s.rssiCoded.takeIf { s.codedFresh }).maxOrNull()
 }

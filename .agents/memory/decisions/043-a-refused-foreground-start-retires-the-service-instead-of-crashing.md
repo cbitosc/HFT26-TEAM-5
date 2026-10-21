@@ -105,3 +105,13 @@ pre-check and keeps the call-site catch, and records the outcome in `MeshStartGa
 *Amendment (2026-09-20, ADR 2026-09.wz99).* "Recovery is the next foreground app open" holds only while
 `SettingsStore.meshEnabled` is on: the notification's Stop is now sticky, and `KnitApp`'s two starters ask
 `shouldStartMeshFromUi` first. A *refused* start never clears the flag, so the resume retry above is untouched.
+
+*Amendment (2026-10-20, ADR 2026-09.9dnk's amendment of that date).* "The cure fires on the next check once the app
+is foreground or exempt" no longer holds for the foreground half: Tier 2 never runs while Knit is in use (its UI on
+screen or a call running), so a declined kill now fires only on a battery-exempt phone, after use ends — and on a
+non-exempt API 31+ phone never. And "the gate lives in the transport, not in `NanWatchdogPolicy`" is half true: the
+re-claim check stays in the transport, but the in-use hold is the policy's `inUse` input (`Action.DeferRestart`),
+since it needs no binder call. The refusal's line is now `Tier-2 restart deferred: foreground service can't be
+re-claimed`, once per episode, so the soak poller's `NAN data plane wedged` count no longer reads it as a kill.
+Corroboration moved too: Bluetooth's `near`, not its `reachable` (ADR 2026-10.yvn6's Coded PHY made the latter reach
+past an NDP).

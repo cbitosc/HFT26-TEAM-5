@@ -52,6 +52,8 @@ document:
 
 ### Fixed
 
+- Knit could close while you were using it, after a phone you had been near walked out of Wi-Fi Aware range.
+  It no longer restarts itself while you're in the app or on a call, or because of a phone that's far away.
 - A reply could quote someone saying something they never wrote. Quotes now show the message as your phone
   received it, and say so when your phone doesn't have the original to check against.
 - In a group still in your message requests, someone who had left could reappear, or someone who had come

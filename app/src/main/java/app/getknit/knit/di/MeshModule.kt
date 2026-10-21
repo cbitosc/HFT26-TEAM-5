@@ -10,6 +10,7 @@ import app.getknit.knit.R
 import app.getknit.knit.badge.BadgeIssuer
 import app.getknit.knit.badge.BadgeKeys
 import app.getknit.knit.call.CallManager
+import app.getknit.knit.call.CallPhase
 import app.getknit.knit.crash.ProcessExitReasons
 import app.getknit.knit.data.KnitDatabase
 import app.getknit.knit.data.MeshBlobStore
@@ -242,6 +243,21 @@ val meshModule =
                                     journals,
                                     journals,
                                     get(),
+                                    appVisible = get<AppVisibility>().visible,
+                                    // A call running (live or walkie) holds the watchdog's Tier-2 kill, which would end it
+                                    // (ADR 2026-09.9dnk's 2026-10-20 amendment). Late-bound like onCallSignal below, and
+                                    // never true in a build that wires no calls.
+                                    callLive = {
+                                        val call =
+                                            if (CALLS_WIRED) {
+                                                runCatching {
+                                                    getKoin().getOrNull<CallManager>()?.state?.value
+                                                }.getOrNull()
+                                            } else {
+                                                null
+                                            }
+                                        call != null && call.phase != CallPhase.Ended
+                                    },
                                     field = get<FieldLog>(),
                                 )
                             // Low-power mode switches the plane off live in every build (ADR 2026-10.d44b), and a debug

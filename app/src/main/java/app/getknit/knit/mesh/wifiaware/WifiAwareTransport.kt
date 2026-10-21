@@ -77,6 +77,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.drop
@@ -143,6 +144,12 @@ class WifiAwareTransport(
     // Where a link keeps an attachment cut mid-stream and resumes it from (#116, ADR 2026-10.wtyc), shared with
     // the Bluetooth plane: a transfer the NDP lost can finish over BLE, and the other way round.
     private val partials: PartialBlobs,
+    // Whether Knit's UI is on screen (AppVisibility, as the Bluetooth plane reads it): the wedge watchdog never kills
+    // the process under the person using it (ADR 2026-09.9dnk's 2026-10-20 amendment).
+    private val appVisible: StateFlow<Boolean> = MutableStateFlow(false),
+    // Whether a call is running (CallManager, wired in di/ behind CALLS_WIRED): a Tier-2 kill would end it, whichever
+    // plane carries it, so it holds the kill as the screen does.
+    private val callLive: () -> Boolean = { false },
     // The field log (ADR 2026-10.a239): each data path's up and down, and each session cycle.
     private val field: FieldRecorder = FieldRecorder.NONE,
 ) : MeshTransport {
@@ -408,14 +415,23 @@ class WifiAwareTransport(
     @Volatile
     private var suppressed: Set<String> = emptySet()
 
-    // Peers another plane (Bluetooth) can currently see, pushed by CompositeMeshTransport.onForeignReachable.
-    // Used only to corroborate the wedge watchdog ([checkWedge]): a self-kill is only justified for an owed peer
-    // that is genuinely nearby (another plane sights it) yet our NAN data path can't serve it — the leak wedge a
-    // restart cures — not for one that has simply walked out of NDP range while still trickling us cues. [hasForeignPlane]
-    // records whether a corroborating plane exists at all (the composite only wires this up with >1 child), so a
-    // NAN-only device falls back to the un-corroborated behaviour. Volatile — written from the composite's collector.
+    // Peers another short-range plane (Bluetooth) can currently see, pushed by CompositeMeshTransport.onForeignReachable.
+    // Read only for loneliness ([onForeignReachable]'s rising edge). Never the wedge watchdog's corroboration: a
+    // Coded-PHY sighting holds a peer from one advert at −101 dBm, far past an NDP's range, and corroborated a process
+    // kill over a walk-away peer that way (P9, 2026-10-20; ADR 2026-09.9dnk's 2026-10-20 amendment).
     @Volatile
     private var foreignReachable: Set<String> = emptySet()
+
+    // Peers another short-range plane hears *near* (its MeshTransport.near: Bluetooth's links, and peers heard fresh at
+    // raw ≥ −90 dBm on either PHY, never Coded-only), pushed by CompositeMeshTransport.onForeignNear. The wedge
+    // watchdog's Tier-2 corroboration ([corroboratedPresent]): a self-kill is only justified for an owed peer that is
+    // genuinely nearby yet our NAN data path can't serve it — the leak wedge a restart cures — not for one that has
+    // walked out of NDP range while still trickling us cues. Staleness is the sibling's to bound (≈150 s, as its
+    // reachable's). [hasForeignPlane] records whether a corroborating plane exists at all (the composite only wires
+    // either hook with >1 child), so a NAN-only device falls back to the un-corroborated behaviour. Volatile — written
+    // from the composite's collectors.
+    @Volatile
+    private var foreignNear: Set<String> = emptySet()
 
     @Volatile
     private var hasForeignPlane = false
@@ -538,6 +554,11 @@ class WifiAwareTransport(
     @Volatile private var lastRestartAt = 0L
 
     @Volatile private var responderRefreshes = 0
+
+    // A held Tier-2 kill logs once per owed episode, per reason — else a 30 s line for as long as Knit is on screen
+    // (or, for the re-claim refusal, as long as a non-exempt phone sits off screen). Fed the episode clock by
+    // [checkWedge]; touched only by the watchdog loop.
+    private val tier2Notes = NanWatchdogPolicy.Tier2Notes()
 
     private var powerJob: Job? = null
 
@@ -774,11 +795,29 @@ class WifiAwareTransport(
      * That false case bit the smallest-nodeId node hardest: as everyone's pure responder it can neither initiate
      * to the peer nor complete the peer's NDP, so an out-of-range-but-still-cueing peer kept a sync owed forever
      * and self-killed it (field-observed 2026-07-03, P7 walked off the triangle's far leg). When a corroborating
-     * plane exists ([hasForeignPlane], i.e. Bluetooth), require it to *also* sight the peer (evidence it's truly
-     * nearby and the fault is our NAN data path); a live NAN link is its own corroboration. A NAN-only device has
-     * no corroborator, so it falls back to the prior behaviour.
+     * plane exists ([hasForeignPlane], i.e. Bluetooth), require it to hear the peer *near* ([foreignNear]: linked, or
+     * heard fresh at raw ≥ −90 dBm on either PHY, never Coded-only) — evidence it's truly within NDP reach and the fault
+     * is our NAN data path. Merely *reachable* is not enough: Bluetooth's Coded PHY holds a peer from one advert at
+     * −101 dBm, and corroborated a kill over a walk-away peer that way (P9, 2026-10-20; ADR 2026-09.9dnk's 2026-10-20
+     * amendment). A live NAN link is its own corroboration. A NAN-only device has no corroborator, so it falls back to
+     * the prior behaviour.
      */
-    private fun corroboratedPresent(nodeId: String): Boolean = !hasForeignPlane || peers.containsKey(nodeId) || nodeId in foreignReachable
+    private fun corroboratedPresent(nodeId: String): Boolean =
+        NanSyncPolicy.corroborated(hasForeignPlane, linked = peers.containsKey(nodeId), near = nodeId in foreignNear)
+
+    /**
+     * The owed peers that corroborate a Tier-2 kill by evidence ([anySyncOwed]'s peers, minus the NAN-only fallback's
+     * blanket yes): live-linked here or near on another plane. Only for the kill's log line, so the trial can read
+     * which sighting it rested on beside Bluetooth's own `bt state … near=` line.
+     */
+    private fun corroboratingPeers(now: Long): List<String> {
+        val v = storeDigest.current()
+        return cueTarget.keys.filter { id ->
+            val linked = peers.containsKey(id)
+            val lingering = linked || (lastSeenAt[id]?.let { now - it <= REACHABLE_LINGER_MS } == true)
+            digestSyncWanted(id, v) && lingering && NanSyncPolicy.evidence(linked, near = id in foreignNear)
+        }
+    }
 
     /**
      * Reduce every [cueTarget] candidate to an immutable [NanSyncPolicy.PeerFacts] at one instant ([now]/[v]),
@@ -836,9 +875,14 @@ class WifiAwareTransport(
      *   responder that goes stuck after serving-then-idle would otherwise stay dead until process death
      *   (field-observed 2026-07-04). The session cycle is safe at 0 NDPs (the NAN-down wipe clears any ghost an
      *   in-place unregister would mint) and cheap, so it needs no corroboration.
-     * - **Tier 2 (last resort, [WEDGE_RESTART_MS]):** still owed *and* [anySyncOwed] (corroborated) → process
-     *   kill. Corroboration stays on the kill so an out-of-range-but-cueing peer can't self-kill the node, and
-     *   [canReclaimForegroundService] gates it so the cure can't cost more than the wedge.
+     * - **Tier 2 (last resort, [WEDGE_RESTART_MS]):** still owed *and* [anySyncOwed] (corroborated: a live NAN link,
+     *   or another short-range plane hears the peer *near*, [corroboratedPresent]) → process kill. Corroboration stays
+     *   on the kill so an out-of-range-but-cueing peer can't self-kill the node; it is held while Knit is in use (its
+     *   UI on screen or a call running — the policy's [NanWatchdogPolicy.Action.DeferRestart]), and
+     *   [canReclaimForegroundService] gates it so the cure can't cost more than the wedge. On a non-exempt API 31+
+     *   phone those two together mean Tier 2 never fires (the re-claim needs the screen the hold refuses): accepted,
+     *   since Tier 1's session cycle is already a NAN restart wherever Knit is the only Aware client (ADR 2026-09.9dnk's
+     *   2026-10-20 amendment).
      */
     private fun checkWedge() {
         val now = SystemClock.elapsedRealtime()
@@ -848,6 +892,8 @@ class WifiAwareTransport(
                 healthy = healthy,
                 reachableOwed = anyReachableSyncOwed(), // Tier-1 / episode signal (uncorroborated)
                 corroboratedOwed = anySyncOwed(), // extra Tier-2 gate (corroborated)
+                visible = appVisible.value, // either holds a due Tier 2, never Tier 1
+                callLive = callLive(),
                 now = now,
                 syncOwedSince = syncOwedSince,
                 lastLinkOrAcceptAt = lastLinkOrAcceptAt,
@@ -859,6 +905,7 @@ class WifiAwareTransport(
                 wedgeRestartMs = WEDGE_RESTART_MS,
                 maxResponderRefreshes = MAX_RESPONDER_REFRESHES,
             )
+        tier2Notes.episode(decision.nextSyncOwedSince) // a (re)started or ended episode: a held kill's lines re-arm
         syncOwedSince = decision.nextSyncOwedSince
         responderRefreshes = decision.nextResponderRefreshes
         // Publish the episode clock the watchdog runs on: without this it has no consumer outside this
@@ -868,6 +915,14 @@ class WifiAwareTransport(
         if (syncOwedSince != 0L) metrics.onNanSyncOwed(now - syncOwedSince)
         when (decision.action) {
             NanWatchdogPolicy.Action.None -> {}
+
+            // A due kill held while Knit is in use: the episode clock runs on, [lastRestartAt] stays unstamped, and the
+            // first check after use ends re-decides. Never "NAN data plane wedged": the soak poller counts that as a kill.
+            NanWatchdogPolicy.Action.DeferRestart -> {
+                if (tier2Notes.shouldLogInUse()) {
+                    Log.w(TAG, "Tier-2 restart deferred: Knit is in use (sync owed ${now - syncOwedSince}ms with no link)")
+                }
+            }
 
             // Tier 1: refresh the (possibly wedged) responder — light, uncorroborated, safe at 0 NDPs.
             NanWatchdogPolicy.Action.RefreshResponder -> {
@@ -882,22 +937,36 @@ class WifiAwareTransport(
 
             // Tier 2: last-resort process kill (MeshService is START_STICKY, so the service is recreated).
             NanWatchdogPolicy.Action.RestartProcess -> {
-                // ...but only when the system would actually let the service back. A sticky restart is not an
-                // exemption to the Android 12+ background foreground-service-start rule, so killing an
-                // unexempted backgrounded process trades a wedged data plane for no mesh at all until the user
-                // next opens the app (and, before MeshService learned to decline, a crash). Deliberately leaves
-                // the episode clock running and [lastRestartAt] unstamped, so the cure still fires on the next
-                // check once the app is foreground or battery-exempt and the wedge has persisted.
-                if (!canReclaimForegroundService(appContext)) {
-                    Log.w(TAG, "NAN data plane wedged but the foreground service can't be re-claimed — not restarting")
-                    return
-                }
-                lastRestartAt = now
-                Log.e(TAG, "NAN data plane wedged (sync owed ${now - syncOwedSince}ms with no link) — restarting process")
-                logState()
-                Process.killProcess(Process.myPid())
+                restartProcess(now)
             }
         }
+    }
+
+    /**
+     * Tier 2's kill, once the policy says it is due and Knit is not in use — but only when the system would actually
+     * let the service back. A sticky restart is not an exemption to the Android 12+ background foreground-service-start
+     * rule, so killing an unexempted backgrounded process trades a wedged data plane for no mesh at all until the user
+     * next opens the app (and, before MeshService learned to decline, a crash). Declining leaves the episode clock
+     * running and [lastRestartAt] unstamped, so the cure still fires on a later check once the phone is battery-exempt
+     * and the wedge has persisted; on a non-exempt phone it never does, since the re-claim needs the screen the in-use
+     * hold refuses (ADR 043, ADR 2026-09.9dnk's 2026-10-20 amendment). Logged once per episode, and never as "NAN data
+     * plane wedged": the soak poller counts that phrase as a kill.
+     */
+    private fun restartProcess(now: Long) {
+        if (!canReclaimForegroundService(appContext)) {
+            if (tier2Notes.shouldLogReclaim()) {
+                Log.w(TAG, "Tier-2 restart deferred: foreground service can't be re-claimed")
+            }
+            return
+        }
+        lastRestartAt = now
+        Log.e(
+            TAG,
+            "NAN data plane wedged (sync owed ${now - syncOwedSince}ms with no link) — restarting process " +
+                "corroborated=${corroboratingPeers(now)}",
+        )
+        logState()
+        Process.killProcess(Process.myPid())
     }
 
     /**
@@ -1135,13 +1204,13 @@ class WifiAwareTransport(
     }
 
     /**
-     * The set of peers another plane (Bluetooth) can currently see, pushed by [CompositeMeshTransport]. It
-     * corroborates the wedge watchdog ([checkWedge] / [anySyncOwed]) — being called at all means a corroborating
-     * plane exists, so a NAN-only device is left on the un-corroborated fallback — and a peer that plane sights
-     * which we hold no cue target for ends loneliness: the relaxed lonely cadence ([NanLonelyPolicy]) is
-     * restarted and the loop woken, so a BLE walk-up relights discovery within one aggressive tick rather than
-     * one relaxed one. Rising edge only, and NAN's own discoveries fill `cueTarget` before any echo, so it
-     * cannot loop.
+     * The set of peers another plane (Bluetooth) can currently see, pushed by [CompositeMeshTransport]. Being
+     * called at all means a corroborating plane exists ([hasForeignPlane]; a NAN-only device is left on the
+     * un-corroborated fallback), but the set itself no longer corroborates the wedge watchdog — [onForeignNear]
+     * does. A peer that plane sights which we hold no cue target for ends loneliness: the relaxed lonely cadence
+     * ([NanLonelyPolicy]) is restarted and the loop woken, so a BLE walk-up relights discovery within one
+     * aggressive tick rather than one relaxed one. Rising edge only, and NAN's own discoveries fill `cueTarget`
+     * before any echo, so it cannot loop.
      */
     override fun onForeignReachable(peers: Set<String>) {
         hasForeignPlane = true
@@ -1151,6 +1220,15 @@ class WifiAwareTransport(
             lonelySince = 0L
             healSignal.trySend(Unit)
         }
+    }
+
+    /**
+     * The peers another short-range plane hears near ([MeshTransport.near]), pushed by [CompositeMeshTransport]: the
+     * wedge watchdog's Tier-2 corroboration ([corroboratedPresent]). Read only by the watchdog tick; wakes nothing.
+     */
+    override fun onForeignNear(peers: Set<String>) {
+        hasForeignPlane = true
+        foreignNear = peers
     }
 
     /**

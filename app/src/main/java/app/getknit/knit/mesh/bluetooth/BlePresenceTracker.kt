@@ -62,6 +62,14 @@ class BlePresenceTracker(
          * its first Coded hit, so it counts only once a 1M listener has missed it for a while.
          */
         val codedLagMs: Long? = null,
+        /**
+         * Whether that PHY was heard in the latest burst — the rule [smoothedRssi] counts a PHY's reading by. [rssi1m]
+         * and [rssiCoded] outlive their PHY going silent (a walk-away peer keeps its last strong 1M reading while Coded
+         * alone still hears it), so a reader of the raw readings checks these first ([ScanPlan.near]). The defaults
+         * call a held reading fresh, for a snapshot built by hand.
+         */
+        val oneMFresh: Boolean = rssi1m != null,
+        val codedFresh: Boolean = rssiCoded != null,
     )
 
     private class Entry(
@@ -78,25 +86,30 @@ class BlePresenceTracker(
         // The 1M-listening clock at the latest Coded hit.
         var lastCodedClock: Long? = null,
     ) {
+        /** Whether 1M was heard in the latest burst: its last hit within [PresenceConfig.presenceGapResetMs] of the latest sighting. */
+        fun oneMFresh(config: PresenceConfig): Boolean = fresh(last1mAt, config.presenceGapResetMs)
+
+        /** Whether Coded was heard in the latest burst: its last hit within [PresenceConfig.codedGapResetMs] of the latest sighting. */
+        fun codedFresh(config: PresenceConfig): Boolean = fresh(lastCodedAt, config.codedGapResetMs)
+
+        private fun fresh(
+            at: Long?,
+            gapMs: Long,
+        ) = at != null && lastSeenAt - at <= gapMs
+
         /**
-         * The smoothed RSSI on the 1M scale, counting a PHY only if it was heard in the latest burst (within that
-         * PHY's own gap of the latest sighting). The latest sighting's own PHY always is, so this is never empty once
-         * [note] has run.
+         * The smoothed RSSI on the 1M scale, counting a PHY only if it was heard in the latest burst ([oneMFresh],
+         * [codedFresh]). The latest sighting's own PHY always is, so this is never empty once [note] has run.
          */
         fun smoothed(
             config: PresenceConfig,
             creditDb: Double,
-        ): Double {
-            fun fresh(
-                at: Long?,
-                gapMs: Long,
-            ) = at != null && lastSeenAt - at <= gapMs
-            return CodedPhyPolicy.effectiveRssi(
-                rssi1m.takeIf { fresh(last1mAt, config.presenceGapResetMs) },
-                rssiCoded.takeIf { fresh(lastCodedAt, config.codedGapResetMs) },
+        ): Double =
+            CodedPhyPolicy.effectiveRssi(
+                rssi1m.takeIf { oneMFresh(config) },
+                rssiCoded.takeIf { codedFresh(config) },
                 creditDb,
             ) ?: Double.NEGATIVE_INFINITY
-        }
 
         /** The gap past which a sighting on [coded]'s PHY starts presence over: wider only for Coded after Coded. */
         fun gapFor(
@@ -219,6 +232,8 @@ class BlePresenceTracker(
                 rssi1m = e.rssi1m,
                 rssiCoded = e.rssiCoded,
                 codedLagMs = e.lastCodedClock?.let { coded -> maxOf(0L, coded - (oneMMarks[nodeId] ?: coded)) },
+                oneMFresh = e.oneMFresh(config),
+                codedFresh = e.codedFresh(config),
             )
         }
     }

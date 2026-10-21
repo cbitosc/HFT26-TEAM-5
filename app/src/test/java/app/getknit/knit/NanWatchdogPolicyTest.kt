@@ -3,6 +3,8 @@ package app.getknit.knit
 import app.getknit.knit.mesh.wifiaware.NanWatchdogPolicy
 import app.getknit.knit.mesh.wifiaware.NanWatchdogPolicy.Action
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /** Unit tests for [NanWatchdogPolicy] — the pure two-tier wedge episode-clock decision. */
@@ -21,6 +23,8 @@ class NanWatchdogPolicyTest {
         healthy: Boolean = true,
         reachableOwed: Boolean = true,
         corroboratedOwed: Boolean = true,
+        visible: Boolean = false,
+        callLive: Boolean = false,
         now: Long,
         syncOwedSince: Long = episodeStart,
         lastLinkOrAcceptAt: Long = 0L, // < episodeStart ⇒ no progress
@@ -31,6 +35,8 @@ class NanWatchdogPolicyTest {
         healthy = healthy,
         reachableOwed = reachableOwed,
         corroboratedOwed = corroboratedOwed,
+        visible = visible,
+        callLive = callLive,
         now = now,
         syncOwedSince = syncOwedSince,
         lastLinkOrAcceptAt = lastLinkOrAcceptAt,
@@ -157,7 +163,7 @@ class NanWatchdogPolicyTest {
                     restartedAt = now - episodeStart
                 }
 
-                Action.None -> {}
+                Action.None, Action.DeferRestart -> {}
             }
             now += wedgeCheckMs
         }
@@ -182,5 +188,218 @@ class NanWatchdogPolicyTest {
             NanWatchdogPolicy.Decision(Action.None, episodeStart, 0),
             decide(now = now, lastReattachAt = now - 5_000L, lastRestartAt = now - (wedgeRestartMs - 1)),
         )
+    }
+
+    @Test
+    fun inUseDefersADueTier2AndKeepsTheEpisode() {
+        val now = episodeStart + wedgeRestartMs
+        assertEquals(
+            NanWatchdogPolicy.Decision(Action.DeferRestart, episodeStart, maxResponderRefreshes),
+            decide(now = now, visible = true, responderRefreshes = maxResponderRefreshes, lastReattachAt = episodeStart + 120_000L),
+        )
+    }
+
+    @Test
+    fun inUseDefersNothingThatWasNotDue() {
+        // Below the restart boundary, uncorroborated or rate-limited, a held kill is plain None: the transport logs
+        // a deferral only for a kill it would otherwise have run.
+        val due = episodeStart + wedgeRestartMs
+        assertEquals(Action.None, decide(now = due - 1, visible = true, lastReattachAt = due - 5_000L).action)
+        assertEquals(Action.None, decide(now = due, visible = true, corroboratedOwed = false, lastReattachAt = due - 5_000L).action)
+        assertEquals(
+            Action.None,
+            decide(now = due, visible = true, lastReattachAt = due - 5_000L, lastRestartAt = due - (wedgeRestartMs - 1)).action,
+        )
+    }
+
+    @Test
+    fun inUseNeverBlocksTier1() {
+        assertEquals(
+            NanWatchdogPolicy.Decision(Action.RefreshResponder, episodeStart, 1),
+            decide(now = episodeStart + responderRefreshMs, visible = true),
+        )
+        // ...nor a Tier 1 that is still owed when the Tier-2 boundary arrives (the cooldown-elapsed case).
+        assertEquals(
+            NanWatchdogPolicy.Decision(Action.RefreshResponder, episodeStart, 3),
+            decide(now = episodeStart + wedgeRestartMs, visible = true, responderRefreshes = 2),
+        )
+    }
+
+    /**
+     * The real cadence with Knit on screen past the Tier-2 boundary (P9, 2026-10-20): the three Tier-1 cycles run as
+     * without the hold, every due tick defers, the clock and the count survive every deferral, and the first tick after
+     * the screen goes away restarts.
+     */
+    @Test
+    fun aDeferredTier2FiresOnTheFirstTickAfterUseEnds() {
+        var refreshes = 0
+        var lastReattachAt = 0L
+        var since = episodeStart
+        val fired = mutableListOf<Long>()
+        val deferred = mutableListOf<Long>()
+        var restartedAt: Long? = null
+        val useEndsAt = episodeStart + wedgeRestartMs + 3 * wedgeCheckMs
+        var now = episodeStart
+        while (restartedAt == null && now <= useEndsAt + wedgeCheckMs) {
+            val d =
+                decide(
+                    now = now,
+                    syncOwedSince = since,
+                    visible = now < useEndsAt,
+                    lastReattachAt = lastReattachAt,
+                    responderRefreshes = refreshes,
+                )
+            since = d.nextSyncOwedSince
+            refreshes = d.nextResponderRefreshes
+            when (d.action) {
+                Action.RefreshResponder -> {
+                    fired += now - episodeStart
+                    lastReattachAt = now
+                }
+
+                Action.DeferRestart -> {
+                    deferred += now - episodeStart
+                }
+
+                Action.RestartProcess -> {
+                    restartedAt = now - episodeStart
+                }
+
+                Action.None -> {}
+            }
+            now += wedgeCheckMs
+        }
+        assertEquals(listOf(60_000L, 90_000L, 120_000L), fired)
+        assertEquals(listOf(180_000L, 210_000L, 240_000L), deferred)
+        assertEquals(episodeStart, since)
+        assertEquals(maxResponderRefreshes, refreshes)
+        assertEquals(useEndsAt - episodeStart, restartedAt)
+    }
+
+    @Test
+    fun aLiveCallAloneHoldsADueTier2() {
+        // Off screen with a call running (a walkie in a pocket): the kill would end the call, so it is held as surely as
+        // a lit screen holds it. Fails if the call stops reaching the hold.
+        val now = episodeStart + wedgeRestartMs
+        val held = decide(now = now, callLive = true, responderRefreshes = maxResponderRefreshes, lastReattachAt = now - 5_000L)
+        assertEquals(NanWatchdogPolicy.Decision(Action.DeferRestart, episodeStart, maxResponderRefreshes), held)
+        assertEquals(
+            "neither on screen nor in a call: the due kill runs",
+            Action.RestartProcess,
+            decide(now = now, responderRefreshes = maxResponderRefreshes, lastReattachAt = now - 5_000L).action,
+        )
+    }
+
+    @Test
+    fun tier2NotesLogEachLineOncePerEpisode() {
+        val notes = NanWatchdogPolicy.Tier2Notes()
+        notes.episode(episodeStart)
+        assertTrue(notes.shouldLogInUse())
+        assertTrue(notes.shouldLogReclaim())
+        repeat(5) {
+            notes.episode(episodeStart) // the same episode, tick after tick
+            assertFalse(notes.shouldLogInUse())
+            assertFalse(notes.shouldLogReclaim())
+        }
+    }
+
+    @Test
+    fun tier2NotesReArmOnAnEpisodeRestart() {
+        // A link mid-episode restarts the clock at a later now (decide's progress branch): a fresh episode.
+        val notes = NanWatchdogPolicy.Tier2Notes()
+        notes.episode(episodeStart)
+        assertTrue(notes.shouldLogInUse())
+        assertTrue(notes.shouldLogReclaim())
+        notes.episode(episodeStart + 90_000L)
+        assertTrue(notes.shouldLogInUse())
+        assertTrue(notes.shouldLogReclaim())
+        assertFalse(notes.shouldLogInUse())
+    }
+
+    @Test
+    fun tier2NotesReArmWhenAnEpisodeEnds() {
+        // Convergence or an unhealthy tick ends the episode (nextSyncOwedSince = 0); a later episode starting at the very
+        // same instant's clock value still gets its lines, because the end in between re-armed them.
+        val notes = NanWatchdogPolicy.Tier2Notes()
+        notes.episode(episodeStart)
+        assertTrue(notes.shouldLogInUse())
+        assertTrue(notes.shouldLogReclaim())
+        notes.episode(0L)
+        assertTrue(notes.shouldLogInUse())
+        assertTrue(notes.shouldLogReclaim())
+        notes.episode(episodeStart)
+        assertTrue(notes.shouldLogInUse())
+        assertTrue(notes.shouldLogReclaim())
+    }
+
+    @Test
+    fun tier2NotesLinesAreIndependent() {
+        // The screen hold fires for minutes before the screen goes off and the re-claim refusal takes over: the first
+        // line's spend must leave the second's armed, and the reverse.
+        val notes = NanWatchdogPolicy.Tier2Notes()
+        notes.episode(episodeStart)
+        assertTrue(notes.shouldLogInUse())
+        assertFalse(notes.shouldLogInUse())
+        assertTrue("the in-use line spent nothing of the re-claim line", notes.shouldLogReclaim())
+        assertFalse(notes.shouldLogReclaim())
+
+        val other = NanWatchdogPolicy.Tier2Notes()
+        other.episode(episodeStart)
+        assertTrue(other.shouldLogReclaim())
+        assertTrue("the re-claim line spent nothing of the in-use line", other.shouldLogInUse())
+    }
+
+    /**
+     * The latch fed by the real cadence: decide's episode clock, every tick, through the screen hold, the screen going
+     * off onto a refused re-claim, a link that restarts the episode, and the episode's end.
+     */
+    @Test
+    fun tier2NotesOverTheRealCadence() {
+        val notes = NanWatchdogPolicy.Tier2Notes()
+        var since = 0L
+        var refreshes = 0
+        var lastReattachAt = 0L
+        var lastLink = 0L
+        val inUseLines = mutableListOf<Long>()
+        val reclaimLines = mutableListOf<Long>()
+        val linkAt = episodeStart + 300_000L
+        var now = episodeStart
+        while (now <= episodeStart + 720_000L) {
+            val visible = now < episodeStart + 240_000L
+            if (now == linkAt) lastLink = now - 1 // a link just before this tick: progress restarts the episode now
+            val d =
+                decide(
+                    now = now,
+                    syncOwedSince = since,
+                    visible = visible,
+                    lastLinkOrAcceptAt = lastLink,
+                    lastReattachAt = lastReattachAt,
+                    responderRefreshes = refreshes,
+                )
+            since = d.nextSyncOwedSince
+            refreshes = d.nextResponderRefreshes
+            notes.episode(since)
+            when (d.action) {
+                Action.RefreshResponder -> {
+                    lastReattachAt = now
+                }
+
+                Action.DeferRestart -> {
+                    if (notes.shouldLogInUse()) inUseLines += now - episodeStart
+                }
+
+                // The transport's refused re-claim: off screen on a non-exempt phone, the kill never runs.
+                Action.RestartProcess -> {
+                    if (notes.shouldLogReclaim()) reclaimLines += now - episodeStart
+                }
+
+                Action.None -> {}
+            }
+            now += wedgeCheckMs
+        }
+        // First episode: one in-use line at the Tier-2 boundary, one re-claim line once the screen is off. The link
+        // restarts the episode at 300 s, whose own Tier 2 comes due 180 s later and gets its own re-claim line.
+        assertEquals(listOf(180_000L), inUseLines)
+        assertEquals(listOf(240_000L, 480_000L), reclaimLines)
     }
 }

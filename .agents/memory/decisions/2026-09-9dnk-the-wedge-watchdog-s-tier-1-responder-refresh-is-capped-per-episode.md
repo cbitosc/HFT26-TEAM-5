@@ -77,3 +77,34 @@ this ADR exists to close — `NanWatchdogPolicyTest.tier1CannotCycleForeverAndTi
 `WEDGE_CHECK_MS` cadence and is the regression that catches it. Second, any *new* path that closes
 `subscribeSession` must clear `discovered` with it; the map is the fleet's only record of which handles are
 live, and a stale entry both mis-dials and suppresses its own repair.
+
+*Amendment (2026-10-20, Tier 2 corroborates on Bluetooth's near and never runs while Knit is in use).* P9 killed
+itself on a lit Knit screen: `NAN data plane wedged (sync owed 180013ms with no link) — restarting process`, three
+Tier-1 cycles first, the owed peer P8 walking away. Its Bluetooth link to P8 had dropped at range seven minutes
+earlier, and the corroboration passed on one Coded advert at −101..−103 dBm (`bt coded heard … hits=1 … 1m=0`):
+`corroboratedPresent` read the siblings' `reachable`, and once Bluetooth links stepped down to the Coded PHY (ADR
+2026-10.yvn6) `reachable` reached far past an NDP. The service came back in a second; the person saw the app crash.
+Two changes, both on the Tier-2 kill only — Tier 1, its 45 s clock and its three-per-episode cap are untouched.
+
+- **Corroboration is another short-range plane's `near`, not its `reachable`.** `MeshTransport.near` (default:
+  `reachable`) is pushed to each child by `CompositeMeshTransport` through `onForeignNear`, LoRa excluded as before;
+  Bluetooth's is its links plus the peers heard fresh, in the latest burst, at raw ≥ −90 dBm on either PHY, never
+  a Coded-only peer, and never the Coded sensitivity credit (raw dBm is a power reading). Its staleness bound is
+  `reachable`'s, ≈150 s: nothing republishes it on a clock. A live NAN link still corroborates itself, and a phone
+  with no sibling plane keeps the uncorroborated fallback. `onForeignReachable` keeps its other readers — the BLE
+  scan boost, the NAN lonely restart — unchanged. The kill line now ends `corroborated=[…]`, the owed peers that were
+  linked or near, so a trial reads which sighting it rested on beside Bluetooth's `bt state … near=` line.
+- **No Tier 2 while Knit is in use.** `NanWatchdogPolicy.decide` takes `inUse` — Knit's UI on screen
+  (`AppVisibility`) or a call running (`CallManager.state` short of `Ended`; a kill ends any call the process
+  carries, whichever plane carries it) — and answers a due kill with `Action.DeferRestart`, the episode clock and
+  the Tier-1 count kept and `lastRestartAt` unstamped, so it fires on the first check after use ends if the wedge,
+  its corroboration and the rate limit still allow it. The hold sits after Tier 1, so the cap still spends before
+  `WEDGE_RESTART_MS` and `tier1CannotCycleForeverAndTier2IsReached` still walks to the restart. It logs
+  `Tier-2 restart deferred: Knit is in use` once per episode; the re-claim refusal is reworded to `Tier-2 restart
+  deferred: foreground service can't be re-claimed` and logs once per episode too. Neither carries `NAN data plane
+  wedged`, which the soak poller counts as a kill.
+
+The accepted cost: on a non-exempt API 31+ phone the re-claim gate (ADR 043) passes only with Knit on screen, which
+the hold now refuses, so Tier 2 never fires there. Where Knit is the only Aware client, Tier 1's session cycle is
+already a NAN disable/enable and clears the ghost the kill was for; Tier 2 only adds the case where another Aware
+client holds NAN up, and Bluetooth and the coordination plane's DMs carry on meanwhile.

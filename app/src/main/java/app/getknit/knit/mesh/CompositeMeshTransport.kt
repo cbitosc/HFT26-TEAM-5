@@ -234,9 +234,22 @@ class CompositeMeshTransport(
                     for (i in children.indices) {
                         val foreign = HashSet<String>()
                         // Only SHORT-RANGE siblings' sightings imply real proximity; a LoRa sighting (a peer
-                        // kilometres away) must not make BLE chase it or corroborate NAN's wedge self-kill.
+                        // kilometres away) must not make BLE chase it or end NAN's loneliness.
                         for (j in children.indices) if (j != i && children[j].shortRange) sets[j].forEach { foreign.add(it.nodeId) }
                         children[i].onForeignReachable(foreign)
+                    }
+                }
+            }
+            // The narrower hint beside it: which peers the *other* short-range planes hear near ([MeshTransport.near]),
+            // the Wi-Fi Aware wedge watchdog's process-kill corroboration (ADR 2026-09.9dnk). Never `reachable`: a
+            // Coded-PHY advert at −101 dBm keeps a walk-away peer reachable over Bluetooth far past an NDP's range, and
+            // corroborated a kill that way (P9, 2026-10-20). LoRa is excluded exactly as above.
+            scope.launch {
+                combine(children.map { it.near }) { it }.collect { sets ->
+                    for (i in children.indices) {
+                        val foreign = HashSet<String>()
+                        for (j in children.indices) if (j != i && children[j].shortRange) sets[j].forEach { foreign.add(it.nodeId) }
+                        children[i].onForeignNear(foreign)
                     }
                 }
             }

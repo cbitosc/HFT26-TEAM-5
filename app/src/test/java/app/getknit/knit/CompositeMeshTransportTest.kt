@@ -67,6 +67,8 @@ class CompositeMeshTransportTest {
         override val neighbors = _neighbors.asStateFlow()
         private val _reachable = MutableStateFlow<Set<Peer>>(emptySet())
         override val reachable = _reachable.asStateFlow()
+        private val _near = MutableStateFlow<Set<Peer>>(emptySet())
+        override val near = _near.asStateFlow()
         private val healthState = MutableStateFlow(TransportHealth.Healthy)
         override val health = healthState.asStateFlow()
         private val heldState = MutableStateFlow(false)
@@ -95,6 +97,7 @@ class CompositeMeshTransportTest {
         val fastSends = mutableListOf<Peer>()
         val suppressCalls = mutableListOf<Set<String>>()
         val foreignCalls = mutableListOf<Set<String>>()
+        val nearCalls = mutableListOf<Set<String>>()
         val internetCalls = mutableListOf<Set<String>>()
         var starts = 0
         var stops = 0
@@ -133,6 +136,10 @@ class CompositeMeshTransportTest {
 
         override fun onForeignReachable(peers: Set<String>) {
             foreignCalls += peers
+        }
+
+        override fun onForeignNear(peers: Set<String>) {
+            nearCalls += peers
         }
 
         override fun expectBulkTransfer(nodeId: String): Boolean {
@@ -193,6 +200,10 @@ class CompositeMeshTransportTest {
 
         fun setReachable(vararg peers: Peer) {
             _reachable.value = peers.toSet()
+        }
+
+        fun setNear(vararg peers: Peer) {
+            _near.value = peers.toSet()
         }
 
         fun setHealth(h: TransportHealth) {
@@ -975,6 +986,29 @@ class CompositeMeshTransportTest {
             assertTrue("BT never learns the LoRa-only peer as foreign", bt.foreignCalls.all { "far" !in it })
             assertTrue("NAN never learns the LoRa-only peer as foreign", nan.foreignCalls.all { "far" !in it })
             assertTrue("the short-range NAN sighting still propagates to BT", bt.foreignCalls.any { "near" in it })
+        }
+
+    @Test
+    fun pushesForeignNearFromTheOtherShortRangeChildrenOnly() =
+        runTest(UnconfinedTestDispatcher()) {
+            val bt = FakeChild(kind = TransportKind.Bluetooth)
+            val nan = FakeChild(hasFastPlane = true, kind = TransportKind.WifiAware)
+            val lora = FakeChild(hasFastPlane = true, kind = TransportKind.LoRa, shortRange = false)
+            CompositeMeshTransport(listOf(bt, nan, lora), backgroundScope)
+            // BT reaches "far" (a Coded advert) but hears only "close" near: NAN's corroboration gets "close" alone.
+            bt.setReachable(Peer("close"), Peer("far"))
+            bt.setNear(Peer("close"))
+            lora.setNear(Peer("board"))
+            advanceUntilIdle()
+            assertEquals("NAN learns what BT hears near, not what it reaches", setOf("close"), nan.nearCalls.last())
+            assertEquals("the reachable hint is untouched", setOf("close", "far"), nan.foreignCalls.last())
+            assertEquals("LoRa learns BT's near too, as it learns its reachable", setOf("close"), lora.nearCalls.last())
+            assertTrue("BT never hears its own near back", bt.nearCalls.all { "close" !in it })
+            assertTrue("a LoRa sighting is never near", (bt.nearCalls + nan.nearCalls).all { "board" !in it })
+
+            bt.setNear()
+            advanceUntilIdle()
+            assertEquals("a peer leaving BT's near leaves NAN's", emptySet<String>(), nan.nearCalls.last())
         }
 
     @Test

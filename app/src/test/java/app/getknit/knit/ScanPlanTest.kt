@@ -131,4 +131,44 @@ class ScanPlanTest {
         assertEquals(PowerPolicy.hunting(dark, 0, 0), gap.keepsWallTime)
         assertTrue("alone and not yet relaxed", gap.keepsWallTime)
     }
+
+    private fun heard(
+        nodeId: String,
+        rssi1m: Double? = null,
+        rssiCoded: Double? = null,
+        oneMFresh: Boolean = rssi1m != null,
+        codedFresh: Boolean = rssiCoded != null,
+        codedLagMs: Long? = null,
+    ): BlePresenceTracker.Snapshot =
+        snap(nodeId, codedLagMs).copy(
+            smoothedRssi = -60.0, // never read by near: the raw readings are
+            rssi1m = rssi1m,
+            rssiCoded = rssiCoded,
+            oneMFresh = oneMFresh,
+            codedFresh = codedFresh,
+        )
+
+    @Test
+    fun nearIsEveryLinkAndEverySightingWhoseFreshRawReadingReachesTheFloor() {
+        val stale = CodedPhyPolicy.ONE_M_FRESH_MS + 1
+        val snaps =
+            listOf(
+                heard("strong1m", rssi1m = -60.0),
+                heard("edge1m", rssi1m = -90.0),
+                heard("weak1m", rssi1m = -91.0),
+                // A walk-away peer: its last 1M reading is strong but 1M went silent, and Coded hears it weakly.
+                heard("stale1m", rssi1m = -60.0, oneMFresh = false, rssiCoded = -95.0, codedLagMs = 1_000),
+                heard("codedOnly", rssi1m = -60.0, oneMFresh = false, rssiCoded = -60.0, codedLagMs = stale),
+                // The incident's reading: raw −101 on Coded, which its credit scores −89 on the 1M scale.
+                heard("farCoded", rssiCoded = -101.0, codedLagMs = 0),
+                // A close peer heard in a Coded-only window: 1M not fresh, but not Coded-only either.
+                heard("closeCoded", rssi1m = -65.0, oneMFresh = false, rssiCoded = -70.0, codedLagMs = 0),
+            )
+        val link = Peer("linked", protoVersion = 1, capabilities = 7L)
+        val near = ScanPlan.near(snaps, linkPeers = listOf(link))
+        assertEquals(setOf("strong1m", "edge1m", "closeCoded", "linked"), near.map { it.nodeId }.toSet())
+        assertTrue("the link's Peer, with no snapshot behind it", link in near)
+        assertTrue("near is within reachable", ScanPlan.reachable(snaps, listOf(link)).containsAll(near))
+        assertTrue("the credit would have passed −101", -101.0 + CodedPhyPolicy.CODED_RSSI_CREDIT_DB >= -90.0)
+    }
 }

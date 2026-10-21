@@ -89,6 +89,14 @@ Bluetooth-adjacent routing that stays in `AGENTS.md`, because another subsystem 
   watchdogs, scan window and pause, the hunting gap, the GATT payload read's give-up) go through `elapsedWait`, never
   `delay` / `withTimeoutOrNull`, which stop while the CPU sleeps; the settled, linked and relaxed scan gaps keep
   stretching on purpose (power budgets — moving one is a battery change). Measure with `scripts/ble-link-trial.py`.
+- **When touching `ScanPlan.near`, `BlePresenceTracker.Snapshot.oneMFresh` / `codedFresh`, `BluetoothMeshTransport.near`,
+  or `MeshTransport.near` / `onForeignNear`:** READ ADR 2026-09.9dnk (its 2026-10-20 amendment) and ADR 2026-10.yvn6.
+  `near` is the set that corroborates Wi-Fi Aware's Tier-2 self-kill: link peers on any PHY, plus peers whose strongest
+  reading heard in the latest burst, raw on its own PHY (no Coded credit), is ≥ −90 and that are not
+  `CodedPhyPolicy.codedOnly`. A stored `rssi1m` outlives 1M going silent, so freshness is the tracker's own
+  latest-burst rule, shared with `smoothed()`. It is built from the same `snapshots(now)` call as `reachable` (so
+  `near ⊆ reachable`), cleared at stop and adapter off, and logged as the last field of `bt state` (`near=[…]`). No
+  wall-clock gate: nothing republishes when one expires.
 - **When touching `BleAdvertiser.reassert` / `onAdvertisingEnabled`, `AdvertReassertPolicy`, or the transport's
   `advertLoop` / ACL edge receiver:** READ ADR 2026-10.9utz. The stack re-enables its advertising sets around every
   connection and the controller can refuse that (0x0d), reporting it only for a connection *to* the set — never for

@@ -107,6 +107,7 @@ data class PromotionConfig(
         // edge of usable range without churning connect-backoff on doomed sub-sensitivity attempts. It reads the
         // presence advert, which runs at full power (TX_POWER_HIGH, ADR 2026-10.ryak); at MEDIUM it stood 8 dB
         // short of that edge, and two Pixels four metres apart in line of sight read -79..-90.
-        private const val DEFAULT_RSSI_FLOOR_DBM = -90
+        // Public for ScanPlan.near, whose "heard near" floor is this one on the raw reading.
+        const val DEFAULT_RSSI_FLOOR_DBM = -90
     }
 }

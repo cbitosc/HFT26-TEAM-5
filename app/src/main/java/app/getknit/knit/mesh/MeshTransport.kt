@@ -264,6 +264,15 @@ interface MeshTransport {
     val reachable: StateFlow<Set<Peer>> get() = neighbors
 
     /**
+     * The peers this short-range plane hears close enough to corroborate that they are physically present — a subset
+     * of [reachable], which a long-reach PHY widens past a sibling's range (Bluetooth's Coded PHY holds a peer from one
+     * advert at −101 dBm, far past a Wi-Fi Aware NDP). [CompositeMeshTransport] pushes the short-range siblings' sets
+     * to each child through [onForeignNear]; the Wi-Fi Aware wedge watchdog's process kill reads it (ADR 2026-09.9dnk).
+     * Defaults to [reachable] for a transport whose reach is its range.
+     */
+    val near: StateFlow<Set<Peer>> get() = reachable
+
+    /**
      * Coarse radio health: [TransportHealth.Degraded] when Quick Share seizes the radios (on but failing),
      * [TransportHealth.Unavailable] when the radio is switched off (Wi-Fi/Bluetooth off or airplane mode).
      */
@@ -297,8 +306,9 @@ interface MeshTransport {
 
     /**
      * Whether a sighting on this transport implies the peer is **physically near** (BLE/NAN range), so a
-     * sibling plane may act on its [reachable] set — the Bluetooth scan-boost chase, the Wi-Fi Aware wedge
-     * watchdog's "owed peer genuinely nearby" corroboration, and the attachment-upload deferral all read it.
+     * sibling plane may act on its sets — the Bluetooth scan-boost chase and the attachment-upload deferral read
+     * its [reachable], and the Wi-Fi Aware wedge watchdog's "owed peer genuinely nearby" corroboration reads its
+     * narrower [near] (a Coded-PHY advert keeps a peer reachable far past an NDP's range, ADR 2026-09.9dnk).
      * A long-range plane (LoRa, whose peer may be kilometres away) overrides this to false so those siblings
      * ignore its sightings; [CompositeMeshTransport] excludes non-short-range children from every foreign set
      * and from [CompositeMeshTransport.shortRangeReachable]. A routing/semantics flag, deliberately distinct
@@ -403,6 +413,14 @@ interface MeshTransport {
      * Aware / fakes ignore it. Driven by [CompositeMeshTransport] from the *other* children's [reachable] sets.
      */
     fun onForeignReachable(peers: Set<String>) {}
+
+    /**
+     * Hints that [peers] (by nodeId) are heard **near** over some other short-range plane — its [near] set, a subset of
+     * what [onForeignReachable] carries. Driven by [CompositeMeshTransport] from the other short-range children's
+     * [near]; read by the Wi-Fi Aware wedge watchdog's corroboration, where a merely reachable peer (a far Coded
+     * advert) must not corroborate a process kill (ADR 2026-09.9dnk). Default no-op.
+     */
+    fun onForeignNear(peers: Set<String>) {}
 
     /**
      * Hints that a **large file transfer** with [peer nodeId] is imminent (an attachment blob is about to be

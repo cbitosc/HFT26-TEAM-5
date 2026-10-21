@@ -31,7 +31,7 @@ object NanSyncPolicy {
         val bulkWanted: Boolean,
         /** Live link, or heard on the coordination plane within `REACHABLE_LINGER_MS`. */
         val lingerReachable: Boolean,
-        /** Corroborated genuinely-present enough for the Tier-2 self-kill (`!hasForeignPlane || linked || foreignReachable`). */
+        /** Corroborated genuinely-present enough for the Tier-2 self-kill ([NanSyncPolicy.corroborated]). */
         val corroborated: Boolean,
     ) {
         /** Bulk-aware gate for the admission/teardown sites. */
@@ -45,6 +45,29 @@ object NanSyncPolicy {
 
     /** Tier-2 owed signal: a reachable peer's digest differs AND it's corroborated present. */
     fun anySyncOwed(facts: List<PeerFacts>): Boolean = facts.any { it.reachableSyncOwed && it.corroborated }
+
+    /**
+     * [PeerFacts.corroborated] for one owed peer: whether it is genuinely present enough to justify the Tier-2 self-kill.
+     * With a corroborating plane ([hasForeignPlane]: the composite wired Bluetooth's hooks), only [evidence] counts; a
+     * NAN-only device has no corroborator and falls back to yes, the behaviour before corroboration existed.
+     */
+    fun corroborated(
+        hasForeignPlane: Boolean,
+        linked: Boolean,
+        near: Boolean,
+    ): Boolean = !hasForeignPlane || evidence(linked, near)
+
+    /**
+     * The evidence that corroborates a Tier-2 kill: a live NAN link here ([linked]), or another short-range plane hears
+     * the peer *near* ([near]: `MeshTransport.near`, Bluetooth's links and fresh ≥ −90 dBm sightings, never Coded-only).
+     * Merely *reachable* on Bluetooth is never evidence and is not an input: a Coded-PHY advert at −101 dBm held a
+     * walk-away peer reachable and corroborated a kill on a lit screen (P9, 2026-10-20; ADR 2026-09.9dnk's 2026-10-20
+     * amendment). Also the filter of the kill's `corroborated=` log line, so that line names what the kill rested on.
+     */
+    fun evidence(
+        linked: Boolean,
+        near: Boolean,
+    ): Boolean = linked || near
 
     /** Tier-1 / episode owed signal: a reachable peer's digest differs (uncorroborated). */
     fun anyReachableSyncOwed(facts: List<PeerFacts>): Boolean = facts.any { it.reachableSyncOwed }

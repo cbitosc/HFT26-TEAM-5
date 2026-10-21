@@ -358,7 +358,9 @@ refusal, and on a 10 s (no link) / 60 s net (`AdvertReassertPolicy`, ADR 2026-10
 <status>, retry in <ms>` / `bt advert enabled again (refused for <ms>ms)`, `advert=` on the `bt state` line. **Load-bearing invariant: `reachable ⊇ neighbors`.**
 BLE `reachable` is fed only from scan presence (90 s linger), so once the floor stops re-sighting a
 linked peer it would vanish from the "nearby" UI while still linked — `publishReachable` unions live
-links back in (`_reachable` only, never `_neighbors`, which routes sends). Verify on-device via the
+links back in (`_reachable` only, never `_neighbors`, which routes sends). The same call publishes `near`, the
+stricter subset (links, or heard fresh at raw ≥ −90 and not Coded-only) that the composite pushes to Wi-Fi Aware
+through `onForeignNear` to corroborate its Tier-2 self-kill (ADR 2026-09.9dnk). Verify on-device via the
 `bt scan → floor/boost` logcat lines and that a linked peer stays in `…debug.STATE` reachable while the
 scan is floored. The side channel below runs a **second** scan with its own policy (`SideScanPolicy`):
 continuous at LOW_POWER/BALANCED while a flagged peer is around, Off during a connect, and rationed to

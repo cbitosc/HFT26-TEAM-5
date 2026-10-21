@@ -26,9 +26,21 @@ package app.getknit.knit.mesh.wifiaware
  * A refresh that has been tried [maxResponderRefreshes] times without producing a link is not working, so
  * the episode goes quiet and lets Tier 2 — correctly gated on corroboration and its own long clock —
  * escalate over a radio that is finally holding still.
+ *
+ * **Tier 2 never runs while Knit is in use** (`visible`: its UI on screen, or `callLive`: a call running; either alone
+ * holds it). A process kill is a
+ * crash to the person looking at it, and it ends any call the process carries; it fired on a lit Knit screen
+ * (P9, 2026-10-20) over a peer a single −101 dBm Coded advert corroborated. The hold sits after Tier 1, so the
+ * session cycles and their cap run exactly as without it, and it answers [Action.DeferRestart] with the episode
+ * clock and the Tier-1 count kept, so the kill fires on the first check after use ends if the wedge, its
+ * corroboration and the rate limit all still allow it (ADR 2026-09.9dnk's 2026-10-20 amendment).
  */
 object NanWatchdogPolicy {
-    enum class Action { None, RefreshResponder, RestartProcess }
+    /**
+     * [DeferRestart] is a Tier-2 kill that was due — owed long enough, corroborated, not rate-limited — and held only
+     * because Knit is in use: the transport logs it and does nothing else, exactly as it does for [None].
+     */
+    enum class Action { None, RefreshResponder, RestartProcess, DeferRestart }
 
     /**
      * [action] to take now, plus the values the transport must write back into its episode state:
@@ -46,6 +58,8 @@ object NanWatchdogPolicy {
      * @param healthy hardware present, Aware healthy, and a live session — else we can't sync, so not wedged.
      * @param reachableOwed a sync is owed to a *reachable* peer (uncorroborated) — the Tier-1 / episode signal.
      * @param corroboratedOwed the owed peer is corroborated genuinely-present — the extra Tier-2 gate.
+     * @param visible Knit's UI is on screen — holds a due Tier 2 as [Action.DeferRestart].
+     * @param callLive a call is running — holds a due Tier 2 the same way, screen or not (a kill ends the call).
      * @param syncOwedSince start of the current owed-with-no-link episode (0 = none).
      * @param lastLinkOrAcceptAt last successful link/accept (either role) — "progress" resets the episode.
      * @param responderRefreshes Tier-1 session cycles already spent in this episode.
@@ -57,6 +71,8 @@ object NanWatchdogPolicy {
         healthy: Boolean,
         reachableOwed: Boolean,
         corroboratedOwed: Boolean,
+        visible: Boolean,
+        callLive: Boolean,
         now: Long,
         syncOwedSince: Long,
         lastLinkOrAcceptAt: Long,
@@ -86,6 +102,48 @@ object NanWatchdogPolicy {
         if (owedFor < wedgeRestartMs || now - lastRestartAt < wedgeRestartMs || !corroboratedOwed) {
             return Decision(Action.None, syncOwedSince, responderRefreshes)
         }
+        // In use: hold the due kill. The clock and the count are kept and nothing is stamped, so it is still due
+        // on the first check after use ends; Tier 1 above has already had its turn this tick.
+        if (visible || callLive) return Decision(Action.DeferRestart, syncOwedSince, responderRefreshes)
         return Decision(Action.RestartProcess, syncOwedSince, responderRefreshes)
+    }
+
+    /**
+     * The once-per-episode latch for the two lines a held Tier-2 kill logs ([Action.DeferRestart]'s "Knit is in use" and
+     * the transport's foreground re-claim refusal): without it each repeats every watchdog tick for as long as Knit is on
+     * screen, or a non-exempt phone sits off screen. An episode is the policy's own clock
+     * ([Decision.nextSyncOwedSince]): fed through [episode] every check, a changed value — a fresh start, a restart on
+     * progress, or the end (`0`) — re-arms both lines. The two are independent: one logging never spends the other.
+     *
+     * Touched only by the watchdog loop (one coroutine; `@Volatile` because its rounds may resume on different threads).
+     */
+    class Tier2Notes {
+        @Volatile private var since = 0L
+
+        @Volatile private var inUseLogged = false
+
+        @Volatile private var reclaimLogged = false
+
+        /** Feed the episode clock [Decision.nextSyncOwedSince] after every [decide]; a change re-arms both lines. */
+        fun episode(nextSyncOwedSince: Long) {
+            if (nextSyncOwedSince == since) return
+            since = nextSyncOwedSince
+            inUseLogged = false
+            reclaimLogged = false
+        }
+
+        /** True once per episode: log the "Knit is in use" deferral now. */
+        fun shouldLogInUse(): Boolean {
+            if (inUseLogged) return false
+            inUseLogged = true
+            return true
+        }
+
+        /** True once per episode: log the "foreground service can't be re-claimed" deferral now. */
+        fun shouldLogReclaim(): Boolean {
+            if (reclaimLogged) return false
+            reclaimLogged = true
+            return true
+        }
     }
 }

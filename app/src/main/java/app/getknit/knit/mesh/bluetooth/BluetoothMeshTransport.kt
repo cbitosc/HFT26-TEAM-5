@@ -375,6 +375,9 @@ class BluetoothMeshTransport(
     private val _reachable = MutableStateFlow<Set<Peer>>(emptySet())
     override val reachable = _reachable.asStateFlow()
 
+    private val _near = MutableStateFlow<Set<Peer>>(emptySet())
+    override val near = _near.asStateFlow()
+
     private val _health = MutableStateFlow(TransportHealth.Healthy)
     override val health = _health.asStateFlow()
 
@@ -655,6 +658,7 @@ class BluetoothMeshTransport(
         }
         _neighbors.value = emptySet()
         _reachable.value = emptySet()
+        _near.value = emptySet()
         disarmAtStop() // after the links' ends: nothing watches an ACL once the transport has stopped
     }
 
@@ -2904,6 +2908,7 @@ class BluetoothMeshTransport(
                                 backoffs.clear()
                             }
                             _reachable.value = emptySet()
+                            _near.value = emptySet()
                         }
                     }
                 }
@@ -3071,10 +3076,17 @@ class BluetoothMeshTransport(
     /**
      * Publish [reachable] as presence ∪ live links, so a peer we hold a link to stays "nearby" even when the
      * throttled scan hasn't re-sighted it within the presence linger (the reachable ⊇ neighbors invariant the
-     * floor depends on). Applies to [_reachable] only — never [_neighbors], which routes sends.
+     * floor depends on). [near] is published beside it from the same snapshots ([ScanPlan.near]): one
+     * [BlePresenceTracker.snapshots] call, since it prunes, so the two sets never read different presences. No
+     * freshness gate of its own on the wall clock: nothing would republish when one expired, so a stale hit leaves on
+     * the next publish, as it leaves [reachable]. Applies to [_reachable] and [_near] only — never [_neighbors], which
+     * routes sends.
      */
     private fun publishReachable(now: Long = elapsed()) {
-        _reachable.value = ScanPlan.reachable(presence.snapshots(now), links.values.map { it.peer })
+        val snaps = presence.snapshots(now)
+        val linkPeers = links.values.map { it.peer }
+        _reachable.value = ScanPlan.reachable(snaps, linkPeers)
+        _near.value = ScanPlan.near(snaps, linkPeers)
     }
 
     private fun localNodeIdOrEmpty(): String = if (::localNodeId.isInitialized) localNodeId else ""
@@ -3149,7 +3161,9 @@ class BluetoothMeshTransport(
                 (if (codedOn()) " phy=${codedMode.wire} coded=$codedAdvert phyLinks=${phyControls.size} hunt=$hunting" else "") +
                 (if (codedOn()) fadeDiag() else "") +
                 (sideChannel?.let { " ${it.diag()} $sideDecision" } ?: "") +
-                " linkScores=${links.values.joinToString(",") { "${it.nodeId}:${linkScore(it, rssiByNode).toInt()}" }}",
+                " linkScores=${links.values.joinToString(",") { "${it.nodeId}:${linkScore(it, rssiByNode).toInt()}" }}" +
+                // Last on the line: ble-link-trial.py reads `links=` then `reach=` at its head.
+                " near=${_near.value.map { it.nodeId }}",
         )
     }
 

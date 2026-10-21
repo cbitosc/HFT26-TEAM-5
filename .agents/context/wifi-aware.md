@@ -45,14 +45,20 @@ is in `docs/NAN_CONCURRENCY_REAUDIT.md` and `docs/DIGEST_PULL_REATTACH.md`.
   against the ADR (#144), not a precedent.
 - **When touching `checkWedge`, `NanWatchdogPolicy`, `RESPONDER_REFRESH_MS` / `WEDGE_RESTART_MS` /
   `MAX_RESPONDER_REFRESHES` / `WEDGE_CHECK_MS` / `REATTACH_COOLDOWN_MS`, `lastReattachAt`, `syncOwedSince`,
-  `anySyncOwed` / `anyReachableSyncOwed` / `corroboratedPresent`, `onForeignReachable`, or the Tier-2 kill's
-  `canReclaimForegroundService` gate:** READ ADR 2026-09.9dnk and ADR 043. The watchdog's clock is an **owed
-  episode** (a sync owed to a reachable peer with no link forming), never time since the last link. Tier 1 (45 s) is a
-  session cycle, uncorroborated so the smallest id — everyone's pure responder — heals itself with Bluetooth dark,
-  capped at three per episode so Tier 2 stays reachable; Tier 2 (180 s) is a process kill, only for a peer another
-  plane also sights (a cue-reachable, NDP-unreachable peer is not a wedge), and only when the service can come back
-  (043). The cap is right only while it is spent before `WEDGE_RESTART_MS`:
-  `NanWatchdogPolicyTest.tier1CannotCycleForeverAndTier2IsReached` walks the real cadence.
+  `anySyncOwed` / `anyReachableSyncOwed` / `corroboratedPresent`, `onForeignReachable` / `onForeignNear` /
+  `foreignNear`, `NanSyncPolicy.corroborated` / `evidence`, `MeshTransport.near`, `Action.DeferRestart` (`decide`'s
+  `visible` / `callLive`), `NanWatchdogPolicy.Tier2Notes`, or the Tier-2 kill's
+  `canReclaimForegroundService` gate:** READ ADR 2026-09.9dnk (its 2026-10-20 amendment) and ADR 043. The watchdog's
+  clock is an **owed episode** (a sync owed to a reachable peer with no link forming), never time since the last
+  link. Tier 1 (45 s) is a session cycle, uncorroborated so the smallest id — everyone's pure responder — heals itself
+  with Bluetooth dark, capped at three per episode so Tier 2 stays reachable; Tier 2 (180 s) is a process kill, only
+  for a peer linked here or that another short-range plane hears **near** (`near`, never `reachable`: a Coded advert
+  at −101 dBm reaches far past an NDP), never while Knit is in use (UI on screen or a call running: `DeferRestart`,
+  clock and count kept), and only when the service can come back (043) — so never on a non-exempt API 31+ phone, by
+  design. Neither deferral line may say `NAN data plane wedged` (the soak poller counts it as a kill); each logs once
+  per episode through `Tier2Notes`. The cap is right
+  only while it is spent before `WEDGE_RESTART_MS`: `NanWatchdogPolicyTest.tier1CannotCycleForeverAndTier2IsReached`
+  walks the real cadence.
 - **When touching `NanSyncPolicy` / `PeerFacts`, `syncWanted` / `digestSyncWanted` / `bulkSyncWanted`,
   `BulkWantTracker`, `expectBulkTransfer`, `BULK_FRESH_MS`, `suppressDataPath`, `initiateOwed` /
   `initiateOwedToReachable`, `needsRediscovery`, `needsIcmRelight` or `rediscoverDelayMs`:** READ the "Steady-state

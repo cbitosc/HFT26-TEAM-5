@@ -1,8 +1,10 @@
 package app.getknit.knit
 
 import app.getknit.knit.mesh.bluetooth.BlePresenceTracker
+import app.getknit.knit.mesh.bluetooth.CodedPhyPolicy
 import app.getknit.knit.mesh.bluetooth.PresenceConfig
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -14,7 +16,8 @@ class BlePresenceTrackerTest {
         rssi: Int,
         psm: Int = 100,
         cue: Int = 0,
-    ) = BlePresenceTracker.Sighting(nodeId, rssi, protoVersion = 1, capabilities = 0xFL, psm = psm, digestCue = cue)
+        coded: Boolean = false,
+    ) = BlePresenceTracker.Sighting(nodeId, rssi, protoVersion = 1, capabilities = 0xFL, psm = psm, digestCue = cue, coded = coded)
 
     @Test
     fun firstSightingSeedsRssiAndZeroDwell() {
@@ -69,5 +72,31 @@ class BlePresenceTrackerTest {
         t.onSighting(sighting("bbbb2222", -70, psm = 141), now = 0)
         assertEquals(setOf("aaaa1111", "bbbb2222"), t.reachable(0).map { it.nodeId }.toSet())
         assertEquals(137, t.psmFor("aaaa1111"))
+    }
+
+    @Test
+    fun aPhyIsFreshOnlyWhileHeardInTheLatestBurstAndItsHeldReadingOutlivesIt() {
+        val t = BlePresenceTracker()
+        t.onOneMListening(true, now = 0)
+        t.onSighting(sighting("p", -80), now = 0)
+        t.onOneMListening(false, now = 1_000) // a Coded-only window: the 1M-listening clock stops
+        t.onSighting(sighting("p", -100, coded = true), now = 5_000)
+        val both = t.snapshots(5_000).single()
+        assertTrue("1M heard within its gap of the latest sighting", both.oneMFresh)
+        assertTrue(both.codedFresh)
+
+        t.onSighting(sighting("p", -100, coded = true), now = 12_000) // 12 s after the 1M hit: past its 8 s gap
+        val coded = t.snapshots(12_000).single()
+        assertFalse("1M not heard in the latest burst", coded.oneMFresh)
+        assertTrue(coded.codedFresh)
+        assertEquals("the stale 1M reading is still held", -80.0, coded.rssi1m!!, 0.0001)
+        assertTrue("not Coded-only: 1M listened for 1 s of the lag", (coded.codedLagMs ?: Long.MAX_VALUE) <= CodedPhyPolicy.ONE_M_FRESH_MS)
+        assertFalse(CodedPhyPolicy.codedOnly(coded.codedLagMs))
+        assertEquals(
+            "the smoothed reading counts the fresh PHY alone, by the same rule",
+            coded.rssiCoded!! + CodedPhyPolicy.CODED_RSSI_CREDIT_DB,
+            coded.smoothedRssi,
+            0.0001,
+        )
     }
 }
