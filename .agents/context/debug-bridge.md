@@ -134,8 +134,14 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   dump shows `held`, the `issuer` origin, the last `answer` (`ok`/`unknown-key`/`ended`, null before one), `endsAt`
   (epoch ms), `failures` (asks in a row with no verdict) and `nextAskAt` / `nextAskInMs` (null when parked by
   `unknown-key`, and for a `free` key unless an upload waits there with no ticket to present — a free key never asks
-  on the 6 h margin) — never the key or the ticket. Logcat under `ScopeSync`: `<host>: ticket fetched from <issuer>
-  (exp …)` or `<host>: ticket ask: unknown-key|ended (endsAt …)|no verdict (<reason>)|unavailable (retry after …)`.
+  on the 6 h margin) — never the key or the ticket. Device binding (ADR 2026-10.wk3m) adds `movableAt` (epoch ms, null
+  for now), `parkedUnsigned` and `parkedPairs` (how many of this phone's device-key pairs a 409 refused; never their
+  ids); a parked key's `answer` is `bound-elsewhere`. `--es move <spoolUrl>` is the relay screen's **Move it here**
+  for a phone whose screen a trial does not drive (C-7.6-44): the reply's `move` is `moved`, `too-soon` (with
+  `movableAt`), `unknown-key`, `ended`, `failed` (with a `reason` word: `offline`, `keystore`, `no verdict (…)`) or
+  `unavailable`. Logcat under `ScopeSync`: `<host>: ticket fetched from <issuer> (exp …)`, `<host>: move: <word>` or
+  `<host>: ticket ask: unknown-key|ended (endsAt …)|bound-elsewhere (movableAt …)|upgrade-required|bad-proof|no
+  verdict (<reason>)|unavailable (retry after …)`.
   **Free tickets** (`docs/VOICE_CALLS.md` C-7.6-32 to C-7.6-38): `--es url <spoolUrl> --es freeIssuer
   <https://host[:port]|clear>` sets the **free issuer** for that relay's host (only the seeded `lax.spool.getknit.app`
   ships with one; the lab's `lab.lax.spool.getknit.app` takes `https://anywhere.getknit.app`), `clear` going back to

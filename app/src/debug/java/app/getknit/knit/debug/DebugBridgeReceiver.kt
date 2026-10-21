@@ -121,6 +121,7 @@ import app.getknit.knit.mesh.spool.FreeState
 import app.getknit.knit.mesh.spool.HeldKey
 import app.getknit.knit.mesh.spool.IssuerOrigin
 import app.getknit.knit.mesh.spool.KeyState
+import app.getknit.knit.mesh.spool.MoveResult
 import app.getknit.knit.mesh.spool.SpoolStatus
 import app.getknit.knit.mesh.spool.SpoolTicket
 import app.getknit.knit.mesh.spool.SpoolTicketState
@@ -1761,6 +1762,12 @@ class DebugBridgeReceiver :
         if (ticketText == null && keyText == null && freeNote == null) {
             intent.getStringExtra(EXTRA_URL)?.takeIf { it.isNotBlank() }?.let { settings.addSpoolUrl(it.trim()) }
         }
+        // The person's Move it here (docs/VOICE_CALLS.md C-7.6-44), for a phone whose screen a trial does not drive.
+        val moveNote =
+            intent.getStringExtra(EXTRA_MOVE)?.takeIf { it.isNotBlank() }?.let { url ->
+                val host = SpoolUrl.hostname(url.trim()) ?: return reply("error", "the url names no host")
+                moveJson(mesh.moveAnywhereHere(host))
+            }
         intent.getStringExtra(EXTRA_DROP)?.takeIf { it.isNotBlank() }?.let { dropped ->
             settings.removeSpoolUrl(dropped.trim())
             // As the relays screen's Remove does (C-7.6-29): the key and the ticket go unless another row shares the host.
@@ -1864,6 +1871,7 @@ class DebugBridgeReceiver :
             .put("status", "ok")
             .put("ticketImport", ticketNote?.optString("message") ?: JSONObject.NULL)
             .put("keyImport", keyNote?.optString("message") ?: JSONObject.NULL)
+            .put("move", moveNote ?: JSONObject.NULL)
             .put("free", freeNote?.optString("message") ?: JSONObject.NULL)
             .put("mine", mineNote ?: JSONObject.NULL)
             .put("enabled", settings.spoolEnabled.first())
@@ -2032,7 +2040,23 @@ class DebugBridgeReceiver :
             .put("failures", state.failures)
             .put("nextAskAt", next ?: JSONObject.NULL)
             .put("nextAskInMs", next?.let { it - System.currentTimeMillis() } ?: JSONObject.NULL)
+            // Device binding (ADR 2026-10.wk3m): when a parked account can move here, and how many of this phone's pairs
+            // a 409 has refused — a count, never their ids.
+            .put("movableAt", state.movableAt ?: JSONObject.NULL)
+            .put("parkedUnsigned", state.parkedUnsigned)
+            .put("parkedPairs", state.parkedBy.size)
     }
+
+    /** A move's outcome as words and a time, for the reply's `move`. Names nothing secret. */
+    private fun moveJson(result: MoveResult): JSONObject =
+        when (result) {
+            MoveResult.Moved -> JSONObject().put("result", "moved")
+            is MoveResult.TooSoon -> JSONObject().put("result", "too-soon").put("movableAt", result.movableAt ?: JSONObject.NULL)
+            MoveResult.UnknownKey -> JSONObject().put("result", "unknown-key")
+            MoveResult.Ended -> JSONObject().put("result", "ended")
+            is MoveResult.Failed -> JSONObject().put("result", "failed").put("reason", result.reason)
+            MoveResult.Unavailable -> JSONObject().put("result", "unavailable")
+        }
 
     /** This connection's ticket state beside what the store holds for the host: claims and verdicts, never bytes. */
     private suspend fun ticketJson(
@@ -3848,6 +3872,7 @@ class DebugBridgeReceiver :
         const val EXTRA_ON = "on"
         const val EXTRA_MODE = "mode"
         const val EXTRA_DROP = "drop"
+        const val EXTRA_MOVE = "move"
         const val EXTRA_PARK = "park"
         const val EXTRA_UNPARK = "unpark"
         const val EXTRA_TICKET = "ticket"
