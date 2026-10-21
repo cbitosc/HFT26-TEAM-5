@@ -90,5 +90,8 @@ bound private key destroyed, or an issuer that only ever sees proofs from pairs 
   `bad-proof`).
 - Guards: `DeviceKeysTest` (each rule above, the sweep race included), `DeviceProofVectorTest` (the `m` and signature vector the issuer
   copies), `OkHttpTicketIssuerTest`, `TicketRefresherTest`, `BadgeRefresherTest`, `TicketKeyStoreTest`.
-- Owed: a device trial against a bench issuer in `optional` mode (binds on first proof), then a second phone with the
-  same invite (409, then the move).
+- Device trial, passed 2026-10-21 (a Pixel 9 and an emulator against a LAN knit-spool-coordinator issuer, which confirmed
+  each binding on its side): in `optional` mode, the first proof binds and the second phone's ask gets 409 and parks;
+  its early move gets `move-too-soon`, the relay page shows the move date; with a zero cooldown the move rebinds, and the
+  first phone's next ask gets 409 with no move date, and its move rebinds back. In `required` mode, signed moves and swaps
+  from both phones get 200; the issuer showed the unsigned 426 itself, since a phone that can make a pair never sends one.
