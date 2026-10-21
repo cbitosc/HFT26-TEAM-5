@@ -76,7 +76,8 @@ not a wire change.
 - **C-5-3** It asks the issuer of the first held customer key (by relay host name) whose origin passes `IssuerOrigin`
   and whose last ticket answer is neither `ended` nor `unknown-key`: `POST <issuer>/api/v1/badge`,
   `Authorization: Bearer kak1_…`, body `{"sub": "<unpadded base64url of 32 bytes>"}`. No redirect is followed; the
-  socket is bound to the validated Internet network (the ticket swap's rules, ADR 2026-10.3sk7).
+  socket is bound to the validated Internet network (the ticket swap's rules, ADR 2026-10.3sk7). It carries the
+  customer key's device proof, signed for `/api/v1/badge` (`docs/VOICE_CALLS.md` C-7.6-40, C-7.6-41).
 - **C-5-4** Each ask draws a fresh 16-byte `r` and sends `sub = SHA-256("knit/badge/v1/sub" ‖ id ‖ r)`. The issuer never
   sees `id` or `r`.
 - **C-5-5** It runs on the ticket refresher's session and never asks more than once an hour; after `ended`, once a day.
@@ -86,7 +87,8 @@ not a wire change.
   most 4; an empty list holds nothing. 403 `ended` drops what is held. 401, 503, 400 and no answer keep what is held
   until it lapses.
 - **C-5-8** The route's answers, in the issuer's order: 503 `unavailable`, 401 `unknown-key`, 403 `ended` (with
-  `endsAt`), 400 `bad-sub`, 200 `{badges: [{badge, b, nbf, exp}]}`. A 401/403/503 counts only with its own `error`
+  `endsAt`), 400 `bad-sub`, 200 `{badges: [{badge, b, nbf, exp}]}`; with a device proof, also 400 `bad-proof`, 409
+  `bound-elsewhere` and 426 `upgrade-required`, read as `docs/VOICE_CALLS.md` C-7.6-42 and C-7.6-43 read them. A 401/403/503 counts only with its own `error`
   word. The JSON copies of `b`/`nbf`/`exp` are not read: the app acts on the claims inside the credential.
 - **C-5-9** Turning the switch on or off, and any change in the held badges, publishes a new profile version **on the
   sealed path alone**: a persisted sealed version (`badge_sealed_version`) moves past the cleartext one and only the

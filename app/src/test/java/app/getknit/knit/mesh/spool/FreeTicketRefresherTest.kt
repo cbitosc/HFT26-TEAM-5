@@ -105,6 +105,7 @@ class FreeTicketRefresherTest {
         override suspend fun swap(
             origin: String,
             key: String,
+            device: DeviceSigner?,
         ): IssuerAnswer {
             asks += origin to key
             return next()

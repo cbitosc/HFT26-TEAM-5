@@ -90,11 +90,13 @@ import app.getknit.knit.mesh.protocol.WireEnvelope
 import app.getknit.knit.mesh.spool.AccountIssuer
 import app.getknit.knit.mesh.spool.AttachmentDeferPolicy
 import app.getknit.knit.mesh.spool.CommonsStore
+import app.getknit.knit.mesh.spool.DeviceKeyring
 import app.getknit.knit.mesh.spool.FreeKeyJournal
 import app.getknit.knit.mesh.spool.GroupRootPolicy
 import app.getknit.knit.mesh.spool.GroupRootStore
 import app.getknit.knit.mesh.spool.GroupScopeRoots
 import app.getknit.knit.mesh.spool.HolderAskBatch
+import app.getknit.knit.mesh.spool.MoveResult
 import app.getknit.knit.mesh.spool.PairScopeRoots
 import app.getknit.knit.mesh.spool.ScopeBlobs
 import app.getknit.knit.mesh.spool.ScopeRegistry
@@ -295,6 +297,9 @@ class MeshManager(
     // the notice, and the account route. Null with the rest of tickets, so release makes no free account.
     freeKeys: FreeKeyJournal? = null,
     accountIssuer: AccountIssuer? = null,
+    // The customer keys' device keys (docs/VOICE_CALLS.md C-7.6-39, ADR 2026-10.wk3m), which sign every request a
+    // customer key makes. Null with the rest of tickets, and in every test that signs nothing.
+    deviceKeys: DeviceKeyring? = null,
     private val allowCleartext: Boolean = false,
     // The supporter badge (docs/SUPPORTER_BADGE.md, ADR 2026-10.r99s): the holder's toggle and held badges, read into the
     // sealed profile, and the issuer that signs them. The journal is wired in every build (a release build simply never
@@ -699,6 +704,7 @@ class MeshManager(
                 log = { Log.i(SPOOL_TAG, it) },
                 free = freeKeys,
                 accounts = accountIssuer,
+                devices = deviceKeys,
             )
         } else {
             null
@@ -722,6 +728,7 @@ class MeshManager(
                 allowCleartext = allowCleartext,
                 clock = clock,
                 log = { Log.i(SPOOL_TAG, it) },
+                devices = deviceKeys,
             )
         } else {
             null
@@ -1032,6 +1039,8 @@ class MeshManager(
     override fun freeTicketAsking(): Set<String> = ticketRefresher?.asking?.value.orEmpty()
 
     override fun freeTicketWaiting(host: String): Boolean = ticketRefresher?.isWaiting(host) == true
+
+    override suspend fun moveAnywhereHere(host: String): MoveResult = ticketRefresher?.move(host) ?: MoveResult.Unavailable
 
     /**
      * Demo-screenshot only: pin a fixed set of spool statuses, so the relay indicators (the chat header's

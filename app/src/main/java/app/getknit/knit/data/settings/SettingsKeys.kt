@@ -42,6 +42,13 @@ object SettingsKeys {
 
     fun spoolKeyStateKey(host: String) = stringPreferencesKey(SPOOL_KEY_STATE_PREFIX + host)
 
+    // Which device-key pair the issuer last accepted, per customer key's slot (`mesh/spool/DeviceKeys`, ADR 2026-10.wk3m).
+    // The pairs live in the Keystore, which no backup carries, so neither does this ("spool_device" is in
+    // [TRANSIENT_PREFIXES]): a restored phone signs with its oldest pair until the issuer accepts one.
+    const val SPOOL_DEVICE_PREFIX = "spool_device:"
+
+    fun spoolDeviceKey(slot: String) = stringPreferencesKey(SPOOL_DEVICE_PREFIX + slot)
+
     // The free half (docs/VOICE_CALLS.md C-7.6-33 to C-7.6-38): a free key made at a free issuer, the account route's
     // backoff, the person's answer to the notice, and a debug build's own free issuer, per relay host name. All under
     // "spool_free_", which is in [TRANSIENT_PREFIXES]: a free key never rides a backup (a restored phone makes its own),
@@ -115,6 +122,7 @@ object SettingsKeys {
             "debug_",
             "spool_ticket",
             "spool_key_state",
+            "spool_device",
             "spool_free_",
             CALL_TOMBS,
             DIRECT_HOST_PREFIX,

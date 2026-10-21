@@ -1440,6 +1440,15 @@
     <string name="relays_calls_key_unknown">%1$s doesn\'t recognise this key</string>
     <string name="relays_calls_key_ended">%1$s · account ended %2$s</string>
     <string name="relays_calls_key_ended_undated">%1$s · account has ended</string>
+    <string name="relays_calls_key_bound_elsewhere">%1$s · in use on another phone</string>
+    <string name="relays_move_here">Move it here</string>
+    <string name="relays_move_from">You can move it here from %1$s</string>
+    <string name="relays_move_title">Move Knit Anywhere to this phone?</string>
+    <string name="relays_move_body">This account from %1$s works on one phone at a time. Moving it here stops it on the other phone, and it can\'t be moved again for a while.</string>
+    <string name="relays_move_done">Knit Anywhere now works on this phone</string>
+    <string name="relays_move_failed">Couldn\'t move it. Try again later.</string>
+    <string name="relays_move_unknown_key">The issuer doesn\'t recognise this key</string>
+    <string name="relays_move_ended">This account has ended</string>
     <!-- A ticket's own limits (S-7.6-22, S-7.6-31) after its grants: %1$s is a size such as "256 kB". -->
     <string name="relays_calls_files_each">Up to %1$s each</string>
     <string name="relays_calls_files_day">%1$s a day</string>

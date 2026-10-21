@@ -450,6 +450,7 @@ val meshModule =
                 ticketIssuer = if (ANYWHERE_WIRED) get<TicketIssuer>() else null,
                 freeKeys = if (ANYWHERE_WIRED) get<TicketKeyStore>() else null,
                 accountIssuer = if (ANYWHERE_WIRED) get<TicketIssuer>() as? AccountIssuer else null,
+                deviceKeys = if (ANYWHERE_WIRED) get<TicketKeyStore>().devices else null,
                 allowCleartext = BuildConfig.DEBUG,
                 // The supporter badge (ADR 2026-10.r99s): the journal in every build, the issuer beside the ticket swap's.
                 badgeJournal = get<BadgeStore>(),

@@ -1,6 +1,7 @@
 package app.getknit.knit.di
 
 import android.os.Build
+import android.os.SystemClock
 import android.util.Log
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
@@ -35,6 +36,7 @@ import app.getknit.knit.data.ReactionRepository
 import app.getknit.knit.data.backup.BackupWriter
 import app.getknit.knit.data.backup.RestoreStager
 import app.getknit.knit.data.commons.CommonsRepository
+import app.getknit.knit.data.crypto.AndroidDeviceKeystore
 import app.getknit.knit.data.crypto.DatabaseKey
 import app.getknit.knit.data.crypto.IdentityKeyStore
 import app.getknit.knit.data.crypto.KeystoreCipher
@@ -223,7 +225,16 @@ val appModule =
         single { RelayInviteInbox() }
         // The customer keys an invite hands this phone (ADR 2026-10.3sk7), beside the relay list in the settings DataStore.
         // The free issuers this build ships (C-7.6-33) seed its free half; a debug build's bridge may add its own.
-        single { TicketKeyStore(get(), FreeIssuers.parse(androidContext().resources.getStringArray(R.array.free_issuers))) }
+        // With Knit Anywhere, each customer key's device key (C-7.6-39, ADR 2026-10.wk3m) in the Keystore beside it.
+        single {
+            TicketKeyStore(
+                get(),
+                FreeIssuers.parse(androidContext().resources.getStringArray(R.array.free_issuers)),
+                keystore = if (ANYWHERE_WIRED) AndroidDeviceKeystore(androidContext().packageManager) else null,
+                // Counts deep sleep, so "refused for an hour" means an hour on a dozing phone too.
+                elapsed = SystemClock::elapsedRealtime,
+            )
+        }
         // The supporter badge (docs/SUPPORTER_BADGE.md, ADR 2026-10.r99s): the holder's toggle and held badges beside the
         // customer keys, and every peer's received badges verified at display time against this build's pinned keys.
         single { BadgeStore(get()) }

@@ -1,6 +1,8 @@
 package app.getknit.knit.badge
 
 import app.getknit.knit.mesh.protocol.BadgeEntry
+import app.getknit.knit.mesh.spool.DeviceSigner
+import app.getknit.knit.mesh.spool.IssuerAnswer
 import kotlinx.coroutines.flow.Flow
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -81,6 +83,7 @@ interface BadgeIssuer {
         origin: String,
         key: String,
         sub: ByteArray,
+        device: DeviceSigner? = null,
     ): BadgeAnswer
 }
 
@@ -104,6 +107,17 @@ sealed interface BadgeAnswer {
     /** 503 `unavailable`: the issuer signs no badges right now. */
     data object Unavailable : BadgeAnswer
 
+    /** 409 `bound-elsewhere` (C-5-8, docs/VOICE_CALLS.md C-7.6-42): another phone holds the account; movable from [movableAt]. */
+    data class BoundElsewhere(
+        val movableAt: Long?,
+    ) : BadgeAnswer
+
+    /** 426 `upgrade-required`: backed off from as no verdict. */
+    data object UpgradeRequired : BadgeAnswer
+
+    /** 400 `bad-proof`, after the one re-sign docs/VOICE_CALLS.md C-7.6-43 allows: backed off from as no verdict. */
+    data object BadProof : BadgeAnswer
+
     /** Anything else, `bad-sub` included: no verdict. [reason] is a short word for the log, never the body. */
     data class NoVerdict(
         val reason: String,
@@ -115,7 +129,7 @@ sealed interface BadgeAnswer {
         const val HTTP_FORBIDDEN = 403
         const val HTTP_UNAVAILABLE = 503
 
-        /** Reads a response. Like the ticket swap's reader, a 401/403/503 counts only with its own `error` word. */
+        /** Reads a response. Like the ticket swap's reader, a 400/401/403/409/426/503 counts only with its own `error` word. */
         fun read(
             status: Int,
             body: ByteArray,
@@ -124,12 +138,24 @@ sealed interface BadgeAnswer {
             return when {
                 parsed == null -> NoVerdict(if (status == HTTP_OK) "unparseable" else "http $status")
                 status == HTTP_OK -> parsed.badges?.let { list -> Issued(list.mapNotNull { it.badge }) } ?: NoVerdict("unparseable")
-                status == HTTP_UNAUTHORIZED && parsed.error == "unknown-key" -> UnknownKey
-                status == HTTP_FORBIDDEN && parsed.error == "ended" -> Ended(parsed.endsAt?.let(::instant))
-                status == HTTP_UNAVAILABLE && parsed.error == "unavailable" -> Unavailable
-                else -> NoVerdict("http $status")
+                else -> refusal(status, parsed) ?: NoVerdict("http $status")
             }
         }
+
+        // A refusal the issuer named with its own `error` word, or null for one it did not (`bad-sub` included).
+        private fun refusal(
+            status: Int,
+            parsed: Answer,
+        ): BadgeAnswer? =
+            when (status to parsed.error) {
+                HTTP_UNAUTHORIZED to "unknown-key" -> UnknownKey
+                HTTP_FORBIDDEN to "ended" -> Ended(parsed.endsAt?.let(::instant))
+                HTTP_UNAVAILABLE to "unavailable" -> Unavailable
+                IssuerAnswer.HTTP_CONFLICT to IssuerAnswer.BOUND_ELSEWHERE -> BoundElsewhere(parsed.movableAt?.let(::instant))
+                IssuerAnswer.HTTP_UPGRADE_REQUIRED to IssuerAnswer.UPGRADE_REQUIRED -> UpgradeRequired
+                IssuerAnswer.HTTP_BAD_REQUEST to IssuerAnswer.BAD_PROOF -> BadProof
+                else -> null
+            }
 
         private fun instant(text: String): Long? =
             try {
@@ -148,6 +174,7 @@ private class Answer(
     val badges: List<Entry>? = null,
     val error: String? = null,
     val endsAt: String? = null,
+    val movableAt: String? = null,
 )
 
 @Serializable

@@ -619,6 +619,12 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   while an upload waits (no 6 h margin, the hour floor kept), only for a relay in use, and never once the person turned
   free tickets off (on by default; the notice informs, s3ep's amendment); it never rides a backup
   or asks for a badge; a photo is fitted at staging, to the hint only with a free key or none.
+  Before touching `DeviceProof`, `DeviceKeys` / `DeviceKeyring`, `data/crypto/AndroidDeviceKeystore`,
+  `IssuerAnswer.BoundElsewhere`, `TicketRefresher.move`, the `spool_device:` keys or the relay screen's Move it here: READ
+  ADR 2026-10.wk3m and `docs/VOICE_CALLS.md` "Device binding" (C-7.6-39 to C-7.6-46) — every customer-key request carries
+  a proof signed afresh, a Keystore refusal sends nothing (an unsigned request to a bound account parks it behind the
+  issuer's cooldown), no pair is ever made over or deleted on the Keystore's word (the accepted pair, else the oldest,
+  signs), and a move is only ever the person's.
 - **When creating or modifying anything under `app/src/test/java/app/getknit/knit/mesh/lab/`:** keep
   `scripts/lab-lint.py` clean (a `PostToolUse` hook runs it on every scenario edit, `lab-chaos.sh` before every sweep,
   both CIs as `lab-lint`; a deliberate finding carries `// lab-lint: allow <rule> — <why>`), then RUN

@@ -98,6 +98,7 @@ fun RelayDetailScreen(
         onShareInvite = { relay?.let { viewModel.shareInvite(it.url) } },
         onCopyInvite = { relay?.let { viewModel.copyInvite(it.url) } },
         onSetFreeUploads = { allowed -> relay?.let { SpoolUrl.hostname(it.url) }?.let { viewModel.setFreeUploads(it, allowed) } },
+        onMoveHere = { relay?.let { viewModel.moveHere(it.url) } },
     )
 }
 
@@ -118,8 +119,10 @@ internal fun RelayDetailScreenContent(
     onShareInvite: () -> Unit = {},
     onCopyInvite: () -> Unit = {},
     onSetFreeUploads: (Boolean) -> Unit = {},
+    onMoveHere: () -> Unit = {},
 ) {
     var removing by remember { mutableStateOf(false) }
+    var moving by remember { mutableStateOf(false) }
     var joining by remember { mutableStateOf(false) }
     var leaving by remember { mutableStateOf(false) }
 
@@ -159,7 +162,7 @@ internal fun RelayDetailScreenContent(
             DetailCard { UseRelayRow(relay, planeEnabled, offline, onSetEnabled) }
             ConnectionSection(relay)
             CallsSection(relay)
-            TicketsSection(relay, onSetFreeUploads)
+            TicketsSection(relay, onSetFreeUploads, onMoveHere = { moving = true })
             relay.commons?.let { room ->
                 RoomSection(relay, room, onJoin = { joining = true }, onLeave = { leaving = true })
             }
@@ -209,6 +212,31 @@ internal fun RelayDetailScreenContent(
             },
             dismissButton = {
                 TextButton(onClick = { leaving = false }) {
+                    Text(stringResource(R.string.action_cancel))
+                }
+            },
+        )
+    }
+
+    if (moving) {
+        // Moving takes the account from the other phone, so it is the person's act and always confirmed (C-7.6-44).
+        AlertDialog(
+            onDismissRequest = { moving = false },
+            title = { Text(stringResource(R.string.relays_move_title)) },
+            text = { Text(stringResource(R.string.relays_move_body, relay.account?.issuer.orEmpty())) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        moving = false
+                        onMoveHere()
+                    },
+                    modifier = Modifier.testTag("relay_move_confirm"),
+                ) {
+                    Text(stringResource(R.string.relays_move_here))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { moving = false }) {
                     Text(stringResource(R.string.action_cancel))
                 }
             },
@@ -358,6 +386,7 @@ private fun CallsSection(relay: RelayRow) {
 private fun TicketsSection(
     relay: RelayRow,
     onSetFreeUploads: (Boolean) -> Unit,
+    onMoveHere: () -> Unit,
 ) {
     val calls = relay.calls
     val ticket = calls?.ticket
@@ -373,7 +402,36 @@ private fun TicketsSection(
     SectionHeader(stringResource(R.string.relays_detail_section_tickets))
     DetailCard(Modifier.testTag("relay_ticket_${relay.host}")) {
         rows.forEach { (label, value) -> DetailRow(label, value) }
+        relay.account?.takeIf { it.answer == KeyAnswer.BOUND_ELSEWHERE && !it.free }?.let { MoveHere(relay.host, it, onMoveHere) }
         relay.freeUploads?.let { FreeUploadsSwitch(relay.host, it, onSetFreeUploads) }
+    }
+}
+
+/**
+ * A parked account (docs/VOICE_CALLS.md C-7.6-42): the one place the person learns it is in use on another phone, and
+ * the way to move it here — a button once the issuer's `movableAt` has passed (or named none), else the time it can.
+ */
+@Composable
+private fun MoveHere(
+    host: String,
+    account: RelayAccount,
+    onMoveHere: () -> Unit,
+) {
+    val movableAt = account.movableAt
+    if (movableAt != null && movableAt > System.currentTimeMillis()) {
+        Text(
+            text = movableLine(movableAt),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp).testTag("relay_move_from_$host"),
+        )
+    } else {
+        OutlinedButton(
+            onClick = onMoveHere,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp).testTag("relay_move_here_$host"),
+        ) {
+            Text(stringResource(R.string.relays_move_here))
+        }
     }
 }
 
@@ -496,6 +554,33 @@ fun RelayDetailScreenDisconnectedPreview() =
                     connected = false,
                     lastError = "unreachable",
                     account = RelayAccount("issuer.example.org", KeyAnswer.ENDED, endsAt = 1_790_000_000_000L, failures = 0),
+                ),
+            planeEnabled = true,
+            offline = false,
+            onBack = {},
+        )
+    }
+
+@Preview(showBackground = true)
+@Composable
+fun RelayDetailScreenParkedPreview() =
+    KnitPreview {
+        RelayDetailScreenContent(
+            relay =
+                RelayRow(
+                    url = "wss://lab.lax.spool.getknit.app/spool/v1",
+                    host = "lab.lax.spool.getknit.app",
+                    enabled = true,
+                    connected = true,
+                    scopeCount = 2,
+                    account =
+                        RelayAccount(
+                            "issuer.example.org",
+                            KeyAnswer.BOUND_ELSEWHERE,
+                            endsAt = 1_796_000_000_000L,
+                            failures = 0,
+                            movableAt = null,
+                        ),
                 ),
             planeEnabled = true,
             offline = false,

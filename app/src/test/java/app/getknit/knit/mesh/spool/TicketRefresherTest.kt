@@ -48,17 +48,33 @@ class TicketRefresherTest {
         }
     }
 
-    /** An issuer that answers from a script, recording every ask. */
+    /** An issuer that answers from a script, recording every ask and the device key it was handed. */
     private class ScriptedIssuer : TicketIssuer {
         val asks = mutableListOf<Pair<String, String>>()
+        val signers = mutableListOf<DeviceSigner?>()
         var next: () -> IssuerAnswer = { IssuerAnswer.NoVerdict("unscripted") }
+        val moves = mutableListOf<Pair<String, String>>()
+        val moveSigners = mutableListOf<DeviceSigner?>()
+        var moveNext: () -> IssuerAnswer = { IssuerAnswer.NoVerdict("unscripted") }
 
         override suspend fun swap(
             origin: String,
             key: String,
+            device: DeviceSigner?,
         ): IssuerAnswer {
             asks += origin to key
+            signers += device
             return next()
+        }
+
+        override suspend fun move(
+            origin: String,
+            key: String,
+            device: DeviceSigner?,
+        ): IssuerAnswer {
+            moves += origin to key
+            moveSigners += device
+            return moveNext()
         }
     }
 
@@ -335,6 +351,294 @@ class TicketRefresherTest {
             }
             assertFalse(answer.toString().contains(body.take(16)))
             assertFalse(HeldKey(ISSUER, KEY).toString().contains(KEY.removePrefix(CustomerKey.PREFIX).take(12)))
+        }
+
+    // ── device binding (docs/VOICE_CALLS.md C-7.6-39 to C-7.6-46, ADR 2026-10.wk3m) ─────────────────────────────
+
+    private val devices = FakeDeviceKeyring()
+
+    private fun bound() =
+        TicketRefresher(
+            keys = keys,
+            tickets = tickets,
+            issuer = issuer,
+            urls = urls,
+            online = { online },
+            clock = { now },
+            log = { logs += it },
+            devices = devices,
+        )
+
+    private fun state() = keys.states.value.getValue(HOST)
+
+    @Test
+    fun aCustomerKeysSwapIsHandedItsDeviceKey() =
+        runTest {
+            keys.putKey(HOST, HeldKey(ISSUER, KEY))
+            issuer.next = { issued() }
+            bound().runOnce()
+            assertTrue(issuer.signers.single() === devices.signers.getValue(HOST to KEY))
+        }
+
+    @Test
+    fun aKeystoreThatRefusesAsksNothingAndBacksOff() =
+        runTest {
+            keys.putKey(HOST, HeldKey(ISSUER, KEY))
+            devices.next = { DeviceKey.Refused }
+            val next = bound().runOnce()
+            assertTrue(issuer.asks.isEmpty())
+            // No verdict: the ordinary first backoff, never a park.
+            assertNull(state().answer)
+            assertEquals(1, state().failures)
+            assertEquals(now + TicketRefreshPolicy.FIRST_BACKOFF_MS, next)
+        }
+
+    @Test
+    fun aPhoneThatCannotHoldADeviceKeySwapsWithoutOne() =
+        runTest {
+            keys.putKey(HOST, HeldKey(ISSUER, KEY))
+            devices.next = { DeviceKey.Unmade }
+            issuer.next = { issued() }
+            bound().runOnce()
+            assertEquals(listOf<DeviceSigner?>(null), issuer.signers)
+            assertEquals(KeyAnswer.OK, state().answer)
+        }
+
+    @Test
+    fun boundElsewhereParksTheKeyAndKeepsTheHeldTicket() =
+        runTest {
+            keys.putKey(HOST, HeldKey(ISSUER, KEY))
+            issuer.next = { issued() }
+            val r = bound()
+            r.runOnce()
+            // Six hours from exp, the renewal is answered 409.
+            now += 20 * 3_600_000L
+            issuer.next = { IssuerAnswer.BoundElsewhere(now + 3 * DAY_MS) }
+            assertNull(r.runOnce())
+            assertEquals(KeyAnswer.BOUND_ELSEWHERE, state().answer)
+            assertEquals(now + 3 * DAY_MS, state().movableAt)
+            assertFalse(state().parkedUnsigned)
+            assertTrue(tickets.presentable(URL) != null)
+
+            // Nothing on the schedule, past the ticket's exp, nor for a waiting upload.
+            now += 2 * DAY_MS
+            r.uploadWanted(URL)
+            assertNull(r.runOnce())
+            assertEquals(2, issuer.asks.size)
+        }
+
+    @Test
+    fun aDifferentKeyLiftsThePark() =
+        runTest {
+            keys.putKey(HOST, HeldKey(ISSUER, KEY))
+            issuer.next = { IssuerAnswer.BoundElsewhere(null) }
+            val r = bound()
+            r.runOnce()
+            assertNull(r.runOnce())
+            keys.putKey(HOST, HeldKey(ISSUER, OTHER_KEY))
+            issuer.next = { issued() }
+            r.runOnce()
+            assertEquals(listOf(ISSUER to KEY, ISSUER to OTHER_KEY), issuer.asks)
+            assertEquals(KeyAnswer.OK, state().answer)
+        }
+
+    @Test
+    fun aParkAnsweredUnsignedEarnsOneSignedAskOnceTheKeystoreAnswers() =
+        runTest {
+            keys.putKey(HOST, HeldKey(ISSUER, KEY))
+            // The Keystore could not make the pair this time: the swap went unsigned and a bound account answered 409.
+            devices.next = { DeviceKey.Unmade }
+            issuer.next = { IssuerAnswer.BoundElsewhere(null) }
+            val r = bound()
+            r.runOnce()
+            assertTrue(state().parkedUnsigned)
+            // Still unable to sign: nothing more is asked.
+            assertNull(r.runOnce())
+            assertEquals(1, issuer.asks.size)
+            // It can sign now, and this phone's own pair is the bound one: the 200 lifts the park.
+            devices.next = null
+            issuer.next = { issued() }
+            r.runOnce()
+            assertEquals(2, issuer.asks.size)
+            assertEquals(KeyAnswer.OK, state().answer)
+        }
+
+    @Test
+    fun aSignedBoundElsewhereIsFinalUntilAMove() =
+        runTest {
+            keys.putKey(HOST, HeldKey(ISSUER, KEY))
+            devices.next = { DeviceKey.Unmade }
+            issuer.next = { IssuerAnswer.BoundElsewhere(null) }
+            val r = bound()
+            r.runOnce()
+            devices.next = null
+            r.runOnce()
+            assertFalse(state().parkedUnsigned)
+            now += 7 * DAY_MS
+            assertNull(r.runOnce())
+            assertEquals(2, issuer.asks.size)
+        }
+
+    @Test
+    fun upgradeRequiredAndBadProofOnlyBackOff() =
+        runTest {
+            keys.putKey(HOST, HeldKey(ISSUER, KEY))
+            issuer.next = { IssuerAnswer.UpgradeRequired }
+            val r = bound()
+            assertEquals(now + TicketRefreshPolicy.FIRST_BACKOFF_MS, r.runOnce())
+            now += TicketRefreshPolicy.FIRST_BACKOFF_MS
+            issuer.next = { IssuerAnswer.BadProof }
+            assertEquals(now + 2 * TicketRefreshPolicy.FIRST_BACKOFF_MS, r.runOnce())
+            assertNull(state().answer)
+            assertEquals(2, state().failures)
+        }
+
+    @Test
+    fun aMoveImportsItsTicketAndLiftsThePark() =
+        runTest {
+            keys.putKey(HOST, HeldKey(ISSUER, KEY))
+            issuer.next = { IssuerAnswer.BoundElsewhere(null) }
+            val r = bound()
+            r.runOnce()
+            issuer.moveNext = { issued() }
+            assertEquals(MoveResult.Moved, r.move(HOST))
+            assertEquals(listOf(ISSUER to KEY), issuer.moves)
+            assertTrue(issuer.moveSigners.single() === devices.signers.getValue(HOST to KEY))
+            assertTrue(tickets.presentable(URL) != null)
+            assertEquals(KeyAnswer.OK, state().answer)
+            assertNull(state().movableAt)
+        }
+
+    @Test
+    fun aMoveTooSoonKeepsTheParkWithTheIssuersTime() =
+        runTest {
+            keys.putKey(HOST, HeldKey(ISSUER, KEY))
+            issuer.next = { IssuerAnswer.BoundElsewhere(null) }
+            val r = bound()
+            r.runOnce()
+            issuer.moveNext = { IssuerAnswer.MoveTooSoon(now + DAY_MS) }
+            assertEquals(MoveResult.TooSoon(now + DAY_MS), r.move(HOST))
+            assertEquals(KeyAnswer.BOUND_ELSEWHERE, state().answer)
+            assertEquals(now + DAY_MS, state().movableAt)
+            // Never retried on its own.
+            now += 2 * DAY_MS
+            assertNull(r.runOnce())
+            assertEquals(1, issuer.moves.size)
+        }
+
+    @Test
+    fun aMoveWithARefusingKeystoreSendsNothingAndChangesNothing() =
+        runTest {
+            keys.putKey(HOST, HeldKey(ISSUER, KEY))
+            issuer.next = { IssuerAnswer.BoundElsewhere(null) }
+            val r = bound()
+            r.runOnce()
+            val parked = state()
+            devices.next = { DeviceKey.Refused }
+            assertEquals(MoveResult.Failed("keystore"), r.move(HOST))
+            assertTrue(issuer.moves.isEmpty())
+            assertEquals(parked, state())
+        }
+
+    @Test
+    fun aMovesOtherRefusalsAreReadAsTheSwapReadsThem() =
+        runTest {
+            keys.putKey(HOST, HeldKey(ISSUER, KEY))
+            issuer.next = { IssuerAnswer.BoundElsewhere(null) }
+            val r = bound()
+            r.runOnce()
+            issuer.moveNext = { IssuerAnswer.NoVerdict("http 502") }
+            assertEquals(MoveResult.Failed("no verdict (http 502)"), r.move(HOST))
+            assertEquals(KeyAnswer.BOUND_ELSEWHERE, state().answer)
+            issuer.moveNext = { IssuerAnswer.UnknownKey }
+            assertEquals(MoveResult.UnknownKey, r.move(HOST))
+            assertEquals(KeyAnswer.UNKNOWN_KEY, state().answer)
+        }
+
+    @Test
+    fun aFreeKeyIsNeverMoved() =
+        runTest {
+            keys.putKey(HOST, HeldKey(ISSUER, KEY, free = true))
+            assertEquals(MoveResult.Unavailable, bound().move(HOST))
+            assertTrue(issuer.moves.isEmpty())
+        }
+
+    @Test
+    fun aFreeKeysSwapCarriesNoDeviceKey() =
+        runTest {
+            // C-7.6-37: decided here, by `key.free`, whatever the keyring would hand out.
+            keys.putKey(HOST, HeldKey(ISSUER, KEY, free = true))
+            issuer.next = { issued() }
+            val r = bound()
+            r.uploadWanted(URL)
+            r.runOnce()
+            assertEquals(listOf<DeviceSigner?>(null), issuer.signers)
+            assertTrue(devices.signers.isEmpty())
+        }
+
+    @Test
+    fun a200ToAProofRecordsThePairAsAccepted() =
+        runTest {
+            keys.putKey(HOST, HeldKey(ISSUER, KEY))
+            issuer.next = { issued() }
+            bound().runOnce()
+            assertEquals(listOf(FakeDeviceKeyring.ID), devices.acceptedIds)
+        }
+
+    @Test
+    fun aParkAnsweredToOnePairIsAskedOnceMoreWithAnotherThePhoneHolds() =
+        runTest {
+            // A Keystore blip left two pairs: the issuer bound the old one, and the new one's proof was refused.
+            val old = SoftwareDeviceSigner()
+            val newer = SoftwareDeviceSigner()
+            keys.putKey(HOST, HeldKey(ISSUER, KEY))
+            // The keyring prefers the new pair until a 409 refuses it, then hands the old one.
+            devices.next = { avoid -> if ("new" in avoid) DeviceKey.Ready(old, "old") else DeviceKey.Ready(newer, "new") }
+            issuer.next = { IssuerAnswer.BoundElsewhere(null) }
+            val r = bound()
+            r.runOnce()
+            assertEquals(setOf("new"), state().parkedBy)
+            issuer.next = { issued() }
+            r.runOnce()
+            assertTrue(issuer.signers.last() === old)
+            assertEquals(KeyAnswer.OK, state().answer)
+            assertEquals(listOf("old"), devices.acceptedIds)
+        }
+
+    @Test
+    fun everyPairRefusedParksForGood() =
+        runTest {
+            keys.putKey(HOST, HeldKey(ISSUER, KEY))
+            devices.next = { avoid -> DeviceKey.Ready(SoftwareDeviceSigner(), if ("a" in avoid) "b" else "a") }
+            issuer.next = { IssuerAnswer.BoundElsewhere(null) }
+            val r = bound()
+            r.runOnce()
+            r.runOnce()
+            assertEquals(setOf("a", "b"), state().parkedBy)
+            // The keyring hands back a refused pair now: nothing new to try.
+            devices.next = { DeviceKey.Ready(SoftwareDeviceSigner(), "a") }
+            now += 7 * DAY_MS
+            assertNull(r.runOnce())
+            assertEquals(2, issuer.asks.size)
+        }
+
+    @Test
+    fun noLogLineNamesTheProof() =
+        runTest {
+            keys.putKey(HOST, HeldKey(ISSUER, KEY))
+            issuer.next = { IssuerAnswer.BoundElsewhere(null) }
+            val r = bound()
+            r.runOnce()
+            issuer.moveNext = { IssuerAnswer.MoveTooSoon(null) }
+            r.move(HOST)
+            val spki =
+                DeviceProof.b64(
+                    devices.signers
+                        .getValue(HOST to KEY)
+                        .pair.public.encoded,
+                )
+            assertTrue(logs.isNotEmpty())
+            assertTrue(logs.none { it.contains(spki.take(16)) || it.contains(KEY.takeLast(20)) || it.contains(DeviceKeys.ALIAS_PREFIX) })
         }
 
     private companion object {

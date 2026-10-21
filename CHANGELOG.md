@@ -28,6 +28,8 @@ document:
   the first 61 seconds, and like a large photo, a video only Bluetooth can bring waits for your tap.
 - If you support Knit, you can show a small supporter badge on your photo. It's off until you switch it on in your
   profile, and other phones check each badge before they show it.
+- A paid Knit Anywhere account now works on one phone at a time. If it's in use on another phone, the relay's
+  page says so and offers to move it here, which is also how a phone restored from a backup takes it back.
 - Settings has a new Low-power mode that turns Wi-Fi Aware off to save battery, and it switches on by itself
   while Battery Saver is on. Bluetooth keeps the phone on the mesh, so messages still arrive, but photos and
   files take longer.

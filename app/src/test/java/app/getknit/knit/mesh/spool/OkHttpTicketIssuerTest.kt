@@ -1,9 +1,12 @@
 package app.getknit.knit.mesh.spool
 
+import app.getknit.knit.badge.BadgeAnswer
 import kotlinx.coroutines.runBlocking
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
+import mockwebserver3.RecordedRequest
 import org.junit.After
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -12,6 +15,9 @@ import org.junit.Before
 import org.junit.Test
 import java.net.InetAddress
 import java.time.Instant
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
+import java.util.Base64
 import java.util.concurrent.TimeUnit
 
 /**
@@ -230,6 +236,193 @@ class OkHttpTicketIssuerTest {
         val release = OkHttpTicketIssuer(clientFor = { OkHttpTicketIssuer.baseClient() }, allowCleartext = false)
         assertEquals(AccountAnswer.NoAnswer("refused origin"), runBlocking { release.accountParams(origin, "lab.example") })
         assertEquals(1, server.requestCount)
+    }
+
+    // ── the device proof (docs/VOICE_CALLS.md C-7.6-40 to C-7.6-45, ADR 2026-10.wk3m; coordinator ADR 2026-10.473c) ──
+
+    private var phoneNow = 1_800_000_000_000L
+    private val signer = SoftwareDeviceSigner()
+
+    private val clocked =
+        OkHttpTicketIssuer(
+            clientFor = {
+                OkHttpTicketIssuer
+                    .baseClient()
+                    .newBuilder()
+                    .callTimeout(3, TimeUnit.SECONDS)
+                    .build()
+            },
+            allowCleartext = true,
+            clock = { phoneNow },
+        )
+
+    private fun signedSwap() = runBlocking { clocked.swap(origin, KEY, signer) }
+
+    private fun httpDate(epochMillis: Long): String =
+        DateTimeFormatter.RFC_1123_DATE_TIME.format(Instant.ofEpochMilli(epochMillis).atZone(ZoneOffset.UTC))
+
+    /** Checks [request] carries a proof by [signer] over its own [path], [key] and time, and returns that time. */
+    private fun assertProof(
+        request: RecordedRequest,
+        path: String,
+        key: String = KEY,
+    ): Long {
+        val spki = Base64.getUrlDecoder().decode(request.headers[DeviceProof.KEY_HEADER]!!)
+        val t = request.headers[DeviceProof.TIME_HEADER]!!.toLong()
+        val signature = Base64.getUrlDecoder().decode(request.headers[DeviceProof.SIGNATURE_HEADER]!!)
+        assertTrue(SoftwareDeviceSigner.verifies(spki, DeviceProof.message(path, t, key), signature))
+        assertArrayEquals(signer.pair.public.encoded, spki)
+        listOf(DeviceProof.KEY_HEADER, DeviceProof.SIGNATURE_HEADER).forEach { assertFalse(request.headers[it]!!.contains('=')) }
+        return t
+    }
+
+    @Test
+    fun aCustomerKeysSwapCarriesTheThreeHeadersSignedForItsPath() {
+        server.enqueue(json(200, okBody(SpoolTicketsTest.TEXT)))
+        assertTrue(signedSwap() is IssuerAnswer.Issued)
+        val request = server.takeRequest()
+        assertEquals(phoneNow / 1_000, assertProof(request, IssuerOrigin.TICKET_PATH))
+        assertEquals("Bearer $KEY", request.headers["Authorization"])
+    }
+
+    @Test
+    fun aSwapHandedNoSignerCarriesNoProof() {
+        server.enqueue(json(401, UNKNOWN_KEY_BODY))
+        swap()
+        val request = server.takeRequest()
+        listOf(DeviceProof.KEY_HEADER, DeviceProof.TIME_HEADER, DeviceProof.SIGNATURE_HEADER).forEach { assertNull(request.headers[it]) }
+    }
+
+    @Test
+    fun eachRequestIsSignedAfresh() {
+        server.enqueue(json(401, UNKNOWN_KEY_BODY))
+        server.enqueue(json(401, UNKNOWN_KEY_BODY))
+        signedSwap()
+        phoneNow += 1_000
+        signedSwap()
+        val first = server.takeRequest().headers[DeviceProof.SIGNATURE_HEADER]
+        val second = server.takeRequest()
+        assertEquals(phoneNow / 1_000, assertProof(second, IssuerOrigin.TICKET_PATH))
+        assertFalse(first == second.headers[DeviceProof.SIGNATURE_HEADER])
+        assertEquals(2, signer.signed)
+    }
+
+    @Test
+    fun a409BoundElsewhereIsReadWithAndWithoutMovableAt() {
+        server.enqueue(json(409, """{"error":"bound-elsewhere","movableAt":"2026-10-28T12:00:00.000Z"}"""))
+        server.enqueue(json(409, """{"error":"bound-elsewhere","movableAt":null}"""))
+        server.enqueue(json(409, """{"error":"bound-elsewhere"}"""))
+        assertEquals(IssuerAnswer.BoundElsewhere(Instant.parse("2026-10-28T12:00:00.000Z").toEpochMilli()), signedSwap())
+        assertEquals(IssuerAnswer.BoundElsewhere(null), signedSwap())
+        assertEquals(IssuerAnswer.BoundElsewhere(null), signedSwap())
+    }
+
+    @Test
+    fun a426UpgradeRequiredIsItsOwnAnswerAndBareStatusesAreNot() {
+        server.enqueue(json(426, """{"error":"upgrade-required"}"""))
+        server.enqueue(json(409, """{"message":"conflict"}"""))
+        server.enqueue(json(426, "upgrade"))
+        assertEquals(IssuerAnswer.UpgradeRequired, signedSwap())
+        assertEquals(IssuerAnswer.NoVerdict("http 409"), signedSwap())
+        assertEquals(IssuerAnswer.NoVerdict("http 426"), signedSwap())
+    }
+
+    @Test
+    fun aBadProofFromAFarClockIsReSignedOnceOnTheIssuersClock() {
+        val issuerNow = phoneNow + 10 * 60_000L
+        server.enqueue(json(400, """{"error":"bad-proof"}""", "Date" to httpDate(issuerNow)))
+        server.enqueue(json(200, okBody(SpoolTicketsTest.TEXT), "Date" to httpDate(issuerNow)))
+        assertTrue(signedSwap() is IssuerAnswer.Issued)
+        assertEquals(2, server.requestCount)
+        assertEquals(phoneNow / 1_000, assertProof(server.takeRequest(), IssuerOrigin.TICKET_PATH))
+        assertEquals(issuerNow / 1_000, assertProof(server.takeRequest(), IssuerOrigin.TICKET_PATH))
+        // The offset is kept for the origin: the next request starts on the issuer's clock.
+        server.enqueue(json(401, UNKNOWN_KEY_BODY))
+        signedSwap()
+        assertEquals(issuerNow / 1_000, assertProof(server.takeRequest(), IssuerOrigin.TICKET_PATH))
+    }
+
+    @Test
+    fun aSecondBadProofIsBackedOffFromNotReSignedAgain() {
+        val issuerNow = phoneNow + 10 * 60_000L
+        repeat(3) { server.enqueue(json(400, """{"error":"bad-proof"}""", "Date" to httpDate(issuerNow))) }
+        assertEquals(IssuerAnswer.BadProof, signedSwap())
+        assertEquals(2, server.requestCount)
+    }
+
+    @Test
+    fun aBadProofWithTheClocksAgreedIsNotReSigned() {
+        server.enqueue(json(400, """{"error":"bad-proof"}""", "Date" to httpDate(phoneNow + 30_000L)))
+        server.enqueue(json(400, """{"error":"bad-proof"}"""))
+        assertEquals(IssuerAnswer.BadProof, signedSwap())
+        assertEquals(IssuerAnswer.BadProof, signedSwap())
+        assertEquals(2, server.requestCount)
+    }
+
+    @Test
+    fun aKeystoreThatRefusesSendsNothing() {
+        // An unsigned request to a bound account would be answered 409 and park the key (ADR 2026-10.wk3m).
+        signer.refuse = true
+        assertEquals(IssuerAnswer.NoVerdict("keystore"), signedSwap())
+        assertEquals(0, server.requestCount)
+    }
+
+    @Test
+    fun theMoveIsAnEmptyPostWithTheKeyAndAProofForItsOwnPath() {
+        server.enqueue(json(200, okBody(SpoolTicketsTest.TEXT)))
+        val answer = runBlocking { clocked.move(origin, KEY, signer) }
+        assertTrue(answer is IssuerAnswer.Issued)
+        val request = server.takeRequest()
+        assertEquals("POST", request.method)
+        assertEquals(IssuerOrigin.MOVE_PATH, request.target)
+        assertEquals("Bearer $KEY", request.headers["Authorization"])
+        assertEquals(0L, request.bodySize)
+        assertProof(request, IssuerOrigin.MOVE_PATH)
+    }
+
+    @Test
+    fun theMovesRefusalsAreRead() {
+        server.enqueue(json(409, """{"error":"move-too-soon","movableAt":"2026-10-28T12:00:00.000Z"}"""))
+        server.enqueue(json(401, UNKNOWN_KEY_BODY))
+        server.enqueue(json(403, """{"error":"ended","endsAt":"2026-10-09T12:00:00.000Z"}"""))
+        server.enqueue(
+            MockResponse
+                .Builder()
+                .code(307)
+                .addHeader("Location", "$origin/elsewhere")
+                .build(),
+        )
+        val move = { runBlocking { clocked.move(origin, KEY, signer) } }
+        assertEquals(IssuerAnswer.MoveTooSoon(Instant.parse("2026-10-28T12:00:00.000Z").toEpochMilli()), move())
+        assertEquals(IssuerAnswer.UnknownKey, move())
+        assertEquals(IssuerAnswer.Ended(Instant.parse("2026-10-09T12:00:00.000Z").toEpochMilli()), move())
+        assertEquals(IssuerAnswer.NoVerdict("http 307"), move())
+        assertEquals(4, server.requestCount)
+    }
+
+    @Test
+    fun theBadgeRequestCarriesAProofSignedForTheBadgePath() {
+        server.enqueue(json(409, """{"error":"bound-elsewhere","movableAt":null}"""))
+        val answer = runBlocking { clocked.issueBadge(origin, KEY, ByteArray(32), signer) }
+        assertEquals(BadgeAnswer.BoundElsewhere(null), answer)
+        assertProof(server.takeRequest(), IssuerOrigin.BADGE_PATH)
+    }
+
+    @Test
+    fun aStaleOffsetIsCaughtAndDroppedOnceTheClocksAgree() {
+        // An offset learnt while the phone's clock was 10 min slow; then the phone's clock is corrected.
+        val issuerNow = phoneNow + 10 * 60_000L
+        server.enqueue(json(400, """{"error":"bad-proof"}""", "Date" to httpDate(issuerNow)))
+        server.enqueue(json(401, UNKNOWN_KEY_BODY, "Date" to httpDate(issuerNow)))
+        signedSwap()
+        phoneNow = issuerNow
+        // Signed on the stale offset, 10 min ahead: the issuer's Date is near the phone's clock but far from what was sent.
+        server.enqueue(json(400, """{"error":"bad-proof"}""", "Date" to httpDate(phoneNow)))
+        server.enqueue(json(401, UNKNOWN_KEY_BODY, "Date" to httpDate(phoneNow)))
+        assertEquals(IssuerAnswer.UnknownKey, signedSwap())
+        repeat(2) { server.takeRequest() }
+        assertEquals((phoneNow + 10 * 60_000L) / 1_000, assertProof(server.takeRequest(), IssuerOrigin.TICKET_PATH))
+        assertEquals(phoneNow / 1_000, assertProof(server.takeRequest(), IssuerOrigin.TICKET_PATH))
     }
 
     private companion object {

@@ -4,6 +4,7 @@ import app.getknit.knit.mesh.crypto.scope.SpoolPow
 import app.getknit.knit.mesh.spool.AccountAnswer
 import app.getknit.knit.mesh.spool.AccountIssuer
 import app.getknit.knit.mesh.spool.AccountStamp
+import app.getknit.knit.mesh.spool.DeviceSigner
 import app.getknit.knit.mesh.spool.IssuerAnswer
 import app.getknit.knit.mesh.spool.SpoolTicket
 import app.getknit.knit.mesh.spool.SpoolTicketsTest
@@ -55,6 +56,7 @@ class LabFreeIssuer(
     override suspend fun swap(
         origin: String,
         key: String,
+        device: DeviceSigner?,
     ): IssuerAnswer {
         if (key !in keys) return IssuerAnswer.UnknownKey
         val nowS = clock() / MS_PER_S

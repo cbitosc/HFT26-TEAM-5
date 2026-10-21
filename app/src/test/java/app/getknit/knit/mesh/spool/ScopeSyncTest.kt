@@ -486,6 +486,7 @@ class ScopeSyncTest {
                     override suspend fun swap(
                         origin: String,
                         key: String,
+                        device: DeviceSigner?,
                     ) = IssuerAnswer.Issued(SpoolTicketsTest.TEXT, now + 30L * 86_400_000L)
                 }
             val refresher =
@@ -3088,6 +3089,7 @@ class ScopeSyncTest {
         override suspend fun swap(
             origin: String,
             key: String,
+            device: DeviceSigner?,
         ): IssuerAnswer {
             asks++
             val nowS = clock() / 1_000

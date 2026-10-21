@@ -4,6 +4,7 @@ import androidx.compose.runtime.Composable
 import app.getknit.knit.ui.relay.InternetRelayScreenEmptyPreview
 import app.getknit.knit.ui.relay.InternetRelayScreenOnPreview
 import app.getknit.knit.ui.relay.RelayDetailScreenDisconnectedPreview
+import app.getknit.knit.ui.relay.RelayDetailScreenParkedPreview
 import app.getknit.knit.ui.relay.RelayDetailScreenPreview
 import com.android.tools.screenshot.PreviewTest
 
@@ -28,3 +29,8 @@ fun RelayDetailScreen() = RelayDetailScreenPreview()
 @ScreenShots
 @Composable
 fun RelayDetailScreenDisconnected() = RelayDetailScreenDisconnectedPreview()
+
+@PreviewTest
+@ScreenShots
+@Composable
+fun RelayDetailScreenParked() = RelayDetailScreenParkedPreview()

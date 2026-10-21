@@ -18,14 +18,18 @@ import java.io.IOException
 import java.io.InterruptedIOException
 import java.net.UnknownHostException
 import java.util.Base64
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
+import kotlin.math.abs
 
 /**
  * The one place the key swap speaks OkHttp (`rules/mesh.md`, ADR 2026-10.3sk7): a single `POST <origin>/api/v1/ticket`
  * with `Authorization: Bearer <key>` and an empty body, read into [IssuerAnswer.read]. The badge issue
- * ([issueBadge], ADR 2026-10.r99s) is the same `POST` to `/api/v1/badge` with a `{"sub": …}` body, under every rule
- * below. So is the free account's route (docs/VOICE_CALLS.md §2.6, [accountParams] and [createAccount]): a `GET` and a
- * `POST` to `/api/v1/account` that carry no key at all.
+ * ([issueBadge], ADR 2026-10.r99s) is the same `POST` to `/api/v1/badge` with a `{"sub": …}` body, and the move
+ * ([move], docs/VOICE_CALLS.md C-7.6-44) the swap's request at `/api/v1/ticket/move`, under every rule below; each of
+ * the three carries the customer key's device proof when it is handed a signer (C-7.6-40, ADR 2026-10.wk3m). So is
+ * the free account's route (docs/VOICE_CALLS.md §2.6, [accountParams] and [createAccount]): a `GET` and a `POST` to
+ * `/api/v1/account` that carry no key at all.
  *
  * - **Bound to the validated network**, as the link-preview fetch is: [clientFor] hands back a client whose sockets and
  *   lookups belong to the default network `net/AndroidInternetGate` vouched for, or null when there is none
@@ -45,12 +49,18 @@ import java.util.concurrent.TimeUnit
 class OkHttpTicketIssuer(
     private val clientFor: () -> OkHttpClient?,
     private val allowCleartext: Boolean,
+    private val clock: () -> Long = { System.currentTimeMillis() },
 ) : TicketIssuer,
     BadgeIssuer,
     AccountIssuer {
+    // Issuer origin → how far its clock is from this phone's (millis), learnt from a `bad-proof`'s `Date` (C-7.6-43).
+    // In memory only: a restart re-learns it from the next `bad-proof`.
+    private val offsets = ConcurrentHashMap<String, Long>()
+
     override suspend fun swap(
         origin: String,
         key: String,
+        device: DeviceSigner?,
     ): IssuerAnswer =
         call(
             origin,
@@ -58,6 +68,27 @@ class OkHttpTicketIssuer(
             key,
             ByteArray(0).toRequestBody(null),
             IssuerAnswer::NoVerdict,
+            Proof.of(IssuerOrigin.TICKET_PATH, device),
+        ) { code, body, retryAfter ->
+            IssuerAnswer.read(code, body, retryAfter)
+        }
+
+    /**
+     * The move (docs/VOICE_CALLS.md C-7.6-44): the swap's request at [IssuerOrigin.MOVE_PATH], its proof signed for that
+     * path, read by the same reader. Sent only because the person asked; nothing here retries it.
+     */
+    override suspend fun move(
+        origin: String,
+        key: String,
+        device: DeviceSigner?,
+    ): IssuerAnswer =
+        call(
+            origin,
+            IssuerOrigin.moveUrl(origin),
+            key,
+            ByteArray(0).toRequestBody(null),
+            IssuerAnswer::NoVerdict,
+            Proof.of(IssuerOrigin.MOVE_PATH, device),
         ) { code, body, retryAfter ->
             IssuerAnswer.read(code, body, retryAfter)
         }
@@ -70,15 +101,17 @@ class OkHttpTicketIssuer(
         origin: String,
         key: String,
         sub: ByteArray,
+        device: DeviceSigner?,
     ): BadgeAnswer {
         val body = """{"sub":"${Base64.getUrlEncoder().withoutPadding().encodeToString(sub)}"}"""
-        return post(
+        return call(
             origin,
             IssuerOrigin.badgeUrl(origin),
             key,
             body.toRequestBody(JSON.toMediaType()),
             BadgeAnswer::NoVerdict,
-        ) { code, bytes ->
+            Proof.of(IssuerOrigin.BADGE_PATH, device),
+        ) { code, bytes, _ ->
             BadgeAnswer.read(code, bytes)
         }
     }
@@ -125,18 +158,15 @@ class OkHttpTicketIssuer(
         }
     }
 
-    private suspend fun <A> post(
-        origin: String,
-        url: String,
-        key: String,
-        body: RequestBody,
-        noVerdict: (String) -> A,
-        read: (Int, ByteArray) -> A,
-    ): A = call(origin, url, key, body, noVerdict) { code, bytes, _ -> read(code, bytes) }
-
     /**
-     * One request: a `POST` of [body], or a `GET` without one, with [key] in `Authorization` when there is one. [read]
-     * gets the status, the capped body and a numeric `retry-after` in seconds.
+     * One request: a `POST` of [body], or a `GET` without one, with [key] in `Authorization` when there is one and, with
+     * a [proof], the three device headers (C-7.6-40) signed afresh for each send. [read] gets the status, the capped body
+     * and a numeric `retry-after` in seconds.
+     *
+     * A signer that refuses sends nothing ([noVerdict] `keystore`): an unsigned request to a bound account would be
+     * answered 409 and park the key (ADR 2026-10.wk3m). A 400 `bad-proof` whose `Date` is more than
+     * [DeviceProof.MAX_SKEW_MS] from this phone's clock is re-signed once on the issuer's clock, and that offset is kept
+     * in memory for [origin] (C-7.6-43); any other answer, a second `bad-proof` included, goes to [read].
      */
     @Suppress("LongParameterList") // one request's parts; a holder class would only rename them
     private suspend fun <A> call(
@@ -145,31 +175,141 @@ class OkHttpTicketIssuer(
         key: String?,
         body: RequestBody?,
         noVerdict: (String) -> A,
+        proof: Proof? = null,
         read: (Int, ByteArray, Long?) -> A,
     ): A {
         if (!IssuerOrigin.isAcceptable(origin, allowCleartext)) return noVerdict("refused origin")
         val client = clientFor() ?: return noVerdict("offline")
-        val request =
-            Request
-                .Builder()
-                .url(url)
-                .apply { if (key != null) header(AUTHORIZATION, "Bearer $key") }
-                .header(ACCEPT, JSON)
-                .apply { if (body != null) post(body) else get() }
-                .build()
-        return withContext(Dispatchers.IO) {
+        var resigned = false
+        while (true) {
+            val headers =
+                if (proof != null && key != null) {
+                    proofHeaders(origin, proof, key) ?: return noVerdict(KEYSTORE)
+                } else {
+                    emptyList()
+                }
+            // The time the proof was signed at, as it went out (the header, not a second read of the clock).
+            val signed =
+                headers
+                    .firstOrNull { it.first == DeviceProof.TIME_HEADER }
+                    ?.second
+                    ?.toLongOrNull()
+                    ?.times(MS_PER_S) ?: clock()
+            val exchange = exchange(client, request(url, key, headers, body))
+            if (exchange !is Exchange.Answered) return noVerdict((exchange as Exchange.Failed).reason)
+            val reSign = proof != null && !resigned && learnClock(origin, exchange, signed)
+            if (!reSign) return read(exchange.code, exchange.bytes, exchange.retryAfterS)
+            resigned = true
+        }
+    }
+
+    /**
+     * Reads the issuer's clock off [exchange]'s `Date` (C-7.6-43): drops [origin]'s offset once the clocks agree again
+     * (the phone's was corrected), and says whether a `bad-proof` is to be re-signed, learning the offset when the
+     * phone's clock is the one that is off.
+     */
+    private fun learnClock(
+        origin: String,
+        exchange: Exchange.Answered,
+        signed: Long,
+    ): Boolean {
+        val date = exchange.dateMs ?: return false
+        val agree = abs(date - clock()) <= DeviceProof.MAX_SKEW_MS
+        if (agree) offsets.remove(origin)
+        if (!farFromSigned(exchange, date, signed)) return false
+        if (!agree) offsets[origin] = date - clock()
+        return true
+    }
+
+    /**
+     * Whether [exchange] is a `bad-proof` C-7.6-43 re-signs: the issuer's [date] is more than [DeviceProof.MAX_SKEW_MS]
+     * from the time the proof was signed at — compared with what was sent, so an offset gone stale is caught too.
+     */
+    private fun farFromSigned(
+        exchange: Exchange.Answered,
+        date: Long,
+        signed: Long,
+    ): Boolean = abs(date - signed) > DeviceProof.MAX_SKEW_MS && IssuerAnswer.isBadProof(exchange.code, exchange.bytes)
+
+    private fun request(
+        url: String,
+        key: String?,
+        headers: List<Pair<String, String>>,
+        body: RequestBody?,
+    ): Request =
+        Request
+            .Builder()
+            .url(url)
+            .apply { if (key != null) header(AUTHORIZATION, "Bearer $key") }
+            .apply { headers.forEach { (name, value) -> header(name, value) } }
+            .header(ACCEPT, JSON)
+            .apply { if (body != null) post(body) else get() }
+            .build()
+
+    /** The three device headers for one send, or null when the signer refused. Names nothing in a log. */
+    private suspend fun proofHeaders(
+        origin: String,
+        proof: Proof,
+        key: String,
+    ): List<Pair<String, String>>? {
+        val t = (clock() + (offsets[origin] ?: 0L)) / MS_PER_S
+        val spki = proof.signer.publicKey() ?: return null
+        val signature = proof.signer.sign(DeviceProof.message(proof.path, t, key)) ?: return null
+        return listOf(
+            DeviceProof.KEY_HEADER to DeviceProof.b64(spki),
+            DeviceProof.TIME_HEADER to t.toString(),
+            DeviceProof.SIGNATURE_HEADER to DeviceProof.b64(signature),
+        )
+    }
+
+    private suspend fun exchange(
+        client: OkHttpClient,
+        request: Request,
+    ): Exchange =
+        withContext(Dispatchers.IO) {
             try {
                 client.newCall(request).execute().use { response ->
-                    val bytes = readCapped(response) ?: return@use noVerdict("too large")
-                    read(response.code, bytes, response.header(RETRY_AFTER)?.trim()?.toLongOrNull())
+                    val bytes = readCapped(response) ?: return@use Exchange.Failed("too large")
+                    Exchange.Answered(
+                        response.code,
+                        bytes,
+                        response.header(RETRY_AFTER)?.trim()?.toLongOrNull(),
+                        response.headers.getDate(DATE)?.time,
+                    )
                 }
             } catch (_: UnknownHostException) {
-                noVerdict("dns")
+                Exchange.Failed("dns")
             } catch (_: InterruptedIOException) {
-                noVerdict("timeout")
+                Exchange.Failed("timeout")
             } catch (e: IOException) {
-                noVerdict(e.javaClass.simpleName)
+                Exchange.Failed(e.javaClass.simpleName)
             }
+        }
+
+    /** What one send came back with: an answer to read, or a reason word for no verdict. */
+    private sealed interface Exchange {
+        class Answered(
+            val code: Int,
+            val bytes: ByteArray,
+            val retryAfterS: Long?,
+            val dateMs: Long?,
+        ) : Exchange
+
+        class Failed(
+            val reason: String,
+        ) : Exchange
+    }
+
+    /** A request's device proof: the [path] it is signed for and the [signer]. */
+    private class Proof(
+        val path: String,
+        val signer: DeviceSigner,
+    ) {
+        companion object {
+            fun of(
+                path: String,
+                signer: DeviceSigner?,
+            ): Proof? = signer?.let { Proof(path, it) }
         }
     }
 
@@ -195,6 +335,9 @@ class OkHttpTicketIssuer(
 
         private const val AUTHORIZATION = "Authorization"
         private const val RETRY_AFTER = "Retry-After"
+        private const val DATE = "Date"
+        private const val KEYSTORE = "keystore"
+        private const val MS_PER_S = 1_000L
         private const val ACCEPT = "Accept"
         private const val JSON = "application/json"
 

@@ -36,6 +36,9 @@ import java.util.concurrent.ConcurrentHashMap
  *   capped at its end cannot loop (nor a 200 whose ticket was never held), and [ENDED_RETRY_MS] after a 403, since
  *   `account extend` can revive it.
  * - `unknown-key` is never asked again; only a different key ([TicketKeyJournal.putKey]) resets the state.
+ * - `bound-elsewhere` (C-7.6-42) parks the key the same way, and only a move or a different key lifts it — except that a
+ *   park is asked once more with each pair this phone holds that the issuer has not refused yet ([KeyState.parkedBy],
+ *   [KeyState.parkedUnsigned], ADR 2026-10.wk3m). `upgrade-required` and `bad-proof` are no verdict.
  * - No verdict backs off from [FIRST_BACKOFF_MS], doubling, to at most [MAX_BACKOFF_MS], keeping the last verdict; a
  *   503 that names a `retry-after` (a free key on a capped day) waits at least that long.
  * - A free key ([HeldKey.free], C-7.6-27 amended) is asked only while an upload waits and no ticket is presentable
@@ -56,10 +59,18 @@ object TicketRefreshPolicy {
     fun dueAt(
         state: KeyState,
         presentableExp: Long?,
+        untried: Boolean = false,
     ): Long? =
         when (state.answer) {
             KeyAnswer.UNKNOWN_KEY -> null
+
+            // C-7.6-42: parked until a move or a new key. A park answered to a proof from another of this phone's pairs,
+            // or to no proof at all, may be this phone's own Keystore hiccup, so a pair it holds that the issuer has not
+            // refused yet earns one more ask ([untried], ADR 2026-10.wk3m).
+            KeyAnswer.BOUND_ELSEWHERE -> if (untried) state.notBefore else null
+
             null -> state.notBefore
+
             KeyAnswer.OK, KeyAnswer.ENDED -> maxOf(state.notBefore, presentableExp?.let { it * MS_PER_S - REFRESH_MARGIN_MS } ?: 0L)
         }
 
@@ -88,6 +99,8 @@ object TicketRefreshPolicy {
         answer: IssuerAnswer,
         held: Boolean,
         now: Long,
+        // The id of the pair whose proof the request carried, or null for none.
+        signedBy: String? = null,
     ): KeyState =
         when (answer) {
             // A 200 whose ticket was never held is no verdict, but it still waits out the floor: asking again at once
@@ -108,8 +121,18 @@ object TicketRefreshPolicy {
                 KeyState(KeyAnswer.ENDED, answer.endsAt ?: prior.endsAt, now + ENDED_RETRY_MS, failures = 0)
             }
 
-            is IssuerAnswer.NoVerdict -> {
+            is IssuerAnswer.NoVerdict, IssuerAnswer.UpgradeRequired, IssuerAnswer.BadProof -> {
                 noVerdict(prior, now)
+            }
+
+            // C-7.6-42: parked, keeping the account's end; the held ticket is kept until it lapses.
+            is IssuerAnswer.BoundElsewhere -> {
+                parked(prior, answer, signedBy)
+            }
+
+            // C-7.6-44, the move route's own answer: the park stands, with the time the issuer named.
+            is IssuerAnswer.MoveTooSoon -> {
+                prior.copy(movableAt = answer.movableAt)
             }
 
             // A capped day (C-7.6-28): no ticket before the issuer's `retry-after`, so no ask before it either; without
@@ -121,6 +144,23 @@ object TicketRefreshPolicy {
                 }
             }
         }
+
+    // C-7.6-42: parked, keeping the account's end and every pair of this phone's a 409 has refused so far.
+    private fun parked(
+        prior: KeyState,
+        answer: IssuerAnswer.BoundElsewhere,
+        signedBy: String?,
+    ): KeyState {
+        val refused = if (prior.answer == KeyAnswer.BOUND_ELSEWHERE) prior.parkedBy else emptySet()
+        return KeyState(
+            KeyAnswer.BOUND_ELSEWHERE,
+            prior.endsAt,
+            notBefore = 0L,
+            movableAt = answer.movableAt,
+            parkedUnsigned = signedBy == null,
+            parkedBy = refused + listOfNotNull(signedBy),
+        )
+    }
 
     /** The wait after the [failures]-th ask in a row with no verdict: 1 min, 2, 4, … capped at 1 h. */
     fun backoff(failures: Int): Long {
@@ -188,6 +228,8 @@ class TicketRefresher(
     private val mine: suspend (Long, ByteArray, Int) -> Long? = { day, nonce, bits ->
         withContext(Dispatchers.Default) { AccountStamp.mine(day, nonce, bits, MINE_ATTEMPTS) }
     },
+    // The customer keys' device keys (C-7.6-39, ADR 2026-10.wk3m); null in a build or a test that signs nothing.
+    private val devices: DeviceKeyring? = null,
 ) {
     // Relay host name → when an upload there was last locked for want of a ticket (epoch millis).
     private val waiting = ConcurrentHashMap<String, Long>()
@@ -231,6 +273,9 @@ class TicketRefresher(
         if (job?.isActive == true) return
         job =
             session.launch {
+                // A restore replaces the keys under the Keystore's pairs: one sweep drops the pairs no held key names. It
+                // never throws (DeviceKeys catches), so the loop always starts.
+                devices?.retain()
                 while (isActive) {
                     val seen = wants.value
                     val next = runOnce()
@@ -275,13 +320,88 @@ class TicketRefresher(
         state: KeyState,
     ): Long? {
         if (!IssuerOrigin.isAcceptable(key.issuer, allowCleartext) || !CustomerKey.isWellFormed(key.key)) return null
-        val due = TicketRefreshPolicy.dueAt(state, tickets.presentable(url)?.claims?.exp) ?: return null
+        // Only a parked key looks at the Keystore before it is due: whether it holds a pair the issuer has not refused yet.
+        val device = if (state.answer == KeyAnswer.BOUND_ELSEWHERE) deviceKey(host, key, state) else null
+        val untried = device is DeviceKey.Ready && (state.parkedUnsigned || device.id !in state.parkedBy)
+        val due = TicketRefreshPolicy.dueAt(state, tickets.presentable(url)?.claims?.exp, untried) ?: return null
         return when {
-            due > clock() -> due
-            !online() -> clock() + maxSleepMs
-            else -> TicketRefreshPolicy.dueAt(ask(host, url, key, state), tickets.presentable(url)?.claims?.exp)
+            due > clock() -> {
+                due
+            }
+
+            !online() -> {
+                clock() + maxSleepMs
+            }
+
+            else -> {
+                val next = ask(host, url, key, state, device ?: deviceKey(host, key, state))
+                val stillUntried = untried && next.answer == KeyAnswer.BOUND_ELSEWHERE && device.id !in next.parkedBy
+                TicketRefreshPolicy.dueAt(next, tickets.presentable(url)?.claims?.exp, stillUntried)
+            }
         }
     }
+
+    /** [key]'s device key: a free key never has one (C-7.6-37), and a build without a keyring signs nothing. */
+    private suspend fun deviceKey(
+        host: String,
+        key: HeldKey,
+        state: KeyState = KeyState.FRESH,
+    ): DeviceKey = if (key.free) DeviceKey.Unmade else devices?.forKey(host, key.key, avoid = state.parkedBy) ?: DeviceKey.Unmade
+
+    /**
+     * Moves [host]'s account to this phone (docs/VOICE_CALLS.md C-7.6-44): only because the person asked, once, never
+     * retried. A 200 goes through the swap's import door and lifts the park; `move-too-soon` keeps it with the issuer's
+     * `movableAt`; 401 and 403 are recorded as the swap records them; anything else changes nothing.
+     */
+    suspend fun move(host: String): MoveResult {
+        val url = activeHosts()[host] ?: return MoveResult.Unavailable
+        val key = keys.keys.first()[host]?.takeUnless { it.free } ?: return MoveResult.Unavailable
+        if (!IssuerOrigin.isAcceptable(key.issuer, allowCleartext) || !CustomerKey.isWellFormed(key.key)) return MoveResult.Unavailable
+        if (!online()) return MoveResult.Failed("offline")
+        val prior = keys.keyStates.first()[host] ?: KeyState.FRESH
+        val device = deviceKey(host, key, prior)
+        // A Keystore that refused sends nothing: an unsigned move could not bind this phone (ADR 2026-10.wk3m).
+        if (device is DeviceKey.Refused) return MoveResult.Failed("keystore")
+        val ready = device as? DeviceKey.Ready
+        val answer = issuer.move(key.issuer, key.key, ready?.signer)
+        log("$host: move: ${describe(answer)}")
+        return settleMove(host, url, key, prior, ready, answer)
+    }
+
+    /** What a move's [answer] leaves: the swap's import and verdicts for a 200, 401 and 403; nothing for the rest. */
+    private suspend fun settleMove(
+        host: String,
+        url: String,
+        key: HeldKey,
+        prior: KeyState,
+        ready: DeviceKey.Ready?,
+        answer: IssuerAnswer,
+    ): MoveResult =
+        when (answer) {
+            is IssuerAnswer.Issued -> {
+                val held = hold(host, url, key, answer)
+                // The account is this phone's now, whatever became of the ticket: lift the park before the verdict.
+                val lifted = prior.copy(answer = null, movableAt = null, parkedUnsigned = false, parkedBy = emptySet())
+                keys.putKeyState(host, key, TicketRefreshPolicy.afterAnswer(lifted, answer, held, clock()))
+                ready?.let { devices?.accepted(host, key.key, it.id) }
+                if (held) waiting.remove(host)
+                MoveResult.Moved
+            }
+
+            is IssuerAnswer.MoveTooSoon -> {
+                keys.putKeyState(host, key, TicketRefreshPolicy.afterAnswer(prior, answer, held = false, now = clock()))
+                MoveResult.TooSoon(answer.movableAt)
+            }
+
+            IssuerAnswer.UnknownKey, is IssuerAnswer.Ended -> {
+                keys.putKeyState(host, key, TicketRefreshPolicy.afterAnswer(prior, answer, held = false, now = clock()))
+                if (answer is IssuerAnswer.Ended) MoveResult.Ended else MoveResult.UnknownKey
+            }
+
+            else -> {
+                MoveResult.Failed(describe(answer))
+            }
+        }
 
     /** A free key's ask ([TicketRefreshPolicy.freeDueAt]): only for a waiting upload. Next due, or null for never. */
     private suspend fun refreshFree(
@@ -439,33 +559,25 @@ class TicketRefresher(
         }
     }
 
+    /**
+     * One swap with [device]: a Keystore that refused sends nothing and counts as no verdict, since an unsigned request
+     * to a bound account would park the key (ADR 2026-10.wk3m); a phone that cannot hold a device key sends without one
+     * (C-7.6-45).
+     */
     private suspend fun ask(
         host: String,
         url: String,
         key: HeldKey,
         prior: KeyState,
+        device: DeviceKey = DeviceKey.Unmade,
     ): KeyState {
-        val answer = issuer.swap(key.issuer, key.key)
-        val held =
-            (answer as? IssuerAnswer.Issued)?.let {
-                when (val imported = tickets.import(url, it.ticket)) {
-                    is SpoolTickets.Import.Held -> {
-                        log("$host: ticket fetched from ${IssuerOrigin.host(key.issuer)} (exp ${imported.ticket.claims.exp})")
-                        true
-                    }
-
-                    is SpoolTickets.Import.ForAnotherSpool -> {
-                        log("$host: the issuer sent a ticket for ${imported.aud}; never held")
-                        false
-                    }
-
-                    else -> {
-                        log("$host: the issuer sent a ticket this build cannot hold")
-                        false
-                    }
-                }
-            } ?: false
-        val next = TicketRefreshPolicy.afterAnswer(prior, answer, held, clock())
+        val ready = device as? DeviceKey.Ready
+        val answer =
+            if (device is DeviceKey.Refused) IssuerAnswer.NoVerdict("keystore") else issuer.swap(key.issuer, key.key, ready?.signer)
+        val held = (answer as? IssuerAnswer.Issued)?.let { hold(host, url, key, it) } ?: false
+        // A 200 to a proof says the issuer bound that pair: it signs from now on, and the key's other pairs go.
+        if (answer is IssuerAnswer.Issued && ready != null) devices?.accepted(host, key.key, ready.id)
+        val next = TicketRefreshPolicy.afterAnswer(prior, answer, held, clock(), signedBy = ready?.id)
         if (answer !is IssuerAnswer.Issued) log("$host: ticket ask: ${describe(answer)}")
         // The ticket the waiting upload needed is held: the plane presents it, and only a new lock asks again.
         if (held) waiting.remove(host)
@@ -478,6 +590,30 @@ class TicketRefresher(
         keys.putKeyState(host, key, next)
         return next
     }
+
+    /** Puts an issued ticket through [SpoolTickets.import]'s host rule; whether it is now held. */
+    private suspend fun hold(
+        host: String,
+        url: String,
+        key: HeldKey,
+        issued: IssuerAnswer.Issued,
+    ): Boolean =
+        when (val imported = tickets.import(url, issued.ticket)) {
+            is SpoolTickets.Import.Held -> {
+                log("$host: ticket fetched from ${IssuerOrigin.host(key.issuer)} (exp ${imported.ticket.claims.exp})")
+                true
+            }
+
+            is SpoolTickets.Import.ForAnotherSpool -> {
+                log("$host: the issuer sent a ticket for ${imported.aud}; never held")
+                false
+            }
+
+            else -> {
+                log("$host: the issuer sent a ticket this build cannot hold")
+                false
+            }
+        }
 
     /** Each active relay's host name with one URL for it (two relays on one host share its ticket and its key). */
     private suspend fun activeHosts(): Map<String, String> =
@@ -516,6 +652,10 @@ class TicketRefresher(
             is IssuerAnswer.Ended -> "${KeyAnswer.ENDED.word} (endsAt ${answer.endsAt})"
             is IssuerAnswer.NoVerdict -> "no verdict (${answer.reason})"
             is IssuerAnswer.Unavailable -> "unavailable (retry after ${answer.retryAfterMs} ms)"
+            is IssuerAnswer.BoundElsewhere -> "${KeyAnswer.BOUND_ELSEWHERE.word} (movableAt ${answer.movableAt})"
+            is IssuerAnswer.MoveTooSoon -> "move-too-soon (movableAt ${answer.movableAt})"
+            IssuerAnswer.UpgradeRequired -> IssuerAnswer.UPGRADE_REQUIRED
+            IssuerAnswer.BadProof -> IssuerAnswer.BAD_PROOF
         }
 
     companion object {

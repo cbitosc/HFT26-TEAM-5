@@ -2,10 +2,15 @@ package app.getknit.knit.badge
 
 import app.getknit.knit.identity.NodeId
 import app.getknit.knit.mesh.spool.CustomerKey
+import app.getknit.knit.mesh.spool.DeviceKey
+import app.getknit.knit.mesh.spool.DeviceKeyring
 import app.getknit.knit.mesh.spool.HeldKey
+import app.getknit.knit.mesh.spool.IssuerAnswer
 import app.getknit.knit.mesh.spool.IssuerOrigin
 import app.getknit.knit.mesh.spool.KeyAnswer
+import app.getknit.knit.mesh.spool.KeyState
 import app.getknit.knit.mesh.spool.TicketKeyJournal
+import app.getknit.knit.mesh.spool.TicketRefreshPolicy
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
@@ -56,8 +61,15 @@ object BadgeRefreshPolicy {
                 emptyList<HeldBadge>() to BadgeAskState(now + ENDED_RETRY_MS, 0)
             }
 
-            // A 401, a 503 and no answer all keep what is held until it lapses on its own.
-            BadgeAnswer.UnknownKey, BadgeAnswer.Unavailable, is BadgeAnswer.NoVerdict -> {
+            // A 401, a 503, a 409 (C-5-8: the account is another phone's), a 426, a `bad-proof` and no answer all keep what
+            // is held until it lapses on its own.
+            BadgeAnswer.UnknownKey,
+            BadgeAnswer.Unavailable,
+            is BadgeAnswer.NoVerdict,
+            is BadgeAnswer.BoundElsewhere,
+            BadgeAnswer.UpgradeRequired,
+            BadgeAnswer.BadProof,
+            -> {
                 held to BadgeAskState(now + FLOOR_MS, prior.failures + 1)
             }
         }
@@ -85,6 +97,8 @@ class BadgeRefresher(
     private val random: (Int) -> ByteArray = { n -> ByteArray(n).also(SecureRandom()::nextBytes) },
     private val log: (String) -> Unit = {},
     private val maxSleepMs: Long = MAX_SLEEP_MS,
+    // The customer keys' device keys (docs/VOICE_CALLS.md C-7.6-39, ADR 2026-10.wk3m); null signs nothing.
+    private val devices: DeviceKeyring? = null,
 ) {
     @Volatile
     private var job: Job? = null
@@ -109,7 +123,7 @@ class BadgeRefresher(
     /** Asks if an ask is due and possible; returns when the next one falls due (epoch millis), or null for never. */
     suspend fun runOnce(): Long? {
         if (!journal.show.first()) return null
-        val key = issuerKey() ?: return null
+        val (host, key) = issuerKey() ?: return null
         val me = selfId()
         val held = journal.held.first()
         val state = journal.askState.first()
@@ -117,18 +131,45 @@ class BadgeRefresher(
         return when {
             due > clock() -> due
             !online() -> clock() + maxSleepMs
-            else -> ask(key, me, held, state)
+            else -> ask(host, key, me, held, state)
         }
     }
 
     private suspend fun ask(
+        host: String,
         key: HeldKey,
         me: String,
         held: List<HeldBadge>,
         prior: BadgeAskState,
     ): Long {
         val r = random(Badges.R_BYTES)
-        val answer = issuer.issueBadge(key.issuer, key.key, Badges.subject(NodeId.toBytes(me), r))
+        val parkedBy =
+            keys.keyStates
+                .first()[host]
+                ?.parkedBy
+                .orEmpty()
+        val device = devices?.forKey(host, key.key, avoid = parkedBy) ?: DeviceKey.Unmade
+        val ready = device as? DeviceKey.Ready
+        val signer = ready?.signer
+        // A Keystore that refused sends nothing: an unsigned request to a bound account would park it (ADR 2026-10.wk3m).
+        val answer =
+            if (device is DeviceKey.Refused) {
+                BadgeAnswer.NoVerdict("keystore")
+            } else {
+                issuer.issueBadge(key.issuer, key.key, Badges.subject(NodeId.toBytes(me), r), signer)
+            }
+        // C-5-8 reads a 409 as the ticket swap does: the key is parked for the ticket refresher too, until a move.
+        if (answer is BadgeAnswer.BoundElsewhere) {
+            val state = keys.keyStates.first()[host] ?: KeyState.FRESH
+            val parked = IssuerAnswer.BoundElsewhere(answer.movableAt)
+            keys.putKeyState(
+                host,
+                key,
+                TicketRefreshPolicy.afterAnswer(state, parked, held = false, now = clock(), signedBy = ready?.id),
+            )
+        }
+        // A 200 to a proof says the issuer bound that pair (ADR 2026-10.wk3m).
+        if (answer is BadgeAnswer.Issued && ready != null) devices?.accepted(host, key.key, ready.id)
         val fresh =
             (answer as? BadgeAnswer.Issued)
                 ?.badges
@@ -147,11 +188,12 @@ class BadgeRefresher(
     }
 
     /**
-     * The key to ask with: the first held customer key, by relay host name, whose issuer passes [IssuerOrigin] and whose
-     * last ticket answer is neither `ended` nor `unknown-key`. Null when none, so a phone with no live account never
-     * asks. A free key (C-7.6-37) never does: a badge says its holder supports Knit, and a free account pays nothing.
+     * The key to ask with and its relay host: the first held customer key, by relay host name, whose issuer passes
+     * [IssuerOrigin] and whose last ticket answer is none of `ended`, `unknown-key` and `bound-elsewhere`. Null when none,
+     * so a phone with no live account here never asks. A free key (C-7.6-37) never does: a badge says its holder supports
+     * Knit, and a free account pays nothing.
      */
-    private suspend fun issuerKey(): HeldKey? {
+    private suspend fun issuerKey(): Pair<String, HeldKey>? {
         val states = keys.keyStates.first()
         return keys.keys
             .first()
@@ -161,8 +203,8 @@ class BadgeRefresher(
                 !key.free &&
                     IssuerOrigin.isAcceptable(key.issuer, allowCleartext) &&
                     CustomerKey.isWellFormed(key.key) &&
-                    states[host]?.answer.let { it != KeyAnswer.ENDED && it != KeyAnswer.UNKNOWN_KEY }
-            }?.value
+                    states[host]?.answer.let { it != KeyAnswer.ENDED && it != KeyAnswer.UNKNOWN_KEY && it != KeyAnswer.BOUND_ELSEWHERE }
+            }?.toPair()
     }
 
     private fun validExp(
@@ -188,6 +230,9 @@ class BadgeRefresher(
             is BadgeAnswer.Ended -> "ended (endsAt ${answer.endsAt})"
             BadgeAnswer.Unavailable -> "unavailable"
             is BadgeAnswer.NoVerdict -> "no verdict (${answer.reason})"
+            is BadgeAnswer.BoundElsewhere -> "bound-elsewhere (movableAt ${answer.movableAt})"
+            BadgeAnswer.UpgradeRequired -> IssuerAnswer.UPGRADE_REQUIRED
+            BadgeAnswer.BadProof -> IssuerAnswer.BAD_PROOF
         }
 
     companion object {

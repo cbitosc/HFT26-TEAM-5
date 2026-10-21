@@ -1,6 +1,7 @@
 package app.getknit.knit.ui.relay
 
 import android.content.ClipData
+import android.content.Context
 import android.os.Build
 import android.text.format.DateUtils
 import android.text.format.Formatter
@@ -37,6 +38,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import app.getknit.knit.R
 import app.getknit.knit.mesh.spool.KeyAnswer
+import app.getknit.knit.mesh.spool.MoveResult
 import app.getknit.knit.mesh.spool.RelayInvite
 import app.getknit.knit.mesh.spool.ScopeSync
 import app.getknit.knit.mesh.spool.SpoolConnection
@@ -86,10 +88,50 @@ internal fun RelayEventsEffect(
                 is InternetRelayEvent.InviteApplied -> {
                     snackbarHostState.showSnackbar(appliedMessage.format(event.host))
                 }
+
+                is InternetRelayEvent.Moved -> {
+                    snackbarHostState.showSnackbar(moveMessage(context, event.result))
+                }
             }
         }
     }
 }
+
+/** The snackbar line for a move's outcome (docs/VOICE_CALLS.md C-7.6-44). */
+private fun moveMessage(
+    context: Context,
+    result: MoveResult,
+): String =
+    when (result) {
+        MoveResult.Moved -> {
+            context.getString(R.string.relays_move_done)
+        }
+
+        is MoveResult.TooSoon -> {
+            result.movableAt?.let {
+                val at =
+                    DateUtils.formatDateTime(
+                        context,
+                        it,
+                        DateUtils.FORMAT_SHOW_DATE or DateUtils.FORMAT_SHOW_TIME or DateUtils.FORMAT_NO_YEAR or
+                            DateUtils.FORMAT_ABBREV_MONTH,
+                    )
+                context.getString(R.string.relays_move_from, at)
+            } ?: context.getString(R.string.relays_move_failed)
+        }
+
+        MoveResult.UnknownKey -> {
+            context.getString(R.string.relays_move_unknown_key)
+        }
+
+        MoveResult.Ended -> {
+            context.getString(R.string.relays_move_ended)
+        }
+
+        is MoveResult.Failed, MoveResult.Unavailable -> {
+            context.getString(R.string.relays_move_failed)
+        }
+    }
 
 /**
  * A relay's status dot. Intent outranks liveness: a relay the user just parked keeps its worker for up to one
@@ -308,7 +350,15 @@ private fun customerKeyLine(account: RelayAccount): String =
             account.endsAt?.let { stringResource(R.string.relays_calls_key_ended, account.issuer, date(it)) }
                 ?: stringResource(R.string.relays_calls_key_ended_undated, account.issuer)
         }
+
+        KeyAnswer.BOUND_ELSEWHERE -> {
+            stringResource(R.string.relays_calls_key_bound_elsewhere, account.issuer)
+        }
     }
+
+/** When a parked account (C-7.6-42) can move here, as its line says it: the day and the time. */
+@Composable
+internal fun movableLine(epochMillis: Long): String = stringResource(R.string.relays_move_from, dateTime(epochMillis))
 
 /** A ticket's `exp`: the day and the time, never the year — a ticket is good for 48 h at most (§2.6). */
 @Composable

@@ -3,6 +3,10 @@ package app.getknit.knit.data.settings
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
+import app.getknit.knit.mesh.spool.DeviceKeyMarks
+import app.getknit.knit.mesh.spool.DeviceKeyring
+import app.getknit.knit.mesh.spool.DeviceKeys
+import app.getknit.knit.mesh.spool.DeviceKeystore
 import app.getknit.knit.mesh.spool.FreeKeyJournal
 import app.getknit.knit.mesh.spool.FreeState
 import app.getknit.knit.mesh.spool.HeldKey
@@ -11,6 +15,7 @@ import app.getknit.knit.mesh.spool.KeyState
 import app.getknit.knit.mesh.spool.TicketKeyJournal
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -31,12 +36,36 @@ import kotlinx.serialization.json.Json
  * backup: a free key sits in `spool_free_key:<host>` rather than `spool_key:<host>` so that it never rides one, and a
  * host's one slot is the two read together — a write to either clears the other. [seededIssuers] are the free issuers
  * this build ships (`res/values/spools.xml`); a debug build's bridge may set its own per host.
+ *
+ * The device keys (docs/VOICE_CALLS.md C-7.6-39, ADR 2026-10.wk3m) live in the Keystore, which no backup carries; which
+ * pair the issuer accepted sits under `spool_device:`, out of one too. A customer key's arrival makes its pair, and
+ * every write that replaces or forgets a customer key sweeps the pairs no held key names.
  */
 class TicketKeyStore(
     private val dataStore: DataStore<Preferences>,
     private val seededIssuers: Map<String, String> = emptyMap(),
+    // The Keystore under the device keys (C-7.6-39, ADR 2026-10.wk3m), null in a build without Knit Anywhere.
+    keystore: DeviceKeystore? = null,
+    // The device keys' set-aside clock: a monotonic one that counts sleep (`SystemClock.elapsedRealtime` on a phone).
+    elapsed: () -> Long = { System.nanoTime() / NANOS_PER_MS },
 ) : TicketKeyJournal,
-    FreeKeyJournal {
+    FreeKeyJournal,
+    DeviceKeyMarks {
+    /**
+     * The device keys of the customer keys held here, made when a key arrives and deleted when it goes (C-7.6-39).
+     * Which pair the issuer accepted is kept in this file under `spool_device:`, which never rides a backup.
+     */
+    val devices: DeviceKeyring? = keystore?.let { DeviceKeys(it, this, { customerKeys() }, elapsed) }
+
+    // Every customer key held, or null when one of them does not read: a sweep then deletes nothing, since a key read as
+    // missing would cost its bound pair (a downgrade that cannot parse a newer entry, say).
+    private suspend fun customerKeys(): Map<String, String>? {
+        val prefs = dataStore.data.first()
+        val raw = prefs.asMap().keys.count { it.name.startsWith(SettingsKeys.SPOOL_KEY_PREFIX) }
+        val read = prefs.byPrefix(SettingsKeys.SPOOL_KEY_PREFIX) { decodeKey(it) }.mapValues { it.value.key }
+        return read.takeIf { it.size == raw }
+    }
+
     override val keys: Flow<Map<String, HeldKey>> =
         dataStore.data
             .map { prefs ->
@@ -74,6 +103,9 @@ class TicketKeyStore(
             }
             it.remove(SettingsKeys.spoolKeyStateKey(host))
         }
+        // After the edit, so the sweep reads the key it must keep: the replaced key's pair goes, the new one's is made.
+        devices?.retain()
+        if (!key.free) devices?.create(host, key.key)
     }
 
     override suspend fun putKeyState(
@@ -97,6 +129,7 @@ class TicketKeyStore(
             it.remove(SettingsKeys.spoolFreeStateKey(host))
             it.remove(SettingsKeys.spoolFreeConsentKey(host))
         }
+        devices?.retain()
     }
 
     override val freeIssuers: Flow<Map<String, String>> =
@@ -165,6 +198,19 @@ class TicketKeyStore(
         }
     }
 
+    override suspend fun accepted(): Map<String, String> = dataStore.data.first().byPrefix(SettingsKeys.SPOOL_DEVICE_PREFIX) { it }
+
+    override suspend fun putAccepted(
+        slot: String,
+        id: String,
+    ) {
+        dataStore.edit { it[SettingsKeys.spoolDeviceKey(slot)] = id }
+    }
+
+    override suspend fun removeAccepted(slot: String) {
+        dataStore.edit { it.remove(SettingsKeys.spoolDeviceKey(slot)) }
+    }
+
     /** Names nothing it holds. */
     override fun toString(): String = "TicketKeyStore"
 
@@ -187,9 +233,14 @@ class TicketKeyStore(
         val e: Long? = null,
         val nb: Long = 0,
         val f: Int = 0,
+        val m: Long? = null,
+        val pu: Boolean = false,
+        val pb: List<String> = emptyList(),
     )
 
     private companion object {
+        const val NANOS_PER_MS = 1_000_000L
+
         val json = Json { ignoreUnknownKeys = true }
 
         fun <T : Any> Preferences.byPrefix(
@@ -221,11 +272,21 @@ class TicketKeyStore(
             runCatching { json.decodeFromString<StoredKey>(text) }.getOrNull()?.let { HeldKey(it.i, it.k) }
 
         fun encodeState(state: KeyState): String =
-            json.encodeToString(StoredState(state.answer?.word, state.endsAt, state.notBefore, state.failures))
+            json.encodeToString(
+                StoredState(
+                    state.answer?.word,
+                    state.endsAt,
+                    state.notBefore,
+                    state.failures,
+                    state.movableAt,
+                    state.parkedUnsigned,
+                    state.parkedBy.sorted(),
+                ),
+            )
 
         fun decodeState(text: String): KeyState? =
             runCatching { json.decodeFromString<StoredState>(text) }.getOrNull()?.let {
-                KeyState(KeyAnswer.of(it.a), it.e, it.nb, it.f)
+                KeyState(KeyAnswer.of(it.a), it.e, it.nb, it.f, it.m, it.pu, it.pb.toSet())
             }
     }
 }

@@ -236,7 +236,8 @@ here.
 > answer 503 (below). The client acts on the claims inside `ticket`, never the JSON copies, and puts it through the
 > same import door as a pasted one, so a ticket whose `aud` is not that relay's host is never held; the connection
 > then presents it at once (C-7.6-19). A phone never re-mints a key into an invite: it lends out the customer's own
-> quota. Client: knit-next ADR 2026-10.3sk7.
+> quota. Client: knit-next ADR 2026-10.3sk7. Every request with a customer key also carries a device proof, which adds
+> the 400 `bad-proof`, 409 `bound-elsewhere` and 426 `upgrade-required` answers ("Device binding", below).
 >
 > **Why a waiting upload asks.** Without it a phone with a key asks only on its schedule, so a photo sent in the hour
 > a ticket lapsed, or before the first one arrived, waits for the next scheduled ask. A locked upload is held and
@@ -249,6 +250,55 @@ here.
 > **Why the 1 h floor holds for every key.** A 200 brings a ticket good for about a day, so no honest ask comes
 > within the hour after one. A ticket that is never held (its `aud` is not the relay's host) or is refused at `ent`
 > (a clock far off) leaves the upload locked, and without the floor the phone would ask again at once, every time.
+
+#### Device binding
+
+A customer key is for one phone (knit-spool-coordinator ADR 2026-10.473c). The phone proves each request comes from
+the same phone with a **device key**: a key pair it makes for that one customer key, which never leaves the phone and
+names nobody. The issuer binds the account to the first device key it sees, and refuses another until the person
+moves the account. A free key (C-7.6-37) is made on the phone and never leaves it, so it carries no proof.
+
+| ID           | Requirement |
+|--------------|-------------|
+| **C-7.6-39** | When a customer key arrives, a client makes an ECDSA P-256 key pair for it in the Android Keystore: non-exportable, StrongBox-backed where the phone has StrongBox, one pair per customer key. A key that replaces it, or removing the relay, deletes the pair. The private key never leaves the Keystore, and no backup, log line, bridge reply or crash report carries the public key or a signature. |
+| **C-7.6-40** | Every request a client sends with a customer key — the swap (C-7.6-27), the badge (`docs/SUPPORTER_BADGE.md` C-5-3) and the move (C-7.6-44) — carries `Knit-Device-Key` (the public key's SPKI DER), `Knit-Device-Time` (Unix seconds, decimal) and `Knit-Device-Signature` (ECDSA over SHA-256, DER), the two binary values in unpadded base64url. A request with a free key carries none of them. |
+| **C-7.6-41** | The signature is over `m = "knit/issuer/v1/device" ‖ 0x00 ‖ path ‖ 0x00 ‖ u64be(t) ‖ SHA-256(k)`: the label and `path` in ASCII with no terminator, `path` the request's path (`/api/v1/ticket`, `/api/v1/badge`, `/api/v1/ticket/move`), `t` the value of `Knit-Device-Time`, and `k` the customer key's ASCII. Each request is signed afresh; a signature is never reused. |
+| **C-7.6-42** | A 409 `{ error: "bound-elsewhere", movableAt }` on the swap or the badge means another phone holds the account. The client keeps a held ticket and badge until they lapse, asks nothing on a schedule or for a waiting upload, and tells the person, once, that this Knit Anywhere is in use on another phone, offering to move it here from `movableAt` (an ISO 8601 instant; null means now). It asks again only when the person moves it (C-7.6-44) or a different key arrives, or once with each pair it holds that the issuer has not refused (C-7.6-45). A 426 `{ error: "upgrade-required" }` is backed off from as C-7.6-28's "anything else". |
+| **C-7.6-43** | A 400 `{ error: "bad-proof" }` whose response `Date` differs from the phone's clock by more than 60 s is re-signed once with `t` taken from the issuer's clock (the phone's clock plus that difference, kept in memory per issuer origin). Any other 400 `bad-proof`, or a second one, backs off as C-7.6-28's "anything else". |
+| **C-7.6-44** | Moving is the person's act, never the client's: only when they choose to move the account to this phone does it send `POST <i>/api/v1/ticket/move` with the customer key, no body and a proof signed for that path. A 200 is the swap's 200 and is imported the same way. A 409 `{ error: "move-too-soon", movableAt }` is shown to the person with `movableAt`. 400, 401 and 403 are read as the swap reads them. It is never retried on a schedule. |
+| **C-7.6-45** | A client that holds no device key for a customer key and cannot make one (its Keystore holds no EC P-256 key) sends the request without the three headers and reads the answer as above: an issuer that does not yet require proofs answers it as before, and one that does answers 409 or 426. A client whose Keystore refused to list, look up, make or sign with a device key this time sends nothing, and backs off as C-7.6-28's "anything else". It never makes a pair over one it holds, never deletes one on the Keystore's word, and signs with the pair the issuer last accepted, else its oldest. A 409 `bound-elsewhere` is asked once more with each other pair the client holds, and, after a request without a proof, once with a proof. |
+| **C-7.6-46** | A phone restored from a backup, or one given the same invite again, holds the customer key but not its device key, since a Keystore key rides no backup. It makes a new pair (C-7.6-39), and its first swap is answered as any other phone's: 409 `bound-elsewhere` while another phone holds the account, which offers the move. |
+
+> **Why a device key and not the Node ID.** A Node ID is public: it is the hash of the identity key bundle and rides
+> every Bluetooth advert, so a bare one proves nothing. Proving the identity key would fix that, but the issuer would
+> then hold the person's Node ID against a paid account, and so against the email Polar keeps, which is the link this
+> protocol keeps out of every server's hands (§2.5, `docs/SPOOL_PROTOCOL.md` §1, `docs/SUPPORTER_BADGE.md` §1). A
+> device key is random and per customer key: the issuer learns that a request comes from the same phone as the last
+> one, and nothing about which phone, nor that two accounts share one.
+>
+> **Why the path and the key are signed.** The path stops a swap's proof from being replayed as a move, and the key's
+> hash stops a proof for one account from being replayed against another. A timestamp keeps the swap at one round
+> trip; the issuer accepts it within ±300 s, the ticket's own skew (`docs/SPOOL_PROTOCOL.md` S-7.6-14).
+>
+> **Why moving is the person's act and has a cooldown.** A move takes the account from the other phone, so only the
+> person may start it. The issuer's cooldown, which the client reads from `movableAt` and never hardcodes, stops two
+> people from taking turns with one key. A lost phone inside the cooldown goes through the issuer's support, which
+> reissues the key.
+>
+> **Why a Keystore refusal sends nothing, and no pair is ever made over another.** An issuer answers a bound account
+> asked without the bound key's proof 409, and 409 parks the key until the person moves it, behind the issuer's
+> cooldown. The Android Keystore refuses now and then (a busy keystore2, a key-blob upgrade that fails once), and
+> below API 31 it can read a dead daemon as "no key". If the client sent unsigned on a refusal, or made a pair over one
+> it could not read, a hiccup would cost the person the account for days. So a refusal costs one backoff, a new pair
+> goes under a new alias beside the old one, and the pair the issuer accepted, or else the oldest, signs: once the old
+> one reads again, it is the one that answers.
+>
+> **What it does not stop.** A rooted phone, or software that can drive the first phone's Keystore, can still use the
+> key there. It stops a forwarded invite and a second phone scanning the QR code.
+>
+> **Records.** Issuer: knit-spool-coordinator ADR 2026-10.473c, which holds the cooldown, the two phases
+> (`optional`, then `required` before the issuer sells) and the privacy policy's wording. Client: knit-next ADR
+> 2026-10.wk3m.
 
 #### Free accounts
 

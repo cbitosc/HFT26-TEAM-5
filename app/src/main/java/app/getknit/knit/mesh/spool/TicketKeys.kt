@@ -35,6 +35,9 @@ object IssuerOrigin {
     /** Where the badge issue lives under the same origin (docs/SUPPORTER_BADGE.md §5). */
     const val BADGE_PATH = "/api/v1/badge"
 
+    /** Where the move lives under the same origin (docs/VOICE_CALLS.md C-7.6-44). */
+    const val MOVE_PATH = "/api/v1/ticket/move"
+
     /** Where the free account route lives under a free issuer's origin (docs/VOICE_CALLS.md §2.6). */
     const val ACCOUNT_PATH = "/api/v1/account"
 
@@ -64,6 +67,9 @@ object IssuerOrigin {
     /** The badge issue's URL under [origin]. */
     fun badgeUrl(origin: String): String = origin + BADGE_PATH
 
+    /** The move's URL under [origin]. */
+    fun moveUrl(origin: String): String = origin + MOVE_PATH
+
     /** The account route's URL under [origin], without its query. */
     fun accountUrl(origin: String): String = origin + ACCOUNT_PATH
 
@@ -91,6 +97,9 @@ enum class KeyAnswer(
     OK("ok"),
     UNKNOWN_KEY("unknown-key"),
     ENDED("ended"),
+
+    /** 409 `bound-elsewhere` (C-7.6-42): parked until the person moves the account here or a different key arrives. */
+    BOUND_ELSEWHERE("bound-elsewhere"),
     ;
 
     companion object {
@@ -102,13 +111,20 @@ enum class KeyAnswer(
  * What this phone knows about asking for one host's tickets: the last verdict ([answer], null before the first),
  * the account's end as the issuer last said it ([endsAt], epoch millis), the earliest time it may ask again
  * ([notBefore], epoch millis — the 1 h floor after an answer, the daily retry after `ended`, the backoff after no
- * answer), and how many asks in a row got no verdict ([failures], which sets the backoff). Nothing secret.
+ * answer), and how many asks in a row got no verdict ([failures], which sets the backoff). Parked
+ * [KeyAnswer.BOUND_ELSEWHERE], [movableAt] is when the issuer said the account can move here (epoch millis, null for
+ * now); [parkedUnsigned] says the last refused request carried no device proof, and [parkedBy] holds the ids of this
+ * phone's pairs whose proofs were refused, so a pair it holds outside them earns one more ask (ADR 2026-10.wk3m).
+ * Nothing secret.
  */
 data class KeyState(
     val answer: KeyAnswer? = null,
     val endsAt: Long? = null,
     val notBefore: Long = 0,
     val failures: Int = 0,
+    val movableAt: Long? = null,
+    val parkedUnsigned: Boolean = false,
+    val parkedBy: Set<String> = emptySet(),
 ) {
     companion object {
         /** A key that just arrived: never asked, so asked at once. */

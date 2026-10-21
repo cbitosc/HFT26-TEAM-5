@@ -2,6 +2,9 @@ package app.getknit.knit.badge
 
 import app.getknit.knit.badge.BadgeFixtures.HOLDER
 import app.getknit.knit.badge.BadgeFixtures.NBF
+import app.getknit.knit.mesh.spool.DeviceKey
+import app.getknit.knit.mesh.spool.DeviceSigner
+import app.getknit.knit.mesh.spool.FakeDeviceKeyring
 import app.getknit.knit.mesh.spool.HeldKey
 import app.getknit.knit.mesh.spool.KeyAnswer
 import app.getknit.knit.mesh.spool.KeyState
@@ -76,13 +79,16 @@ class BadgeRefresherTest {
 
         val subs = mutableListOf<ByteArray>()
         val asks = mutableListOf<Pair<String, String>>()
+        val signers = mutableListOf<DeviceSigner?>()
 
         override suspend fun issueBadge(
             origin: String,
             key: String,
             sub: ByteArray,
+            device: DeviceSigner?,
         ): BadgeAnswer {
             subs += sub
+            signers += device
             asks += origin to key
             return when (val s = script) {
                 is Fixed -> {
@@ -289,6 +295,69 @@ class BadgeRefresherTest {
         assertTrue(BadgeAnswer.read(401, "<html>".encodeToByteArray()) is BadgeAnswer.NoVerdict)
         assertTrue(BadgeAnswer.read(200, """{"error":"x"}""".encodeToByteArray()) is BadgeAnswer.NoVerdict)
     }
+
+    // ── the device proof (C-5-3, C-5-8; docs/VOICE_CALLS.md C-7.6-40 to C-7.6-45, ADR 2026-10.wk3m) ────────────────
+
+    private val devices = FakeDeviceKeyring()
+
+    private fun signing() =
+        BadgeRefresher(
+            journal = journal,
+            keys = keys,
+            issuer = issuer,
+            selfId = { HOLDER },
+            pins = listOf(BadgeKeys.RFC8032_TEST1),
+            clock = { now },
+            random = { n -> ByteArray(n) { (draws * 16 + it).toByte() }.also { draws++ } },
+            log = { logs += it },
+            devices = devices,
+        )
+
+    @Test
+    fun `the badge request is handed the key's device key, and a 200 records the pair as accepted`() =
+        runTest {
+            journal.on.value = true
+            holdKey()
+            signing().runOnce()
+            val key = "kak1_" + "A".repeat(43)
+            assertTrue(issuer.signers.single() === devices.signers.getValue("relay.example" to key))
+            assertEquals(listOf(FakeDeviceKeyring.ID), devices.acceptedIds)
+        }
+
+    @Test
+    fun `a 409 keeps the held badge and parks the key for the ticket refresher too`() =
+        runTest {
+            journal.on.value = true
+            holdKey()
+            val refresher = signing()
+            refresher.runOnce()
+            val held = journal.badges.value
+            assertEquals(1, held.size)
+            now += 24 * DAY_S * 1_000
+            issuer.script = FakeIssuer.Fixed(BadgeAnswer.BoundElsewhere(now + DAY_S * 1_000))
+            refresher.runOnce()
+            assertEquals(held, journal.badges.value)
+            val state = keys.states.value.getValue("relay.example")
+            assertEquals(KeyAnswer.BOUND_ELSEWHERE, state.answer)
+            assertEquals(now + DAY_S * 1_000, state.movableAt)
+            assertEquals(setOf(FakeDeviceKeyring.ID), state.parkedBy)
+            // Parked: no more badge asks either.
+            now += 7 * DAY_S * 1_000
+            assertNull(refresher.runOnce())
+            assertEquals(2, issuer.asks.size)
+        }
+
+    @Test
+    fun `a keystore that refuses asks nothing and keeps what is held`() =
+        runTest {
+            journal.on.value = true
+            holdKey()
+            devices.next = { DeviceKey.Refused }
+            signing().runOnce()
+            assertTrue(issuer.asks.isEmpty())
+            assertEquals(1, journal.state.value.failures)
+            assertTrue(keys.states.value["relay.example"]?.answer == null)
+        }
 
     private companion object {
         const val DAY_S = 86_400L

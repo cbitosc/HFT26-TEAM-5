@@ -16,6 +16,7 @@ import app.getknit.knit.mesh.spool.HeldTicket
 import app.getknit.knit.mesh.spool.IssuerOrigin
 import app.getknit.knit.mesh.spool.KeyAnswer
 import app.getknit.knit.mesh.spool.KeyState
+import app.getknit.knit.mesh.spool.MoveResult
 import app.getknit.knit.mesh.spool.RelayInvite
 import app.getknit.knit.mesh.spool.SpoolStatus
 import app.getknit.knit.mesh.spool.SpoolTicket
@@ -164,7 +165,8 @@ sealed interface RelayTicket {
  * The ticket key held for a relay's host (ADR 2026-10.3sk7), as the row shows it: the issuer it is traded with (its
  * host, never the key), the issuer's last verdict ([answer], null before the first), the account's end as the issuer
  * last said it ([endsAt], epoch millis), and how many asks in a row got no verdict ([failures]). A [free] key
- * (C-7.6-37) shows no end: its account lives while it is used.
+ * (C-7.6-37) shows no end: its account lives while it is used. Parked [KeyAnswer.BOUND_ELSEWHERE] (C-7.6-42),
+ * [movableAt] is when the person can move it here (epoch millis, null for now).
  */
 data class RelayAccount(
     val issuer: String,
@@ -172,6 +174,7 @@ data class RelayAccount(
     val endsAt: Long?,
     val failures: Int,
     val free: Boolean = false,
+    val movableAt: Long? = null,
 )
 
 data class InternetRelayUiState(
@@ -204,6 +207,11 @@ sealed interface InternetRelayEvent {
     /** The invite was applied; [host] is the relay's redacted host for the confirmation. */
     data class InviteApplied(
         val host: String,
+    ) : InternetRelayEvent
+
+    /** What the person's move of a relay's Knit Anywhere came to (docs/VOICE_CALLS.md C-7.6-44). */
+    data class Moved(
+        val result: MoveResult,
     ) : InternetRelayEvent
 }
 
@@ -496,6 +504,18 @@ class InternetRelayViewModel(
     }
 
     /**
+     * Moves the Knit Anywhere account held for [url]'s relay to this phone (docs/VOICE_CALLS.md C-7.6-44): only from the
+     * person's confirmed tap, once, and the outcome is the snackbar's. Without a mesh nothing moves.
+     */
+    fun moveHere(url: String) {
+        val host = SpoolUrl.hostname(url) ?: return
+        viewModelScope.launch {
+            val result = mesh?.moveAnywhereHere(host) ?: MoveResult.Unavailable
+            _events.tryEmit(InternetRelayEvent.Moved(result))
+        }
+    }
+
+    /**
      * The relay row's free-tickets switch for [host] (C-7.6-34): on lets this phone make a free account at the relay's
      * free issuer when an upload waits; off forgets a free key held there. Written past the screen's life.
      */
@@ -596,7 +616,7 @@ internal fun relayAccount(
 ): RelayAccount? {
     val key = host?.let(keys::get) ?: return null
     val state = states[host] ?: KeyState.FRESH
-    return RelayAccount(IssuerOrigin.host(key.issuer), state.answer, state.endsAt, state.failures, key.free)
+    return RelayAccount(IssuerOrigin.host(key.issuer), state.answer, state.endsAt, state.failures, key.free, state.movableAt)
 }
 
 private const val MS_PER_S = 1_000L

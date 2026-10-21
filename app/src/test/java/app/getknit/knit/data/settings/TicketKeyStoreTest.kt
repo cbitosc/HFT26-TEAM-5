@@ -1,6 +1,10 @@
 package app.getknit.knit.data.settings
 
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import app.getknit.knit.data.backup.SettingsSnapshot
+import app.getknit.knit.mesh.spool.DeviceKey
+import app.getknit.knit.mesh.spool.DeviceKeys
+import app.getknit.knit.mesh.spool.FakeDeviceKeystore
 import app.getknit.knit.mesh.spool.HeldKey
 import app.getknit.knit.mesh.spool.KeyAnswer
 import app.getknit.knit.mesh.spool.KeyState
@@ -183,6 +187,90 @@ class TicketKeyStoreTest {
             assertEquals(mapOf(HOST to "https://bench.example", "other.example" to "http://10.0.2.2:3000"), keys.freeIssuers.first())
             keys.setFreeIssuer(HOST, null)
             assertEquals(FREE_ISSUER, keys.freeIssuers.first()[HOST])
+        }
+
+    // ── device keys (docs/VOICE_CALLS.md C-7.6-39, C-7.6-46, ADR 2026-10.wk3m) ─────────────────────────────────────
+
+    private fun TestScope.signing(keystore: FakeDeviceKeystore): TicketKeyStore {
+        val dataStore = PreferenceDataStoreFactory.create(scope = backgroundScope) { File(tmp.root, "settings.preferences_pb") }
+        return TicketKeyStore(dataStore, keystore = keystore)
+    }
+
+    private fun FakeDeviceKeystore.slots(): Set<String?> = pairs.keys.map { DeviceKeys.slotOfAlias(it) }.toSet()
+
+    @Test
+    fun aCustomerKeyGetsItsPairWhenItArrives() =
+        runTest {
+            val keystore = FakeDeviceKeystore()
+            val keys = signing(keystore)
+            keys.putKey(HOST, HeldKey(ISSUER, KEY))
+            assertEquals(setOf(DeviceKeys.slotOf(HOST, KEY)), keystore.slots())
+            // The same key again makes nothing new.
+            keys.putKey(HOST, HeldKey(ISSUER, KEY))
+            assertEquals(1, keystore.generated)
+        }
+
+    @Test
+    fun aReplacedKeysPairGoesAndTheNewOneGetsItsOwn() =
+        runTest {
+            val keystore = FakeDeviceKeystore()
+            val keys = signing(keystore)
+            keys.putKey(HOST, HeldKey(ISSUER, KEY))
+            keys.putKey(HOST, HeldKey(ISSUER, OTHER_KEY))
+            assertEquals(listOf(DeviceKeys.slotOf(HOST, KEY)), keystore.deleted.map { DeviceKeys.slotOfAlias(it) })
+            assertEquals(setOf(DeviceKeys.slotOf(HOST, OTHER_KEY)), keystore.slots())
+        }
+
+    @Test
+    fun removingTheRelayDeletesItsPairAndNoOther() =
+        runTest {
+            val keystore = FakeDeviceKeystore()
+            val keys = signing(keystore)
+            keys.putKey(HOST, HeldKey(ISSUER, KEY))
+            keys.putKey("other.example", HeldKey(ISSUER, OTHER_KEY))
+            keys.forgetHost(HOST)
+            assertEquals(listOf(DeviceKeys.slotOf(HOST, KEY)), keystore.deleted.map { DeviceKeys.slotOfAlias(it) })
+            assertEquals(setOf(DeviceKeys.slotOf("other.example", OTHER_KEY)), keystore.slots())
+        }
+
+    @Test
+    fun aFreeKeyNeverGetsAPairAndDisplacesTheCustomerKeys() =
+        runTest {
+            val keystore = FakeDeviceKeystore()
+            val keys = signing(keystore)
+            keys.putKey(HOST, HeldKey(FREE_ISSUER, OTHER_KEY, free = true))
+            assertEquals(0, keystore.generated)
+            keys.putKey(HOST, HeldKey(ISSUER, KEY))
+            // A free key made after the account ended takes the slot, and the customer key's pair goes with it.
+            keys.putKey(HOST, HeldKey(FREE_ISSUER, OTHER_KEY, free = true))
+            assertEquals(1, keystore.generated)
+            assertTrue(keystore.pairs.isEmpty())
+        }
+
+    @Test
+    fun anAcceptedPairIsRememberedAndNeverRidesABackup() =
+        runTest {
+            val keys = signing(FakeDeviceKeystore())
+            keys.putKey(HOST, HeldKey(ISSUER, KEY))
+            val pair = keys.devices!!.forKey(HOST, KEY) as DeviceKey.Ready
+            keys.devices.accepted(HOST, KEY, pair.id)
+            assertEquals(mapOf(DeviceKeys.slotOf(HOST, KEY) to pair.id), keys.accepted())
+            val parked =
+                KeyState(
+                    KeyAnswer.BOUND_ELSEWHERE,
+                    endsAt = 7,
+                    movableAt = 1_800_000_000_000L,
+                    parkedUnsigned = true,
+                    parkedBy = setOf("a"),
+                )
+            keys.putKeyState(HOST, HeldKey(ISSUER, KEY), parked)
+            assertEquals(parked, keys.keyStates.first()[HOST])
+            assertTrue(SettingsSnapshot.isTransient(SettingsKeys.spoolKeyStateKey(HOST).name))
+            assertTrue(SettingsSnapshot.isTransient(SettingsKeys.spoolDeviceKey(DeviceKeys.slotOf(HOST, KEY)).name))
+            assertFalse(SettingsSnapshot.isTransient(SettingsKeys.spoolKeyKey(HOST).name))
+            // Forgetting the relay forgets which pair was accepted.
+            keys.forgetHost(HOST)
+            assertTrue(keys.accepted().isEmpty())
         }
 
     private companion object {

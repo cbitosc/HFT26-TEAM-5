@@ -4,6 +4,7 @@ import app.getknit.knit.data.AttachmentStore
 import app.getknit.knit.mesh.protocol.GroupInfo
 import app.getknit.knit.mesh.protocol.Mention
 import app.getknit.knit.mesh.protocol.ReplyRef
+import app.getknit.knit.mesh.spool.MoveResult
 import app.getknit.knit.mesh.spool.SpoolStatus
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
@@ -128,6 +129,12 @@ interface MeshController {
      * key asks, so the debug bridge's `nextAskAt` for one. False without tickets.
      */
     fun freeTicketWaiting(host: String): Boolean = false
+
+    /**
+     * Moves the Knit Anywhere account held for relay [host] to this phone (docs/VOICE_CALLS.md C-7.6-44): the person's
+     * act, once, never retried. Unavailable without tickets.
+     */
+    suspend fun moveAnywhereHere(host: String): MoveResult = MoveResult.Unavailable
 
     /**
      * Per-peer DM ratchet state, for diagnosing a session that will not recover. Debug-only observability:

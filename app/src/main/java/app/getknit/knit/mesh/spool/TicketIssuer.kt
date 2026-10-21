@@ -19,7 +19,19 @@ interface TicketIssuer {
     suspend fun swap(
         origin: String,
         key: String,
+        device: DeviceSigner? = null,
     ): IssuerAnswer
+
+    /**
+     * Moves the account to this phone (docs/VOICE_CALLS.md C-7.6-44): only ever because the person asked, never on a
+     * schedule. A `POST` to [IssuerOrigin.MOVE_PATH] with [key] and a proof signed by [device] for that path; its 200 is
+     * the swap's. Never throws.
+     */
+    suspend fun move(
+        origin: String,
+        key: String,
+        device: DeviceSigner?,
+    ): IssuerAnswer = IssuerAnswer.NoVerdict("unsupported")
 }
 
 /** What the issuer answered (C-7.6-28). Nothing here carries the key, and only [Issued] carries a secret. */
@@ -54,6 +66,25 @@ sealed interface IssuerAnswer {
     ) : IssuerAnswer
 
     /**
+     * 409 `bound-elsewhere` (C-7.6-42): another phone holds the account. It can be moved here from [movableAt] (epoch
+     * millis); null means now.
+     */
+    data class BoundElsewhere(
+        val movableAt: Long?,
+    ) : IssuerAnswer
+
+    /** 409 `move-too-soon` (C-7.6-44), from the move route only: the account can be moved from [movableAt]; null means now. */
+    data class MoveTooSoon(
+        val movableAt: Long?,
+    ) : IssuerAnswer
+
+    /** 426 `upgrade-required`: the issuer wants a proof this request did not carry. Backed off from as no verdict. */
+    data object UpgradeRequired : IssuerAnswer
+
+    /** 400 `bad-proof`, after the one re-sign C-7.6-43 allows: backed off from as no verdict. */
+    data object BadProof : IssuerAnswer
+
+    /**
      * Anything else — no route, a timeout, another status, a redirect, a body that does not parse: no verdict on the
      * key. [reason] is a short word for the log (`offline`, `timeout`, `http 502`, `unparseable`…), never the body.
      */
@@ -64,8 +95,9 @@ sealed interface IssuerAnswer {
     companion object {
         /**
          * Reads a response: [status], the (capped) [body] bytes and a numeric `retry-after` in seconds. Pure, so the JVM
-         * tests pin the coordinator's answers through it. A 401, 403 or 503 counts only with its own `error` word, since a
-         * proxy or a firewall in front of the issuer answers those statuses too and they say nothing about the key.
+         * tests pin the coordinator's answers through it. A 400, 401, 403, 409, 426 or 503 counts only with its own `error`
+         * word, since a proxy or a firewall in front of the issuer answers those statuses too and they say nothing about the
+         * key. A `movableAt` that is absent, null or unreadable reads as null: now.
          */
         fun read(
             status: Int,
@@ -76,12 +108,26 @@ sealed interface IssuerAnswer {
             return when {
                 parsed == null -> NoVerdict(if (status == HTTP_OK) "unparseable" else "http $status")
                 status == HTTP_OK -> issued(parsed)
-                status == HTTP_UNAUTHORIZED && parsed.error == UNKNOWN_KEY -> UnknownKey
-                status == HTTP_FORBIDDEN && parsed.error == ENDED -> Ended(parsed.endsAt?.let(::instant))
-                status == HTTP_UNAVAILABLE && parsed.error == UNAVAILABLE -> Unavailable(retryAfterS?.takeIf { it >= 0 }?.times(MS_PER_S))
-                else -> NoVerdict("http $status")
+                else -> refusal(status, parsed, retryAfterS) ?: NoVerdict("http $status")
             }
         }
+
+        // A refusal the issuer named with its own `error` word, or null for one it did not.
+        private fun refusal(
+            status: Int,
+            parsed: Answer,
+            retryAfterS: Long?,
+        ): IssuerAnswer? =
+            when (status to parsed.error) {
+                HTTP_UNAUTHORIZED to UNKNOWN_KEY -> UnknownKey
+                HTTP_FORBIDDEN to ENDED -> Ended(parsed.endsAt?.let(::instant))
+                HTTP_UNAVAILABLE to UNAVAILABLE -> Unavailable(retryAfterS?.takeIf { it >= 0 }?.times(MS_PER_S))
+                HTTP_CONFLICT to BOUND_ELSEWHERE -> BoundElsewhere(parsed.movableAt?.let(::instant))
+                HTTP_CONFLICT to MOVE_TOO_SOON -> MoveTooSoon(parsed.movableAt?.let(::instant))
+                HTTP_UPGRADE_REQUIRED to UPGRADE_REQUIRED -> UpgradeRequired
+                HTTP_BAD_REQUEST to BAD_PROOF -> BadProof
+                else -> null
+            }
 
         private fun issued(parsed: Answer): IssuerAnswer {
             val ticket = parsed.ticket?.takeIf { it.startsWith(HeldTicket.PREFIX) } ?: return NoVerdict("unparseable")
@@ -89,7 +135,15 @@ sealed interface IssuerAnswer {
             return Issued(ticket, endsAt)
         }
 
-        private fun instant(text: String): Long? =
+        /** Whether [status] and [body] are a 400 `bad-proof`: the answer C-7.6-43 re-signs once, on any route. */
+        fun isBadProof(
+            status: Int,
+            body: ByteArray,
+        ): Boolean =
+            status == HTTP_BAD_REQUEST &&
+                runCatching { json.decodeFromString<Answer>(body.decodeToString()) }.getOrNull()?.error == BAD_PROOF
+
+        internal fun instant(text: String): Long? =
             try {
                 Instant.parse(text).toEpochMilli()
             } catch (_: DateTimeParseException) {
@@ -100,6 +154,13 @@ sealed interface IssuerAnswer {
         const val HTTP_UNAUTHORIZED = 401
         const val HTTP_FORBIDDEN = 403
         const val HTTP_UNAVAILABLE = 503
+        const val HTTP_BAD_REQUEST = 400
+        const val HTTP_CONFLICT = 409
+        const val HTTP_UPGRADE_REQUIRED = 426
+        const val BOUND_ELSEWHERE = "bound-elsewhere"
+        const val MOVE_TOO_SOON = "move-too-soon"
+        const val UPGRADE_REQUIRED = "upgrade-required"
+        const val BAD_PROOF = "bad-proof"
         private const val UNKNOWN_KEY = "unknown-key"
         private const val ENDED = "ended"
         private const val UNAVAILABLE = "unavailable"
@@ -109,10 +170,37 @@ sealed interface IssuerAnswer {
     }
 }
 
-/** Every field any of the issuer's three answers carries; what a given status needs is checked in [IssuerAnswer.read]. */
+/**
+ * What a move the person asked for came to (docs/VOICE_CALLS.md C-7.6-44), for the relay screen's one line. Nothing
+ * here carries the key.
+ */
+sealed interface MoveResult {
+    /** The account is this phone's; the refresher holds its ticket. */
+    data object Moved : MoveResult
+
+    /** `move-too-soon`: it can move from [movableAt] (epoch millis), null for now. */
+    data class TooSoon(
+        val movableAt: Long?,
+    ) : MoveResult
+
+    data object UnknownKey : MoveResult
+
+    data object Ended : MoveResult
+
+    /** No answer worth a verdict: no route, the Keystore refused, a status nobody named. [reason] is a word, never a body. */
+    data class Failed(
+        val reason: String,
+    ) : MoveResult
+
+    /** Nothing to move: no customer key for that relay, the relay off, or a build without Knit Anywhere. */
+    data object Unavailable : MoveResult
+}
+
+/** Every field any of the issuer's answers carries; what a given status needs is checked in [IssuerAnswer.read]. */
 @Serializable
 private class Answer(
     val ticket: String? = null,
     val endsAt: String? = null,
     val error: String? = null,
+    val movableAt: String? = null,
 )
