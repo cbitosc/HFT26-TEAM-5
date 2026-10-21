@@ -85,14 +85,19 @@ class TalkReportIn(
 
 /**
  * Why [CallManager.start] dialled nothing. [NO_LIVE]: this build takes no live calls ([CallMedia.None]) and the call
- * could not be a walkie — the peer runs none, or this build runs none either.
+ * could not be a walkie — the peer runs none, or this build runs none either. [NO_RELAY]: "Relay all calls" is on and
+ * nothing would issue this phone TURN, so a live call could gather no candidate at all (C-3.7-3).
  */
-enum class CallRefusal { BUSY, SELF, NO_LIVE }
+enum class CallRefusal { BUSY, SELF, NO_LIVE, NO_RELAY }
 
-/** A call that rang out unanswered, or never rang because its offer arrived stale (C-3.4-2). */
+/**
+ * A call that rang out unanswered, or never rang: its offer arrived stale (C-3.4-2), or "Relay all calls" had nothing
+ * to relay through ([noRelay], C-3.7-3), which the notification says.
+ */
 class MissedCall(
     val peerId: String,
     val at: Long,
+    val noRelay: Boolean = false,
 )
 
 /**
@@ -149,6 +154,11 @@ data class CallTimings(
  *
  * **[relayAll]** is the user's "Relay all calls" (C-3.7-3), read as each call opens its media: TURN only, no host or
  * server-reflexive candidate in anything we send, and no Wi-Fi Direct leg, whose pair would show the peer our address.
+ * With nothing to relay through — no source would issue TURN ([TurnSource.turnAvailable]) and no issued credential is
+ * still live — such a call could never connect, so it is never begun: [start] refuses a live call
+ * ([CallRefusal.NO_RELAY]) and [CallKind.AUTO] places a walkie where the peer runs one, a live offer is declined
+ * `no_route` without ringing and left as a missed call, and a fetch that still yields no TURN ends the call before its
+ * OFFER or ANSWER goes out.
  *
  * **[onSignal] never waits on the network or the media.** It runs on the inbound path — a spool connection's only
  * reader, or the router's single collector — so it decides under [mutex], sends the small replies (RINGING, a busy
@@ -365,6 +375,7 @@ class CallManager(
                 CallKind.AUTO -> prefersWalkie(peerId)
             }
         if (!asWalkie && !liveEnabled) return CallRefusal.NO_LIVE
+        if (!asWalkie && relayBlocked()) return CallRefusal.NO_RELAY
         val l =
             mutex.withLock {
                 if (live?.phase?.let { it != CallPhase.Ended } == true) return CallRefusal.BUSY
@@ -394,7 +405,20 @@ class CallManager(
      * the chat puts first.
      */
     suspend fun prefersWalkie(peerId: String): Boolean =
-        walkie.enabled && walkie.capable(peerId) && (!liveEnabled || !walkie.liveLikely(peerId))
+        walkie.enabled && walkie.capable(peerId) && (!liveEnabled || relayBlocked() || !walkie.liveLikely(peerId))
+
+    /**
+     * C-3.7-3: "Relay all calls" is on and a live call would have nothing to relay through — no source would issue TURN
+     * now and no credential issued before is still live (what [fallback] would reuse). Asks nothing; safe on the
+     * inbound path.
+     */
+    private fun relayBlocked(): Boolean = relayAll() && !turn.turnAvailable() && liveCredentials().isEmpty()
+
+    /** The last issued TURN credentials that can still allocate, by their coturn expiry in the user name. */
+    private fun liveCredentials(): List<TurnServer> {
+        val nowS = clock() / MS_PER_S
+        return lastServers.filter { (it.user.substringBefore(':').toLongOrNull() ?: 0L) - CREDENTIAL_MARGIN_S > nowS }
+    }
 
     /** Answers the call [id] is alerting for; false when it no longer is. */
     override suspend fun answer(id: String): Boolean {
@@ -535,7 +559,7 @@ class CallManager(
             return listOf(Send(sender, CallPayload(id = p.id, ph = CallPayload.PHASE_DECLINE, rsn = CallPayload.REASON_MEDIA)))
         }
         val current = live?.takeIf { it.phase != CallPhase.Ended }
-        switchedOff(sender, p, current)?.let { return it }
+        declinedUnrung(sender, p, current, now)?.let { return it }
         current?.let { return onOfferWhileLive(it, sender, p, sdp, me, now) }
         val l = Live(p.id, sender, outgoing = false, startedAt = now, phase = CallPhase.Alerting, remoteOffer = sdp)
         live = l
@@ -556,6 +580,14 @@ class CallManager(
         return listOf(Send(sender, CallPayload(id = p.id, ph = CallPayload.PHASE_RINGING, dx = directVerdict(l))))
     }
 
+    /** An offer this phone declines without ringing — a kind switched off, or nothing to relay through — or null. */
+    private fun declinedUnrung(
+        sender: String,
+        p: CallPayload,
+        current: Live?,
+        now: Long,
+    ): List<Send>? = switchedOff(sender, p, current) ?: relayRefused(sender, p, current, now)
+
     /**
      * C-3.3-7: the no-answer DECLINE for an offer of a kind the person switched off, or null to go on. Busy or not, so
      * the answer says nothing about a call in progress; a glare offer ([current] our own call to [sender]) is taken.
@@ -570,6 +602,27 @@ class CallManager(
         refused(sender, p, CallEndReason.OFF)
         log("call ${p.id} from $sender: ${if (isWalkieOnly(p)) "mesh" else "live"} calls are off; no answer")
         return listOf(Send(sender, CallPayload(id = p.id, ph = CallPayload.PHASE_DECLINE, rsn = CallPayload.REASON_TIMEOUT)))
+    }
+
+    /**
+     * C-3.7-3: a live offer this phone could never connect, with "Relay all calls" on and nothing to relay through. It
+     * never rings: declined `no_route`, the caller's "No route between the phones", and left as a missed call (as a
+     * stale offer is, C-3.4-2), so the person sees who tried and, calling back, why it cannot connect. Null to go on,
+     * and while a call is live, which answers busy or glare first.
+     */
+    private fun relayRefused(
+        sender: String,
+        p: CallPayload,
+        current: Live?,
+        now: Long,
+    ): List<Send>? {
+        if (current != null || isWalkieOnly(p) || !relayBlocked()) return null
+        bury(p.id, CallPayload.PHASE_DECLINE, CallPayload.REASON_NO_ROUTE)
+        missedCalls.trySend(MissedCall(sender, now, noRelay = true))
+        loggedCalls.trySend(CallLogged(sender, now, CallRecord(id = p.id, outgoing = false, walkie = false, missed = true)))
+        refused(sender, p, CallEndReason.NO_ROUTE, missed = true)
+        log("call ${p.id} from $sender: relay all calls, but no TURN server; declined")
+        return listOf(Send(sender, CallPayload(id = p.id, ph = CallPayload.PHASE_DECLINE, rsn = CallPayload.REASON_NO_ROUTE)))
     }
 
     /** §3.11: an offer with the walkie bit and no audio is a walkie session; with both, a live call that may drop to one. */
@@ -897,9 +950,8 @@ class CallManager(
 
     /** No credential issued: the last ones while they can still allocate, else their STUN half (see [servers]). */
     private fun fallback(): Pair<List<TurnServer>, List<String>> {
-        val nowS = clock() / MS_PER_S
         val cached = lastServers
-        val live = cached.filter { (it.user.substringBefore(':').toLongOrNull() ?: 0L) - CREDENTIAL_MARGIN_S > nowS }
+        val live = liveCredentials()
         if (live.isNotEmpty()) {
             log("call TURN: none issued, reusing ${live.size} live credential(s)")
             return live to emptyList()
@@ -1049,12 +1101,22 @@ class CallManager(
         deliver(sends)
     }
 
-    /** Opens [l]'s media, or closes it again at once when the call ended meanwhile. */
+    /**
+     * Opens [l]'s media, or closes it again at once when the call ended meanwhile. A relay-only call [servers] give no
+     * TURN to (C-3.7-3) could gather nothing, so it ends here instead, before its OFFER or ANSWER: a caller's peer has
+     * heard nothing yet and is owed nothing, a callee tells its caller.
+     */
     private suspend fun openFor(
         l: Live,
         servers: List<TurnServer>,
     ): CallSession? {
         val relay = relayAll()
+        if (relay && servers.none(TurnServer::isTurn)) {
+            log("call ${l.id}: relay all calls, but no TURN server; ending before the media")
+            val tell = if (l.outgoing) null else endPhase(l)
+            deliver(mutex.withLock { if (current(l)) finish(l, CallPayload.REASON_NO_ROUTE, tell) else emptyList() })
+            return null
+        }
         val goesDirect = !relay && mutex.withLock { l.invite != null }
         val session = media.open(servers, relay, goesDirect) { event -> scope.launch { onMedia(l, event) } }
         val kept =

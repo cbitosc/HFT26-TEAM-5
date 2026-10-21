@@ -259,6 +259,9 @@ class CallManagerTest {
         // "Relay all calls" (C-3.7-3), as the manager reads it at each call.
         var relay = false
 
+        // Whether some source would issue this side TURN now (`TurnSource.turnAvailable`), as relay-only calls ask.
+        var turnAvailable = true
+
         // C-3.3-5: whether anything this side can see reaches the peer, as the manager looks while it has no RINGING.
         var reachable = true
 
@@ -308,6 +311,8 @@ class CallManagerTest {
                         }
 
                         override fun stunUrls(): List<String> = side.stun
+
+                        override fun turnAvailable(): Boolean = side.turnAvailable
                     },
                 media = if (live) media else CallMedia.None,
                 scope = backgroundScope,
@@ -1184,6 +1189,7 @@ class CallManagerTest {
         runTest {
             val (_, alice, bob) = pair()
             alice.relay = true
+            alice.turn = { listOf(TURN) }
             assertNull(alice.manager.start(BOB))
             runCurrent()
             assertTrue(bob.manager.answer(bob.state!!.id))
@@ -1491,6 +1497,8 @@ class CallManagerTest {
         runTest {
             val (_, alice, bob) = neighbours()
             alice.relay = true
+            alice.turn = { listOf(TURN) }
+            bob.turn = { listOf(TURN) }
             alice.manager.start(BOB)
             runCurrent()
             // A group pair would show the peer our real address: no invite at all.
@@ -1508,6 +1516,134 @@ class CallManagerTest {
             assertEquals(INVITE, alice.offer().dw)
             assertNull(bob.lastOf(CallPayload.PHASE_RINGING).dx)
             assertTrue(bob.direct.joins.isEmpty() && alice.direct.hosts.isEmpty())
+        }
+
+    /**
+     * C-3.7-3: with "Relay all calls" on and nothing to relay through, a live call is refused before anything is asked
+     * or sent — it could gather no candidate at all — while a credential issued before and still live is something.
+     */
+    @Test
+    fun aRelayOnlyCallWithNothingToRelayThroughIsRefusedUpFront() =
+        runTest {
+            val (_, alice, bob) = pair()
+            alice.relay = true
+            alice.turnAvailable = false
+            assertEquals(CallRefusal.NO_RELAY, alice.manager.start(BOB, CallKind.LIVE))
+            assertEquals(CallRefusal.NO_RELAY, alice.manager.start(BOB))
+            runCurrent()
+            assertNull(alice.state)
+            assertNull(bob.state)
+            assertTrue(alice.sent.isEmpty() && alice.turnAsks.isEmpty() && alice.media.sessions.isEmpty())
+
+            // Off, the same call goes out.
+            alice.relay = false
+            alice.turn = { listOf(TURN) }
+            assertNull(alice.manager.start(BOB))
+            runCurrent()
+            alice.manager.hangUp()
+            runCurrent()
+
+            // On again with the spools gone: the credential that call was issued can still allocate, so it is placed.
+            alice.relay = true
+            alice.turn = { emptyList() }
+            alice.sent.clear()
+            assertNull(alice.manager.start(BOB))
+            runCurrent()
+            assertEquals(listOf(TURN), alice.media.last.servers)
+            assertTrue(alice.media.last.relay)
+            assertEquals(CallPayload.PHASE_OFFER, alice.offer().ph)
+        }
+
+    /** AUTO with nothing to relay through: a walkie where the peer runs one, since it carries no address to hide. */
+    @Test
+    fun anAutoCallWithNothingToRelayThroughIsAWalkieWhereThePeerRunsOne() =
+        runTest {
+            val (_, alice, bob) = pair()
+            for (side in listOf(alice, bob)) side.walkie.enabled = true
+            alice.relay = true
+            alice.turnAvailable = false
+            assertTrue(alice.manager.prefersWalkie(BOB))
+            assertNull(alice.manager.start(BOB))
+            runCurrent()
+            assertEquals(CallPayload.MEDIA_WALKIE, alice.offer().m)
+            assertTrue(alice.state!!.walkie)
+            assertTrue(alice.turnAsks.isEmpty())
+            alice.manager.hangUp()
+            runCurrent()
+
+            alice.walkie.peerCapable = false
+            assertFalse(alice.manager.prefersWalkie(BOB))
+            assertEquals(CallRefusal.NO_RELAY, alice.manager.start(BOB))
+        }
+
+    /**
+     * A source that said yes and then issued nothing (a spool with no scope of the peer's, a refused `turnreq`): the
+     * call ends before its OFFER goes out, rather than ringing a peer it can never reach.
+     */
+    @Test
+    fun aRelayOnlyCallWhoseFetchYieldsNoTurnEndsBeforeItsOffer() =
+        runTest {
+            val (_, alice, bob) = pair()
+            alice.relay = true
+            alice.stun = listOf("stun:lab.example:3478")
+            assertNull(alice.manager.start(BOB))
+            runCurrent()
+            assertEquals(listOf(BOB), alice.turnAsks)
+            assertEquals(CallPhase.Ended, alice.state!!.phase)
+            assertEquals(CallPayload.REASON_NO_ROUTE, alice.state!!.reason)
+            assertTrue(alice.sent.isEmpty() && alice.media.sessions.isEmpty())
+            assertNull(bob.state)
+        }
+
+    /**
+     * The callee's side: a live offer it could never connect never rings — declined no_route, and left as a missed
+     * call that says why — while a walkie offer, which carries no address, still rings.
+     */
+    @Test
+    fun aLiveOfferWithNothingToRelayThroughNeverRingsAndIsMissed() =
+        runTest {
+            val (_, alice, bob) = pair()
+            bob.relay = true
+            bob.turnAvailable = false
+            assertNull(alice.manager.start(BOB))
+            runCurrent()
+            assertNull(bob.state)
+            assertEquals(listOf(CallPayload.PHASE_DECLINE), bob.phases())
+            assertEquals(CallPayload.REASON_NO_ROUTE, bob.sent.single().rsn)
+            assertEquals(CallPhase.Ended, alice.state!!.phase)
+            assertEquals(CallPayload.REASON_NO_ROUTE, alice.state!!.reason)
+            val missed = bob.missed.single()
+            assertEquals(ALICE, missed.peerId)
+            assertTrue(missed.noRelay)
+            assertTrue(
+                bob.logged
+                    .single()
+                    .record.missed,
+            )
+            assertTrue(bob.media.sessions.isEmpty() && bob.turnAsks.isEmpty())
+
+            for (side in listOf(alice, bob)) side.walkie.enabled = true
+            assertNull(alice.manager.start(BOB, CallKind.WALKIE))
+            runCurrent()
+            assertEquals(CallPhase.Alerting, bob.state!!.phase)
+        }
+
+    /** The callee answered, and its fetch issued nothing: it ends at once and tells the caller, rather than at connectMs. */
+    @Test
+    fun aRelayOnlyAnswerWhoseFetchYieldsNoTurnEndsAtOnce() =
+        runTest {
+            val (_, alice, bob) = pair()
+            bob.relay = true
+            assertNull(alice.manager.start(BOB))
+            runCurrent()
+            assertTrue(bob.manager.answer(bob.state!!.id))
+            runCurrent()
+            assertEquals(CallPayload.REASON_NO_ROUTE, bob.state!!.reason)
+            assertTrue(bob.media.sessions.isEmpty())
+            assertEquals(CallPayload.PHASE_END, bob.sent.last().ph)
+            assertEquals(CallPhase.Ended, alice.state!!.phase)
+            assertEquals(CallPayload.REASON_NO_ROUTE, alice.state!!.reason)
+            assertTrue(bob.missed.isEmpty())
         }
 
     @Test
@@ -2311,6 +2447,9 @@ class CallManagerTest {
         const val ICE_MS = 1_500L
         const val TALK_MS = 40_000L
         const val RELAY_CAND = "candidate:3 1 udp 41885439 203.0.113.9 49170 typ relay raddr 0.0.0.0 rport 0"
+
+        // A TURN credential good until 2027 on the virtual clock, which starts at 0.
+        val TURN = TurnServer(listOf("turn:lab.example:3478?transport=udp"), "1800000000:abc", "secret")
 
         val SDP =
             listOf(

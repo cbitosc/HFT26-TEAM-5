@@ -15,4 +15,6 @@ class OverridingTurnSource(
     override suspend fun turnServers(peerId: String): List<TurnServer> = custom().turn?.let(::listOf) ?: spool.turnServers(peerId)
 
     override fun stunUrls(): List<String> = custom().stun.ifEmpty { spool.stunUrls() }
+
+    override fun turnAvailable(): Boolean = custom().turn != null || spool.turnAvailable()
 }

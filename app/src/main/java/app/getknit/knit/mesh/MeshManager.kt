@@ -3595,6 +3595,9 @@ class MeshManager(
     /** [TurnSource]: the STUN URIs every connected spool advertised in its HELLO (C-7.6-20); empty without the plane. */
     override fun stunUrls(): List<String> = scopeSync?.stunUrls().orEmpty()
 
+    /** [TurnSource]: whether a connected spool would issue this phone TURN now (`SpoolStatus.turnForUs`); no without the plane. */
+    override fun turnAvailable(): Boolean = scopeSync?.turnAvailable() == true
+
     /**
      * Seals one ctl DM ([payload], a `CTL_PROFILE` or `CTL_TRANSFER`) to [peerId]. For a profile the avatar hash is
      * repeated in the **cleartext**

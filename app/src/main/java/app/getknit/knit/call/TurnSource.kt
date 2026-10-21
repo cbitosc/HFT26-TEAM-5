@@ -24,6 +24,13 @@ interface TurnSource {
      */
     fun stunUrls(): List<String>
 
+    /**
+     * Whether some source would issue this phone TURN now: what "Relay all calls" needs (C-3.7-3), since a relay-only
+     * call with no TURN server gathers nothing. Read as a call is placed and as an offer lands, so it asks nothing and
+     * never waits. A source that cannot tell says yes, and the call learns otherwise from [turnServers].
+     */
+    fun turnAvailable(): Boolean = true
+
     /** A build that takes no live calls (`LIVE_CALLS_WIRED` off): nothing ever asks it, and it has nothing to give. */
     object None : TurnSource {
         override suspend fun turnServers(peerId: String): List<TurnServer> = emptyList()
@@ -42,6 +49,9 @@ class TurnServer(
     val user: String,
     val pass: String,
 ) {
+    /** A relay a call can allocate on, not the credential-free STUN entry. */
+    val isTurn: Boolean get() = user.isNotEmpty()
+
     override fun toString(): String = "TurnServer(urls=$urls)"
 }
 

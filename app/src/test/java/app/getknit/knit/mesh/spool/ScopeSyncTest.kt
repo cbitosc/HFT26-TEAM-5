@@ -3185,6 +3185,7 @@ class ScopeSyncTest {
                     .single()
                     .turnForUs,
             )
+            assertTrue(phone.sync.turnAvailable())
             phone.sync.stop()
         }
 
@@ -3204,6 +3205,7 @@ class ScopeSyncTest {
             assertTrue(status.turn)
             assertEquals(SpoolTicketState.Accepted(exp = 1_800_086_400L, fl = SpoolTicket.FL_FILES), status.ticket)
             assertFalse(status.turnForUs)
+            assertFalse(phone.sync.turnAvailable())
             assertTrue(phone.sync.turnCredentials(bob).isEmpty())
             phone.sync.stop()
         }

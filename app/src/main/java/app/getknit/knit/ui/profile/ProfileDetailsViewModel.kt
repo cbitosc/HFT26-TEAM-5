@@ -407,6 +407,7 @@ class ProfileDetailsViewModel(
                 CallRefusal.BUSY -> _events.tryEmit(R.string.chat_call_busy)
                 CallRefusal.SELF -> _events.tryEmit(R.string.chat_call_needs_dm)
                 CallRefusal.NO_LIVE -> _events.tryEmit(R.string.chat_mesh_call_peer_too_old)
+                CallRefusal.NO_RELAY -> _events.tryEmit(R.string.chat_call_no_relay)
             }
         }
     }

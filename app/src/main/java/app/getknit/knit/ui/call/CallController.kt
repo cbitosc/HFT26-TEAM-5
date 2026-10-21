@@ -143,7 +143,7 @@ internal class CallController(
                 .Builder(context, CallNotifications.CHANNEL_STATUS)
                 .setSmallIcon(R.drawable.ic_stat_mesh)
                 .setContentTitle("Missed call")
-                .setContentText(face.name)
+                .setContentText(if (missed.noRelay) "${face.name} · couldn't ring: Relay all calls has no TURN server" else face.name)
                 .setLargeIcon(face.icon.toIcon(context))
                 .setCategory(NotificationCompat.CATEGORY_MISSED_CALL)
                 .setWhen(missed.at)

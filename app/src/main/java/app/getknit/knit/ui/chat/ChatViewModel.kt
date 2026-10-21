@@ -2281,6 +2281,7 @@ class ChatViewModel(
                     CallRefusal.BUSY -> R.string.chat_call_busy
                     CallRefusal.SELF -> R.string.chat_call_needs_dm
                     CallRefusal.NO_LIVE -> R.string.chat_mesh_call_peer_too_old
+                    CallRefusal.NO_RELAY -> R.string.chat_call_no_relay
                 }
             refusal?.let { _events.tryEmit(it) }
         }

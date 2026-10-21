@@ -510,6 +510,9 @@ class ScopeSync(
      */
     fun stunUrls(): List<String> = workers.values.flatMap { it.stunUrls() }.distinct()
 
+    /** Whether some connected spool would answer this phone's `turnreq` now ([SpoolStatus.turnForUs]). Lock-free. */
+    fun turnAvailable(): Boolean = workers.values.any { it.turnForUs() }
+
     private fun describeTurn(reply: SpoolReply): String =
         when (reply) {
             is SpoolReply.Turn -> "credential, ${reply.urls.size} url(s)"
@@ -974,6 +977,10 @@ class ScopeSync(
         /** The STUN URIs this worker's live connection advertised; none while it has no completed hello. */
         fun stunUrls(): List<String> = connection?.takeIf { it.isReady }?.stun.orEmpty()
 
+        /** [SpoolStatus.turnForUs] for this worker's live connection. */
+        fun turnForUs(): Boolean =
+            connection?.takeIf { it.isReady && it.turn }?.let { it.ticketedTurn || !it.gated(SpoolTicket.FL_TURN) } == true
+
         /**
          * Whether this worker's live connection would take a cast for [scope]: the scope belongs here and its SUB was
          * answered (a digest arrived, so the spool counts the subscription), and the connection's own rule holds —
@@ -1132,8 +1139,7 @@ class ScopeSync(
                 stun = stunUrls(),
                 ticket = connection?.takeIf { it.isReady }?.ticketState() ?: SpoolTicketState.None,
                 turn = connection?.takeIf { it.isReady }?.turn == true,
-                turnForUs =
-                    connection?.takeIf { it.isReady && it.turn }?.let { it.ticketedTurn || !it.gated(SpoolTicket.FL_TURN) } == true,
+                turnForUs = turnForUs(),
                 cast = connection?.takeIf { it.isReady }?.cast,
                 entGates = connection?.takeIf { it.isReady }?.gates ?: 0L,
                 uploads = connection?.takeIf { it.isReady }?.let(::uploadsOn) ?: SpoolUploads.Open,

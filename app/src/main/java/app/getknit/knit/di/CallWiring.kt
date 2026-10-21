@@ -331,6 +331,8 @@ private fun Module.liveGraph() {
                 override suspend fun turnServers(peerId: String) = get<MeshManager>().turnServers(peerId)
 
                 override fun stunUrls() = get<MeshManager>().stunUrls()
+
+                override fun turnAvailable() = get<MeshManager>().turnAvailable()
             }
         if (!OWN_ICE_WIRED) return@single spool
         // §3.14 (ADR 2026-10.mr88): the person's own servers, each kind replacing the spools'. Until the store's

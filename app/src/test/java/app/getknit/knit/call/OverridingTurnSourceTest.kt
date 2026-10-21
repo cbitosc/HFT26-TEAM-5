@@ -2,7 +2,9 @@ package app.getknit.knit.call
 
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /** §3.14 (ADR 2026-10.mr88): an own server replaces the spools' per kind, and an own TURN sends no `turnreq`. */
@@ -17,6 +19,10 @@ class OverridingTurnSourceTest {
         }
 
         override fun stunUrls() = listOf("stun:spool.example.org")
+
+        var available = false
+
+        override fun turnAvailable() = available
     }
 
     private val own = TurnServer(urls = listOf("turn:own.example.org"), user = "ada", pass = "pw")
@@ -41,6 +47,17 @@ class OverridingTurnSourceTest {
             // STUN is the other kind: still the hellos'.
             assertEquals(listOf("stun:spool.example.org"), source.stunUrls())
         }
+
+    /** What "Relay all calls" asks (C-3.7-3): an own TURN server is always something to relay through; else the spools say. */
+    @Test
+    fun turnIsAvailableWithAnOwnServerOrWhereTheSpoolsSaySo() {
+        val spool = FakeSpool()
+        assertTrue(OverridingTurnSource({ CustomIce(turn = own) }, spool).turnAvailable())
+        val stunOnly = OverridingTurnSource({ CustomIce(stun = listOf("stun:own.example.org")) }, spool)
+        assertFalse(stunOnly.turnAvailable())
+        spool.available = true
+        assertTrue(stunOnly.turnAvailable())
+    }
 
     @Test
     fun ownStunAloneStillAsksTheSpoolsForTurn() =
