@@ -75,7 +75,7 @@ beyond an Android phone, though it will happily use a Meshtastic board if you ha
 - [Documentation](#-documentation)
 - [Roadmap](#-roadmap)
 - [Security note](#-security-note)
-- [Support](#-support)
+- [Support Knit](#-support-knit)
 - [License](#-license)
 
 > [!NOTE]
@@ -511,7 +511,7 @@ links with Android phones over Bluetooth LE; it is headed for the App Store and 
 
 **Is it free and open source?**
 Yes — Knit is free software under the **GNU General Public License v3.0 or later**. There are no ads,
-paid tiers, or subscriptions; development is funded entirely by optional tips (see [Support](#-support)).
+paid tiers, or subscriptions; development is funded entirely by optional tips (see [Support Knit](#-support-knit)).
 
 **How is it different from Bridgefy / Briar / Meshtastic?**
 Knit runs **two radios at once** (Wi-Fi Aware + Bluetooth LE) behind a single transport seam, has **no
@@ -630,18 +630,30 @@ that off while the Nearby room keeps going. The at-rest database is encrypted wi
 To report a vulnerability, see [`SECURITY.md`](SECURITY.md) — please **do not** open a public issue for
 security problems.
 
-## 💛 Support
+## 💛 Support Knit
 
-Knit is free and open source, with no ads, no tracking, and nothing to sell you — it's funded entirely
-by tips. If it's useful to you and you'd like to chip in, you can leave a one-off tip on Ko-fi or set up
-a recurring one on Liberapay or GitHub Sponsors:
+Knit is free and open source, with no ads, no tracking, and nothing to sell you. Most of the help it
+needs costs nothing:
+
+- **Bring the people around you.** Every phone running Knit carries messages for the others, so the mesh
+  you're on reaches further with each friend who installs it. Add each other with a QR code or a contact
+  link the next time you're together, and you can keep talking when there's no signal.
+- **Rate it on [Google Play](https://play.google.com/store/apps/details?id=app.getknit.knit).** A line
+  about where you used it helps someone who has never tried a mesh messenger decide whether it fits them.
+- **Star [the repository](https://github.com/getknit/knit) on GitHub.** Stars are how people searching
+  for an open-source messenger come across it.
+- **[Report a bug](https://github.com/getknit/knit/issues/new/choose) when something misbehaves.** Radios
+  behave differently on every phone model, so a report from yours can turn up a problem no test phone
+  shows.
+
+If you'd also like to chip in money, Knit is funded entirely by tips. You can leave a one-off tip on
+Ko-fi or set up a recurring one on Liberapay or GitHub Sponsors:
 
 [![Support on Ko-fi](https://img.shields.io/badge/Ko--fi-leave%20a%20tip-FF5E5B?logo=kofi&logoColor=white)](https://ko-fi.com/knit)
 [![Support on Liberapay](https://img.shields.io/badge/Liberapay-give%20recurring-F6C915?logo=liberapay&logoColor=black)](https://liberapay.com/zaventh/)
 [![Sponsor on GitHub](https://img.shields.io/badge/GitHub%20Sponsors-sponsor-EA4AAA?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/getknit)
 
-Tips are optional and buy no special treatment — Knit is GPLv3 and stays that way. Reporting bugs and
-telling people it exists helps just as much.
+Tips are optional and buy no special treatment. Knit is GPLv3 and stays that way.
 
 ## 📄 License
 
