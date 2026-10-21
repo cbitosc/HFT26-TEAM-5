@@ -2,6 +2,7 @@ package app.getknit.knit.data.message
 
 import app.getknit.knit.clampToUtf16
 import app.getknit.knit.data.VoiceAudio
+import app.getknit.knit.ellipsizeToUtf16
 import app.getknit.knit.location.GeoUri
 import app.getknit.knit.mesh.protocol.LinkPreviewBlob
 import app.getknit.knit.normalizeSingleLine
@@ -35,6 +36,16 @@ fun buildReplySnippet(
         body.isBlank() && attachmentLabel != null -> attachmentLabel.clampToUtf16(cap)
         else -> normalizeSingleLine(body).clampToUtf16(cap)
     }
+
+/**
+ * The quoted words in a "Reacted 👍 to “…”" line (the notification and the chat list's preview): [buildReplySnippet]'s
+ * rule, but a body longer than [REPLY_SNIPPET_MAX] ends in "…" rather than mid-word before the closing quote. Display
+ * only — a reply's quote snapshot stays [buildReplySnippet]'s, since the recipient rebuilds and compares it.
+ */
+fun reactionSnippet(
+    preview: String,
+    attachmentLabel: String? = null,
+): String = buildReplySnippet(preview, flagged = false, attachmentLabel, cap = Int.MAX_VALUE).ellipsizeToUtf16(REPLY_SNIPPET_MAX)
 
 /**
  * The localized stand-ins a quote names a body-less or positional original by. [fileFormat] takes the file's name

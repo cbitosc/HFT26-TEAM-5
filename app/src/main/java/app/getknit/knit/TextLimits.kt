@@ -53,6 +53,12 @@ fun String.clampToUtf16(limit: Int): String {
 }
 
 /**
+ * [clampToUtf16] for display: a cut string ends in "…" (inside [limit]) so it reads as cut, not as said. Never for
+ * text that crosses the wire or is compared on the other side — those cut silently, the same on both platforms.
+ */
+fun String.ellipsizeToUtf16(limit: Int): String = if (length <= limit) this else clampToUtf16(limit - 1).trimEnd() + "…"
+
+/**
  * Normalizes a single-line field: trims the ends and collapses internal whitespace runs (including
  * stray newlines/tabs from a paste) down to single spaces. Apply this at commit time, never
  * per-keystroke — trimming the trailing space on every keystroke would stop the user from typing a

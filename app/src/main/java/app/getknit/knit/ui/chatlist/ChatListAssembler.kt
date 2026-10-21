@@ -7,7 +7,7 @@ import app.getknit.knit.data.message.ConversationKind
 import app.getknit.knit.data.message.Conversations
 import app.getknit.knit.data.message.DeliveryPlane
 import app.getknit.knit.data.message.MessageEntity
-import app.getknit.knit.data.message.buildReplySnippet
+import app.getknit.knit.data.message.reactionSnippet
 import app.getknit.knit.data.message.receivedPlane
 import app.getknit.knit.data.message.writtenBy
 import app.getknit.knit.data.reaction.ReactionHead
@@ -180,13 +180,13 @@ internal class ChatListAssembler(
      * "Reacted 👍 to “see you at 6”": in a DM the reactor is the row's title, so the line names nobody; in a
      * group or a room it names them, by the same collision-aware label a message of theirs would wear. The
      * quoted words are the message's own preview (a photo's label, "Message hidden" under Content filtering),
-     * on one line and clamped like a reply's quote.
+     * on one line, clamped like a reply's quote and ending in "…" when cut.
      */
     private fun reactionLineFor(
         reaction: ReactionHead,
         isDm: Boolean,
     ): String {
-        val snippet = buildReplySnippet(messagePreview(context, reaction.target, s.inputs.hideFlagged), flagged = false)
+        val snippet = reactionSnippet(messagePreview(context, reaction.target, s.inputs.hideFlagged))
         if (isDm) return context.getString(R.string.reaction_preview, reaction.emoji, snippet)
         val reactor = directory.label(reaction.reactorNodeId).text
         return context.getString(R.string.chat_list_reaction_preview_with_sender, reactor, reaction.emoji, snippet)

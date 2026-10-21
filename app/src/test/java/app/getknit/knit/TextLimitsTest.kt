@@ -75,6 +75,16 @@ class TextLimitsTest {
     }
 
     @Test
+    fun `an ellipsized cut ends in an ellipsis inside the limit and a fitting string is untouched`() {
+        assertEquals("ok", "ok".ellipsizeToUtf16(5))
+        assertEquals("hello", "hello".ellipsizeToUtf16(5))
+        assertEquals("hell…", "hello!".ellipsizeToUtf16(5))
+        // A cut landing after a space drops it, and one through a surrogate pair keeps whole code points.
+        assertEquals("one…", "one two".ellipsizeToUtf16(5))
+        assertEquals("x…", "x\uD83D\uDC4Bz".ellipsizeToUtf16(3))
+    }
+
+    @Test
     fun `a cut of a zwj sequence keeps whole code points, never a lone surrogate`() {
         for (limit in 1..KISS_WITH_TONES.length) {
             val cut = KISS_WITH_TONES.clampToUtf16(limit)

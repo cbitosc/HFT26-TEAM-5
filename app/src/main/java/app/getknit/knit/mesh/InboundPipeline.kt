@@ -29,8 +29,8 @@ import app.getknit.knit.data.message.MentionStore
 import app.getknit.knit.data.message.MessageEntity
 import app.getknit.knit.data.message.REPLY_SNIPPET_MAX
 import app.getknit.knit.data.message.StatusNotices
-import app.getknit.knit.data.message.buildReplySnippet
 import app.getknit.knit.data.message.hiddenByFilter
+import app.getknit.knit.data.message.reactionSnippet
 import app.getknit.knit.data.message.videoInfo
 import app.getknit.knit.data.message.withReply
 import app.getknit.knit.data.message.withVideo
@@ -3489,9 +3489,8 @@ class InboundPipeline(
             if (target.hiddenByFilter(settings.contentFilteringEnabled.first())) {
                 labels.hidden
             } else {
-                buildReplySnippet(
+                reactionSnippet(
                     GeoUri.describe(target.body, labels.location),
-                    flagged = false,
                     attachmentLabel =
                         attachmentLabel(
                             target.attachmentHash,

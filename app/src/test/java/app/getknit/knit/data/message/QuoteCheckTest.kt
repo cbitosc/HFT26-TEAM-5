@@ -131,6 +131,14 @@ class QuoteCheckTest {
     }
 
     @Test
+    fun `a reaction's quoted words end in an ellipsis only when cut`() {
+        assertEquals("lunch?", reactionSnippet("lunch?"))
+        assertEquals("x".repeat(REPLY_SNIPPET_MAX), reactionSnippet("x".repeat(REPLY_SNIPPET_MAX)))
+        assertEquals("x".repeat(REPLY_SNIPPET_MAX - 1) + "…", reactionSnippet("x".repeat(REPLY_SNIPPET_MAX + 1)))
+        assertEquals(labels.gif, reactionSnippet("", attachmentLabel = labels.gif))
+    }
+
+    @Test
     fun `hiddenByFilter hides a flagged body or flagged quoted words, and only while filtering is on`() {
         val flaggedBody = original.copy(moderation = MessageEntity.MODERATION_TEXT_FLAGGED)
         val flaggedQuote = reply().copy(replyToFlagged = true)

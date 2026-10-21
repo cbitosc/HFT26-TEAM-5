@@ -8407,6 +8407,19 @@ class InboundPipelineTest {
         }
 
     @Test
+    fun aReactionToALongMessageEndsItsQuoteInAnEllipsis() =
+        runTest {
+            val rig = Rig(backgroundScope)
+            val alice = party()
+            rig.pin(alice)
+            rig.ownMessage("mine", conversationId = alice.nodeId, body = "y".repeat(REPLY_SNIPPET_MAX + 10))
+
+            rig.deliver(alice, rig.reaction(alice, messageId = "mine", emoji = "👍"))
+
+            assertEquals("Reacted 👍 to “${"y".repeat(REPLY_SNIPPET_MAX - 1)}…”", rig.postedLines().single().body)
+        }
+
+    @Test
     fun aReactionToAnAttachmentOnlyMessageNamesTheAttachment() =
         runTest {
             val rig = Rig(backgroundScope)
