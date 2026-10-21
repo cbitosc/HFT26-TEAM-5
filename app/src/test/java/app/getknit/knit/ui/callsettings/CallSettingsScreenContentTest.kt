@@ -82,9 +82,37 @@ class CallSettingsScreenContentTest {
     @Test
     fun relayAllIsHere() {
         var toggled: Boolean? = null
-        render(CallSettingsUiState(), onToggleRelayAll = { toggled = it })
-        compose.onNodeWithTag("call_settings_relay_all").performClick()
+        render(CallSettingsUiState(turnAvailable = true), onToggleRelayAll = { toggled = it })
+        compose.onNodeWithTag("call_settings_relay_all").assertIsEnabled().performClick()
         assertEquals(true, toggled)
+    }
+
+    /** No TURN server to relay through (a free ticket's relay, say): the switch cannot be turned on, and says why. */
+    @Test
+    fun relayAllCannotBeTurnedOnWithoutTurn() {
+        var toggled: Boolean? = null
+        render(CallSettingsUiState(turnAvailable = false), onToggleRelayAll = { toggled = it })
+        compose
+            .onNodeWithTag("call_settings_relay_all")
+            .assertIsOff()
+            .assertIsNotEnabled()
+            .performClick()
+        compose.onNodeWithText(context.getString(R.string.settings_relay_calls_no_turn)).assertIsDisplayed()
+        assertEquals(null, toggled)
+    }
+
+    /** On from before the TURN server went: it can still be turned off, and says calls cannot connect meanwhile. */
+    @Test
+    fun relayAllLeftOnWithoutTurnCanStillBeTurnedOff() {
+        var toggled: Boolean? = null
+        render(CallSettingsUiState(relayAll = true, turnAvailable = false), onToggleRelayAll = { toggled = it })
+        compose.onNodeWithText(context.getString(R.string.settings_relay_calls_no_turn_on)).assertIsDisplayed()
+        compose
+            .onNodeWithTag("call_settings_relay_all")
+            .assertIsOn()
+            .assertIsEnabled()
+            .performClick()
+        assertEquals(false, toggled)
     }
 
     /** Switched on with nothing valid saved: the screen says the relays' server is used meanwhile. */

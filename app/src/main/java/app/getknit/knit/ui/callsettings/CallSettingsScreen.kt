@@ -200,9 +200,17 @@ internal fun CallSettingsScreenContent(
                 HorizontalDivider()
                 ToggleRow(
                     title = stringResource(R.string.settings_relay_calls_title),
-                    subtitle = stringResource(R.string.settings_relay_calls_subtitle),
+                    subtitle =
+                        stringResource(
+                            when {
+                                state.turnAvailable -> R.string.settings_relay_calls_subtitle
+                                state.relayAll -> R.string.settings_relay_calls_no_turn_on
+                                else -> R.string.settings_relay_calls_no_turn
+                            },
+                        ),
                     enabled = state.relayAll,
                     onToggle = onToggleRelayAll,
+                    toggles = state.relayAllToggles,
                     modifier = Modifier.testTag("call_settings_relay_all"),
                 )
             }
@@ -464,12 +472,14 @@ private fun ToggleRow(
     enabled: Boolean,
     onToggle: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
+    // False greys the row and takes no touch: what "Relay all calls" is with no TURN server to relay through.
+    toggles: Boolean = true,
 ) {
     Row(
         modifier =
             modifier
                 .fillMaxWidth()
-                .toggleable(value = enabled, onValueChange = onToggle, role = Role.Switch),
+                .toggleable(value = enabled, enabled = toggles, onValueChange = onToggle, role = Role.Switch),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(modifier = Modifier.weight(1f)) {
@@ -481,7 +491,7 @@ private fun ToggleRow(
             )
         }
         Spacer(Modifier.width(12.dp))
-        Switch(checked = enabled, onCheckedChange = null)
+        Switch(checked = enabled, onCheckedChange = null, enabled = toggles)
     }
 }
 
@@ -489,6 +499,14 @@ private fun ToggleRow(
 @Preview(showBackground = true)
 @Composable
 fun CallSettingsScreenPreview() =
+    KnitPreview {
+        CallSettingsScreenContent(state = CallSettingsUiState(turnAvailable = true), onBack = {})
+    }
+
+// No relay issues this phone TURN (a free ticket, say) and no own server: "Relay all calls" cannot be switched on.
+@Preview(showBackground = true)
+@Composable
+fun CallSettingsScreenNoTurnPreview() =
     KnitPreview {
         CallSettingsScreenContent(state = CallSettingsUiState(), onBack = {})
     }
@@ -499,7 +517,7 @@ fun CallSettingsScreenPreview() =
 fun CallSettingsScreenIncomingPreview() =
     KnitPreview {
         CallSettingsScreenContent(
-            state = CallSettingsUiState(),
+            state = CallSettingsUiState(turnAvailable = true),
             onBack = {},
             walkie = true,
             intake = CallIntake(live = false, walkie = true),
@@ -513,7 +531,7 @@ fun CallSettingsScreenIncomingPreview() =
 fun CallSettingsScreenTranscriptsPreview() =
     KnitPreview {
         CallSettingsScreenContent(
-            state = CallSettingsUiState(),
+            state = CallSettingsUiState(turnAvailable = true),
             onBack = {},
             transcripts = TranscriptsUi(on = true, model = SttModelState.Absent, bytes = 142_315_154, metered = true),
         )
@@ -537,6 +555,7 @@ fun CallSettingsScreenOwnServersPreview() =
             state =
                 CallSettingsUiState(
                     relayAll = true,
+                    turnAvailable = true,
                     saved = saved,
                     draft = CallServerDraft.of(saved),
                     result = ProbeResult(stun = ProbeVerdict.Reached, turn = ProbeVerdict.AuthFailed),

@@ -30,6 +30,7 @@ import app.getknit.knit.call.TurnSource
 import app.getknit.knit.call.WalkieTranscriber
 import app.getknit.knit.data.MessageRepository
 import app.getknit.knit.data.PeerRepository
+import app.getknit.knit.data.relay.RelayStatusRepository
 import app.getknit.knit.data.settings.CallIntake
 import app.getknit.knit.data.settings.CallTombStore
 import app.getknit.knit.data.settings.CaptureStore
@@ -174,6 +175,7 @@ private fun callGraph(): Module =
                     preference = get(),
                     walkie = WALKIE_WIRED,
                     live = LIVE_CALLS_WIRED,
+                    relayTurn = get<RelayStatusRepository>().turnAvailable,
                 )
             }
         }

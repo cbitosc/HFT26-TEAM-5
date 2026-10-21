@@ -41,6 +41,7 @@ class CallSettingsViewModelTest {
     private val store = mockk<OwnIceStore>(relaxed = true)
     private val relayAll = MutableStateFlow(false)
     private val ownIce = MutableStateFlow(SAVED)
+    private val relayTurn = MutableStateFlow(false)
     private val transcriptsOn = MutableStateFlow(true)
     private val modelState = MutableStateFlow<SttModelState>(SttModelState.Absent)
     private val stt =
@@ -88,6 +89,7 @@ class CallSettingsViewModelTest {
             preference = preference,
             walkie = walkie,
             live = live,
+            relayTurn = relayTurn,
         ).also { vm ->
             backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.state.collect {} }
             backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) { vm.transcripts.collect {} }
@@ -133,6 +135,42 @@ class CallSettingsViewModelTest {
             coVerify(exactly = 0) { store.setTurnOn(any()) }
             coVerify(exactly = 0) { store.setStunUrls(any()) }
             assertNull(probed)
+        }
+
+    /**
+     * "Relay all calls" is offered only with a TURN server to relay through: a connected relay that issues this phone
+     * TURN, or the person's own where a call uses it (own servers wired, switched on, valid). A free ticket's relay
+     * issues none, and a relay-only call with no TURN never connects.
+     */
+    @Test
+    fun relayAllIsOfferedOnlyWithTurnToRelayThrough() =
+        runTest {
+            val release = vm(live = true, ownServers = false)
+            advanceUntilIdle()
+            // An own TURN server saved counts for nothing where no call uses it.
+            assertFalse(release.state.value.turnAvailable)
+            assertFalse(release.state.value.relayAllToggles)
+            relayTurn.value = true
+            advanceUntilIdle()
+            assertTrue(release.state.value.turnAvailable)
+            assertTrue(release.state.value.relayAllToggles)
+
+            relayTurn.value = false
+            val debug = vm()
+            advanceUntilIdle()
+            assertTrue(debug.state.value.turnAvailable)
+            ownIce.value = SAVED.copy(turnOn = false)
+            advanceUntilIdle()
+            assertFalse(debug.state.value.turnAvailable)
+            ownIce.value = SAVED.copy(turnUrl = "")
+            advanceUntilIdle()
+            assertFalse(debug.state.value.turnAvailable)
+
+            // Left on from before: it can still be switched off.
+            relayAll.value = true
+            advanceUntilIdle()
+            assertFalse(debug.state.value.turnAvailable)
+            assertTrue(debug.state.value.relayAllToggles)
         }
 
     @Test

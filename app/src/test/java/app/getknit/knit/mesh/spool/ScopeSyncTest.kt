@@ -354,6 +354,16 @@ class ScopeSyncTest {
             assertEquals(0, lab.turnIssued)
             assertTrue(lab.turnRefusals.isEmpty())
             assertTrue(lines.any { it.startsWith("lab.example:9480: TURN ask skipped") })
+            // What "Relay all calls" is offered on: the plain relays issue TURN to anyone, the lab one not yet.
+            assertEquals(
+                listOf(true, true, false),
+                urls.map { url ->
+                    caller.sync
+                        .status()
+                        .single { it.url == url }
+                        .turnForUs
+                },
+            )
 
             // Imported mid-connection, the ticket goes out at once and is accepted.
             assertTrue(tickets.import(urls[2], SpoolTicketsTest.TEXT) is SpoolTickets.Import.Held)
@@ -364,6 +374,7 @@ class ScopeSyncTest {
             assertTrue(status.turn)
             assertEquals(listOf("stun:lab.example:3478"), status.stun)
             assertEquals(SpoolTicketState.Accepted(exp = 1_800_086_400L, fl = SpoolTicket.FL_TURN), status.ticket)
+            assertTrue(status.turnForUs)
 
             // C-7.6-21: asked with no answered SUB for the peer (a peer this phone shares no scope with)...
             assertEquals(1, caller.sync.turnCredentials("nobody").size)
@@ -3168,6 +3179,32 @@ class ScopeSyncTest {
             assertEquals(1, spool.turnIssued)
             assertTrue(spool.turnRefusals.isEmpty())
             assertFalse(lines.any { "TURN ask skipped" in it })
+            assertTrue(
+                phone.sync
+                    .status()
+                    .single()
+                    .turnForUs,
+            )
+            phone.sync.stop()
+        }
+
+    @Test
+    fun `a free files ticket on a spool that gates turn leaves no turn for relay-only calls`() =
+        runTest {
+            val lab = FakeSpool(turn = true, ent = true)
+            val url = "ws://lab.example:9480/spool/v1?k=t"
+            val tickets = SpoolTickets(SpoolTicketsTest.MemoryJournal()) { now }
+            val phone = member(lab, alice, bob, urls = listOf(url), tickets = tickets)
+            phone.sync.start(backgroundScope)
+            pump()
+            val free = SpoolTicketsTest.ticket(fl = SpoolTicket.FL_FILES)
+            assertTrue(tickets.import(url, free.text) is SpoolTickets.Import.Held)
+            pump(2)
+            val status = phone.sync.status().single()
+            assertTrue(status.turn)
+            assertEquals(SpoolTicketState.Accepted(exp = 1_800_086_400L, fl = SpoolTicket.FL_FILES), status.ticket)
+            assertFalse(status.turnForUs)
+            assertTrue(phone.sync.turnCredentials(bob).isEmpty())
             phone.sync.stop()
         }
 

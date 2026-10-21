@@ -709,6 +709,8 @@
     <string name="settings_link_previews_title">Link previews</string>
     <string name="settings_relay_calls_title">Relay all calls</string>
     <string name="settings_relay_calls_subtitle">Every call goes through a TURN server, so the person you call never sees your IP address. That server sees both addresses, and a call connects only where one is available: your own, or one a relay offers.</string>
+    <string name="settings_relay_calls_no_turn">Every call would go through a TURN server, so the person you call never sees your IP address. None is available right now: no relay you\'re connected to offers this phone one.</string>
+    <string name="settings_relay_calls_no_turn_on">Every call goes through a TURN server, so the person you call never sees your IP address. None is available right now, so live calls can\'t connect until a relay offers one or you turn this off.</string>
     <string name="settings_calls_title">Calls</string>
     <string name="settings_calls_summary_relays">Servers from your relays</string>
     <string name="settings_calls_summary_own_stun">Your own STUN server</string>

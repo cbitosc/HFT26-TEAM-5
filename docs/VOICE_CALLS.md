@@ -611,7 +611,10 @@ Each side sends an `OFFER` to the other before seeing the other's offer.
 > **"Relay all calls" on Android** is a switch on the Calls screen (Settings → Calls), off by default, shown only by a
 > build that wires calls. It also keeps every call off a Wi-Fi Direct group (§3.10), whose pair would show a neighbour
 > the phone's address, and leaves the walkie (§3.11) alone, which carries no address. A call connects only where a TURN
-> server is available: one a spool issues, or the person's own (§3.14).
+> server is available: one a spool issues, or the person's own (§3.14). So the switch turns on only while one is: a
+> connected spool that issues this phone TURN (`SpoolStatus.turnForUs`: TURN advertised, and not gated or a ticket with
+> bit 0, which a free ticket lacks), or an own TURN server switched on and valid. Left on after that goes, it can still
+> be turned off, and its line says live calls cannot connect meanwhile.
 >
 > **Captions on Android (C-3.7-5; ADR 2026-10.nz3g, its 2026-10-16 amendment).** Where `BuildConfig.STT` and
 > `BuildConfig.LIVE_CALLS` are on (ADR 2026-10.swvp), a
@@ -1049,8 +1052,9 @@ servers a call would use, and never the username or password of an own server.
     (C-3.4-3).
   - Tombstones across a process death (C-3.4-3): `CallManagerTest`'s restart cases over a fake journal (a cancel heard
     before, a call ended before, one past its 48 h, a journal that cannot be read) and `CallTombStoreTest`.
-  - "Relay all calls" (C-3.7-3): the relay-only cases in `CallManagerTest`, and the row in
-    `SettingsScreenContentTest` and `SettingsViewModelTest`.
+  - "Relay all calls" (C-3.7-3): the relay-only cases in `CallManagerTest`, the row in `SettingsScreenContentTest` and
+    `SettingsViewModelTest`, its TURN gate in `CallSettingsViewModelTest` and `CallSettingsScreenContentTest`, and
+    `turnForUs` in `ScopeSyncTest`.
   - TURN pruning (C-7.6-26): `CallConfigurationTest` pins the prune policy beside continual gathering and relay-only,
     and `RelayTallyTest` the call log's `allocations gathered N, pruned M, held K`; a measured relay-only call gives
     the numbers.

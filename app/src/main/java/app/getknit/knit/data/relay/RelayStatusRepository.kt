@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.map
 
 /**
  * The Internet-relay plane's state, as the UI needs it: the two settings that arm it plus a periodic
@@ -82,6 +83,13 @@ class RelayStatusRepository(
                         .mapNotNull { spool -> spool.maxAttachBytes?.let { UploadRoom(it, spool.uploadLimitChunks) } },
             )
         }.distinctUntilChanged()
+
+    /**
+     * Whether some connected relay would issue this phone TURN now ([SpoolStatus.turnForUs]): what the Calls screen's
+     * "Relay all calls" is offered on, since a relay-only call with no TURN server gathers nothing and never connects.
+     */
+    val turnAvailable: Flow<Boolean> =
+        statuses.map { spools -> spools.any { it.connected && it.turnForUs } }.distinctUntilChanged()
 
     private companion object {
         const val POLL_MS = 5_000L

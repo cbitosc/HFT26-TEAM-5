@@ -194,6 +194,12 @@ class SpoolStatus(
     val ticket: SpoolTicketState = SpoolTicketState.None,
     /** Whether this connection's HELLO said the spool issues TURN credentials (`turn`, docs/VOICE_CALLS.md §2.1). */
     val turn: Boolean = false,
+    /**
+     * Whether a `turnreq` from this phone would be answered here (S-7.6-16): the spool issues TURN, and either does not
+     * gate it behind a ticket or this connection holds one with bit 0 of `fl` — [TurnAsk]'s rule without its scope
+     * clause, which is per peer. What "Relay all calls" is offered on. False while disconnected.
+     */
+    val turnForUs: Boolean = false,
     /** This connection's HELLO cast bounds (docs/VOICE_CALLS.md §2.7), or null when the spool fans out no casts. */
     val cast: SpoolCastInfo? = null,
     /** The `fl` bits this connection's HELLO gates behind a ticket (`SpoolHello.ticketGates`); 0 while disconnected. */
@@ -1126,6 +1132,8 @@ class ScopeSync(
                 stun = stunUrls(),
                 ticket = connection?.takeIf { it.isReady }?.ticketState() ?: SpoolTicketState.None,
                 turn = connection?.takeIf { it.isReady }?.turn == true,
+                turnForUs =
+                    connection?.takeIf { it.isReady && it.turn }?.let { it.ticketedTurn || !it.gated(SpoolTicket.FL_TURN) } == true,
                 cast = connection?.takeIf { it.isReady }?.cast,
                 entGates = connection?.takeIf { it.isReady }?.gates ?: 0L,
                 uploads = connection?.takeIf { it.isReady }?.let(::uploadsOn) ?: SpoolUploads.Open,

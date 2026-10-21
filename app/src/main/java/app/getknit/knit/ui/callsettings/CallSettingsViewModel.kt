@@ -15,6 +15,7 @@ import app.getknit.knit.data.settings.OwnIceStore
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.data.settings.TranscriptStore
 import app.getknit.knit.ui.call.stt.SttModelStore
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -76,6 +77,11 @@ data class CallServerDraft(
 data class CallSettingsUiState(
     /** "Relay all calls" (C-3.7-3). */
     val relayAll: Boolean = false,
+    /**
+     * Whether a TURN server is there for a relay-only call: a connected relay that issues this phone TURN, or the
+     * person's own, switched on and valid. Without one such a call gathers nothing and never connects.
+     */
+    val turnAvailable: Boolean = false,
     /** What the store holds: the switches, and the fields a call reads. */
     val saved: OwnIceServers = OwnIceServers(),
     val draft: CallServerDraft = CallServerDraft(),
@@ -99,6 +105,9 @@ data class CallSettingsUiState(
     val stunWaiting: Boolean get() = saved.stunOn && !saved.stunValid
 
     val turnWaiting: Boolean get() = saved.turnOn && !saved.turnValid
+
+    /** "Relay all calls" can be switched on only with TURN available, and off always: a switch never traps the person. */
+    val relayAllToggles: Boolean get() = turnAvailable || relayAll
 }
 
 /**
@@ -144,6 +153,11 @@ class CallSettingsViewModel(
     val walkie: Boolean = false,
     /** Whether live calls are wired, so "Incoming calls" has a live switch and "Relay all calls" shows. */
     val live: Boolean = probe != null,
+    /**
+     * Whether a connected relay issues this phone TURN now (`RelayStatusRepository.turnAvailable`). No default: a build
+     * that forgot to wire it would never let "Relay all calls" on where own servers are not wired.
+     */
+    relayTurn: Flow<Boolean>,
 ) : ViewModel() {
     /** Whether the own servers' rows show: the STUN and TURN switches and fields, their Test and Save. */
     val ownServers: Boolean = live && probe != null
@@ -172,8 +186,23 @@ class CallSettingsViewModel(
     val loaded: StateFlow<Boolean> = _loaded.asStateFlow()
 
     val state: StateFlow<CallSettingsUiState> =
-        combine(settings.callsRelayAll, ownIce.ownIce, draft, testing, result) { relayAll, saved, draft, testing, result ->
-            CallSettingsUiState(relayAll = relayAll, saved = saved, draft = draft, testing = testing, result = result)
+        combine(combine(settings.callsRelayAll, relayTurn, ::Pair), ownIce.ownIce, draft, testing, result) {
+            (relayAll, relayTurn),
+            saved,
+            draft,
+            testing,
+            result,
+            ->
+            // An own TURN server counts only where a call uses it: OverridingTurnSource is wired with the rows.
+            val ownTurn = ownServers && saved.turnOn && saved.turnValid
+            CallSettingsUiState(
+                relayAll = relayAll,
+                turnAvailable = relayTurn || ownTurn,
+                saved = saved,
+                draft = draft,
+                testing = testing,
+                result = result,
+            )
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CallSettingsUiState())
 
     /** The transcripts section; null where it is not wired. The route is read again as the model's state moves. */
