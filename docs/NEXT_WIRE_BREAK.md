@@ -279,6 +279,74 @@ additive; any other form is a new shape that every build before it drops.
 (`leave:…`, `rejoin:…`), `FrameId.forMeshPost` for heard Meshtastic posts. The quote check already requires the
 quoted author to match, so a bound id changes nothing there except that a squatted id can no longer be stored.
 
+### 11. Take a group's roster, name and photo out of the cleartext envelope
+
+**What.** `RelayEnvelope.group` is a cleartext `GroupInfo` on every group frame: the founding roster
+(`members`, `departed`, `createdBy`), the shared `name` and the decided `photoHash` / `photoUpdatedAt`. A
+`groupupdate` (`MeshManager.sendGroupUpdate`) is nothing *but* that field, so a rename or a new photo is
+legible to every relay and carrier. The break moves all of it inside the seal, and leaves only a form marker
+in the clear (so `recipientId == null && group == null` still *is* the room) plus whatever tag the
+group's frames are filed by (below).
+
+**Why it is parked.** `GroupInfo.members` is a non-null `List`, so a frame without it does not decode on any
+fielded build, and every fielded member pins a first-seen group from the frame's roster
+(`InboundPipeline.vetRoster`). Two things also make stripping `members` alone pointless:
+
+- **The id is the roster.** `Conversations.groupIdFor` is an unkeyed SHA-256 over the sorted member set
+  under a public salt (`GROUP_ID_SALT`). A relay sees every `senderId`, and a group has at most eight
+  members (`GroupInfo.MAX_MEMBERS`), so the member set falls out of the cleartext id by hashing
+  combinations of the node ids it has heard. Hiding the roster means a cleartext tag that is not derivable
+  from the member set.
+- **Scheme v1 names every member.** A v1 group frame carries one `WrappedKey` per member, each tagged with
+  a cleartext `to`. Until item 4 retires v1, a mixed-capability group leaks its roster whatever happens to
+  `GroupInfo`, so this item rides with item 4 or not at all.
+
+The cleartext roster was never there for the vaccine purge (group frames were never vaccine-purged: no
+single recipient, no per-member ack). It was there for custody targeting and first-sight reconciliation,
+and both have since gained another route:
+
+- **Custody targeting is an optimisation.** `ForwardSync.onNeighborAdded` offers a carried group frame only
+  to a roster member. Without the roster a carrier offers it to any neighbour, as it does a room post. The
+  live flood already sends every group frame to non-members, so this costs custody re-push airtime, not
+  correctness.
+- **First sight has a sealed door.** Since ADR 2026-09.mjaj the seed carries the founding roster inside the
+  DM ratchet (`GroupKeyPayload.group`, pinned through `pinRosterFromSeed`), so a member no longer needs the
+  frame to learn the group. The frame's copy is the fallback for seeds from builds without that field, which
+  the break partitions off.
+- **Routing reads the form, not the members.** `FrameFanout`, `LoraFramePolicy`, `IngressBudget` and the
+  spool's `ScopeFrames` key on `group != null` and sometimes `group.id`; none of them reads `members`.
+
+**At the break.**
+
+1. **Seal the roster, name and photo.** The founding roster travels in the seed (already true) and in the
+   sender-key plaintext of each group frame, and `vetRoster` runs on the sealed copy. Name and photo keep
+   their last-writer-wins clocks (ADR 2026-09.nxcq) inside the seal; a `groupupdate` becomes a sealed group
+   frame rather than a bare envelope. `groupIdFor` and its "the same people are the same group" rule stay,
+   computed inside the seal and never put on the wire.
+2. **Decide the cleartext tag.** Something has to let custody's group queries (`ForwardStore.liveGroupChatFrames`),
+   `ForwardRepository`'s `groupId` column and the spool's `ScopeFrames` / `ScopeAttachments` file a frame
+   under its group. The candidates, none chosen yet:
+   - **No tag.** A member finds the chain by `senderId` and `GroupRatchetHeader.se`, with at most a few trial
+     decrypts when it shares several groups with that sender. Custody's per-group replay and the spool's
+     per-group filing have to work from the opened frame instead.
+   - **A tag keyed by the group root** (`GroupKeyPayload.gr`). Unguessable, but it changes at every
+     departure re-mint (`docs/SPOOL_PROTOCOL.md` §3.2), so a group's frames are linkable only within one
+     root era, and custody must accept a group under more than one tag.
+3. **Settle carried attachments from the row.** The carrier's attachment pull decides "is this group
+   frame ours" from the frame's roster (`ForwardRepository.carriedAttachments`, the `member` flag in
+   `InboundPipeline.onCarriedFrame`, ADR 2026-10.js2p). After the break it reads the local group row, which
+   the seed now pins before the first frame can be opened.
+4. **Drop the custody filter.** `ForwardSync`'s member-only offer goes; group frames are offered like room
+   posts, bounded by the same TTL and quota they already have.
+
+**Watch out.** This hides who is *in* a group, not who *talks* in it. `senderId` stays cleartext on every
+frame, `GroupRatchetHeader` still shows per-sender send counts and epoch cadence, and a departure is still a
+signed `groupleave` that names its group, followed by a burst of N−1 seed DMs (the rekey fingerprint
+`docs/GROUP_FORWARD_SECRECY.md` §9 accepts). Sealing `groupleave` is its own decision: the signed leave is
+what lets a member refuse a forged departure, and moving it inside the seal moves that check with it.
+Re-read ADR 2026-09.v6fu before touching either. The roster cap is a bound on storage and fan-out, so
+inbound first sight still enforces `MAX_MEMBERS`, now on the sealed roster.
+
 ---
 
 ## Deliberately *not* on this list
