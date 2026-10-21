@@ -255,6 +255,9 @@ internal fun ProfileScreenContent(
                     textStyle = MaterialTheme.typography.displaySmall,
                     contentDescription = stringResource(R.string.profile_change_photo_desc),
                     onClick = onPickPhoto,
+                    // The mark contacts see, while the switch is on and a held badge verifies, so the toggle shows
+                    // its effect here. Lapsed draws nothing, as it does for them.
+                    badge = badgeRow?.takeIf { it.on }?.showing,
                 )
                 // Only offer "remove" when a photo is set. This also covers a dangling hash whose blob is
                 // gone (the avatar shows the initial fallback, but the hash is still non-null), giving the

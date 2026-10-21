@@ -138,7 +138,8 @@ not a wire change.
 ## 7. Display
 
 - **C-7-1** A small mark on the avatar, drawn outside its circle (`Avatar`'s `badge`), on the profile sheet, the DM chat
-  header, the contacts list, the chat list row and group member lists. Not on message-sender avatars, call screens or
+  header, the contacts list, the chat list row and group member lists, and on your own profile screen's photo while the
+  switch is on and a held badge verifies (what contacts see). Not on message-sender avatars, call screens or
   notifications.
 - **C-7-2** A "Supporter" pill in the profile sheet's badge row. Tapping the mark or the pill opens a sheet:
   "<Name> supports Knit."
