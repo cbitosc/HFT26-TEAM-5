@@ -54,6 +54,7 @@ beyond an Android phone, though it will happily use a Meshtastic board if you ha
 | **Encryption** | E2E on 1:1 DMs & group chats, forward-secret between current builds (X3DH-style bootstrap + epoch ratchet, AES-256-GCM, Ed25519); at-rest DB via SQLCipher |
 | **Works without** | Internet, cellular, Wi-Fi routers, accounts, phone numbers, or any server |
 | **Optional extras** | A Meshtastic LoRa board for kilometre-scale hops; Internet relays for when nobody is in range — each off until you turn it on |
+| **Calls** | 1:1 voice calls, over Wi-Fi Direct to someone nearby or the Internet to someone further off, and a walkie-talkie over the mesh when neither path exists — see [Calls](#-calls) |
 | **Watch** | A Wear OS 3+ app, tile, and five complications that read the mesh from your phone — [in preview](#-on-your-watch) |
 | **License** | GPL-3.0-or-later — free and open source |
 
@@ -63,6 +64,7 @@ beyond an Android phone, though it will happily use a Meshtastic board if you ha
 - [How it works](#how-it-works)
 - [Use it when](#-use-it-when)
 - [Features](#-features)
+- [Calls](#-calls)
 - [On your watch](#-on-your-watch)
 - [Requirements](#-requirements)
 - [Tech stack](#-tech-stack)
@@ -184,6 +186,9 @@ Knit is built for situations where there's **no reliable network but people are 
   (up to 8 GB, measured at ~70 MB/s between two Pixels) and tear it down after. The bytes never ride
   the mesh and are never held in custody; the chat keeps a record of the hand-off, and the file lands
   in the other phone's Downloads.
+- **Voice calls** — call a contact from their profile or the top of your chat. Someone nearby is
+  reached over a Wi-Fi Direct link with no Internet at all, someone further off over the Internet, and
+  when there's no live path the call becomes a walkie-talkie over the mesh. See [Calls](#-calls).
 - **Search everything you have** — the magnifier at the top of the chat list finds a chat, a contact,
   or a message by what it said, from an on-device full-text index. Open a hit and its chat lands on
   that message. A stranger's message request stays out of the results until you accept it.
@@ -224,6 +229,32 @@ Knit is built for situations where there's **no reliable network but people are 
   or dark in Settings, or taking your wallpaper's colours if you turn those on (Android 12+). A message
   you start and don't send is still waiting in that chat when you come back, and the chat list shows it
   as `Draft:` until it goes.
+
+## 📞 Calls
+
+Knit can call your contacts too, one to one. Call someone your phone meshes with and you don't need the
+Internet. The two phones raise a Wi-Fi Direct
+link between themselves, the same kind a big-file transfer uses, and the call runs over it. For someone
+further away the call goes over the Internet: it rings as a sealed direct message through the mesh or your
+relays, and your voice goes straight to the other phone where the network allows it, or through a TURN
+server where it doesn't.
+
+When neither path exists, Knit places a **mesh call** instead, which works like a walkie-talkie: hold the
+button to talk and your words stream across the mesh in small chunks, playing about a second behind you
+between neighbours. Nothing is stored, and no burst lands in the chat. A contact's profile has a Mesh call
+button too, for when you'd rather start one yourself.
+
+Only the two of you hear a call. A live call's audio is encrypted with DTLS-SRTP under keys each phone
+checks against the other's Knit identity, so a TURN server relays only ciphertext. Walkie chunks are sealed
+like any direct message, and the phones that carry them can't read them. A live call does show each phone's
+IP address to the other, and **Relay all calls** in Settings → Calls hides yours by routing every call
+through a TURN server instead.
+
+Calls register with Android as calls, so a Bluetooth headset, a watch or a car can answer and hang up, and
+the audio follows your headset. Each call leaves a line in the chat, like "Missed call · 9:15 AM". Knit can
+also write each walkie burst out as text while it plays, and caption the other person on a live call. The
+speech recognition runs on the phone, and the words are never sent anywhere. Its model is a one-time
+download from getknit.app that starts only when you tap for it.
 
 ## ⌚ On your watch
 
@@ -277,6 +308,7 @@ for Google Play once they do. To try it from source, see [Build](#-build).
 | Crypto | **Google Tink** — HPKE/X25519 key-wrap, AES-256-GCM, Ed25519 signatures |
 | Radios | **Wi-Fi Aware + Bluetooth LE** (framework APIs — no external transport dependency) |
 | On-device ML | LiteRT / TFLite (NSFW image + toxicity text classifiers) |
+| Calls | WebRTC (Opus over DTLS-SRTP) · Jetpack core-telecom · Moonshine on-device speech recognition |
 | Networking (opt-in planes only) | OkHttp — WebSocket to relays you configure, the sender-side link-preview fetch, and (debug builds) the ticket key swap; confined to three files |
 | Images | Coil 3 |
 | Verification | ZXing (safety-number QR) |
@@ -307,6 +339,9 @@ cd knit
 ```
 
 The debug APK lands at `app/build/outputs/apk/debug/app-debug.apk`.
+
+Debug builds include [calls](#-calls) and their transcripts. A release build adds them with
+`-Pcalls=true -Pstt=true`, and `-Pcalls=false` leaves them out of a debug build.
 
 The Wear OS app is a separate module that is in the build only when you ask for it:
 
@@ -413,7 +448,8 @@ byte off the mesh, and either alone would require the permission. Two opt-in fea
 the [Internet relay plane](#-roadmap), once you switch it on, and link previews, once you switch *those*
 on — your own phone fetches a page's title and picture for a link you type and sends them with the
 message, so the people you send to never contact the site. Both are off on a fresh install, which
-therefore makes no network calls at all. (`ACCESS_NETWORK_STATE` is declared for the preview fetch alone —
+therefore makes no network calls at all. A call over the Internet goes through those same relays, and the
+speech model for call transcripts is downloaded from getknit.app only when you tap for it. (`ACCESS_NETWORK_STATE` is declared for the preview fetch alone —
 it is how the app checks that the default network actually reaches the Internet before opening a socket,
 so a phone that is only on the mesh never tries.) Knit bundles no analytics or telemetry, and a crash is
 kept on the phone for you to copy into a bug report, never uploaded. The same goes for the field log, which is off
@@ -443,6 +479,10 @@ current build they are **forward-secret**: the keys rotate as the conversation g
 deleted, so recording traffic today and getting hold of a phone later does not open the older messages.
 Delivery receipts and reactions are encrypted too. The public "Nearby" broadcast room is plaintext by
 design, since it has no fixed recipient set. The local database is encrypted at rest with SQLCipher.
+
+**Can I call someone?**
+Yes: 1:1 voice calls over a Wi-Fi Direct link to someone nearby or over the Internet to someone further
+away, and a walkie-talkie over the mesh when neither path exists. See [Calls](#-calls).
 
 **What phones does it support?**
 Android 10 (API 29) and newer, with Wi-Fi Aware and/or Bluetooth LE. Almost all phones have BLE; Wi-Fi
@@ -484,6 +524,8 @@ stay on the phone mesh or an optional relay, and the radio sits idle until you p
   carries, why it is a bearer link, and the consent sheet it is only ever applied through.
 - [`docs/CONTENT_MODERATION.md`](docs/CONTENT_MODERATION.md) — on-device abusive-text / explicit-image
   moderation: design, hook points, the bundled models, and Git LFS.
+- [`docs/VOICE_CALLS.md`](docs/VOICE_CALLS.md) — voice calls (a draft spec): signaling, TURN from relays,
+  the Wi-Fi Direct leg, the walkie-talkie, the audio route, and transcripts.
 
 ## 🗺️ Roadmap
 
@@ -494,8 +536,8 @@ sender-key ratchet for groups) · **encrypted delivery receipts and reactions** 
 Bluetooth LE** transports behind `MeshTransport` (no GMS) · **store-and-forward** delay-tolerant
 delivery · **key-request / retransmit** for messages received before a sender's key is known · contacts
 by QR **or** shared link · on-device toxicity + NSFW moderation · offline app sharing · **big files phone
-to phone** over Wi-Fi Direct · **search** across chats, contacts and messages · the **Your mesh** screen ·
-drafts.
+to phone** over Wi-Fi Direct · **voice calls**, with a walkie-talkie over the mesh and on-device
+transcripts · **search** across chats, contacts and messages · the **Your mesh** screen · drafts.
 
 **Shipped, and off until you turn it on:** a **Meshtastic LoRa bridge** carrying the Nearby room and 1:1
 DMs kilometres past phone range, **Internet relays**, **link previews**, and **sending your location**.
@@ -513,8 +555,8 @@ vectors; the client implements it, and the reference spool daemon lives in
 [`getknit/knit-spool`](https://github.com/getknit/knit-spool). Knit is built around proximity meshing
 either way.
 
-**In preview, debug builds only:** a **Wear OS app** with a tile and five complications that read the mesh
-from your phone ([On your watch](#-on-your-watch)).
+**In preview, debug builds only:** a **Wear OS app** with a tile and five complications that read the
+mesh from your phone ([On your watch](#-on-your-watch)).
 
 **Explicitly deferred (don't start without direction):**
 
