@@ -221,6 +221,9 @@ val meshModule =
                                     gattPeers = BuildConfig.BLE_GATT_PEERS,
                                     phyMode = phyMode,
                                     appVisible = get<AppVisibility>().visible,
+                                    // Cold far sightings start nothing under the low-power posture (ADR 2026-10.yvn6's
+                                    // 2026-10-20 amendment, ADR 2026-10.d44b): read at each decision, never cached.
+                                    lowPower = get<LowPowerSource>().let { source -> { source.current.active } },
                                     partials = get(),
                                     field = get<FieldLog>(),
                                 ),

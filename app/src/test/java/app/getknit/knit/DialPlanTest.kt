@@ -5,6 +5,7 @@ import app.getknit.knit.mesh.bluetooth.BlePresenceTracker
 import app.getknit.knit.mesh.bluetooth.CodedPhyPolicy
 import app.getknit.knit.mesh.bluetooth.DialPlan
 import app.getknit.knit.mesh.bluetooth.LonelyDialPolicy
+import app.getknit.knit.mesh.bluetooth.PromotionConfig
 import app.getknit.knit.mesh.bluetooth.PromotionPolicy
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -198,5 +199,44 @@ class DialPlanTest {
         assertTrue(DialPlan.dialWaiting(listOf("B", "A")) { it in addressed })
         assertFalse("no address, no dial", DialPlan.dialWaiting(listOf("B")) { it in addressed })
         assertFalse("nothing promoted", DialPlan.dialWaiting(emptyList()) { true })
+    }
+
+    // --- the 2026-10-20 amendment ---
+
+    @Test
+    fun aPeerHeardOnlyWeaklyOn1mIsDialedAtItsCodedAddress() {
+        val t = BlePresenceTracker()
+        t.onOneMListening(true, 0)
+        for (at in 0L..9_000L step 3_000L) {
+            t.onSighting(BlePresenceTracker.Sighting("edge", -95, 1, 0L, 100, 0), at + 1_000)
+            t.onSighting(BlePresenceTracker.Sighting("edge", -100, 1, 0L, 100, 0, coded = true), at + 2_000)
+        }
+        val snap = t.snapshots(11_000).single()
+        val (address, viaCoded) = DialPlan.target(CodedPhyPolicy.dialCoded(snap.codedLagMs), oneM = "1m", coded = "coded")!!
+        assertEquals("coded", address)
+        assertEquals(" via=coded", DialPlan.via(codedOn = true, viaCoded = viaCoded))
+    }
+
+    private fun held(
+        nodeId: String,
+        rssi: Double,
+        ageMs: Long = 60_000,
+    ) = PromotionPolicy.LinkSnapshot(nodeId, rssi, ageMs, idleMs = 0)
+
+    @Test
+    fun aColdHuntNeedsThePromotionToHaveRoomForItsPeer() {
+        val config = PromotionConfig(maxLinks = 2)
+        val far = snap("far", rssi = -85.0, dwell = 0)
+        assertTrue("a free slot, the dwell not yet ripe", DialPlan.promotes(far, listOf(held("x", -60.0)), emptySet(), config))
+        val full = listOf(held("x", -60.0), held("y", -70.0))
+        assertFalse("at the budget behind stronger links", DialPlan.promotes(far, full, emptySet(), config))
+        val weak = listOf(held("x", -60.0), held("y", -94.0))
+        assertTrue("it beats the weakest by the hysteresis", DialPlan.promotes(far, weak, emptySet(), config))
+        val young = listOf(held("x", -60.0), held("y", -94.0, ageMs = 1_000))
+        assertFalse("a link too young to evict", DialPlan.promotes(far, young, emptySet(), config))
+        assertFalse("under the floor", DialPlan.promotes(snap("far", rssi = -91.0), emptyList(), emptySet(), config))
+        assertFalse("backing off", DialPlan.promotes(far, emptyList(), setOf("far"), config))
+        assertTrue("the debug cap is the budget", DialPlan.promotes(far, emptyList(), emptySet(), PromotionConfig(maxLinks = 1)))
+        assertFalse(DialPlan.promotes(far, listOf(held("x", -60.0)), emptySet(), PromotionConfig(maxLinks = 1)))
     }
 }

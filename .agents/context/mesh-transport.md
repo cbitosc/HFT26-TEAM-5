@@ -601,7 +601,11 @@ that reports `isLeCodedPhySupported`:
 - **The dial picks the PHY.** A peer heard on Coded alone (`codedOnly`: Coded kept hearing it for more than 8 s of
   *1M listening* after its last 1M hit, `Snapshot.codedLagMs`) is dialed at its Coded address. The clock runs only
   while a window listens on 1M (`BlePresenceTracker.onOneMListening`), because a Coded-only window cannot hear a 1M
-  advert; on the wall clock it made every close peer Coded-only (the ADR's 2026-10-02 (3) amendment). The peer's mark
+  advert; on the wall clock it made every close peer Coded-only (the ADR's 2026-10-02 (3) amendment). Only a 1M hit
+  whose smoothed 1M reading is at or above `PhyTuning.oneMWeakDbm` (−90, raw, the presence advert at HIGH) moves the
+  mark: a peer whose faint 1M advert still got through reset the clock on every hit, was dialed on 1M at the edge and
+  backed off (the 2026-10-20 amendment). So a weak-1M peer is dialed on Coded, admitted as unsighted, counts as far,
+  and leaves `near`. The peer's mark
   outlives its presence entry (64, least recently used out). A peer with no 1M address yet (first heard in a Coded-only
   window) is dialed at its Coded address too, as a Coded dial (`DialPlan.target`, #148). A plain L2CAP connect to that
   address lands on Coded (spike-verified). That dial's watchdog is 25 s, not 12 (`CodedPhyPolicy.connectTimeoutMs`): Android's initiator
@@ -622,7 +626,16 @@ that reports `isLeCodedPhySupported`:
   or up to 30 min from the drop while Knit is in use (`huntInUseHoldMs`), until the peer links again. "In use" is
   `AppVisibility` (`MainActivity` started, kept off `PowerState` so NAN does not heal on it) with the screen lit,
   and it hunts on its own too, with nobody lost. A NAN chase of a peer heard on Coded before also gets Coded-only
-  windows. Before this a dialer
+  windows. **A cold far sighting is hunted too** (the 2026-10-20 amendment): an unlinked peer in `ScanPlan.far`, at or
+  above −90 on the 1M scale and not in backoff, gets the same two halves after the window that heard it
+  (`noteColdSightings`, `CodedPhyPolicy.coldHunt`) — a `RangeHunt.onCold` hold on the side that dials, only while the
+  promotion has room for it (`DialPlan.promotes`), and a fast Coded advert on the dialed side, 2.5 s later and never
+  replacing a pending pace change. `ColdSightings` bounds it: one action per peer per 30 min
+  (`coldHuntCooldownMs`), one cold hunt and one cold fast window at a time, and 3 min of each kind per 30 min phone-wide, each kind its own budget.
+  A cold hunt never takes the in-use bound and ends at the next window once its peer links, backs off or leaves presence; none starts under
+  low power (ADR 2026-10.d44b). Log: `bt hunt <id>: cold sighting on Coded…`, `bt hunt <id>: cold hunt over (linked|backoff|gone|off)`,
+  `bt coded advert fast (cold <id>…)`; `…debug.PHY --ez coldHunt false --ei oneMWeak -200` is today's rule for the A/B.
+  Before this a dialer
   holding any other link (an iPhone in the same pocket) floored its scan and never heard its lost peer again (the
   2026-10-04 walk). Log: `bt hunt <id>: lost at range…`, `bt scan → hunt (lost=[…] inUse=…)` / `bt scan hunt over`.
 - **Admission.** While the experiment runs, a dialer heard on Coded alone counts as unsighted

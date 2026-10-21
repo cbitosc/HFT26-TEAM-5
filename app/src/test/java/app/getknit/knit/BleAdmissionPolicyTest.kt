@@ -5,6 +5,8 @@ import app.getknit.knit.mesh.bluetooth.BleAdmissionPolicy.ABSENT_LINK_RSSI
 import app.getknit.knit.mesh.bluetooth.BleAdmissionPolicy.DOORBELL_HEARD_MS
 import app.getknit.knit.mesh.bluetooth.BleAdmissionPolicy.REPLACE_MIN_HOLD_MS
 import app.getknit.knit.mesh.bluetooth.BleAdmissionPolicy.Verdict
+import app.getknit.knit.mesh.bluetooth.BlePresenceTracker
+import app.getknit.knit.mesh.bluetooth.CodedPhyPolicy
 import app.getknit.knit.mesh.bluetooth.PromotionConfig
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -231,5 +233,21 @@ class BleAdmissionPolicyTest {
         assertEquals(Verdict.Admit, BleAdmissionPolicy.decide(high, low, true, null, doorbell = gatt, heardAgoMs = 89_000L))
         val linked = BleAdmissionPolicy.doorbellTrusted(true, heldLinkDoorbell = true, inPresence = true, sightedViaGatt = true)
         assertEquals(Verdict.Replace, BleAdmissionPolicy.decide(high, low, true, old, doorbell = linked, heardAgoMs = 89_000L))
+    }
+
+    @Test
+    fun aLinkedDialerHeardOnlyWeaklyOn1mReplacesItsHeldLinkPastTheHold() {
+        // The 2026-10-20 amendment moves no code here, only who counts as Coded alone: a peer whose weak 1M hits no
+        // longer reset its clock is unsighted while Coded runs (yvn6), so its redial replaces a held link 30 s old.
+        val t = BlePresenceTracker()
+        t.onOneMListening(true, 0)
+        for (at in 0L..9_000L step 3_000L) {
+            t.onSighting(BlePresenceTracker.Sighting(low, -95, 1, 0L, 100, 0), at + 1_000)
+            t.onSighting(BlePresenceTracker.Sighting(low, -100, 1, 0L, 100, 0, coded = true), at + 2_000)
+        }
+        val sighted = CodedPhyPolicy.sightedForAdmission(t.snapshots(11_000).single(), codedOn = true)
+        assertFalse(sighted)
+        assertEquals(Verdict.Replace, verdict(local = high, dialer = low, sighted = sighted, heldLinkAgeMs = REPLACE_MIN_HOLD_MS))
+        assertEquals(Verdict.Refuse, verdict(local = high, dialer = low, sighted = sighted, heldLinkAgeMs = REPLACE_MIN_HOLD_MS - 1))
     }
 }

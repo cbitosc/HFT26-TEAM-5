@@ -152,6 +152,9 @@ class BluetoothMeshTransport(
     // Whether Knit's UI is on screen (`AppVisibility`): with the screen lit, the person is using Knit, and the scan hunts
     // while the Coded experiment runs ([CodedPhyPolicy.hunts]). False, always, in a process with no UI.
     private val appVisible: StateFlow<Boolean> = MutableStateFlow(false),
+    // Whether the low-power posture is on (`LowPowerSource.current`, ADR 2026-10.d44b): a cold far sighting then starts
+    // no hunt and no fast advert ([CodedPhyPolicy.coldHunt]). Read at each decision; false in a test or a build without it.
+    private val lowPower: () -> Boolean = { false },
     // Where a link keeps an attachment cut mid-stream and resumes it from (#116, ADR 2026-10.wtyc): one store
     // shared with the Wi-Fi Aware plane and BlobExchange, so any holder on either radio can finish the transfer.
     private val partials: PartialBlobs,
@@ -235,6 +238,11 @@ class BluetoothMeshTransport(
     // link again or the hold runs out (ADR 2026-10.yvn6, the 2026-10-04 amendment). [hunting] and [huntWhy] are the
     // last window's verdict, for one log line per change and the state line.
     private val rangeHunt = RangeHunt()
+
+    // What cold far sightings may still spend (ADR 2026-10.yvn6, the 2026-10-20 amendment): each peer's cooldown, one
+    // cold hunt and one cold fast window at a time, and the phone-wide budget. Its grants are [rangeHunt]'s and
+    // [codedPace]'s cold holds.
+    private val coldSightings = ColdSightings()
 
     @Volatile private var hunting = false
 
@@ -356,7 +364,11 @@ class BluetoothMeshTransport(
     private val gattSighted = ConcurrentHashMap.newKeySet<String>()
 
     // Presence model (smoothed RSSI + dwell + linger) fed by scan sightings; drives promotion + `reachable`.
-    private val presence = BlePresenceTracker(codedCreditDb = { CodedPhyDiag.tuning.codedCreditDb })
+    private val presence =
+        BlePresenceTracker(
+            codedCreditDb = { CodedPhyDiag.tuning.codedCreditDb },
+            oneMWeakDbm = { CodedPhyDiag.tuning.oneMWeakDbm },
+        )
 
     // Connection bookkeeping guarded by [lock]: in-flight initiator connects + per-peer escalating backoff
     // (streak + next-eligible deadline), reset the moment a link comes up.
@@ -648,6 +660,7 @@ class BluetoothMeshTransport(
         codedCapable.clear()
         codedTallies.clear()
         rangeHunt.clear()
+        coldSightings.clear()
         hunting = false
         huntWhy = ""
         codedWindows = false
@@ -1827,9 +1840,12 @@ class BluetoothMeshTransport(
             val power = powerState.state.value
             val hunt = huntNow(power)
             scanWindow(power, hunt)
+            // A cold hunt this window began (or one it ended) moves the gap after it too: a screen-off phone would
+            // otherwise sit out its settled gap before the hunt's first window (the 2026-10-20 amendment).
+            val gapHunt = if (noteColdSightings(power)) huntNow(power) else hunt
             val aloneFor = aloneForMs()
-            val gap = ScanPlan.gapAfterWindow(power, hunt, ::floorScan, links.size, aloneFor)
-            logLonelyTransition(!hunt && links.isEmpty() && PowerPolicy.lonelyRelaxed(power, aloneFor), gap.ms, aloneFor)
+            val gap = ScanPlan.gapAfterWindow(power, gapHunt, ::floorScan, links.size, aloneFor)
+            logLonelyTransition(!gapHunt && links.isEmpty() && PowerPolicy.lonelyRelaxed(power, aloneFor), gap.ms, aloneFor)
             // The hunting gaps keep wall time through sleep; every other gap is a power budget and stretches (pj9w).
             if (gap.keepsWallTime) {
                 elapsedWait.receiveWithin(scanWake, gap.ms)
@@ -1897,6 +1913,112 @@ class BluetoothMeshTransport(
         }
         hunting = hunt
         return hunt
+    }
+
+    /**
+     * Treats each cold far sighting the window left — an unlinked peer heard on Coded alone ([ScanPlan.far]) — as a
+     * drop at range, bounded ([CodedPhyPolicy.coldHunt], [ColdSightings]; the 2026-10-20 amendment): the side that dials
+     * holds it in [rangeHunt] for the hold granted, the dialed side makes the Coded advert fast for it. First it ends a
+     * cold hunt whose windows would end in no dial ([endColdHunts]). Returns whether the hunted set moved, so the gap
+     * after this window is judged again.
+     */
+    private fun noteColdSightings(power: PowerState): Boolean {
+        if (!codedOn() || !::localNodeId.isInitialized) return false
+        val now = elapsed()
+        val tuning = CodedPhyDiag.tuning
+        val snaps = presence.snapshots(now)
+        val backoff = activeBackoff(now)
+        val lowPower = lowPower()
+        val ended = endColdHunts(snaps, backoff, off = lowPower || !tuning.coldHunt, now)
+        val far = ScanPlan.far(snaps, links.keys).toSet()
+        if (far.isEmpty()) return ended
+        val inflight = inFlightSnapshot()
+        val held = rangeHunt.wanted(now, inUse(power), tuning.fastHoldMs, tuning.huntInUseHoldMs) + codedPace.wanted(now)
+        val linkSnaps = linkSnapshots(links.values, snaps, now)
+        val config = promotionConfig()
+        var started = false
+        snaps.filter { it.nodeId in far }.forEach { snap ->
+            val id = snap.nodeId
+            val sighting =
+                ColdSighting(
+                    peerNodeId = id,
+                    smoothedRssi = snap.smoothedRssi,
+                    linked = id in links.keys || id in inflight,
+                    held = id in held,
+                    backingOff = id in backoff,
+                    promotes = CodedPhyPolicy.drives(localNodeId, id) && DialPlan.promotes(snap, linkSnaps, backoff, config),
+                )
+            val action = CodedPhyPolicy.coldHunt(localNodeId, sighting, codedOn = true, lowPower = lowPower, tuning = tuning)
+            if (action != ColdAction.NONE) started = startCold(id, action, snap.smoothedRssi.toInt(), now, tuning) || started
+        }
+        return ended || started
+    }
+
+    /**
+     * Ends each cold hunt whose peer linked (a link-up on the link's own thread can land between [noteColdSightings]'
+     * read of [links] and its start), is in connect backoff ([backoff]) or gone from presence ([snaps]), or that low
+     * power or the switch now refuses ([off]): its windows would end in no dial ([ColdSightings.endReason]). A drop's
+     * hunt is left alone. Returns whether any ended.
+     */
+    private fun endColdHunts(
+        snaps: List<BlePresenceTracker.Snapshot>,
+        backoff: Set<String>,
+        off: Boolean,
+        now: Long,
+    ): Boolean {
+        val present = snaps.mapTo(HashSet()) { it.nodeId }
+        var ended = false
+        rangeHunt.cold(now).forEach { id ->
+            val why =
+                ColdSightings.endReason(
+                    linked = links.containsKey(id),
+                    backingOff = id in backoff,
+                    present = id in present,
+                    off = off,
+                ) ?: return@forEach
+            if (rangeHunt.cancelCold(id)) {
+                coldSightings.end(id, now)
+                Log.i(TAG, "bt hunt $id: cold hunt over ($why)")
+                ended = true
+            }
+        }
+        return ended
+    }
+
+    /**
+     * Takes [action] for [id]'s cold sighting if [ColdSightings] grants it — the last gate, so a cooldown or budget is
+     * spent only on an action taken. Returns whether a hunt began.
+     */
+    private fun startCold(
+        id: String,
+        action: ColdAction,
+        rssi: Int,
+        now: Long,
+        tuning: PhyTuning,
+    ): Boolean {
+        val grant = coldSightings.tryStart(id, action, now, tuning.fastHoldMs, tuning.coldHuntCooldownMs) ?: return false
+        if (action == ColdAction.HUNT) {
+            rangeHunt.onCold(id, now, grant)
+            // Read after the hold is in: a link-up on the link's own thread since [noteColdSightings] read [links] cleared
+            // nothing yet held, so it is undone here, as that link-up would have (a later one clears it itself).
+            if (links.containsKey(id)) {
+                rangeHunt.onLinkUp(id)
+                coldSightings.end(id, now)
+                return false
+            }
+            Log.i(TAG, "bt hunt $id: cold sighting on Coded, for ${grant}ms (rssi=$rssi)")
+            return true
+        }
+        codedPace.onDrop(id, now, grant)
+        if (links.containsKey(id)) {
+            codedPace.onLinkUp(id)
+            coldSightings.end(id, now)
+            return false
+        }
+        Log.i(TAG, "bt coded advert fast (cold $id, for ${grant}ms rssi=$rssi)")
+        // After the settle, as a drop's (9utz); a change already pending reads the new hold when it runs.
+        if (paceJob?.isActive != true) schedulePace(AdvertReassertPolicy.SETTLE_MS)
+        return false
     }
 
     /** Whether the person is using Knit now: its UI on screen and the screen lit. */
@@ -2253,24 +2375,32 @@ class BluetoothMeshTransport(
         rssiByNode: Map<String, Double>,
     ): Double = BleAdmissionPolicy.linkRssi(rssiByNode[fl.nodeId], fl in neverSighted, DoorbellPolicy.serves(fl.peer.capabilities))
 
+    /** What each of [held] scores in the promotion: its eviction score ([linkScore]), age and idle time at [now]. */
+    private fun linkSnapshots(
+        held: Collection<FramedLink>,
+        snaps: List<BlePresenceTracker.Snapshot>,
+        now: Long,
+    ): List<PromotionPolicy.LinkSnapshot> {
+        val rssiByNode = snaps.associate { it.nodeId to it.smoothedRssi }
+        return held.map { fl ->
+            PromotionPolicy.LinkSnapshot(
+                nodeId = fl.nodeId,
+                smoothedRssi = linkScore(fl, rssiByNode),
+                ageMs = now - fl.linkStartedAt,
+                idleMs = now - fl.lastActivityAt,
+            )
+        }
+    }
+
     private fun driveConnections() {
         val now = elapsed()
         val snaps = presence.snapshots(now)
         publishReachable(now)
-        val rssiByNode = snaps.associate { it.nodeId to it.smoothedRssi }
         // Candidates: peers we're the initiator for (tie-break: larger id initiates), not linked, not in flight.
         val candidates = ordinaryCandidates(snaps)
         // The links this decision scores: an eviction closes the link it scored, never one that replaced it since.
         val scored = links.values.associateBy { it.nodeId }
-        val linkSnaps =
-            scored.values.map { fl ->
-                PromotionPolicy.LinkSnapshot(
-                    nodeId = fl.nodeId,
-                    smoothedRssi = linkScore(fl, rssiByNode),
-                    ageMs = now - fl.linkStartedAt,
-                    idleMs = now - fl.lastActivityAt,
-                )
-            }
+        val linkSnaps = linkSnapshots(scored.values, snaps, now)
         val presentIds = snaps.mapTo(HashSet()) { it.nodeId }
         val backoff =
             synchronized(lock) {
@@ -2558,6 +2688,7 @@ class BluetoothMeshTransport(
         ensurePhyControl(framed)
         codedPace.onLinkUp(nodeId)
         rangeHunt.onLinkUp(nodeId)
+        coldSightings.end(nodeId, elapsed()) // a cold spell that ends in a link spends only the time it ran
         if (codedFast) schedulePace(AdvertReassertPolicy.SETTLE_MS) // its peer is back: slow again, after the settle
         synchronized(lock) {
             inFlight.remove(nodeId)

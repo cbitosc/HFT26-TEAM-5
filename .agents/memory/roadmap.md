@@ -639,6 +639,10 @@ doc). **Don't start a deferred item without explicit direction.**
   shipped artifact since 2026-10-08 (`BuildConfig.BLE_CODED_PHY`, mode AUTO), flipped ahead of what is still owed: a walk-apart field trial (link-drop
   distance under off, auto and coded), the OFF-vs-AUTO 1M-sighting rate, chat latency behind a blob on a CODED link,
   and a battery night against OFF. iOS has no Coded PHY; 2M up-shift and PHY-aware blob scheduling are deferred.
+  The 2026-10-20 amendment (weak 1M hits no longer reset the Coded-only clock, `PhyTuning.oneMWeakDbm`; a cold far
+  sighting starts a bounded hunt or fast Coded advert, `ColdSightings`) is BUILT, uncommitted, and owes its walk trial:
+  an A/B of `…debug.PHY --ez coldHunt false --ei oneMWeak -200` against the defaults from a start apart, a one-way leg,
+  a bench check that phones a metre apart still open on 1M, and 30 min beside a peer parked just under the floor.
 - **Bluetooth link boost: the release flag, screen-off feeds, iPhone links** — BUILT 2026-10-06 on
   `fix/ble-link-boost-120` (ADR 2026-10.2da4, #120): while a file moves either way, a side whose screen is on asks for
   `CONNECTION_PRIORITY_HIGH` (and the MTU once), and the 1M/2M budget rises to 18 KiB/s (12 past four LE connections)

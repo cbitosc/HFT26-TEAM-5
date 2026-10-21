@@ -310,7 +310,10 @@ import java.util.concurrent.ConcurrentLinkedQueue
  *   the step-up backoff of a link that flaps, #169) override the step thresholds, `--ei credit N` the dB a Coded
  *   advert reading gains on the 1M scale (12), `--ei fastAdvertMs|fastHoldMs N` the Coded advert's interval after a
  *   link at range drops (250) and how long it holds (180000) — on the dialing side, how long the scan hunts the lost
- *   peer — with `--ei huntInUseHoldMs N` that hunt's bound while Knit is open on a lit screen (1800000), `--ei codedPace|codedChunk N` a file's feed rate in B/s
+ *   peer — with `--ei huntInUseHoldMs N` that hunt's bound while Knit is open on a lit screen (1800000), `--ei oneMWeak N`
+ *   the smoothed 1M reading under which a 1M hit leaves the Coded-only clock running (−90; −200 for the old rule) and
+ *   `--ez coldHunt false` no hunt or fast advert for a cold far sighting (the 2026-10-20 amendment's A/B),
+ *   `--ei codedPace|codedChunk N` a file's feed rate in B/s
  *   and chunk on a link on Coded (1024, 2048; a windowed feed's fallback there), `--ei codedWindowChunk N` a windowed
  *   feed's smallest chunk on Coded, which sizes the window's floors (1024; 1024 to 8192 — ADR 2026-10.5buf's Coded amendment), and `--ei filePace N` the file budget the links on 1M or 2M share, split
  *   among those feeding (4096; 0 unbounded; a share's chunk is two seconds of it, 2048 to 16384 — ADR 2026-10.8jwn),
@@ -3485,6 +3488,8 @@ class DebugBridgeReceiver :
                 fastAdvertMs = int("fastAdvertMs") ?: t.fastAdvertMs,
                 fastHoldMs = int("fastHoldMs")?.toLong() ?: t.fastHoldMs,
                 huntInUseHoldMs = int("huntInUseHoldMs")?.toLong() ?: t.huntInUseHoldMs,
+                oneMWeakDbm = int("oneMWeak")?.toDouble() ?: t.oneMWeakDbm,
+                coldHunt = if (intent.hasExtra("coldHunt")) intent.getBooleanExtra("coldHunt", true) else t.coldHunt,
                 codedPaceBytesPerSec = int("codedPace") ?: t.codedPaceBytesPerSec,
                 codedChunkBytes = int("codedChunk")?.coerceIn(1, LinkFraming.FILE_CHUNK_BYTES) ?: t.codedChunkBytes,
                 codedWindowChunkBytes =
@@ -3520,6 +3525,8 @@ class DebugBridgeReceiver :
                     .put("fastAdvertMs", tuned.fastAdvertMs)
                     .put("fastHoldMs", tuned.fastHoldMs)
                     .put("huntInUseHoldMs", tuned.huntInUseHoldMs)
+                    .put("oneMWeak", tuned.oneMWeakDbm.toInt())
+                    .put("coldHunt", tuned.coldHunt)
                     .put("codedPace", tuned.codedPaceBytesPerSec)
                     .put("codedChunk", tuned.codedChunkBytes)
                     .put("codedWindowChunk", tuned.codedWindowChunkBytes)

@@ -346,3 +346,14 @@ check; and the rest of `stop()`'s teardown still runs on the caller's thread.
 **What is owed.** The device trial: the switch, Battery Saver and the charger's hold on one phone, with the Aware row
 switched off, no Wi-Fi banner and the sensor disarmed; then a `shipped,lowpower` battery run, which should land near
 the Aware-off arm's 45 mA on the P3. The walking arm still owes the motion heal's own figure.
+
+## Note 2026-10-20 — cold Coded hunts stay off under the posture
+
+ADR 2026-10.yvn6's 2026-10-20 amendment adds radio duty nobody asked for: a cold far sighting on Coded starts a
+bounded hunt on the dialing side or a fast Coded advert on the dialed side. Neither starts while the low-power posture
+is on: `BluetoothMeshTransport` reads `LowPowerSource.current` through a `lowPower` seam wired in `di/MeshModule`, and
+`CodedPhyPolicy.coldHunt` answers `NONE`; a cold hunt already running ends at the next window
+(`bt hunt <id>: cold hunt over (off)`), and a cold fast window runs out its hold (3 min at most). This is not a new
+lever of Phase 1: the posture still gives up only Wi-Fi Aware and the motion heal, and a drop's hunt and fast advert
+are untouched. It keeps the new duty out of a phone the user or Battery Saver asked to save power.
+

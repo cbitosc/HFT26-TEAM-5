@@ -25,7 +25,7 @@ Bluetooth-adjacent routing that stays in `AGENTS.md`, because another subsystem 
   amendment); the channel's lock is taken before a slot's, never inside a slot's callback. `hasFastPlane` is now true for Bluetooth: the link copy the
   composite used to send lives inside the transport's `fastFanout`/`fastSend`; don't add it back upstream.
 - **When touching `CodedPhyPolicy`, `PhyStepper`, `BlePhyControl`, `CodedPhyDiag`, `CodedAdvertPace`, `RangeHunt`,
-  `AppVisibility`,
+  `ColdSightings`, `CodedPhyPolicy.coldHunt`, `PhyTuning.oneMWeakDbm`, `AppVisibility`,
   `BleAdvertiser.codedParams` / `setInterval`, `BleScanner.phys`, `BlePresenceTracker`'s per-PHY RSSI,
   `BuildConfig.BLE_CODED_PHY` or `…debug.PHY`:** READ ADR
   2026-10.yvn6 and the Coded PHY section of `.agents/context/mesh-transport.md`. On in release since 2026-10-08: a
@@ -39,7 +39,11 @@ Bluetooth-adjacent routing that stays in `AGENTS.md`, because another subsystem 
   interval moved in place (`CodedAdvertPace`, `BleAdvertiser.setInterval`; the amendment of 2026-10-02), while the
   dialing side hunts it — lonely gap, Coded windows, no settled floor, whatever other links it holds — for those
   3 min, or up to 30 while Knit is open on a lit screen, which hunts on its own too (`RangeHunt`, the 2026-10-04
-  amendment). CHECK
+  amendment). A 1M hit under `PhyTuning.oneMWeakDbm` (−90 smoothed, raw) leaves the Coded-only clock running, and a
+  cold far sighting (unlinked, in `ScanPlan.far`, at or above −90 effective) gets the same hunt or fast advert for at
+  most 3 min, gated by `CodedPhyPolicy.coldHunt` (promotion room for a hunt, off under low power, d44b) and bounded by
+  `ColdSightings` (one per peer per 30 min, one of each at a time, 3 min of each kind per 30 min phone-wide, each its own budget; spent last) —
+  the 2026-10-20 amendment, a draft whose walk trial is owed. CHECK
   `.agents/memory/roadmap.md` for the trials it still owes.
 - **When touching `LinkFade`, `PhyLinkStatus.fading`, the `PhyTuning` fade fields, `BlePhyControl`'s read accounting,
   or `liveLinkFading` (`BluetoothMeshTransport`, `CompositeMeshTransport`, `MeshTransport`):** READ ADR 2026-10.79yb's

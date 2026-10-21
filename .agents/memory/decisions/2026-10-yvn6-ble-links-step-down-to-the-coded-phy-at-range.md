@@ -562,3 +562,112 @@ lines. The trial passes if the reversals' backoffs climb 40s, 80s, 160s, 300s, e
 comes no sooner than its backoff after the step-down before it, and from the fourth reversal on the link steps at most
 twice in any 5 min 20 s. A walk-away at the end of the trial must still step down on today's rule: three weak reads,
 never inside 20 s of the last step.
+
+## Amendment 2026-10-20 — a weak 1M hit is no evidence against Coded alone, and a cold far sighting is hunted
+
+Status: draft, pending review and the walk trial below.
+
+**What was observed.** On Coded a link that opened close holds well past the distance at which a fresh one opens. Two
+of the causes are Knit's own rules:
+
+- **At the edge, the dial went out on 1M.** `codedOnly` needs 8 s of 1M listening with no 1M hit (the 2026-10-02 (3)
+  amendment). A peer whose faint 1M advert still got through now and then reset that clock on every hit and never
+  qualified, so `DialPlan.target` dialed its 1M address. The dial failed and the peer went into backoff, though Coded
+  heard it fine.
+- **A first meeting at range got no help.** The hunt and the fast Coded advert started only from a drop at range
+  (`notePhyDrop`), or while Knit was open on a lit screen. A far peer heard for the first time got the settled cadence
+  (on a screen-off phone, 8 s windows minutes apart) and a 1 s Coded advert.
+
+**What changed.**
+
+- **The weak-1M rule.** `BlePresenceTracker` moves a peer's 1M mark only on a 1M hit whose smoothed 1M reading, that
+  hit included, is at or above `PhyTuning.oneMWeakDbm`. The reading is raw, on the 1M scale, with no credit: the
+  presence advert at `TX_POWER_HIGH` (ryak). A weaker hit only seeds a missing mark, as a Coded first hit does. So a
+  peer heard on 1M only weakly ripens `codedLagMs` at the same rate as one never heard on 1M. The default is the
+  promotion floor (`PromotionConfig.DEFAULT_RSSI_FLOOR_DBM`, −90). That is a guess, not a measured 1M dial limit, and
+  the walk sizes it. A close peer's strong 1M hits reset the mark as before, so the 2026-10-02 bench case is unchanged
+  (`BlePresenceTrackerTest`). `ONE_M_FRESH_MS` stays 8 s.
+- **What moves with it.** Every reader of `codedOnly`:
+  - `dialCoded`: a weak-1M peer is dialed at its Coded address, `via=coded`. That is the fix.
+  - `sightedForAdmission`: a weak-1M dialer counts as unsighted while the experiment runs, so it is admitted whatever
+    the id order. That is the far-pair deadlock fix of the 2026-10-01 amendment, now reached sooner. No admission code
+    changed. A linked dialer that is weak on 1M now redials into the unsighted rows: its second link replaces the
+    held one once that is 30 s old (`REPLACE_MIN_HOLD_MS`), where before it was refused (`BleAdmissionPolicyTest`).
+  - `ScanPlan.far`: more Coded-only windows while a weak-1M peer is unlinked. It stays bounded, since `far` excludes
+    linked peers.
+  - `ScanPlan.near` moves at the boundary. A peer with a weak smoothed 1M reading but a fresh raw Coded reading at
+    −90 or better used to be near, and once it ripens Coded-only it is not. That is the conservative way for Wi-Fi
+    Aware's Tier-2 corroboration (ADR 2026-09.9dnk): one fewer peer vouches for the radio, never one more
+    (`ScanPlanTest`).
+- **A cold far sighting is treated as a drop at range, bounded.** After each presence window
+  (`BluetoothMeshTransport.noteColdSightings`), every unlinked peer in `ScanPlan.far` is judged by
+  `CodedPhyPolicy.coldHunt`, on the same two sides as a drop:
+  - **The side that dials** (`drives`, the larger id) gets `HUNT`. `RangeHunt.onCold` holds the peer for the hold
+    granted, never `huntInUseHoldMs`, since a lit, in-use Knit already hunts on its own. The hunt is the one the
+    2026-10-04 amendment built: the 12 s hunting gap on the elapsed clock, Coded windows, no settled floor, a dial ends
+    the window, and A2DP still floors it. The gap after the window that began the hunt is judged again, so a
+    screen-off phone does not sit out its settled gap before the hunt's first window.
+  - **The dialed side** (the smaller id) gets `FAST_ADVERT`. `CodedAdvertPace.onDrop` holds it fast for the grant,
+    2.5 s after the decision (`AdvertReassertPolicy.SETTLE_MS`), and never replaces a pace change already pending,
+    which reads the new hold when it runs. The refusal give-up applies as for a drop.
+- **The gates** (`coldHunt`, pure): the experiment runs; `PhyTuning.coldHunt` is set; the low-power posture is off
+  (ADR 2026-10.d44b, the seam `lowPower` reading `LowPowerSource.current`); the peer is not linked or dialed, not
+  already hunted or wanted back, not in connect backoff; and its smoothed RSSI on the 1M scale is at or above −90, the
+  floor below which neither the ordinary dial nor the lonely dial would dial it. A hunt also needs the promotion that
+  would dial the peer to have room for it (`DialPlan.promotes`): the connect loop's own `PromotionPolicy.decide` over
+  the links it scores, the debug cap included, with only the dwell taken as ripe — a free slot under `maxLinks`, or
+  the peer beats the weakest evictable link by `rssiHysteresisDb`. At the budget behind stronger links, a hunt's
+  windows would ripen a dwell into nothing.
+- **The bounds** (`ColdSightings`, pure; `tryStart` is the last gate, so nothing is spent on an action not taken):
+  - per peer, at most one cold hunt or fast window per `PhyTuning.coldHuntCooldownMs` (30 min), in a 64-entry LRU;
+  - at most one cold hunt and one cold fast window running at a time, phone-wide;
+  - a phone-wide budget per kind, each its own: `fastHoldMs` (3 min) of cold hunting and, separately, 3 min of cold
+    fast Coded advert per cooldown window. A phone with a larger far neighbour to dial and a smaller one that dials it
+    can spend both. A spell that ended early (the peer linked, backed off or left presence) spends only the time it
+    ran, and a grant is the budget of its kind left, never under `ColdSightings.MIN_GRANT_MS` (24 s, one hunting window
+    and its gap).
+  - A cold hunt ends at the next scan window once its peer has linked, entered connect backoff or left presence, or
+    the switch or low power turns it off (`ColdSightings.endReason`): `bt hunt <id>: cold hunt over
+    (linked|backoff|gone|off)`. The `linked` end, and a re-check of the links right after a cold hold is set, cover a
+    link-up on the link's own thread (an inbound accept) landing between the scan loop's read of the links and the
+    hold's start; such a hold is undone at once and its spell ended. A drop's hunt keeps its current behaviour.
+- **One-sided triggers.** Each phone acts on what it hears. A pair where only the larger id hears the other cold hunts
+  a slow advert; where only the smaller does, it advertises fast for a dialer that may not be listening on Coded yet.
+  Neither half waits on the other, and each helps alone. The trial has a one-way leg.
+- **The record.** `bt hunt <id>: cold sighting on Coded, for <ms>ms (rssi=…)` on the dialing side (the `bt hunt <id>:`
+  prefix kept), `bt coded advert fast (cold <id>, for <ms>ms rssi=…)` on the dialed side, then the existing
+  `bt scan → hunt (…)` and `bt coded advert fast (…)` edges. `…debug.PHY --ei oneMWeak N` (−200 restores the old rule)
+  and `--ez coldHunt false` set the two knobs for the A/B, and the reply's `tuning` echoes them.
+
+**What it costs.** It rides `BLE_CODED_PHY`, like the rest of the feature. A parked neighbour heard through a wall at
+or above the floor costs at most 3 min of hunting (or of a 250 ms Coded advert) per 30 min. Each kind has its own
+budget, so one phone may spend up to 3 min of cold hunting and 3 min of cold fast Coded advert per 30 min, for a larger
+and a smaller far neighbour, and a crowd of them no more than that. A Coded dial to a weak-1M peer gets the 25 s watchdog, where a failing 1M dial got 12 s; the
+scan pauses for it the longer time. A link that opens on Coded at moderate range steps up through `PhyStepper` as today
+(−72 held 30 s); the trial watches for flapping near −82 / −72.
+
+**Not taken.**
+
+- *A shorter `ONE_M_FRESH_MS`.* It would make a close peer Coded-only sooner too, the bench regression.
+- *Hunting cold sightings under the promotion floor.* Neither dial path dials there, so the windows would buy nothing.
+- *A per-peer hold without the phone-wide budget.* A pocket among several parked neighbours would hunt back to back.
+
+Tests: `BlePresenceTrackerTest` (weak hits ripen the lag, a strong one resets it, the knob restores the old rule, the
+alternating-window bench never goes Coded-only), `CodedPhyPolicyTest` (`coldHunt`: id order, floor, room, linked,
+held, backoff, the switch and low power), `ColdSightingsTest` (cooldown, one at a time, the budget and its sliding
+window, the least grant, the LRU, `clear`, `endReason`), `RangeHuntTest` (a cold hold ignores the in-use bound, a drop keeps it,
+`cancelCold`), `ScanPlanTest` (a weak-1M peer is far and not near), `DialPlanTest` (it is dialed `via=coded`;
+`promotes`), `BleAdmissionPolicyTest` (a weak-1M linked dialer replaces after 30 s).
+
+**The walk trial owed** (`scripts/ble-link-trial.py` plus a walk, two lab phones in AUTO):
+
+- Start the phones apart, at a distance where a carried link still holds but a cold one does not open today. A/B
+  `…debug.PHY --ez coldHunt false --ei oneMWeak -200` (today's behaviour) against the defaults. Measure the time to
+  `bt initiating to … via=coded` and to link-up, and count `via=1m` dials that fail at the edge.
+- A one-way leg: the larger id screen-off in a pocket, the smaller id moving in; then the roles swapped. Each side's
+  cold line (`bt hunt <id>: cold sighting…` or `bt coded advert fast (cold <id>…`) by the end of the window that heard
+  the other.
+- A bench check, the phones a metre apart: links still open on 1M (no `via=coded`), and no cold line.
+- The parked-peer cost: 30 min with a peer parked just under the floor (`bt coded heard … eff=` under −90): no cold
+  line at all. Then parked just over it, where its dials fail: at most one cold line per peer per 30 min, each hunt
+  ending at its first backoff (`cold hunt over (backoff)`), and no more than 3 min of cold `bt scan → hunt` in any 30.

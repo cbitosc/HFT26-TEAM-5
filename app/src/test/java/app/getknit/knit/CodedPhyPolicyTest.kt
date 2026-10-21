@@ -3,11 +3,14 @@ package app.getknit.knit
 import app.getknit.knit.mesh.bluetooth.BlePresenceTracker
 import app.getknit.knit.mesh.bluetooth.CodedPhyMode
 import app.getknit.knit.mesh.bluetooth.CodedPhyPolicy
+import app.getknit.knit.mesh.bluetooth.ColdAction
+import app.getknit.knit.mesh.bluetooth.ColdSighting
 import app.getknit.knit.mesh.bluetooth.LinkPhy
 import app.getknit.knit.mesh.bluetooth.PhyStepper
 import app.getknit.knit.mesh.bluetooth.PhyStepper.Action
 import app.getknit.knit.mesh.bluetooth.PhyStepper.StepUpHold
 import app.getknit.knit.mesh.bluetooth.PhyTuning
+import app.getknit.knit.mesh.bluetooth.PromotionConfig
 import app.getknit.knit.mesh.bluetooth.PromotionPolicy
 import app.getknit.knit.mesh.bluetooth.ScanPhys
 import app.getknit.knit.mesh.link.LinkFraming
@@ -179,9 +182,12 @@ class CodedPhyPolicyTest {
         t.onSighting(sighting(-100, coded = true), now = 10_000)
         assertEquals(9_000L, t.snapshots(10_000).single().codedLagMs)
         assertTrue(CodedPhyPolicy.codedOnly(t.snapshots(10_000).single().codedLagMs))
-        // A 1M hit puts it back.
+        // A weak 1M hit does not put it back (the 2026-10-20 amendment): its smoothed 1M reading is still under −90.
         t.onSighting(sighting(-94, coded = false), now = 11_000)
-        assertFalse(CodedPhyPolicy.codedOnly(t.snapshots(11_000).single().codedLagMs))
+        assertTrue(CodedPhyPolicy.codedOnly(t.snapshots(11_000).single().codedLagMs))
+        // A strong one does.
+        t.onSighting(sighting(-60, coded = false), now = 11_500)
+        assertFalse(CodedPhyPolicy.codedOnly(t.snapshots(11_500).single().codedLagMs))
     }
 
     @Test
@@ -288,6 +294,71 @@ class CodedPhyPolicyTest {
             CodedPhyPolicy.huntAfterDrop("b", "a", LinkPhy.TWO_M, linkRssi = -60, tuning = tuning),
         )
         assertFalse(CodedPhyPolicy.huntAfterDrop("b", "a", LinkPhy.ONE_M, linkRssi = null, tuning = tuning))
+    }
+
+    // --- cold far sightings (the 2026-10-20 amendment) ---
+
+    private fun cold(
+        peer: String = "a",
+        rssi: Double = -85.0,
+        linked: Boolean = false,
+        held: Boolean = false,
+        backingOff: Boolean = false,
+        promotes: Boolean = true,
+    ) = ColdSighting(peer, rssi, linked, held, backingOff, promotes)
+
+    private fun coldHunt(
+        local: String,
+        sighting: ColdSighting,
+        codedOn: Boolean = true,
+        lowPower: Boolean = false,
+        tuning: PhyTuning = this.tuning,
+    ) = CodedPhyPolicy.coldHunt(local, sighting, codedOn, lowPower, tuning)
+
+    @Test
+    fun theSideThatDialsHuntsAColdSightingAndTheDialedSideAdvertisesFast() {
+        assertEquals(ColdAction.HUNT, coldHunt("b", cold(peer = "a")))
+        assertEquals(ColdAction.FAST_ADVERT, coldHunt("a", cold(peer = "b")))
+    }
+
+    @Test
+    fun aHuntNeedsThePromotionToHaveRoomButTheFastAdvertDoesNot() {
+        assertEquals(ColdAction.NONE, coldHunt("b", cold(peer = "a", promotes = false)))
+        assertEquals("the dialed side never reads it", ColdAction.FAST_ADVERT, coldHunt("a", cold(peer = "b", promotes = false)))
+    }
+
+    @Test
+    fun aColdSightingUnderTheFloorStartsNothing() {
+        assertEquals(ColdAction.HUNT, coldHunt("b", cold(peer = "a", rssi = -90.0)))
+        assertEquals(ColdAction.NONE, coldHunt("b", cold(peer = "a", rssi = -90.5)))
+        assertEquals(ColdAction.NONE, coldHunt("a", cold(peer = "b", rssi = -90.5)))
+    }
+
+    @Test
+    fun aLinkedHeldOrBackedOffPeerStartsNothing() {
+        for (local in listOf("a", "b")) {
+            val peer = if (local == "a") "b" else "a"
+            assertEquals(ColdAction.NONE, coldHunt(local, cold(peer = peer, linked = true)))
+            assertEquals(ColdAction.NONE, coldHunt(local, cold(peer = peer, held = true)))
+            assertEquals(ColdAction.NONE, coldHunt(local, cold(peer = peer, backingOff = true)))
+        }
+    }
+
+    @Test
+    fun coldHuntsAreOffWithCodedOffTheSwitchOffOrLowPowerOn() {
+        assertEquals(ColdAction.NONE, coldHunt("b", cold(peer = "a"), codedOn = false))
+        assertEquals(ColdAction.NONE, coldHunt("b", cold(peer = "a"), lowPower = true))
+        assertEquals(ColdAction.NONE, coldHunt("a", cold(peer = "b"), lowPower = true))
+        assertEquals(ColdAction.NONE, coldHunt("b", cold(peer = "a"), tuning = tuning.copy(coldHunt = false)))
+        assertEquals(ColdAction.NONE, coldHunt("a", cold(peer = "b"), tuning = tuning.copy(coldHunt = false)))
+    }
+
+    @Test
+    fun theWeakOneMFloorDefaultsToThePromotionFloor() {
+        assertEquals(PromotionConfig.DEFAULT_RSSI_FLOOR_DBM.toDouble(), tuning.oneMWeakDbm, 0.0)
+        assertEquals("a cold hunt holds the drop's pocket hold", 180_000L, tuning.fastHoldMs)
+        assertEquals(1_800_000L, tuning.coldHuntCooldownMs)
+        assertTrue(tuning.coldHunt)
     }
 
     @Test

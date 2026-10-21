@@ -18,7 +18,11 @@ import app.getknit.knit.mesh.Peer
  * Whether a peer is heard on Coded alone ([Snapshot.codedLagMs]) is measured on a clock that runs only while a scan
  * window listens on 1M ([onOneMListening]): a Coded-only window cannot hear a 1M advert, so its hits are no evidence
  * that the peer has none. The clock's reading at each peer's last 1M hit outlives its presence entry (a screen-off
- * scan is 8 s windows two minutes apart, so presence restarts every window).
+ * scan is 8 s windows two minutes apart, so presence restarts every window). Only a 1M hit whose smoothed 1M reading,
+ * that hit included, is at or above [oneMWeakDbm] moves the mark: a peer whose faint 1M advert still got through now and
+ * then reset it on every hit, never became Coded-only, and was dialed on 1M at the edge while Coded heard it fine (ADR
+ * 2026-10.yvn6, the 2026-10-20 amendment). A weaker hit is no evidence against Coded alone; a peer heard only so on 1M
+ * is marked at its first hit, as one first heard on Coded is.
  *
  * Pure of Android and driven by an injected clock (all methods take `now`), so it is JVM-unit-testable with a
  * virtual clock ([app.getknit.knit.BlePresenceTrackerTest]) exactly like the other pure mesh components.
@@ -27,6 +31,8 @@ class BlePresenceTracker(
     private val config: PresenceConfig = PresenceConfig(),
     // Read at every score, so `…debug.PHY --ei credit` moves it live (ADR 2026-10.yvn6).
     private val codedCreditDb: () -> Double = { CodedPhyPolicy.CODED_RSSI_CREDIT_DB },
+    // Read at every 1M hit, so `…debug.PHY --ei oneMWeak` moves it live (the 2026-10-20 amendment).
+    private val oneMWeakDbm: () -> Double = { PromotionConfig.DEFAULT_RSSI_FLOOR_DBM.toDouble() },
 ) {
     /** One scan hit for a peer: RSSI plus the fields decoded from its [BleAdvertPayload]. */
     data class Sighting(
@@ -59,7 +65,8 @@ class BlePresenceTracker(
         /**
          * How long a scan listened on 1M between the peer's last 1M hit and its latest Coded hit, null when this
          * presence holds no Coded hit; [CodedPhyPolicy.codedOnly] reads it. A peer never heard on 1M is measured from
-         * its first Coded hit, so it counts only once a 1M listener has missed it for a while.
+         * its first Coded hit, so it counts only once a 1M listener has missed it for a while. A 1M hit under the weak
+         * floor ([PhyTuning.oneMWeakDbm], on the smoothed 1M reading) does not count as one: the lag runs on through it.
          */
         val codedLagMs: Long? = null,
         /**
@@ -144,8 +151,8 @@ class BlePresenceTracker(
     private var oneMListenedMs = 0L
     private var oneMListenSince: Long? = null
 
-    // The clock at each peer's last 1M hit, or at its first Coded hit if it has never been heard on 1M. Kept past the
-    // presence entry, least recently used out first.
+    // The clock at each peer's last 1M hit at or above the weak floor, or at its first hit if it has had none. Kept
+    // past the presence entry, least recently used out first.
     private val oneMMarks =
         object : LinkedHashMap<String, Long>(MARKS_CAPACITY, MARKS_LOAD_FACTOR, true) {
             override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Long>?) = size > MAX_MARKS
@@ -173,12 +180,10 @@ class BlePresenceTracker(
         now: Long,
     ) {
         val clock = oneMClock(now)
-        if (s.coded) {
-            entry.lastCodedClock = clock
-            oneMMarks.getOrPut(s.nodeId) { clock }
-        } else {
-            oneMMarks[s.nodeId] = clock
-        }
+        if (s.coded) entry.lastCodedClock = clock
+        // [note] has already folded this hit into rssi1m. A weak 1M hit, like a Coded one, only seeds a missing mark.
+        val strongOneM = !s.coded && (entry.rssi1m ?: Double.NEGATIVE_INFINITY) >= oneMWeakDbm()
+        if (strongOneM) oneMMarks[s.nodeId] = clock else oneMMarks.getOrPut(s.nodeId) { clock }
     }
 
     @Synchronized

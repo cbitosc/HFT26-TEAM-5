@@ -2,6 +2,7 @@ package app.getknit.knit
 
 import app.getknit.knit.mesh.bluetooth.RangeHunt
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -68,6 +69,49 @@ class RangeHuntTest {
         hunt.onDrop("p", now = 0)
         hunt.clear()
         assertTrue(wanted(now = 1, inUse = true).isEmpty())
+    }
+
+    // --- cold holds (the 2026-10-20 amendment) ---
+
+    @Test
+    fun aColdHoldRunsItsOwnHoldAndIgnoresTheInUseBound() {
+        hunt.onCold("p", now = 0, holdMs = HOLD)
+        assertEquals(setOf("p"), wanted(now = HOLD - 1))
+        assertTrue("in use or not, it ends at its own hold", wanted(now = HOLD, inUse = true).isEmpty())
+        assertTrue(hunt.cold(now = HOLD).isEmpty())
+    }
+
+    @Test
+    fun aDropKeepsTheInUseBoundBesideAColdHold() {
+        hunt.onDrop("d", now = 0)
+        hunt.onCold("c", now = 0, holdMs = HOLD)
+        assertEquals(setOf("d"), wanted(now = HOLD + 60_000, inUse = true))
+    }
+
+    @Test
+    fun cancellingAColdHoldLeavesTheSamePeersDropAlone() {
+        hunt.onDrop("p", now = 0)
+        hunt.onCold("p", now = 0, holdMs = 10_000)
+        assertTrue(hunt.cancelCold("p"))
+        assertFalse("nothing cold is left to cancel", hunt.cancelCold("p"))
+        assertEquals("the drop still hunts", setOf("p"), wanted(now = 20_000))
+    }
+
+    @Test
+    fun theColdSetIsTheColdHoldsOnly() {
+        hunt.onDrop("d", now = 0)
+        hunt.onCold("c", now = 0, holdMs = HOLD)
+        assertEquals(setOf("c"), hunt.cold(now = 1))
+    }
+
+    @Test
+    fun linkingAgainOrClearingEndsAColdHold() {
+        hunt.onCold("p", now = 0, holdMs = HOLD)
+        hunt.onCold("q", now = 0, holdMs = HOLD)
+        hunt.onLinkUp("p")
+        assertEquals(setOf("q"), wanted(now = 1))
+        hunt.clear()
+        assertTrue(wanted(now = 1).isEmpty())
     }
 
     private companion object {

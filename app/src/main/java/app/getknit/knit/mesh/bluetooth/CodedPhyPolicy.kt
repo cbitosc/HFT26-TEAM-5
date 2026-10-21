@@ -118,6 +118,26 @@ data class PhyTuning(
      */
     val huntInUseHoldMs: Long = 1_800_000,
     /**
+     * The smoothed 1M advert reading (raw, on the 1M scale, no credit: the presence advert at `TX_POWER_HIGH`, ADR
+     * 2026-10.ryak) under which a 1M hit no longer counts against Coded alone ([BlePresenceTracker]'s 1M mark stays
+     * put). Past it 1M is beyond the place a 1M link opens, so a peer whose faint 1M advert still got through now and
+     * then never became [CodedPhyPolicy.codedOnly], was dialed on 1M and backed off while Coded heard it fine (ADR
+     * 2026-10.yvn6, the 2026-10-20 amendment). The promotion floor by default, a guess, not a measured 1M dial limit:
+     * the walk trial sizes it. `…debug.PHY --ei oneMWeak` (−200 restores the old rule, every 1M hit resets the mark).
+     */
+    val oneMWeakDbm: Double = PromotionConfig.DEFAULT_RSSI_FLOOR_DBM.toDouble(),
+    /**
+     * Whether a cold far sighting — an unlinked peer heard on Coded alone, no drop behind it — starts a bounded hunt or
+     * a fast Coded advert ([CodedPhyPolicy.coldHunt], [ColdSightings]). `…debug.PHY --ez coldHunt false` for the trial's A/B.
+     */
+    val coldHunt: Boolean = true,
+    /**
+     * The per-peer cooldown of a cold action, and the window of the phone-wide budget: at most one cold hunt or fast
+     * window per peer, and at most [fastHoldMs] of each kind across all peers, per this ([ColdSightings]). It bounds
+     * what a parked neighbour heard through a wall costs: 3 min of hunting per 30.
+     */
+    val coldHuntCooldownMs: Long = 1_800_000,
+    /**
      * A file's feed rate and chunk on a link on Coded ([CodedPhyPolicy.pace], #114): about what S=8 drained at the edge
      * of the 2026-10-02 walk (~1.1 KB/s), so a frame queued behind a file waits about one chunk, not the file. A peer
      * that reports is windowed on Coded too (ADR 2026-10.5buf), and this pace is then its fallback: an iPhone, an
@@ -171,7 +191,26 @@ data class PhyTuning(
  */
 enum class ScanPhys { ONE_M, ALL, CODED }
 
+/** What [CodedPhyPolicy.coldHunt] asks of a cold far sighting: hunt it, advertise fast for it, or nothing. */
+enum class ColdAction { HUNT, FAST_ADVERT, NONE }
+
+/** One unlinked peer heard on Coded alone, as [CodedPhyPolicy.coldHunt] judges it. */
+data class ColdSighting(
+    val peerNodeId: String,
+    /** Its smoothed advert RSSI on the 1M scale ([BlePresenceTracker.Snapshot.smoothedRssi]), what every −90 floor reads. */
+    val smoothedRssi: Double,
+    /** Linked, or a dial to it in flight. */
+    val linked: Boolean,
+    /** Already hunted ([RangeHunt]) or wanted back by the fast advert ([CodedAdvertPace]). */
+    val held: Boolean,
+    /** In connect backoff. */
+    val backingOff: Boolean,
+    /** The promotion would dial it once its dwell ripened ([DialPlan.promotes]); read only on the side that dials. */
+    val promotes: Boolean,
+)
+
 /** The pure rules behind the Coded PHY experiment: how a Coded sighting is scored, and which address to dial. */
+@Suppress("TooManyFunctions") // one decision table for the experiment: scoring, dials, drops, hunts and pace side by side
 object CodedPhyPolicy {
     /**
      * What a Coded sighting is worth on the 1M scale every existing RSSI floor is sized for (the −90 of
@@ -269,6 +308,41 @@ object CodedPhyPolicy {
         lostWanted: Boolean,
         inUse: Boolean,
     ): Boolean = codedOn && (lostWanted || inUse)
+
+    /**
+     * What a cold far sighting asks of this phone (the 2026-10-20 amendment): an unlinked peer heard on Coded alone
+     * ([ScanPlan.far]) with no drop behind it got only the settled cadence and a 1 s Coded advert, so a first meeting at
+     * range waited on luck. The same two halves as a drop at range, on the same sides: the side that dials ([drives])
+     * [ColdAction.HUNT]s it, the dialed side makes its Coded advert fast ([ColdAction.FAST_ADVERT]).
+     *
+     * Only while the experiment runs ([codedOn]), [PhyTuning.coldHunt] is set and the low-power posture is off
+     * ([lowPower], ADR 2026-10.d44b: a cold hunt is radio duty nobody asked for); never for a peer [ColdSighting.linked]
+     * (or dialed), already hunted or wanted back ([ColdSighting.held]) or [ColdSighting.backingOff]; and only at or
+     * above [floorDbm] on the 1M scale, the floor below which neither the ordinary dial nor [LonelyDialPolicy] dials it,
+     * so a hunt can end in one. A hunt also needs the promotion that would dial the peer to have room for it
+     * ([ColdSighting.promotes]: a free slot, or it beats the weakest held link by the hysteresis), else its windows buy
+     * nothing. The per-peer cooldown and the phone-wide bounds are [ColdSightings.tryStart]'s, the last gate, so they are
+     * spent only on an action taken.
+     *
+     * One-sided by nature: each phone acts on what it hears, so a pair where only one side hears the other cold acts on
+     * that side alone (the dialed side's fast advert, or the dialing side's hunt of a slow one).
+     */
+    fun coldHunt(
+        localNodeId: String,
+        sighting: ColdSighting,
+        codedOn: Boolean,
+        lowPower: Boolean,
+        tuning: PhyTuning,
+        floorDbm: Int = PromotionConfig.DEFAULT_RSSI_FLOOR_DBM,
+    ): ColdAction =
+        when {
+            !codedOn || !tuning.coldHunt || lowPower -> ColdAction.NONE
+            sighting.linked || sighting.held || sighting.backingOff -> ColdAction.NONE
+            sighting.smoothedRssi < floorDbm -> ColdAction.NONE
+            !drives(localNodeId, sighting.peerNodeId) -> ColdAction.FAST_ADVERT
+            sighting.promotes -> ColdAction.HUNT
+            else -> ColdAction.NONE
+        }
 
     /** [ms] as an advertising interval in the stack's 0.625 ms units, no shorter than the 100 ms it allows. */
     fun advertIntervalUnits(ms: Int): Int = maxOf((ms / ADVERT_UNIT_MS).roundToInt(), MIN_ADVERT_INTERVAL_UNITS)

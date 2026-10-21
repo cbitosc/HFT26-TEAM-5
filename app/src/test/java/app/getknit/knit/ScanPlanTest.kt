@@ -171,4 +171,31 @@ class ScanPlanTest {
         assertTrue("near is within reachable", ScanPlan.reachable(snaps, listOf(link)).containsAll(near))
         assertTrue("the credit would have passed −101", -101.0 + CodedPhyPolicy.CODED_RSSI_CREDIT_DB >= -90.0)
     }
+
+    // An edge peer as the tracker hears it in one all-PHY window: 1M hits smoothed at −95, Coded at a raw −85 between.
+    private fun edgePeer(tracker: BlePresenceTracker): BlePresenceTracker.Snapshot {
+        tracker.onOneMListening(true, 0)
+        for (at in 0L..9_000L step 3_000L) {
+            tracker.onSighting(BlePresenceTracker.Sighting("edge", -95, 1, 0L, 100, 0), at + 1_000)
+            tracker.onSighting(BlePresenceTracker.Sighting("edge", -85, 1, 0L, 100, 0, coded = true), at + 2_000)
+        }
+        return tracker.snapshots(11_000).single()
+    }
+
+    @Test
+    fun aPeerHeardOnlyWeaklyOn1mIsFarAndLeavesNear() {
+        // The 2026-10-20 amendment. Under the old rule each weak 1M hit reset the clock, so the peer was never Coded-only
+        // and its fresh raw Coded reading (≥ −90) put it in near; now it ripens Coded-only, which moves it into far and
+        // out of near. The conservative way for Wi-Fi Aware's Tier-2 corroboration (ADR 2026-09.9dnk).
+        val snap = edgePeer(BlePresenceTracker())
+        assertTrue(snap.oneMFresh && snap.codedFresh)
+        assertTrue(CodedPhyPolicy.codedOnly(snap.codedLagMs))
+        assertEquals(listOf("edge"), ScanPlan.far(listOf(snap), linked = emptySet()))
+        assertTrue(ScanPlan.near(listOf(snap), linkPeers = emptyList()).isEmpty())
+
+        val before = edgePeer(BlePresenceTracker(oneMWeakDbm = { -200.0 }))
+        assertFalse("the old rule", CodedPhyPolicy.codedOnly(before.codedLagMs))
+        assertTrue(ScanPlan.far(listOf(before), linked = emptySet()).isEmpty())
+        assertEquals(setOf("edge"), ScanPlan.near(listOf(before), linkPeers = emptyList()).map { it.nodeId }.toSet())
+    }
 }

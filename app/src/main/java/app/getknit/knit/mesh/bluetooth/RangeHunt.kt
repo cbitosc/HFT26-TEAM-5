@@ -11,10 +11,18 @@ package app.getknit.knit.mesh.bluetooth
  * from the drop, because the person is waiting on that peer. The drop time is kept, not a deadline, so a phone that
  * opens Knit two minutes after a drop picks the hunt up again, and one that closes it ten minutes in stops at once.
  *
+ * A peer can also be held **cold** ([onCold], the 2026-10-20 amendment): an unlinked peer heard on Coded alone with no
+ * drop behind it ([CodedPhyPolicy.coldHunt]). A cold hold is the hold [ColdSightings] granted, never the in-use bound —
+ * a lit, in-use Knit hunts on its own already — and it ends early when the peer backs off or leaves presence
+ * ([cancelCold]). Cold holds are kept apart from drops, so neither replaces the other's clock.
+ *
  * Pure and thread-safe: the transport's link edges and its scan loop both touch it.
  */
 internal class RangeHunt {
     private val droppedAt = HashMap<String, Long>()
+
+    // A cold hold's end, by peer.
+    private val coldUntil = HashMap<String, Long>()
 
     /** [peerNodeId]'s link just dropped at range at [now]. */
     @Synchronized
@@ -29,11 +37,34 @@ internal class RangeHunt {
     @Synchronized
     fun onLinkUp(peerNodeId: String) {
         droppedAt.remove(peerNodeId)
+        coldUntil.remove(peerNodeId)
     }
+
+    /** [peerNodeId] was sighted cold at [now]: hunt it for [holdMs], whether Knit is in use or not. */
+    @Synchronized
+    fun onCold(
+        peerNodeId: String,
+        now: Long,
+        holdMs: Long,
+    ) {
+        coldUntil[peerNodeId] = now + holdMs
+    }
+
+    /** The peers held cold at [now]. */
+    @Synchronized
+    fun cold(now: Long): Set<String> {
+        coldUntil.values.removeAll { it <= now }
+        return coldUntil.keys.toSet()
+    }
+
+    /** Ends [peerNodeId]'s cold hold, leaving a drop's alone. Returns whether one was held. */
+    @Synchronized
+    fun cancelCold(peerNodeId: String): Boolean = coldUntil.remove(peerNodeId) != null
 
     /**
      * The peers hunted at [now]: each for [holdMs] after its drop, or for [inUseHoldMs] while [inUse]. A peer past the
-     * longer of the two is forgotten, so a later [inUse] edge cannot bring back a drop that old.
+     * longer of the two is forgotten, so a later [inUse] edge cannot bring back a drop that old. Every peer held cold,
+     * until its own hold's end, in use or not.
      */
     @Synchronized
     fun wanted(
@@ -45,12 +76,13 @@ internal class RangeHunt {
         val longest = maxOf(holdMs, inUseHoldMs)
         droppedAt.values.removeAll { now - it >= longest }
         val hold = if (inUse) longest else holdMs
-        return droppedAt.filterValues { now - it < hold }.keys.toSet()
+        return droppedAt.filterValues { now - it < hold }.keys + cold(now)
     }
 
     /** Forgets every peer: the transport stopped. */
     @Synchronized
     fun clear() {
         droppedAt.clear()
+        coldUntil.clear()
     }
 }

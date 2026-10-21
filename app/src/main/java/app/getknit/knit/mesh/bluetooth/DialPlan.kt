@@ -32,6 +32,23 @@ internal object DialPlan {
         backingOff: (String) -> Boolean,
     ): Boolean = localId > nodeId && nodeId !in linked && smoothedRssi != null && smoothedRssi >= rssiFloorDbm && !backingOff(nodeId)
 
+    /**
+     * Whether the connect loop's own promotion ([PromotionPolicy.decide] over the [links] it scores, with [backoff] and
+     * [config], the debug cap included) would dial [snap]'s peer once its dwell had ripened: a free slot under the
+     * budget, or it beats the weakest evictable link by the hysteresis. A cold hunt ([CodedPhyPolicy.coldHunt]) is worth
+     * its windows only then — at the budget behind stronger links its dwell ripens to nothing. The dwell is the one gate
+     * left out, being what the hunt's windows ripen; the floor and the backoff stay in.
+     */
+    fun promotes(
+        snap: BlePresenceTracker.Snapshot,
+        links: List<PromotionPolicy.LinkSnapshot>,
+        backoff: Set<String>,
+        config: PromotionConfig,
+    ): Boolean {
+        val ripe = snap.copy(dwellMs = maxOf(snap.dwellMs, config.dwellThresholdMs))
+        return snap.nodeId in PromotionPolicy.decide(listOf(ripe), links, backoff, config).promote
+    }
+
     /** The sighted peers [promotable] keeps: the scan's promotion work. */
     fun scanCandidates(
         localId: String,

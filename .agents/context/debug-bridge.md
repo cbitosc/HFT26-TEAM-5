@@ -572,7 +572,9 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   dB a Coded advert reading gains on the 1M scale (default 12, what every −90 floor reads), and `--ei fastAdvertMs N`
   / `fastHoldMs N` the Coded advert's interval after a link at range drops (250) and how long it holds (180000) — on
   the dialing side, how long the scan hunts the lost peer — and `--ei huntInUseHoldMs N` that hunt's bound while Knit
-  is open on a lit screen (1800000), and
+  is open on a lit screen (1800000), `--ei oneMWeak N` the smoothed 1M reading under which a 1M hit leaves the
+  Coded-only clock running (−90; −200 restores the old rule) and `--ez coldHunt false` no hunt or fast advert for a
+  cold far sighting (the 2026-10-20 amendment's A/B; both echoed in `tuning`), and
   `--ei codedPace N` / `codedChunk N` a file's feed rate in B/s (1024; 0 unbounded) and chunk (2048, capped at 16384)
   on a link on Coded (#114; a windowed feed's fallback there), `--ei codedWindowChunk N` a windowed feed's smallest
   chunk on Coded, which sizes the window's floors (1024; 1024 to 8192 — ADR 2026-10.5buf's Coded amendment), and `--ei filePace N` the file budget the links on 1M or 2M share, split evenly among those
@@ -595,7 +597,8 @@ carries `-f 0x20` (`FLAG_INCLUDE_STOPPED_PACKAGES`); `scripts/bridge.sh` always 
   `bt initiating to … via=coded`, `bt phy <id> step-up hold none|slow|fast (rssi=…)` as a Coded link's smoothed RSSI
   crosses −72 / −62, and at a drop `bt phy <id> link dropped on <PHY> rssi=… (<reason>)` then
   `bt coded advert fast (…)` / `slow` and any `bt coded advert refused` on the dialed side, `bt hunt <id>: lost at
-  range…` then `bt scan → hunt (lost=[…] inUse=…)` / `bt scan hunt held (… a2dp)` / `bt scan hunt over` on the dialing side — raise the buffer first (`adb logcat -G 16M`; the default 256 KiB holds ~40 min).
+  range…` (or `bt hunt <id>: cold sighting on Coded, for <ms>ms (rssi=…)` / `bt hunt <id>: cold hunt over
+  (linked|backoff|gone|off)` for a cold one, and `bt coded advert fast (cold <id>, …)` on the dialed side) then `bt scan → hunt (lost=[…] inUse=…)` / `bt scan hunt held (… a2dp)` / `bt scan hunt over` on the dialing side — raise the buffer first (`adb logcat -G 16M`; the default 256 KiB holds ~40 min).
   Negative control: on a phone without Coded (the Pixel 3) `supported` is false, `advert` stays `off` and no link
   gets a PHY handle; `mode off` restores the legacy scan and lets every handle go, leaving each link on its PHY.
 - `…debug.LINKTUNE` — the **Bluetooth drain trial's lever** (#120; any debug build, no Coded flag needed, so a build
