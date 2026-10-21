@@ -49,7 +49,7 @@ beyond an Android phone, though it will happily use a Meshtastic board if you ha
 | | |
 |---|---|
 | **Category** | Offline / off-grid mesh messenger (proximity, peer-to-peer, delay-tolerant) |
-| **Platform** | Android 10+ (API 29), Kotlin + Jetpack Compose (Material 3) |
+| **Platform** | Android 10+ (API 29), Kotlin + Jetpack Compose (Material 3). An iPhone port, [Knit for iOS](https://github.com/getknit/knit-ios), joins the same mesh over Bluetooth LE and is headed for the App Store |
 | **Radios** | Wi-Fi Aware (NAN) **and** Bluetooth LE, running simultaneously — no Google Play services |
 | **Encryption** | E2E on 1:1 DMs & group chats, forward-secret between current builds (X3DH-style bootstrap + epoch ratchet, AES-256-GCM, Ed25519); at-rest DB via SQLCipher |
 | **Works without** | Internet, cellular, Wi-Fi routers, accounts, phone numbers, or any server |
@@ -108,7 +108,8 @@ same app; pick one and stay on it (see the note below).
   distributes *our* signed APK verbatim — see [the reproducibility
   contract](.agents/context/distribution.md).
 - **Direct APK** — the same F-Droid-verified, self-signed universal APK is attached to every
-  [GitHub Release](https://github.com/getknit/knit/releases), for sideloading without any store.
+  [GitHub Release](https://github.com/getknit/knit/releases), for sideloading without any store. Alpha
+  pre-releases appear there too, signed with the same key so they update in place; F-Droid skips them.
 - **From a nearby phone, no store or internet needed** — an installed copy of Knit can hand itself to
   another device: **Install offline** in the app menu merges its installed splits into a universal APK,
   re-signs it on-device, and sends it over Quick Share or Bluetooth. Open the received file on the other
@@ -155,7 +156,9 @@ Knit is built for situations where there's **no reliable network but people are 
   both run behind a single `MeshTransport` seam (`CompositeMeshTransport`), with no Google Nearby / GMS.
   Knit advertises, discovers, connects, and floods with hop-count/TTL bounds and dedup; relays
   rebroadcast on a **jitter with overhear suppression**, so a dense cluster doesn't storm itself. A
-  phone with only one of the two radios still meshes over that one.
+  phone with only one of the two radios still meshes over that one. Where both phones support
+  Bluetooth's long-range mode (Coded PHY), they find each other from further apart, and a link drifting
+  out of range switches to it to stay up.
 - **Broadcast room, 1:1 DMs, and group chats** — a conversation list and contact picker, message
   bubbles, relative timestamps, unread badges, and delivery ticks (✓ / ✓✓).
 - **End-to-end encryption with forward secrecy** for DMs and groups — each message's body, mentions,
@@ -174,9 +177,11 @@ Knit is built for situations where there's **no reliable network but people are 
   and re-offered when they (or a path to them) later come into range, so two phones that meet only
   briefly still backfill each other. A content-digest anti-entropy layer means an idle mesh does zero
   data-path work; a new message triggers a targeted sync only with the peers that need it.
-- **Photos, files, voice notes, reactions, and @-mentions** — send an image (GIF/JPEG/PNG/WebP), any
-  other file up to 8 MB, or a voice note held down in the composer; files and voice notes are for DMs
-  and groups, and the public room stays photos-only so everything strangers see has been screened.
+- **Photos, videos, files, voice notes, reactions, and @-mentions** — send an image (GIF/JPEG/PNG/WebP),
+  a short video (Knit re-encodes it to about 3 MB and keeps the first 61 seconds), any other file up to
+  8 MB, or a voice note held down in the composer. Files and voice notes are for DMs and groups, and the
+  public room takes photos and videos only, so everything strangers see has been screened. In a group,
+  @everyone mentions every other member at once.
   React with any emoji — the quick row learns the ones you actually use — and mentions raise their own
   notification. Attachment bytes are content-addressed and pulled on demand instead of riding the
   flood (encrypted ones by ciphertext hash, so dedup and pull are unchanged), and reactions converge
@@ -209,20 +214,29 @@ Knit is built for situations where there's **no reliable network but people are 
   message as a `geo:` line the other phone opens in any maps app — the only place the app ever reads
   where you are.
 - **Profiles** — display name, status, and avatar flooded across the mesh; avatars transferred as files
-  (re-pushed only when they actually change) and shown next to messages.
+  (re-pushed only when they actually change) and shown next to messages. Supporters can switch on a small
+  badge on their photo, which every phone checks offline before it draws it.
+- **Backup and restore** — your identity, contacts, groups and messages go into one encrypted file,
+  locked by a recovery key Knit shows you once. Restore it on a new phone from the welcome screen. A
+  backup belongs on one phone at a time, and if the same one turns up on two, each phone says so and
+  offers to sign out there.
 - **On-device content moderation** — abusive-text and explicit-image (NSFW) filtering that runs
   **entirely offline** (no network, no server): a deterministic profanity filter, a bundled TFLite
   **toxicity** text classifier, and a bundled TFLite **NSFW** image classifier. In the public Nearby and
-  Meshtastic rooms, abusive **text** and explicit **images are blocked on send**; DMs, groups and the
+  Meshtastic rooms, abusive **text** and explicit **images and videos are blocked on send**; DMs, groups and the
   commons are never checked on the sender's phone. Everything received, in every conversation, is
   **collapsed/blurred behind tap-to-reveal** (receiver-side enforcement is what actually protects a user
   in a mesh), under the receiver's own toggle, with one-tap block-sender. Your own avatar and group photos
   are screened when you set them. See
   [`docs/CONTENT_MODERATION.md`](docs/CONTENT_MODERATION.md).
 - **Messaging-style notifications** with per-context channels (Nearby, groups, DMs) and a separate
-  channel for mentions.
+  channel for mentions. A reaction to one of your messages notifies you too.
 - **Always-on background mesh** via a foreground service, kept healthy by a heartbeat alarm,
   significant-motion re-scan, and radio-availability recovery; prompts to disable battery optimization.
+  The mesh notification can pause Knit for 15 minutes or an hour so another app can have Bluetooth, and
+  the mesh comes back by itself. **Low-power mode** in Settings turns Wi-Fi Aware off to save battery,
+  and switches on by itself under Battery Saver: Bluetooth keeps you on the mesh, so messages still
+  arrive while photos and files take longer.
 - **Offline app sharing** — hand Knit to a nearby phone with no store: the installed splits are merged
   into a universal APK and re-signed on-device (ARSCLib + apksig).
 - **Material 3** UI with a coral brand theme and full dark mode — following your phone, pinned to light
@@ -310,7 +324,7 @@ for Google Play once they do. To try it from source, see [Build](#-build).
 | On-device ML | LiteRT / TFLite (NSFW image + toxicity text classifiers) |
 | Calls | WebRTC (Opus over DTLS-SRTP) · Jetpack core-telecom · Moonshine on-device speech recognition |
 | Networking (opt-in planes only) | OkHttp — WebSocket to relays you configure, the sender-side link-preview fetch, and (debug builds) the ticket key swap; confined to three files |
-| Images | Coil 3 |
+| Images & video | Coil 3 · Media3 Transformer (on-device video re-encode) |
 | Verification | ZXing (safety-number QR) |
 | App sharing | ARSCLib + apksig (on-device split-APK merge & re-sign) |
 | Quality | detekt · ktlint · Kover (all pinned; detekt/ktlint run as Gradle plugins) |
@@ -429,6 +443,10 @@ headless `am broadcast` bridge (`…debug.SEND` / `SENDIMG` / `STATE` / `STORE` 
   small touch targets, and (on a physical device) text and image contrast. Errors fail the run; every
   finding is written out per screen. It needs API 34+, so run it with the `pixel8api34` managed device or
   on Firebase Test Lab (`…arguments.package=app.getknit.knit.a11y`).
+- **Screenshot tests** — every public `@Preview` is rendered and compared against a reference PNG with
+  `./gradlew :app:validateDebugScreenshotTest`, on the JVM with no device. After changing a preview,
+  regenerate the wrappers with `scripts/gen-screenshot-tests.py`, re-render with
+  `./gradlew :app:updateDebugScreenshotTest`, and review the PNG diff before committing.
 
 ## ❓ FAQ
 
@@ -448,10 +466,11 @@ byte off the mesh, and either alone would require the permission. Two opt-in fea
 the [Internet relay plane](#-roadmap), once you switch it on, and link previews, once you switch *those*
 on — your own phone fetches a page's title and picture for a link you type and sends them with the
 message, so the people you send to never contact the site. Both are off on a fresh install, which
-therefore makes no network calls at all. A call over the Internet goes through those same relays, and the
-speech model for call transcripts is downloaded from getknit.app only when you tap for it. (`ACCESS_NETWORK_STATE` is declared for the preview fetch alone —
-it is how the app checks that the default network actually reaches the Internet before opening a socket,
-so a phone that is only on the mesh never tries.) Knit bundles no analytics or telemetry, and a crash is
+therefore makes no network calls at all. A call over the Internet and a relay's free ticket both go
+through the relay plane, and the speech model for call transcripts is downloaded from getknit.app only
+when you tap for it. (`ACCESS_NETWORK_STATE` is how the app checks that the default network actually
+reaches the Internet before it opens any of these sockets, so a phone that is only on the mesh never
+tries.) Knit bundles no analytics or telemetry, and a crash is
 kept on the phone for you to copy into a bug report, never uploaded. The same goes for the field log, which is off
 unless you turn it on in Diagnostics: a three-day record of how your radios behaved, with no names, messages
 or ids in it, that you can share if you want to help tune Knit. You can confirm all of it from the source and the deliberately
@@ -487,7 +506,8 @@ away, and a walkie-talkie over the mesh when neither path exists. See [Calls](#-
 **What phones does it support?**
 Android 10 (API 29) and newer, with Wi-Fi Aware and/or Bluetooth LE. Almost all phones have BLE; Wi-Fi
 Aware is on Pixel 3+ and many recent devices. A phone with only one of the two radios still meshes over
-it.
+it. An iPhone port, [Knit for iOS](https://github.com/getknit/knit-ios), speaks the same protocol and
+links with Android phones over Bluetooth LE; it is headed for the App Store and not released yet.
 
 **Is it free and open source?**
 Yes — Knit is free software under the **GNU General Public License v3.0 or later**. There are no ads,
@@ -523,34 +543,42 @@ stay on the phone mesh or an optional relay, and the radio sits idle until you p
 - [`docs/RELAY_INVITE.md`](docs/RELAY_INVITE.md) — the relay invite link (`getknit.app/r`): what one
   carries, why it is a bearer link, and the consent sheet it is only ever applied through.
 - [`docs/CONTENT_MODERATION.md`](docs/CONTENT_MODERATION.md) — on-device abusive-text / explicit-image
-  moderation: design, hook points, the bundled models, and Git LFS.
+  moderation: design, hook points, and the bundled models.
+- [`docs/BACKUP_FORMAT.md`](docs/BACKUP_FORMAT.md) — the backup file: what it carries and leaves out, how
+  the recovery key seals it, and how a restore is staged.
+- [`docs/FIELD_LOG.md`](docs/FIELD_LOG.md) — the opt-in field log: every event it records, and why none
+  of them can name a person.
+- [`docs/SUPPORTER_BADGE.md`](docs/SUPPORTER_BADGE.md) — the supporter badge: the credential, how a
+  phone carries it, and how every receiver checks it.
 - [`docs/VOICE_CALLS.md`](docs/VOICE_CALLS.md) — voice calls (a draft spec): signaling, TURN from relays,
   the Wi-Fi Direct leg, the walkie-talkie, the audio route, and transcripts.
 
 ## 🗺️ Roadmap
 
 **Implemented & verified:** broadcast room · 1:1 DMs · multi-member group chats · profiles · reactions ·
-mentions · photos, files and voice notes · at-rest DB encryption (SQLCipher) · **E2E encryption +
+mentions · photos, videos, files and voice notes · at-rest DB encryption (SQLCipher) · **E2E encryption +
 identity verification** for DMs and groups · **forward secrecy** for both (an epoch ratchet for DMs, a
 sender-key ratchet for groups) · **encrypted delivery receipts and reactions** · dual **Wi-Fi Aware +
 Bluetooth LE** transports behind `MeshTransport` (no GMS) · **store-and-forward** delay-tolerant
 delivery · **key-request / retransmit** for messages received before a sender's key is known · contacts
 by QR **or** shared link · on-device toxicity + NSFW moderation · offline app sharing · **big files phone
 to phone** over Wi-Fi Direct · **voice calls**, with a walkie-talkie over the mesh and on-device
-transcripts · **search** across chats, contacts and messages · the **Your mesh** screen · drafts.
+transcripts · **search** across chats, contacts and messages · the **Your mesh** screen · drafts ·
+**backup and restore** · **low-power mode**.
 
 **Shipped, and off until you turn it on:** a **Meshtastic LoRa bridge** carrying the Nearby room and 1:1
 DMs kilometres past phone range, **Internet relays**, **link previews**, and **sending your location**.
 
-The relay layer is the largest of those. It carries DMs and group messages between contacts you already
-have when no radio path exists, keeping the mesh's delay-tolerant behaviour and running through small
+The relay layer is the largest of those. It carries DMs and group messages, and their photos and files,
+between contacts you already have when no radio path exists, keeping the mesh's delay-tolerant behaviour and running through small
 relays ("spools") that hold sealed frames without learning whose they are or what is in them. Turning it
 on takes an explicit consent sheet in the relay settings screen that spells out what a spool can see —
 your IP address, when you send, and roughly how much — and what it cannot: your messages, who you are
 talking to, or who else is in a group. A relay's operator can hand you their relay as one invite link
 (`getknit.app/r`); it opens the same sheet before anything is added. Until you say yes, a fresh install
-makes no network calls at all. The
-protocol is specified in [`docs/SPOOL_PROTOCOL.md`](docs/SPOOL_PROTOCOL.md) with executable test
+makes no network calls at all. Some relays carry photos and files only for phones holding a ticket from
+their operator; where the operator gives out free ones, Knit fetches one on the days it sends something
+through that relay, and a switch in Internet relays turns that off. The protocol is specified in [`docs/SPOOL_PROTOCOL.md`](docs/SPOOL_PROTOCOL.md) with executable test
 vectors; the client implements it, and the reference spool daemon lives in
 [`getknit/knit-spool`](https://github.com/getknit/knit-spool). Knit is built around proximity meshing
 either way.

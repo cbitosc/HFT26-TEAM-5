@@ -32,7 +32,7 @@ di/ModerationModule.kt   Koin: binds TextModerator + ImageModerator
 data/BlobRepository.kt   image-moderation hub: send/receive screening + per-hash verdict cache
 data/FileTypes.kt        what bytes ACTUALLY are (§7): the image-signature sniff, apk/archive refusals
 data/blob/BlobVerdictEntity.kt   `blob_verdicts` table (NSFW verdict cached by content hash)
-assets/moderation/       profanity_en.txt, slurs_en.txt, nsfw.tflite (LFS), README.md
+assets/moderation/       profanity_en.txt, slurs_en.txt, nsfw.tflite, README.md
 ```
 
 User control: a **Content filtering** toggle (default on) in Profile →
@@ -172,7 +172,7 @@ identical bytes are scanned once across send/receive):
 `assets/moderation/nsfw.tflite` is the **GantMan `nsfw_model` MobileNetV2 (140/224)** classifier:
 input `[1,224,224,3]` float32 normalized `÷255`, softmax output `[1,5]` =
 `drawings, hentai, neutral, porn, sexy`; `NsfwImageModerator` defaults flag on
-`hentai+porn+sexy ≥ 0.7`. It is a 17 MB float model (managed via Git LFS — see §5). Its license is vetted — MIT, © 2020 The nsfw_model Developers (attributed in
+`hentai+porn+sexy ≥ 0.7`. It is a 17 MB float model (a plain Git blob — see §5). Its license is vetted — MIT, © 2020 The nsfw_model Developers (attributed in
 [`THIRD-PARTY-NOTICES.md`](../THIRD-PARTY-NOTICES.md)); tune `threshold`/`unsafeClasses` on-device. A quantized `.tflite` (~4–5 MB) drops in
 unchanged — `NsfwImageModerator` auto-detects uint8 input.
 
@@ -206,7 +206,7 @@ tokenizer. Fully offline, no `INTERNET`.
 
 ### 4.2 What's wired
 
-- `assets/moderation/{toxicity.tflite (LFS), tokenizer.json, labels.txt}`.
+- `assets/moderation/{toxicity.tflite, tokenizer.json, labels.txt}`.
 - `moderation/SentencePieceTokenizer.kt` — pure-Kotlin Unigram tokenizer (parses `tokenizer.json` via
   kotlinx-serialization; no native lib). JVM unit-tested against HF goldens (`SentencePieceTokenizerTest`).
 - `moderation/MlTextModerator.kt` — tokenize → pad/truncate to 128 → TFLite Interpreter → per-category
@@ -224,12 +224,13 @@ To re-export or re-tune the model, see the `detoxify-mobile` repo (`README.md`).
 After any dependency change, regenerate the lockfile for **all** configs (AGENTS.md gotcha):
 `./gradlew :app:dependencies --write-locks` then `./gradlew lint`.
 
-## 5. Git LFS for model files
+## 5. Model files are plain Git blobs
 
-`*.tflite` is tracked via Git LFS (`.gitattributes`). Contributors and CI **must have git-lfs
-installed** (`git lfs install`) or checkouts get pointer files instead of real models and the build
-ships a broken classifier. Models are large binaries (the NSFW model is 17 MB); keeping them out of
-the packfile keeps clones fast. `.tflite` is also kept uncompressed in the APK
+The two `.tflite` models (about 32 MB together) are ordinary Git blobs, not Git LFS: F-Droid's
+build server has no LFS support, and a checkout without it gets 130-byte pointer stubs that both
+moderators would read as an unreadable model and silently allow everything. `.gitattributes` records
+why and must not regain a `*.tflite filter=lfs` rule; the `checkModerationModels` task in
+`app/build.gradle.kts` fails the build on a stub model. `.tflite` is also kept uncompressed in the APK
 (`androidResources { noCompress += "tflite" }`) so TFLite can mmap it.
 
 ## 6. Verification
