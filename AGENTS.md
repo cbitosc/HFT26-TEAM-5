@@ -82,6 +82,9 @@ over cleverness. Start with `.agents/context/architecture.md` for the subsystem 
   never fetches, both ends screen the card's picture and text into one verdict, and the fetch is gated on
   `net/InternetGate` (a validated route, never the NAN link), bound to that `Network`, https-only, with a
   private-address DNS guard. `okhttp3` stays confined to the three files `rules/mesh.md` names.
+  Anything new that can open an Internet socket, or a default that turns one on, must keep
+  `scripts/egress-check.sh` green: a fresh install with default settings sends no byte over IP (the "Egress
+  check" section of `.agents/context/testing.md`).
 - **When touching `transfer/`, `MeshTransport.pause`/`resume`, or anything that hands the Wi-Fi radio to a
   second role:** READ `.agents/context/direct-transfer.md` — a large file goes to one nearby contact over a
   Wi-Fi Direct group the two phones raise, never over the mesh and never custodied (ADR 2026-09.wtmz, the

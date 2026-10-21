@@ -903,6 +903,24 @@ coordinates from `uiautomator dump` rather than guessing; seed the photo picker 
 into `/sdcard/Pictures` if you need an image to select. For the headless debug bridge (send/verify without
 screenshots), see `context/debug-bridge.md`.
 
+## Egress check (`scripts/egress-check.sh`)
+
+The README promises that a fresh install makes no network calls at all; this script is that sentence as a test. It
+installs the staging APK (release with R8, debug-signed; `--variant debug` for the debug build) on an emulator it
+boots on an adb server of its own, grants what onboarding asks for, leaves every setting at its default, opens the
+app, sends it home and back, and idles with the mesh service up (`--soak`, 180 s by default). It fails if the
+kernel's per-UID counters (`dumpsys netstats` after a forced poll) charge a single byte to Knit's UID, or if a
+two-second sample of `/proc/net/{tcp,udp}{,6}` catches one of its sockets open to anything but loopback; a DNS
+lookup counts, because netd charges the resolver's socket to the asking app. An emulator has no Wi-Fi Aware and no
+real Bluetooth, so no mesh traffic can be IP there: every byte it counts was headed for the Internet.
+
+A self-test pings the host from the shell UID first and refuses to pass if the counters missed it. `--control`
+(debug builds) then drops the preconfigured relay, switches the relay plane on towards a closed port on the host
+(`10.0.2.2:9`) through `…debug.SPOOL` and expects the dial to be counted, which can take up to the plane's 60 s
+reconcile tick. Run it after adding anything that can open an Internet socket: a new opener behind
+`net/InternetGate`, a dependency that phones home, or a default that switches a plane on. It never runs on a phone:
+a `--serial` that is not an emulator is refused.
+
 ## Real BLE from an emulator (USB passthrough)
 
 `scripts/emulator-ble-mesh.sh` puts a **real** BLE radio behind an emulator, so it joins the actual mesh
