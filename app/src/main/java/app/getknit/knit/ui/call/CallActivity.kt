@@ -54,7 +54,7 @@ import androidx.compose.material.icons.outlined.LinkOff
 import androidx.compose.material.icons.outlined.Sensors
 import androidx.compose.material.icons.outlined.SignalCellularAlt1Bar
 import androidx.compose.material.icons.outlined.SignalCellularAlt2Bar
-import androidx.compose.material.icons.outlined.SpeakerPhone
+import androidx.compose.material.icons.outlined.WifiCalling3
 import androidx.compose.material.icons.outlined.WifiTethering
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilledTonalIconToggleButton
@@ -1021,7 +1021,7 @@ private fun WalkiePill() {
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            Icon(Icons.Outlined.SpeakerPhone, contentDescription = null, modifier = Modifier.size(16.dp))
+            Icon(Icons.Outlined.WifiCalling3, contentDescription = null, modifier = Modifier.size(16.dp))
             Text("Walkie-talkie · mesh", style = MaterialTheme.typography.labelLarge)
         }
     }

@@ -30,8 +30,8 @@ import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PersonRemove
-import androidx.compose.material.icons.filled.SpeakerPhone
 import androidx.compose.material.icons.filled.VerifiedUser
+import androidx.compose.material.icons.filled.WifiCalling3
 import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -399,7 +399,7 @@ private fun RowScope.CallButtons(
         CallButton(Icons.Filled.Call, R.string.profile_details_call, "profile_details_call") { gate.runOrRequest(onCall) }
     }
     if (state.canMeshCall) {
-        CallButton(Icons.Filled.SpeakerPhone, R.string.chat_mesh_call, "profile_details_mesh_call") {
+        CallButton(Icons.Filled.WifiCalling3, R.string.chat_mesh_call, "profile_details_mesh_call") {
             gate.runOrRequest(onMeshCall)
         }
     }

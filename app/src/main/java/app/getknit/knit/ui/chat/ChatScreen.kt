@@ -96,9 +96,9 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.SpeakerPhone
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material.icons.filled.WifiCalling3
 import androidx.compose.material.icons.outlined.AddReaction
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.Public
@@ -1139,7 +1139,7 @@ internal fun ChatScreenContent(
                     val meshFirst = state.canMeshCall && (meshCallFirst || !state.canCall)
                     if (callGate != null) {
                         if (meshFirst) {
-                            CallButton(callGate, Icons.Filled.SpeakerPhone, R.string.chat_mesh_call, "chat_mesh_call", onStartMeshCall)
+                            CallButton(callGate, Icons.Filled.WifiCalling3, R.string.chat_mesh_call, "chat_mesh_call", onStartMeshCall)
                         } else {
                             CallButton(callGate, Icons.Filled.Call, R.string.chat_call, "chat_call", onStartCall)
                         }
@@ -1188,7 +1188,7 @@ internal fun ChatScreenContent(
                                             text = { Text(stringResource(if (meshFirst) R.string.chat_call else R.string.chat_mesh_call)) },
                                             leadingIcon = {
                                                 Icon(
-                                                    if (meshFirst) Icons.Filled.Call else Icons.Filled.SpeakerPhone,
+                                                    if (meshFirst) Icons.Filled.Call else Icons.Filled.WifiCalling3,
                                                     contentDescription = null,
                                                 )
                                             },
