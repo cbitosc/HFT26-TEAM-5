@@ -25,16 +25,16 @@ document:
 - You can now call your contacts. Someone nearby is called over a Wi-Fi Direct link without the Internet,
   someone farther away over the Internet, and when neither works the call becomes a walkie-talkie over the
   mesh.
-- Knit now works with Knit Anywhere, a paid internet relay account that carries your photos, files and calls
-  when no phone nearby can. On a relay that only takes files from accounts, Knit gets a free ticket for small
-  photos, which you can turn off.
+- Supporting Knit on Ko-fi or GitHub Sponsors now comes with Knit Anywhere, which carries your photos, files
+  and calls over the Internet when no phone nearby can. On a relay that takes files only from supporters, Knit
+  gets a free ticket for small photos, which you can turn off.
 - In a group chat, typing @ now offers @everyone first. Picking it mentions every other member at once, and each
   gets the same mention alert as if you had picked them one by one.
 - You can now send short videos in any chat, Nearby included. Knit shrinks each one to about 3 MB and keeps
   the first 61 seconds, and like a large photo, a video only Bluetooth can bring waits for your tap.
 - If you support Knit, you can show a small supporter badge on your photo. It's off until you switch it on in your
   profile, and other phones check each badge before they show it.
-- A paid Knit Anywhere account now works on one phone at a time. If it's in use on another phone, the relay's
+- Knit Anywhere now works on one phone at a time. If it's in use on another phone, the relay's
   page says so and offers to move it here, which is also how a phone restored from a backup takes it back.
 - Settings has a new Low-power mode that turns Wi-Fi Aware off to save battery, and it switches on by itself
   while Battery Saver is on. Bluetooth keeps the phone on the mesh, so messages still arrive, but photos and
