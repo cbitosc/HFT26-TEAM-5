@@ -9,7 +9,7 @@ product:
   platforms: [android]
   category: Communication
 document:
-  updated: 2026-10-12T23:11:38Z
+  updated: 2026-10-25T01:20:20Z
   coverage: partial
   canonical: https://whatsnew.fyi/product/knit
   locale: en
@@ -18,16 +18,18 @@ document:
 
 # Knit changelog
 
-## Unreleased
+## [2.10.0](https://github.com/getknit/knit/releases/tag/v2.10.0) — 2026-10-25T01:20:20Z
+
+> Call your contacts, even with no Internet, and send short videos in any chat
 
 ### Added
 
 - You can now call your contacts. Someone nearby is called over a Wi-Fi Direct link without the Internet,
   someone farther away over the Internet, and when neither works the call becomes a walkie-talkie over the
   mesh.
-- Supporting Knit on Ko-fi or GitHub Sponsors now comes with Knit Anywhere, which carries your photos, files
-  and calls over the Internet when no phone nearby can. On a relay that takes files only from supporters, Knit
-  gets a free ticket for small photos, which you can turn off.
+- Supporting Knit on Ko-fi or GitHub Sponsors comes with Knit Anywhere, which carries your photos and files
+  over the Internet when no phone nearby can, and gets calls through that would otherwise fail. On a relay that
+  takes files only from supporters, Knit gets a free ticket for small photos, which you can turn off.
 - In a group chat, typing @ now offers @everyone first. Picking it mentions every other member at once, and each
   gets the same mention alert as if you had picked them one by one.
 - You can now send short videos in any chat, Nearby included. Knit shrinks each one to about 3 MB and keeps
