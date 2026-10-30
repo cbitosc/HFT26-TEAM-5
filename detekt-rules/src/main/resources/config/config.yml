@@ -1,0 +1,5 @@
+knit:
+  BarePeriodicLoop:
+    active: false
+    guards:
+      - 'runCatching'

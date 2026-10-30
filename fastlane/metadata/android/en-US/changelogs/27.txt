@@ -1,0 +1,19 @@
+Bluetooth that reaches farther, and photos and files that cross the mesh faster
+
+Phones now find each other over Bluetooth from farther apart. When a connection drifts toward the edge of
+range, it switches to Bluetooth's long-range mode to stay up, and a phone that loses its last connection
+keeps looking at full speed for three minutes. Both phones need the long-range mode, so iPhones and phones
+without it connect as before.
+
+Photos, voice messages and files now cost nearby phones fewer copies. Your phone asks the phone that sent a
+photo, or one it has a faster Wi-Fi link to, and tries the others only if nothing starts within a few
+seconds. Phones that only pass a message along wait, so its recipient gets the photo first, and a transfer
+cut off midway picks up where it stopped. A ring shows how much has arrived.
+
+Direct messages and groups are no longer screened as you send them; with Content filtering on, whoever
+receives a message decides what stays hidden. Also new: a What's New card in your chats, Retry on a failed
+direct file send, an opt-in field log, and photos that keep their sharpness when passed on.
+
+Fixed: slow Bluetooth reconnects, a phone vanishing from nearby while connected to a watch, the same photo
+sent two or three times, direct messages that stopped opening after a contact reinstalled, LoRa direct
+messages stuck behind room posts, animated stickers arriving still, and a crash pasting in Add contact.

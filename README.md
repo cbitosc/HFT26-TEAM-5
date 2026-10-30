@@ -1,87 +1,105 @@
-# 🚀 CBIT Hacktoberfest '26 — Project Starter Repository
+# Offline Emergency Messaging System
 
-> **Official Public Starter Repository for CBIT Hacktoberfest '26**  
-> *Chaitanya Bharathi Institute of Technology (CBIT), Hyderabad*
+CBIT Hacktoberfest 2026 submission by **The Tarnished** (`HFT26-TEAM-5`).
 
----
+This repository extends the official [Knit](https://github.com/getknit/knit) Android mesh messenger into an emergency-focused, offline-first communication system. The Android foundation is pinned to Knit `v2.10.0`; core communication is designed to work without cellular service, Internet access, cloud servers, or Google Play Services.
 
-## 📋 Team Information
+## Team information
 
 | Attribute | Details |
-| :--- | :--- |
-| **Team Name** | **The Tarnished** |
-| **Team Number** | `TEAM-5` (`HFT26-TEAM-5`) |
-| **Registration ID** | `HFEST26-3EGXMFBJ` |
-| **Problem Track** | **Track Selection in Progress** |
-| **Domain** | `General Track` |
-| **Team Leader** | Syed Sultan Mohiuddin Quadri (syedsultan.dev@gmail.com) |
-| **Institution** | Nawab shah alam khan college of engineering and technology |
+| --- | --- |
+| Event | CBIT Hacktoberfest 2026 |
+| Team | The Tarnished |
+| Team number | `TEAM-5` (`HFT26-TEAM-5`) |
+| Registration ID | `HFEST26-3EGXMFBJ` |
+| Domain | General Track |
+| Team leader | Syed Sultan Mohiuddin Quadri (syedsultan.dev@gmail.com) |
+| Institution | Nawab Shah Alam Khan College of Engineering and Technology |
 
-### 👥 Team Members
+### Team members
 
 | # | Name | Email | Institution |
-| :--- | :--- | :--- | :--- |
-| 1 | Shaik Nizam Khizar | shaiknizamkhizer5606@gmail.com | Nawab shah alam khan college of engineering and technology |
+| --- | --- | --- | --- |
+| 1 | Shaik Nizam Khizar | shaiknizamkhizer5606@gmail.com | Nawab Shah Alam Khan College of Engineering and Technology |
 | 2 | Mohammed Osman | mohdosman.cs@gmail.com | Muffakham Jah College of Engineering and Technology |
 
----
+## Project mission
 
-## 🎯 Problem Statement
+The project aims to provide reliable emergency communication when normal Internet and cellular networks are unavailable or unreliable. Planned emergency extensions include structured SOS messages, priority handling, evidence-based delivery states, explicit acknowledgements, optional location sharing, and an emergency-focused interface.
 
-### **Track Selection in Progress**
-*Domain:* **General Track**
+The imported Knit foundation already provides:
 
-Details regarding the chosen problem statement track and technical requirements.
+- Bluetooth Low Energy and Wi-Fi Aware peer discovery and communication.
+- Multi-hop mesh relaying with deduplication and hop limits.
+- Local persistence and delay-tolerant store-and-forward delivery.
+- Public, direct, and group conversations.
+- Signed message authentication and end-to-end encryption for supported private conversations.
+- Delivery receipts, attachments, optional location sharing, background service handling, and offline moderation.
 
----
+Public Nearby messages are signed but are not confidential. Direct and group messages use Knit's encryption facilities. Emergency functionality must preserve this distinction honestly.
 
-## 🛠️ Contribution & Submission Workflow
+## Repository structure
 
-All teams must follow the official fork-and-pull-request workflow:
-
-1. **Fork this Repository**:
-   - One team member should click the **Fork** button at the top right to fork this upstream repository to your personal/team GitHub account.
-2. **Add Collaborators**:
-   - In your forked repository, navigate to **Settings > Collaborators** and invite all your registered team members.
-3. **Clone & Develop Locally**:
-   ```bash
-   git clone https://github.com/<your-username>/HFT26-TEAM-5.git
-   cd HFT26-TEAM-5
-   git checkout -b feature/prototype
-   ```
-4. **Commit & Push Regularly**:
-   - Make atomic, descriptive commits throughout the hackathon.
-   ```bash
-   git add .
-   git commit -m "feat: implement core solution architecture"
-   git push origin feature/prototype
-   ```
-5. **Open Pull Request (PR) for Final Submission**:
-   - When ready for evaluation, open a **Pull Request** from your fork's `main` branch back to this upstream repository's `main` branch.
-   - **PR Title Format**: `[SUBMISSION] TEAM-5 - The Tarnished - Track Selection in Progress`
-   - **PR Description Checklist**:
-     - 📌 Solution Overview & Approach
-     - 🏗️ Architecture & Tech Stack Details
-     - 🚀 Local Setup & Installation Instructions
-     - 🎥 Demo Video Link / Live Deployment URL
-     - 📸 Key Screenshots & Visuals
-
----
-
-## 📁 Recommended Project Structure
-
-```
-.
-├── src/                  # Source code (Frontend / Backend / ML)
-├── docs/                 # Documentation, architecture diagrams, slides
-├── tests/                # Test suites & verification scripts
-├── README.md             # Your project documentation & presentation
-└── LICENSE               # Open-source license (MIT recommended)
+```text
+app/                 Main Android application
+detekt-rules/        Knit-specific static-analysis rules
+docs/                Architecture, protocol, security, and subsystem documentation
+gradle/              Gradle wrapper and version catalog
+vectors/             Cross-platform protocol test vectors
+wear/                Optional Wear OS application
+watchface*/          Optional Wear OS watch faces
+AGENTS.md            CBIT and upstream engineering rules
+COPYING              GNU GPL v3-or-later licence text
+THIRD-PARTY-NOTICES.md
 ```
 
----
+The application package and Knit architecture remain unchanged at this integration milestone.
 
-## ⚠️ Important Rules & Code of Conduct
-* **Upstream Protection**: Do not push directly to this repository's main branch. All evaluation will be conducted on your submitted Pull Request.
-* **Original Work**: All code submitted must be developed during the hackathon timeline. Open-source libraries and frameworks are welcomed with proper attribution.
-* **Code Freeze**: Final Pull Requests must be submitted before the designated hackathon submission deadline.
+## Build prerequisites
+
+Knit `v2.10.0` uses a deliberately recent Android toolchain. Read `.agents/context/toolchain.md` before changing it.
+
+- JDK 21
+- Android SDK platform and build-tools versions declared in `app/build.gradle.kts`
+- The repository's Gradle wrapper (`gradlew` / `gradlew.bat`)
+
+From PowerShell in `C:\HFT26-TEAM-5`, a future baseline build can be run with:
+
+```powershell
+.\gradlew.bat :app:assembleDebug
+```
+
+Unit tests can be run with:
+
+```powershell
+.\gradlew.bat :app:testDebugUnitTest
+```
+
+No build or test result is claimed by this integration commit. Physical Android devices are required to validate real BLE, Wi-Fi Aware, and multi-hop behavior.
+
+## Contribution and submission workflow
+
+The official CBIT fork-and-pull-request workflow remains in effect:
+
+1. Work in the team fork, not directly in the CBIT upstream repository.
+2. Develop on focused feature branches such as `feature/prototype`.
+3. Make small, descriptive commits and push them to the team fork.
+4. Merge reviewed work into the fork's `main` branch when it is ready for submission.
+5. Open the final submission pull request from the team fork's `main` branch to `cbitosc/HFT26-TEAM-5:main`.
+6. Include the solution overview, architecture and stack, setup instructions, demo video or deployment link, screenshots, and an honest implemented/tested/planned feature matrix.
+
+Suggested final pull-request title:
+
+```text
+[SUBMISSION] TEAM-5 - The Tarnished - Offline Emergency Messaging System
+```
+
+Never force-push, commit credentials, or push directly to the CBIT upstream repository.
+
+## Attribution and licensing
+
+The Android foundation is derived from **Knit**, copyright © 2026 Jeffrey Walter Mixon and contributors. The imported baseline is the signed, annotated `v2.10.0` tag from `https://github.com/getknit/knit`.
+
+Knit and this derivative are distributed under the **GNU General Public License, version 3 or later**. See [COPYING](COPYING). Third-party components and bundled data retain their original licences and notices; see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md), `third_party/`, and the relevant asset README files.
+
+Do not remove Knit attribution, copyright notices, licence files, source headers, or third-party notices.

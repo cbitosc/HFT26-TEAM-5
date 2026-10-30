@@ -1,0 +1,158 @@
+# In-repo F-Droid metadata. Two jobs:
+#   1. Lets `fdroid build` build Knit straight from a checkout, so the buildserver recipe can be tested
+#      locally in F-Droid's own container before anything is submitted.
+#   2. Source of truth for `metadata/app.getknit.knit.yml` in fdroiddata — edit here, copy there.
+# Comments are the ONLY permitted difference: fdroidserver's canonical writer strips them, so everything
+# else must match the merged fdroiddata file field-for-field, in this order, or the two have drifted. They
+# did once — the new-app review (MR 43609) dropped an AntiFeatures block, MaintainerNotes and every
+# `output:` line, and reordered fields, none of which was mirrored back here until 2.2.3. Check with:
+#   diff <(grep -v '^\s*#' .fdroid.yml | grep -v '^$') <(grep -v '^$' ../fdroiddata/metadata/app.getknit.knit.yml)
+# Field reference: https://f-droid.org/docs/Build_Metadata_Reference/
+# Background and the reproducibility contract: .agents/context/distribution.md
+#
+# NOTE: a local `fdroid build` needs JDK 21 already present — settings.gradle.kts omits the foojay resolver,
+# so Gradle won't fetch one (it fails loudly). The F-Droid buildserver already has JDK 21 selected.
+
+# Validated against fdroiddata's config/categories.yml (108 categories — the old ~17-category list is long
+# gone). Deliberately NOT "Internet": Knit works without it, and filing an offline mesh messenger under
+# Internet misdescribes it. `fdroid lint` will reject any name not in that file. Alphabetical, as the
+# canonical writer emits them.
+Categories:
+  - Connectivity
+  - Messaging
+  - Security
+License: GPL-3.0-or-later
+AuthorName: Jeffrey Walter Mixon
+WebSite: https://github.com/getknit/knit
+SourceCode: https://github.com/getknit/knit
+IssueTracker: https://github.com/getknit/knit/issues
+Changelog: https://github.com/getknit/knit/releases
+# One free-form URL is all the schema allows, so GitHub Sponsors (github.com/sponsors/getknit) has no
+# field here; the in-app Support screen and the store description list it.
+Donate: https://ko-fi.com/knit
+# Bare user/group name, not a URL — F-Droid builds the link itself. Field order matters to
+# fdroidserver's canonical writer: Liberapay goes directly after Donate.
+Liberapay: zaventh
+
+AutoName: Knit
+
+RepoType: git
+Repo: https://github.com/getknit/knit.git
+# Reproducible-build flow: F-Droid rebuilds the tagged commit, byte-compares against the APK below, and on
+# a match distributes OUR signed APK rather than re-signing with F-Droid's key. See distribution.md for why
+# that matters here (Knit's offline app-share hands peers this same APK).
+Binaries: https://github.com/getknit/knit/releases/download/v%v/knit-%v.apk
+
+# No AntiFeatures block, and no `output:` or `ndk:` lines. On-device content moderation runs Google's
+# prebuilt TensorFlow Lite (com.google.ai.edge.litert), which the source scanner used to flag via the SUSS
+# signature `litert:(2|1.[34])` — an over-broad false positive on the published 1.x line, which is the plain
+# org.tensorflow.lite interpreter (Apache-2.0, zero Play refs). The real Play coupling (AiPackModelProvider
+# + com.google.android.play:ai-delivery) publishes as litert-api:2.x. Fixed upstream in fdroid-suss!63
+# (signature -> `litert(-api)?:2`, merged 2026-07-26), after which our pinned litert:1.4.2 stopped matching
+# and the NonFreeDep AntiFeature was dropped in review. Keep Google's litert: the from-source substitute
+# de.schliweb:tensorflow-lite-fdroid miscomputes our Detoxify/ALBERT model (saturates every output to 0/1
+# on-device, independent of the XNNPACK delegate), so it would make Knit block every message — full
+# evidence in distribution.md. `output:` is unnecessary because fdroidserver finds the APK itself, and the
+# APK path needs no NDK (native-symbol extraction defaults on only for `bundle*` tasks, i.e. the Play AAB).
+# `commit:` is the full 40-char hash, not the tag — the reviewer's request, since tags are mutable. Oldest
+# build first, as the canonical writer emits them.
+Builds:
+  - versionName: 2.2.2
+    versionCode: 11
+    commit: 388c3120d4de1e19e002e31ae1aabe4970a2fed6
+    subdir: app
+    gradle:
+      - yes
+
+  - versionName: 2.2.3
+    versionCode: 12
+    commit: 40691d508f9dc4b24d03c9e07e3edbe545228929
+    subdir: app
+    gradle:
+      - yes
+
+  - versionName: 2.3.0
+    versionCode: 15
+    commit: 720b87d0c554665fca5d49021d19746c5ab534f8
+    subdir: app
+    gradle:
+      - yes
+
+  - versionName: 2.3.1
+    versionCode: 16
+    commit: 210478b90b0fab8489a523107b56f4e2a118d264
+    subdir: app
+    gradle:
+      - yes
+
+  - versionName: 2.4.0
+    versionCode: 17
+    commit: 211a44b4d0fd7060412f0c38da456739d884dc25
+    subdir: app
+    gradle:
+      - yes
+
+  - versionName: 2.5.0
+    versionCode: 20
+    commit: 93eabf2bd61b534d0f5dbfe3550ef3206a001be8
+    subdir: app
+    gradle:
+      - yes
+
+  - versionName: 2.5.1
+    versionCode: 21
+    commit: da943e1e97432bb839e9b791037f9a931ecd859a
+    subdir: app
+    gradle:
+      - yes
+
+  - versionName: 2.6.0
+    versionCode: 22
+    commit: 38e59053c2945f815c3944333eb2555df0d39b34
+    subdir: app
+    gradle:
+      - yes
+
+  - versionName: 2.7.0
+    versionCode: 24
+    commit: 7e73e891766f58e394c340961217342d16823581
+    subdir: app
+    gradle:
+      - yes
+
+  - versionName: 2.8.0
+    versionCode: 25
+    commit: 45e09f190bd94423ef83330f4b136450a3df225d
+    subdir: app
+    gradle:
+      - yes
+
+  - versionName: 2.9.0
+    versionCode: 27
+    commit: 3286edd803650db1fc0f3cee7d940c134617efe3
+    subdir: app
+    gradle:
+      - yes
+
+  - versionName: 2.10.0
+    versionCode: 33
+    commit: v2.10.0
+    subdir: app
+    gradle:
+      - yes
+
+AllowedAPKSigningKeys: b18a283d11797c2a84a008c1fcb9e1b864e7b4c3b301408f7a4a80624b0e631c
+
+# versionCode/versionName live in gradle.properties and are read via providers.gradleProperty(), which
+# fdroidserver's build-file parser cannot evaluate. UpdateCheckData points it at the file instead — the
+# same pattern metadata/org.osmdroid.yml uses. Verify with `fdroid checkupdates` before submitting.
+# AutoUpdateMode is bare `Version` (NOT `Version v%v`): under UpdateCheckMode: Tags the schema forbids a
+# format string — the tag itself is the version source. `Version v%v` is a UpdateCheckMode: HTTP construct
+# and fails schema validation with Tags.
+# The `Tags` regex is load-bearing: it keeps checkupdates off the `v*-alpha.N` sideload test tags that
+# .github/workflows/release.yml also builds.
+AutoUpdateMode: Version
+UpdateCheckMode: Tags ^v[0-9.]+$
+UpdateCheckData: gradle.properties|knit\.versionCode=(\d+)|.|knit\.versionName=(.*)
+CurrentVersion: 2.10.0
+CurrentVersionCode: 33

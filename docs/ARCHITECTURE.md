@@ -1,0 +1,1006 @@
+# Knit — Architecture & Implementation Notes
+
+Detailed design notes for the Knit mesh messenger. For build/contribution rules see
+[`../AGENTS.md`](../AGENTS.md); for a user-facing overview see [`../README.md`](../README.md).
+
+---
+
+## 1. Overview
+
+Knit is an offline, serverless proximity messenger. Each device is simultaneously a sender, a
+receiver, and a relay. Messages flood across an ad-hoc mesh of nearby phones over **two radios at
+once** — **Wi-Fi Aware (NAN)** and **Bluetooth LE** — hopping device-to-device so they can travel
+beyond direct radio range. There is **no Google Nearby / Google Play services dependency**: the radios
+are driven directly through the framework `android.net.wifi.aware.*` and `android.bluetooth.*` APIs,
+composed behind one `MeshTransport` seam so everything above is radio-agnostic.
+
+The app surfaces a **"Nearby" public broadcast room**, **1:1 direct messages**, and **multi-member
+group chats**, with profiles (name / status / avatar), emoji **reactions**, **@-mentions**, and image
+**attachments** (GIF/JPEG/PNG/WebP). DMs and group messages flood like broadcast traffic — only the
+addressed recipient(s) deliver/ack them — but they are **end-to-end encrypted** (§14), so relays
+carry ciphertext; the public Nearby room stays plaintext by design. A **store-and-forward** custody
+layer makes delivery delay-tolerant (design detail in `.agents/context/store-and-forward.md`),
+and on-device **content moderation** screens abusive text and explicit images
+(`docs/CONTENT_MODERATION.md`). The wire format and identity layer still leave room for true
+(targeted) routing without rework.
+
+Design goals, in priority order: (1) correctness of the mesh (dedup, bounded propagation,
+duplicate-suppressed flooding), (2) a clean transport abstraction so radios can be swapped or run
+side-by-side, (3) a Signal-like Compose UI, and (4) reliable background operation.
+
+## 2. Module / package map
+
+The phone app is the Gradle module `:app`, package root `app.getknit.knit`. The Wear OS app is the opt-in
+`:wear` module (in the build only under `-Pknit.wear=true`, ADR 2026-09.wetm): it shares the package name and
+compiles `wearstatus/` from `:app`'s source, so that package imports nothing but `java.*` and `kotlin.*`.
+
+| Package | Responsibility |
+|---|---|
+| `ui/` | Compose screens + ViewModels: `onboarding/`, `chatlist/` (conversation list), `chat/` (thread + `MentionText`), `contacts/` (new-DM picker), `search/` (app-wide search, ADR 2026-09.wnh6; the list rules it shares with `chatlist/` live in `ui/ConversationTitles.kt`), `profile/`, `group/` (details), `diagnostics/`, `blocked/`, `share/` + `invite/` (offline app share), `donate/`, shared `components/` (`Avatar`, `GroupAvatar`, `ConnectionStatus`), `image/` (Coil `BlobFetcher` / `QrCode`), `theme/`, `util/RelativeTime`, `KnitApp` (Navigation Compose), `Permissions.kt`, `Battery.kt` |
+| `mesh/` | `MeshTransport` (interface) + `CompositeMeshTransport` (runs the two radios below at once), `MeshRouter` (dedup + jittered/suppressed flood), `MeshManager` (orchestrator), `MeshService` (foreground service), `MeshMetrics` (counters), `SeenSet`, `FakeLoopTransport` / `DemoTransport`, `BlobExchange` + `BlobStore` (content-addressed pull), `ForwardSync` + `ForwardStore` (store-and-forward custody), `KeyExchange` (`keyreq`) + `PendingInbound` (park-until-key), `StoreDigest` + `DigestTracker` (cue-plane anti-entropy), `power/`, `protocol/Wire.kt` |
+| `mesh/crypto/` | End-to-end crypto (Google Tink), pure & JVM-testable: `MessageCrypto` (per-message seal/open; the frame signature is applied by `MeshManager`, §14), `PublicKeyBundle`, `MessageContent` (the encrypted payload), `AttachmentCrypto`, `SafetyNumber`, `VerifyPayload`, `Crypto.kt` (`TinkInit`/`AesGcm`) |
+| `mesh/wifiaware/` | `WifiAwareTransport` — the **only** code that touches `android.net.wifi.aware.*` (the NAN plane) |
+| `mesh/bluetooth/` | `BluetoothMeshTransport` (BLE advertise/scan presence + persistent L2CAP links) + its pure policies (`PromotionPolicy`, `ScanDemandPolicy`, `ConnectBackoffPolicy`, `BlePresenceTracker`) — the **only** code that touches `android.bluetooth.*` (the BLE plane) |
+| `mesh/link/` | `LinkFraming` (transport-neutral socket record codec) + `FramedLink` / `LinkSocket` / `LinkHandshake` — shared by the NAN NDP socket and the BLE L2CAP socket |
+| `moderation/` | On-device content moderation: `TextModerator` (`LexicalTextFilter` + `MlTextModerator`) + `ImageModerator` (`NsfwImageModerator`) + `SentencePieceTokenizer` — see `docs/CONTENT_MODERATION.md` |
+| `data/` | Room (`KnitDatabase`, `message/` — incl. `MessageFtsEntity`, the FTS4 index over bodies (ADR 2026-09.wdfz) —, `peer/`, `reaction/`, `blob/`, `group/`, `forward/`), `search/` (`SearchQuery` + `Snippets`, the pure half of search), repositories (`MessageRepository`, `PeerRepository`, `ReactionRepository`, `GroupRepository`, `BlobRepository`, `forward/ForwardRepository`), `AttachmentStore`, `AvatarStore`, `settings/SettingsStore` (DataStore), `crypto/` (`DatabaseKey`, `IdentityKeyStore`, `KeystoreSecret` — AndroidKeyStore-wrapped secrets) |
+| `identity/` | `Identity` (stable node id **+ E2E public-key bundle**), `NodeId` (derivation), `DeviceIdSource` (`AndroidDeviceIdSource`), `DeviceTag`, `Alias` (deterministic display-name fallback) |
+| `notifications/` | `Notifier` (interface) + `MessageNotifier`, `NotificationChannels`, `NotificationHistory`, `NotificationActionReceiver` |
+| `crash/` | Manual crash reporting (ADR 028): `CrashHandler` (uncaught-exception capture, installed before Koin so startup crashes are caught), `CrashStore` (five reports under `noBackupFilesDir`), `CrashRedactor` (structural at capture, contact names on read), `CrashReports` (reader + share staging), `CrashIssueUrl` (prefilled GitHub bug form, for a stored report and for About's Report a problem). No upload path — the user hands the report over |
+| `location/` | "Send location" (ADR 2026-09.tss4): `GeoUri` (the `geo:` token a message body carries — format, strict parse, strip, describe; pure), `LocationFix` + `LocationFixPolicy` (which reading to keep, the refine window; pure), `LocationSource` (seam), `AndroidLocationSource` — the **only** code that touches `android.location.*`, listening only while the composer's staged tile collects it |
+| `wearstatus/`, `mesh/wear/`, `mesh/bluetooth/wear/` | The mesh status a paired Wear OS watch reads (ADR 2026-09.wetm): `WearStatusCodec` (the 20-byte snapshot: state, counts, and a radio mask per drawn peer, never an id) and `WearStatusFrame`, both compiled into `:wear` too; `WearStatusSource` (computes it from the flows the app's own screens read); `WearStatusServer` (a secure RFCOMM socket first, a read-only encrypted GATT characteristic as the fallback, bonded devices only). Dark in release behind `BuildConfig.WEAR_STATUS` |
+| `di/` | Koin modules: `appModule`, `meshModule`, `moderationModule`, `uiModule` |
+
+### Data flow
+
+```
+ Compose UI ──(send chat / react / attach)──▶ MeshManager ──▶ MeshRouter.originate ──▶ MeshTransport.send ──▶ radios
+     ▲                       │                                                                                  │
+     │                       ▼ onDeliver (persist, ack, react, cache profile, pull blob)                       │
+ StateFlow ◀── Repositories ◀┘                                                                                  │
+     ▲                                                                                                          │
+     └────────── MeshRouter ◀── (dedup + jittered relay) ◀── MeshTransport.inbound ◀──────────────────────────-┘
+```
+
+`MeshManager` is a Koin singleton shared by the foreground service and the UI, so both observe and
+drive the same mesh instance. Avatars and attachments travel **out of band as file payloads**, not
+inside frames (see §3.1, §7).
+
+## 3. Mesh layer
+
+### 3.1 Transport abstraction (`mesh/MeshTransport.kt`)
+
+```kotlin
+interface MeshTransport {
+    val neighbors: StateFlow<Set<Peer>>       // live data-path links right now (routing target)
+    val reachable: StateFlow<Set<Peer>>       // smoothed "who's nearby" for the UI (coordination plane)
+    val health: StateFlow<TransportHealth>    // Healthy / Degraded (radio seized) / Unavailable (off)
+    val inbound: Flow<InboundFrame>           // frames received (pre dedup/relay)
+    val incomingFiles: Flow<ReceivedFile>     // completed file transfers (avatars + attachments)
+    val incomingDigests: Flow<ReceivedDigest> // store-and-forward id-lists (data-path anti-entropy)
+    fun start(); fun stop(); fun heal()       // heal() = rescan/reconnect now
+    suspend fun send(wire: WireEnvelope, to: Peer? = null)   // null = broadcast to all neighbors
+    fun fastFanout(wire: WireEnvelope)                       // coordination-plane blast, no data path
+    fun fastSend(wire: WireEnvelope, to: Peer)               // coordination-plane point-to-point
+    suspend fun sendFile(file: File, to: Peer, meta: FileMeta): Boolean  // false = no live route (caller's re-offer retries)
+    suspend fun sendDigest(to: Peer, ids: List<String>)      // advertise held custody ids on link-up
+    fun expectBulkTransfer(nodeId: String): Boolean          // arm an on-demand data path for an imminent big blob
+    // + kind / hasFastPlane / highThroughput / radioContended and the cross-plane hints suppressDataPath() / onForeignReachable()
+}
+```
+
+Supporting types are declared in the same file: `Peer(nodeId, protoVersion, capabilities)` carries the
+advertised (unauthenticated) routing hint; `InboundFrame` carries the verbatim `WireEnvelope` plus its
+already-decoded `RelayEnvelope` (so the router and delivery paths don't each re-decode); `FileMeta` /
+`ReceivedFile` route a completed transfer by `FileKind` — an **AVATAR** (`key` = sender node id) updates
+that peer's avatar, an **ATTACHMENT** (`key` = content hash) feeds the blob-exchange pull (§7); and
+`ReceivedDigest` carries a neighbor's held custody id-list. `send` takes a `WireEnvelope` (the frozen
+on-radio unit, §4); the two `fast*` methods are the best-effort **coordination-plane** path that reaches
+neighbors with no data path (§3.2) and no-op on a transport without one.
+
+Implementations:
+
+- **`WifiAwareTransport`** — the Wi-Fi Aware (NAN) plane: a coordination plane (Aware messages) plus one
+  ephemeral NDP data path; see §3.2.
+- **`BluetoothMeshTransport`** — the Bluetooth LE plane: BLE advertise/scan presence plus several
+  persistent L2CAP links; see §3.2.1.
+- **`CompositeMeshTransport`** — runs the two radio planes **simultaneously** behind this one interface
+  (merging `neighbors`/`reachable`/`health`/`inbound` by nodeId, preferring Bluetooth for sends), so
+  `MeshManager`/`MeshRouter` stay radio-agnostic. DI (`di/MeshModule.kt`) gates each child on hardware
+  support, so a device with only one radio runs that plane alone. One deliberate exception to the
+  Bluetooth-first rule: **ATTACHMENTs prefer the `highThroughput` plane** (a NAN NDP moves megabytes in
+  under a second vs. L2CAP's seconds-to-minutes) — any size rides a live NAN link if one exists, and one
+  ≥ 128 KiB (`BULK_MIN_BYTES`, compared against the **transcoded wire blob**, not the picked file — a
+  multi-MB GIF lands at ~150-250 KB as a 480px animated WebP) additionally arms an on-demand bring-up
+  via `expectBulkTransfer` and grace-waits ≤ 10 s (off the inbound dispatch coroutine) before falling
+  back to Bluetooth. Every decision logs a `file route: …` line under the `CompositeMeshTransport` tag.
+  See the AGENTS.md gotcha for why a plain routing preference is not enough (steady-state digest parity +
+  BLE suppression) and why the bulk mark must stay out of the NAN recovery machinery.
+- **`FakeLoopTransport`** / **`DemoTransport`** — in-process doubles for JVM tests and the demo build;
+  `FakeLoopTransport.connect()` wires instances into an arbitrary topology so a multi-hop mesh (relay,
+  blob pulls, custody) runs on the JVM with no radios.
+
+### 3.2 Wi-Fi Aware specifics (`mesh/wifiaware/WifiAwareTransport.kt`)
+
+- **Service `SERVICE_NAME = "_knitmesh1._tcp"`.** Each node `attach()`es once, then both
+  **publishes and subscribes** the service. The device's **node id + version + caps**
+  (`Protocol.advertise`) ride in the publish `serviceSpecificInfo`, so a subscriber learns a peer's
+  identity on discovery with zero round-trips and rejects discovering itself. `SERVICE_NAME` is the
+  transport marker: any breaking change to the cue or socket format (or the node-id derivation) bumps the
+  `knitmesh<N>` digit — a **hard cut** (old and new builds simply don't discover each other). The
+  coordination-plane compact/fragment/transcoded message tags (`0x03`/`0x04`/`0x05`,
+  `mesh/link/FastFrameCodec`, `mesh/link/FrameTranscoder`) are the deliberate counter-example: additive and
+  capability-gated (`CAP_FAST_COMPACT`, `CAP_FRAME_TRANSCODE`), so they ride *without* a marker bump. *(Pre-1.0
+  alpha churned through the markers `.v2`…`.v8`, recorded in `docs/DIGEST_PULL_REATTACH.md`; that history
+  is collapsed into the v1 launch baseline.)*
+- **One data interface → two planes.** Real chipsets (Pixel 7/8/9) report `maxNdiInterfaces == 1`, and
+  each aware *network* needs its own NDI — so a node holds at most one **outbound** (initiator) NDP, and
+  cannot mix roles concurrently. (The **accept-any responder** is one network that can officially serve
+  **many concurrent inbound NDPs** on the same NDI — on-device-verified 2026-07-04; the shipped transport
+  still serializes serves by choice, and the concurrent-serve redesign is proposed in
+  `docs/NAN_CONCURRENCY_REAUDIT.md`.) So the transport does **not** try to link everyone — it runs two
+  planes (the deep treatment, including the NDI-wedge root cause, is in `AGENTS.md` and
+  `docs/NAN_CONCURRENCY_REAUDIT.md`):
+  - **Coordination plane** — Wi-Fi Aware *messages* (`DiscoverySession.sendMessage`, ~255 B, best-effort)
+    ride discovery follow-up frames and need **no data path**, so they reach every neighbor at once and
+    keep working while the one NDP is busy. Each node cues `nodeId|version`, a `StoreDigest` content
+    digest of its custody set (XOR of held frame ids — incremental and restart-stable); `DigestTracker`
+    flags a peer *sync-wanted* when either side's digest changed since the last sync. Small floodable
+    frames also ride this plane as a best-effort **fast fan-out** (`fastFanout`/`fastSend`), deduped by the
+    receiver's `SeenSet`, so they propagate with zero NDP. This is the `hasFastPlane` path
+    `CompositeMeshTransport` routes the fast methods to.
+  - **Data plane** — one ephemeral NDP (a TCP socket over link-local IPv6), brought up **only** for a
+    sync-wanted peer (the larger nodeId initiates; the smaller serves an **accept-any responder** anchored
+    to its publish session, because per-peer responders don't compose — one already serving a peer can't
+    stand up a second). On link-up each side advertises the custody ids it holds (a
+    `LinkFraming.Type.DIGEST` record) and pushes back only the frames the peer lacks, then tears the NDP
+    down on quiescence — freeing the interface for the next pair. An idle mesh does **zero** data-path work.
+- **Accept-any responder handshake.** Since the responder accepts a data path from any initiator, the
+  **initiator sends its advert as the first `LinkFraming.Type.HELLO` record** (`mesh/link/LinkHandshake`,
+  shared with BLE) so the responder learns who connected. A fixed app-wide 32-byte PMK (`setPmk` — skips
+  the per-NDP passphrase→PMK derivation; same public-constant security) encrypts the link; real
+  authentication is the per-frame signature + E2E layer above. Instant Communication Mode (API 33, when
+  supported) speeds discovery + data-path bring-up for the brief-encounter (festival) case.
+- **Neighbor vs. reachable.** `neighbors` is the ≤1 live NDP link — the routing target for `send` /
+  `sendFile` and the "new neighbor" (store-and-forward / key-exchange) hooks — and it **flaps** as
+  ephemeral syncs come and go, so the **UI reads the smoothed `reachable` set** (coordination-plane
+  sightings, lingered `REACHABLE_LINGER_MS`) instead.
+- **Lifecycle hardening.** A time-boxed client `requestNetwork` (`HANDSHAKE_TIMEOUT_MS`) + per-peer
+  backoff, a single-flight / generation-guarded `reattach()`, an idempotent responder, and a
+  process-restart `checkWedge` watchdog keep the single NDI off the "no interfaces available" wedge (the
+  full lifecycle is in `AGENTS.md` and `docs/DIGEST_PULL_REATTACH.md`; the framework root cause of both
+  wedges — a 0-NDP TERMINATING request the framework never reaps — plus the ghost-proof fix is in
+  `docs/NAN_CONCURRENCY_REAUDIT.md` §2).
+  `ACTION_WIFI_AWARE_STATE_CHANGED` drives `health` (→ `Degraded` when Wi-Fi is off or another Wi-Fi mode
+  seizes the radio) and re-attach on recovery. A device without `FEATURE_WIFI_AWARE` runs the Bluetooth
+  plane instead (§3.2.1); only a device with **neither** radio is "unsupported".
+- **Socket framing (`mesh/link/LinkFraming.kt`).** Transport-neutral — the same codec runs over the NAN
+  NDP socket and the BLE L2CAP socket. A byte stream is chunked into length-prefixed records
+  `[type:1][len:4 big-endian][payload]`: `FRAME` (one CBOR `WireEnvelope` → `inbound`); a file as
+  `FILE_HEADER` (JSON `FileHeaderWire`: kind + key + mime + the stream's `size`, a label the receiver's
+  progress ring reads, ADR 2026-10.y9qh, and — when the stream is the rest of a cut transfer — the `offset` it
+  starts at, ADR 2026-10.wtyc) → `FILE_CHUNK`s → `FILE_END` (→
+  `incomingFiles`); `DIGEST` (a custody id-list, at most one waiting per link — a newer one takes the
+  waiting one's place, ADR 2026-09.tjfb); plus `HELLO`/`KEEPALIVE`. The writer serializes files
+  and interleaves live frames *between* chunks so an 8 MiB blob never stalls traffic; a per-file receive
+  ceiling matches the 8 MiB send cap.
+- **Byte metrics:** `send` records `metrics.onBytesSent(bytes.size * targets.size)` — one frame
+  broadcast to N neighbors counts as `frameSize × N`, so the CBOR win is measurable in the field.
+  (`sendFile` is not counted.)
+
+### 3.2.1 Bluetooth LE specifics (`mesh/bluetooth/BluetoothMeshTransport.kt`)
+
+The BLE plane runs **simultaneously** with Wi-Fi Aware behind `CompositeMeshTransport`, and is
+**preferred** for sends (persistent, cheap links vs. NAN's one ephemeral NDP). Unlike NAN it can hold
+**many** links at once, so it needs no single-slot cue dance; it is also the mesh plane for phones with
+no Wi-Fi Aware hardware.
+
+- **Presence** — connectable BLE advertising of a fixed 24-byte service-data payload
+  (`BleAdvertPayload`: capabilities, the nodeId's raw 16 bytes, digest cue, L2CAP PSM, a BLE-local flags
+  byte) under a versioned
+  16-bit service UUID (`BleConstants.SERVICE_UUID`, bumped on every breaking wire change to hard-partition
+  at discovery; the layout/version is implied by the UUID, so there is no format-version byte). The advert
+  carries **only** the service-data AD — no separate service-UUID-list AD — so the 16 raw id bytes still
+  fit the 31-byte legacy budget; the scan filters on the presence of service data for the UUID. That
+  duty-cycled scan feeds `BlePresenceTracker` (per-peer smoothed RSSI + continuous-presence dwell +
+  last-seen linger), which drives the `reachable` set. Advertising is always-on so BLE-only devices still
+  discover us.
+- **Data links** — persistent **L2CAP CoC** sockets; `BluetoothSocketLink` adapts the socket to the same
+  `LinkSocket` / `FramedLink` / `LinkFraming` machinery NAN uses, so framing, files, and the `DIGEST`
+  id-diff are shared. `PromotionPolicy` (pure) decides which nearby peers to hold a link to (dwell + RSSI,
+  bounded by a connection budget, hysteretic weakest-first eviction); `ConnectBackoffPolicy` (pure) backs
+  off repeated per-peer connect failures.
+- **Adaptive scan** — `ScanDemandPolicy` (pure) duty-cycles the scan by *demand*: a settled clique floors
+  the scan (~2 min) while an isolated node scans aggressively. NAN acts as an early-warning — via
+  `CompositeMeshTransport.onForeignReachable`, BLE boosts its scan to chase a peer another plane already
+  sees onto the cheaper persistent link. `BluetoothAudioMonitor` flags A2DP-audio contention
+  (diagnostic-only today; the connect-time gate is deferred — §18).
+- **Side channel** (`BleSideChannel`, ADR 2026-09.sjaa; `BuildConfig.BLE_SIDE_PLANE`, on in release since
+  2026-10-08) — the BLE analogue of NAN's fast fan-out: small floodable frames on non-connectable
+  extended-advertising pages (one `FastFrameCodec` unit per page, ≤ 236 B, under a second service UUID),
+  connectionless so they bypass a blob head-of-line-blocking the L2CAP stream and reach a sighted-but-unlinked
+  peer. `SideCarousel` schedules two advertising sets (12 s dwell, fewer-part frames first, typing coalesced);
+  `SideScanPolicy` runs the second, filtered scan only while a peer advertising the flags byte is around.
+  The transport declares `hasFastPlane`: `fastFanout` keeps the link copy and adds the page; `fastSend` never
+  uses a page.
+- **iPhones** (ADR 2026-09.kwq2; `BuildConfig.BLE_GATT_PEERS`) — a foreground iPhone advertises only the `0xFE30`
+  UUID, so the presence scan also matches it and reads the peer's 24-byte payload over GATT (`GattPayloads`,
+  `BleGattPayloadReader`) before the usual dial rule applies.
+- **Coded PHY** (ADR 2026-10.yvn6; `BuildConfig.BLE_CODED_PHY`, always AUTO in release) — a second presence set on
+  Coded, an all-PHY scan, per-link 1M ↔ Coded S=8 steps driven by the larger id, and a fast advert plus a scan hunt
+  to recover a link lost at range.
+- **File feed** — a link feeding a file on a lit screen asks for a 15 ms interval and earns a larger budget (ADR
+  2026-10.2da4; `BuildConfig.BLE_LINK_BOOST`), and a file to a peer that reports its progress is clocked by those
+  reports instead of a fixed pace (ADR 2026-10.5buf; `BuildConfig.BLE_FEED_WINDOW`).
+
+All five Bluetooth flags and `BLOB_QUERY` default to on in release since 2026-10-08.
+[`BLUETOOTH_PLANE.md`](BLUETOOTH_PLANE.md) explains how they work together, with diagrams.
+
+### 3.3 Routing, dedup & duplicate-suppressed flooding (`mesh/MeshRouter.kt`, `mesh/SeenSet.kt`)
+
+`MeshRouter` is transport-agnostic and unit-tested (`FakeLoopTransport` / a fake). It does **not**
+blind-flood. On each inbound frame `handleInbound`:
+
+1. **`SeenSet.add(id)`** — if this is the **first sighting** of the frame id, deliver locally via the
+   `onDeliver` callback (persist / ack / react / cache), then **schedule** a relay.
+2. If it's a **duplicate** (already seen), it is never re-delivered or re-relayed — but it *is*
+   evidence the frame is already propagating, so it's counted toward **overhear suppression**
+   (`metrics.onDeduped()` + `countOverheard`).
+
+**Jittered relay with overhear suppression** replaces immediate rebroadcast (which storms a dense
+cluster with O(neighbors²) redundant sends):
+
+- `scheduleRelay` keeps the synchronous early-outs — a frame flagged **not to relay** (`relay = false`,
+  e.g. a `blobreq`) and a **TTL-exhausted** frame (`hops >= ttl`) are dropped immediately. Otherwise it
+  records a `PendingRelay { relayed = wire.relayed(), heardFrom, job }`
+  in a `Mutex`-guarded `pending` map keyed by frame id, and launches a coroutine that waits a small
+  random **`jitter()`** delay, then re-checks under the lock and, if still pending, sends the
+  hop-incremented frame to every neighbor **not** in `heardFrom` (split-horizon across every source
+  it heard the frame from, not just the first).
+- `countOverheard` adds the duplicate's source to `heardFrom`; once the frame has been heard from
+  **`suppressThreshold`** *distinct* neighbors (default 2 — i.e. one *other* node was heard relaying it),
+  the pending relay is **removed and its job cancelled** (cancel happens outside the lock), and
+  `metrics.onSuppressed()` fires. This is classic counter-based gossip: redundant rebroadcasts are
+  cut in dense meshes while sparse meshes (where no duplicate is overheard) still relay reliably. A
+  second copy from the **same** neighbor is deliberately not an overhear: a link-up pushes a peer's
+  profile live and the custody digest exchange that follows re-serves the same frame from the same
+  peer moments later, and counting that copy used to cancel the relay that carries a newcomer's
+  profile past the first hop (a node two hops away then waited for the 60 s custody re-offer).
+- Tunables are constructor params with defaults: `jitterWindowMs = 150`
+  (`jitter = { Random.nextLong(jitterWindowMs) }`) and `suppressThreshold = 2`. The `jitter` lambda
+  is an injection seam so tests use a fixed delay and virtual time. `metrics` is also injected
+  (defaulted) so the same params keep existing call sites source-compatible.
+- **Self-originated frames bypass suppression.** `originate()` / `sendOwn()` mark the frame seen and
+  send immediately; the echo that returns from the mesh hits the duplicate branch and is a harmless
+  no-op.
+- `stop()` cancels any relays still waiting out their jitter window and clears the map; it's called
+  from `MeshManager.stop()` so coroutines don't linger on the app-lifetime scope. The map is
+  otherwise self-draining (an entry is removed on fire or suppress) and transitively bounded by the
+  `SeenSet`.
+
+`SeenSet` is a **bounded, time-windowed LRU** (`maxSize` eviction + `ttlMillis` expiry, injectable
+clock). Combined with the per-frame TTL/hop-count, propagation is guaranteed to terminate.
+
+### 3.4 Transmission metrics (`mesh/MeshMetrics.kt`)
+
+A pure-JVM, thread-safe counter set (`AtomicLong`s; no Android deps, so it lives in `mesh/` and is
+asserted from the same unit tests as `MeshRouter`). It is a Koin singleton injected into both
+`WifiAwareTransport` and (via `MeshManager`) `MeshRouter`. Counters: `framesOriginated`,
+`framesDelivered`, `framesRelayed`, `framesSuppressed`, `framesDeduped`, `bytesSent` — plus a
+`DropReason` breakdown and the key-exchange / pending-inbound recovery counters
+(`keyRequestsSent`/`keysServed`/`keysRecovered`, `framesHeld`/`framesReplayed`) surfaced in the
+Diagnostics screen; `snapshot()` returns an immutable `Snapshot`, and `frames()`, `lora()` and the rest read one of
+its groups alone. The groups (`frames`, `keys`, `seals`, `receipts`, `groups`, `files`, `bluetooth`, `nan`, `fast`,
+`spool`, `lora`, `meshtastic`) exist because a flat data class of 129 counters reached the JVM's 255-slot method limit,
+which fails at class load rather than at compile time; `MeshMetricsTest` holds each group to half of it. A counter keeps
+its full name inside its group, the name the debug bridge's STATE uses as its key.
+`MeshManager.logMetricsPeriodically()` logs a snapshot every `60_000 ms`. The `framesSuppressed : framesRelayed` ratio quantifies how much rebroadcasting the
+overhear suppression eliminated; `bytesSent` tracks the CBOR byte win.
+
+### 3.5 Orchestration (`mesh/MeshManager.kt`)
+
+Owns the transport + router + `BlobExchange` + `ForwardSync` + `KeyExchange` + `PendingInbound`, and
+implements `onDeliver`, the router's per-frame callback. It first runs `verifyInbound` (§14: a byte-exact
+Ed25519 check of `WireEnvelope.sig`, drop-but-still-relay on failure; a `NO_SENDER_KEY` drop parks the
+frame in `PendingInbound` and asks `KeyExchange` for the sender's profile), then dispatches on the
+cleartext `RelayEnvelope.type` **string** (a discriminator, not a sealed subtype — §4) and its decoded
+per-type content:
+
+- **`chat`** → blocked-sender drop (local surfacing only — the frame is still carried and relayed, ADR 010).
+  A **group** message (`group != null`) reconciles the self-describing roster and delivers if we're a
+  member; a **DM** addressed to someone else (`!Conversations.isForMe(...)`)
+  is only relayed + carried (don't persist/notify/ack). For a DM/group meant for us the `ChatContent.enc`
+  envelope is **decrypted** (`decryptAndDeliver`; dropped on any failure, and never throwing — §14) before
+  persisting to Room (unacked), screening the body/image on-device (`docs/CONTENT_MODERATION.md`), pulling
+  any referenced attachment blob, notifying (mention vs. normal — §11), and acking (§5). The broadcast
+  room is plaintext.
+- **`groupupdate`** → reconcile the stored group from the carried roster (e.g. a rename), no message
+  persisted. **`groupleave`** → apply the member's leave tombstone.
+- **`profile`** → upsert the peer's name/status/avatar (last-writer-wins on `sentAt`) and **pin its E2E
+  key** trust-on-first-use into `PeerEntity.pubKey` (a changed key resets `verified` — §14), merging so an
+  unfetched avatar isn't clobbered; then **replay** any frames `PendingInbound` parked for that sender.
+- **`receipt`** → `markReceived(ackId)` (gated to the DM's `recipientId`) drives the ✓ tick and purges the
+  carried DM copy mesh-wide (`ForwardSync.onAck`). This is the **legacy cleartext form** — between
+  ratchet-capable builds a receipt is a sealed `CTL_RECEIPT` ctl chat frame instead, which flips the tick
+  without purging anywhere (ADR 018, §14): delivered DMs then age out of custody on the TTL uniformly.
+  A DM's receipt floods and is custodied either way; a **broadcast/group** receipt starts as a unicast,
+  non-flooded tick the deliverer owes the author (`AckSync`, sealed once + resent verbatim for capable
+  authors), and a **group** tick toward an absent capable author escalates: the acks batch and one sealed
+  ctl frame (`MessageContent.acks`) is originated `relay = true` — flooded, custodied, spool-eligible —
+  so the ✓✓ converges like the message it acks (ADR 033). One surviving receipt flips it ("≥1 received");
+  `onAck` no-ops for it (no single recipient), so retries never evict custody.
+- **`reaction`** → `ReactionRepository.apply(...)` (last-writer-wins, §6). Also the legacy cleartext form:
+  DM/group-target reactions between capable builds ride sealed (`CTL_REACTION`, DM or group form) into
+  the same table under the same LWW clock, so mixed-form races converge (ADR 018).
+- **`blobreq`** → `BlobExchange.onRequest(...)` (serve the blob or recurse the pull, §7). **`keyreq`** →
+  `KeyExchange` re-serves the requested peer's profile verbatim or records the asker and recurses (the
+  inbound key-recovery path — see `.agents/context/store-and-forward.md`).
+
+Every custodial frame is also persisted for store-and-forward (`ForwardSync`, `FrameType.isCustodial`).
+Also: `sendChat` (broadcast / DM / group, with optional attachment + mentions — **encrypts** for DM/group,
+§14; screens abusive text/images before sending), `sendReaction`, `sendGroupUpdate` / `sendGroupLeave`,
+profile broadcasting with **content-hash-gated avatar dedup** (§8), `heal()`/`restart()`, the periodic
+metrics log, and `neighborCount`/`reachable` `StateFlow`s for the UI.
+
+## 4. Wire protocol (`mesh/protocol/Wire.kt`)
+
+The on-radio format is **layered binary CBOR**, structured so it can evolve *additively* — the
+authoritative rules live in **`docs/WIRE_COMPAT.md`** (read it before touching any wire type) and the
+"Wire format" bullet in `AGENTS.md`. Three layers, one CBOR config (`encodeDefaults = false`,
+`ignoreUnknownKeys = true`):
+
+```kotlin
+// L1 — the frozen on-radio unit; the ONLY thing a relay re-encodes (ttl/hops only).
+class WireEnvelope(ttl = DEFAULT_TTL /*8*/, hops = 0, relay = true,
+                   @ByteString sig, @ByteString signed)   // relayed() rewrites ttl/hops; sig+signed pass byte-for-byte
+
+// L2 — what `signed` decodes to: cleartext routing fields + an opaque per-type payload.
+class RelayEnvelope(type: String, id, senderId, sentAt, recipientId?, group?, @ByteString payload)
+
+// L3 — per-type content inside `payload` (only endpoints parse it):
+data class ChatContent(body="", mentions, attachmentHash?, attachmentMime?, enc?)     // enc = EncEnvelope for a DM/group
+                                                                                     // (a sealed frame sets attachmentHash only — ADR 035)
+data class ProfileContent(name, status, avatarHash?, pubKey?, deviceTag?, protoVersion?, capabilities?, prekey?, version?,
+                          openToChat = false)                                    // the flag is elided while off
+data class ReactionContent(messageId, emoji?)  ·  ReceiptContent(ackId)  ·  GroupLeaveContent(groupId)
+data class BlobReqContent(hash, offset?, fastOnly?, pull?, until?)  ·  KeyReqContent(nodeIds)   // a groupupdate carries its GroupInfo in `group`
+
+data class Mention(nodeId, name)                                    // canonical id + rendered @name span
+data class GroupInfo(id, name?, members, createdBy, photoHash?, photoUpdatedAt?)   // self-describing roster on every group frame
+class EncEnvelope(v=1, @ByteString nonce, @ByteString ct, keys, r?, g?)  // E2E envelope; keys = v1 wraps; v2: r = DM ratchet header, g = group sender-key header
+class WrappedKey(to, @ByteString wk)                               // content key wrapped to one recipient
+```
+
+- **One signature, opaque blobs.** `sig`/`signed`/`payload` are `@ByteString ByteArray` — never nested
+  `@Serializable` objects — so a relay forwards `signed`+`sig` verbatim (`WireEnvelope.relayed()` touches
+  only `ttl`/`hops`) and the originator's Ed25519 signature over `signed` survives every hop. This is *not*
+  kotlinx sealed polymorphism: `type` is a plain **string**, so an old build decodes (and still relays) a
+  `type` it doesn't understand instead of throwing. `WireEnvelope.sig` is the *single* signature
+  authenticating every flooded type (§14).
+- **`id`** is the globally-unique dedup key; **`ttl`** (`DEFAULT_TTL = 8`) + **`hops`** bound propagation
+  and live in the unsigned `WireEnvelope` (the only in-flight-mutable fields — the signature covers
+  neither). The router relays a frame it can't verify verbatim rather than black-holing it; `blobreq`
+  (with `relay = false`) is the point-to-point exception, handled hop-by-hop by `BlobExchange` (§7).
+- **A `reaction`** carries a fresh random `id` per emit (not derived from message/sender/emoji) so the
+  dedup `SeenSet` doesn't swallow a later retract/replace; convergence is `sentAt`'s job (last-writer-wins),
+  not the id's. `emoji = null` is a retraction.
+- **Addressing & encryption:** `RelayEnvelope.recipientId` (null = broadcast/group; set = the addressed DM
+  recipient) and `RelayEnvelope.group` (non-null = a group message; carries the self-describing `GroupInfo`
+  roster) stay **cleartext** so relays and store-and-forward carriers can route/reconcile. For DMs and
+  groups the body, mentions, and attachment refs are encrypted into `ChatContent.enc` (the `EncEnvelope`);
+  the cleartext `body`/`mentions` are blank, while `attachmentHash` carries the *ciphertext*
+  hash so a blind carrier can still custody the image (§7, §14). `attachmentMime` stays null on a sealed
+  frame (ADR 035) — custody addresses bytes by hash, so the type rides only inside the seal and a carrier
+  never learns a photo from a voice note. A file's **name and size** ride inside the seal for the same
+  reason and never got a cleartext counterpart: a filename is a louder signal than the type ADR 035 removed
+  (ADR 2026-09.qq2r). `ProfileContent.pubKey` carries the
+  sender's public-key bundle. See §14.
+- Avatars and attachments travel as **file payloads** (`incomingFiles`), not inside frames (too large for
+  the flood); `ProfileContent.avatarHash` / `ChatContent.attachmentHash` let a peer detect changes and pull
+  by content hash.
+
+### `WireCodec` — CBOR
+
+`WireCodec` round-trips each layer to/from bytes — `encodeWire`/`decodeWire` for the outer
+`WireEnvelope`, `encodeEnvelope`/`decodeEnvelope` for the signed `RelayEnvelope`, and
+`encodePayload`/`decodePayload<T>` for a per-type content — and every `decode*` returns null on malformed
+input. It uses **CBOR, not JSON**, configured `encodeDefaults = false` and `ignoreUnknownKeys = true`:
+
+```kotlin
+@OptIn(ExperimentalSerializationApi::class)
+object WireCodec {
+    val cbor = Cbor { ignoreUnknownKeys = true; encodeDefaults = false }
+    fun encodeWire(wire: WireEnvelope): ByteArray = cbor.encodeToByteArray(wire)
+    fun decodeWire(bytes: ByteArray): WireEnvelope? = runCatching { cbor.decodeFromByteArray<WireEnvelope>(bytes) }.getOrNull()
+    // …encodeEnvelope/decodeEnvelope (RelayEnvelope) · encodePayload/decodePayload<T> (per-type content)
+}
+```
+
+CBOR encodes numbers as binary and length-prefixes strings (no quotes/braces/field-name text per
+value), and `encodeDefaults = false` omits defaulted `ttl`/`hops`, empty collections, and null reserved
+fields — stripping the framing bytes a JSON frame used to carry. Because each layer is an opaque
+`@ByteString` blob rather than one polymorphic tree, a relay re-encodes **only** the `WireEnvelope`
+wrapper (`ttl`/`hops`) and passes `signed`+`sig` byte-for-byte, so additive fields and new `type`s no
+longer force a coordinated break.
+
+> **What is (and isn't) a wire break.** Adding a nullable/defaulted field or a new `type` string is
+> **additive** and safe across builds. A **break** — renaming/re-typing/repurposing a field or `type`,
+> changing the `WireCodec` config or the signed input, or the `SERVICE_NAME`/`SERVICE_UUID` markers — is a
+> coordinated one-time event (bump the transport marker + DB version). See `docs/WIRE_COMPAT.md`.
+
+## 5. Conversations & direct messages (`data/message/Conversations.kt`)
+
+A pure-Kotlin object (JVM-testable) that defines the conversation namespace:
+
+- **`const val NEARBY = "nearby"`** — the single public broadcast room (shown as "Nearby").
+- **`idFor(senderId, recipientId?, selfId)`** — `recipientId == null → NEARBY`; otherwise the DM is
+  keyed by the *other* party (a DM I sent is keyed by its recipient, a DM I received by its sender).
+- **`isForMe(recipientId?, selfId)`** — `recipientId == null` (broadcast, everyone) or
+  `recipientId == selfId` (a DM addressed to me). A node merely relaying someone else's DM gets
+  `false` and must not persist/notify/ack it.
+
+DMs still **flood** (no routing table yet): `MeshManager.sendChat` sets `recipientId` and originates
+the frame to the whole mesh exactly like broadcast; only the addressed recipient delivers and acks,
+and a DM's receipt floods back (the recipient is the only one who acks). The chat list shows the
+always-present Nearby room plus one row per DM thread; the contacts picker starts a new DM.
+
+## 6. Reactions (`data/reaction/`, `data/ReactionRepository.kt`)
+
+- **Schema** — table `reactions`, composite **PK `(messageId, reactorNodeId)`** (at most one
+  reaction per person per message), columns `emoji: String?` and `updatedAt: Long`, indexed on
+  `messageId`, **no FK** to `messages` (a reaction may arrive before its target message and must
+  persist as an orphan that the UI later joins).
+- **Last-writer-wins** — `ReactionRepository.apply(...)` upserts only if the incoming `updatedAt` is
+  strictly newer than the stored clock for that (message, reactor); equal/older frames (duplicates,
+  out-of-order add/retract/replace) are dropped. `emoji = null` is a **retraction tombstone** row —
+  a null at a newer clock must still beat a stale "add", which a DELETE couldn't.
+- **UI** — `observeReactions()` exposes a flat flow of non-tombstone rows; `ChatViewModel` groups by
+  `messageId` then `emoji` into a `ReactionSummary(emoji, count, mine)` per message. `sendReaction`
+  toggles (tapping your current emoji retracts; a different one replaces) and floods a
+  `reaction` frame.
+
+## 7. Attachments & content-addressed blob exchange (`data/AttachmentStore.kt`, `mesh/BlobExchange.kt`)
+
+Attachments — images, voice notes and arbitrary files — are **content-addressed** and pulled on demand, so
+the (large) bytes don't ride the flood. Everything below the ingest seam is content-type-blind: it moves
+opaque SHA-256-addressed bytes with a MIME string beside them, which is why voice notes (ADR 034) and files
+(ADR 2026-09.qq2r) each shipped as two ends and no middle.
+
+- **`AttachmentStore`** — `ingest(uri)` returns `IngestResult.Success(Ingested(hash, mime), flagged)`
+  or `IngestResult.Failed(reason)`: GIFs are transcoded to animated WebP (`data/webp/WebpTranscode`, animation
+  preserved); other images are EXIF-oriented, downscaled to `MAX_DIMENSION = 1280`, and re-encoded
+  JPEG q85 — unless one is already bounded, upright and no sharper than that, when it goes out as its own bytes
+  with the metadata stripped losslessly (`data/ImageStrip`, ADR 2026-10.unqn); inputs are rejected if empty or `> MAX_BYTES` (8 MiB). `ingestVoice(bytes)` and `ingestFile(uri)`
+  share the tail and skip the head — nothing to decode or re-compress, and no classifier that could read
+  them — with one deliberate exception: `ingestFile` sniffs the bytes' own signature and hands anything that
+  is really an image back to `ingest`, so a mislabelled JPEG cannot use the MIME-keyed screening skip as a
+  way past the classifier (`docs/CONTENT_MODERATION.md` §7). A file also carries its **name** and plaintext
+  **size** on the `Ingested`, the two facts a file bubble cannot read off the bytes; both are written to the
+  row and sealed into `MessageContent` by `MeshManager.sendChat`, never onto the cleartext frame. The
+  **SHA-256** of the stored bytes
+  is the hash, and the bytes live in the encrypted `blobs` table, not as files — only in-flight
+  transfers touch the disk, through the `blobtx` cache dir. A received file leaves only through the storage
+  picker (`ChatViewModel.saveAttachmentTo` streams the decrypted bytes into the destination the user names);
+  there is no "open with", because that would need a plaintext copy ADR 029 refuses to make. `MeshBlobStore.saveIncoming(hash, mime,
+  srcPath)` ingests a received file and **re-verifies** that the bytes hash to the peer-supplied
+  address before storing it, since a holder must not be able to serve arbitrary bytes under someone
+  else's content address.
+- **`BlobExchange`** (with the `BlobStore` interface `has`/`fileFor`/`mimeFor`/`saveIncoming`,
+  adapted over `AttachmentStore`) implements a hop-by-hop pull:
+  - `want(hash)` — returns early if held, already in flight (`fetching` set), or already **arriving**
+    on a link (`MeshTransport.arrivingFiles()`: a `FILE_HEADER` in, no `FILE_END` yet — read off
+    `FramedLink.rxFile`, never a memo; the same read gives the chat its progress ring, ADR 2026-10.y9qh);
+    otherwise first **queries the holders** (ADR 2026-10.6e5t): every linked neighbour whose link advertises
+    `CAP_BLOB_HAVE` gets a `blobhave` and answers with a `blobhas` — NONE, HAVE (with the size), SENDING (our copy is
+    already on its link) or FETCHING — plus its load. Once every answer is in or 5 s pass, the best holder by plane
+    (a live Wi-Fi Aware link; a reachable one for a blob worth raising it; a full-speed Bluetooth link with nothing
+    streaming to us; a Coded or busy one) and load is asked alone with a `blobreq` (`relay = false`); one that
+    brings nothing in its grace is queried once more, then the next is asked. Neighbours that cannot answer (the
+    iOS port, older builds, a build with `BuildConfig.BLOB_QUERY` off) get the **round of asks** of ADR
+    2026-10.f7gg: the likeliest alone — the frame's author, then a neighbour on the Wi-Fi Aware plane
+    (`MeshTransport.bulkRouteTo`: linked, then reachable), then the hop the frame came from, then the rest — and,
+    once that ask's grace (5 s, 15 s for a reachable Wi-Fi Aware peer) passes with nothing arriving, every other at
+    once. When nobody in reach holds it, the hop that said NONE is asked to pull it through, and every NONE
+    neighbour from the next empty cycle on; a neighbour asked to pull it is queried again 10 s later, up to four
+    times, in the first two cycles of a dead streak. A cycle in which every neighbour said it lacks the blob doubles
+    the wait for the next, up to 6 min, until a lead turns up, and a cycle that pulled stands one cycle from the pull. A grace counts from the first look that finds the holder no longer
+    streaming to us. A neighbour pulling the blob through us (`onRequest`) is neither queried nor asked back that
+    cycle, and a neighbour that links again is queried again (`linked`): an ask can die with a link. A query is not
+    an ask: `onHaveQuery` serves, pulls and stamps nothing.
+  - `onRequest(hash, fromNodeId, offset)` — if we hold the blob, send it straight back over the file channel
+    (`FileKind.ATTACHMENT`) — from the asker's `offset` when it kept the start of a cut transfer (ADR
+    2026-10.wtyc) — unless a copy is already queued or streaming to that peer
+    (`MeshTransport.fileInFlightTo`, which also covers a file the link fed in full while it goes on feeding
+    that peer, ADR 2026-10.nxfb) or was enqueued inside the per-(hash, peer) **serve memo** (45 s,
+    un-stamped if the enqueue is refused). If not, **recurse** by calling `want(hash)` on the asker's
+    behalf, and remember nothing about the asker (ADR 2026-09.4tx5): the asker re-asks on its own 60 s
+    tick while it still lacks the bytes, and only it can tell whether they are already on the way.
+  - **Resume (ADR 2026-10.wtyc).** A link closed mid-stream hands an attachment's prefix to `PartialBlobs`
+    (session-scoped, keep-the-longer); every ask names its length as the `blobreq` `offset`; the receiving
+    link's `FileIntake` splices the holder's tail onto a copy of it. A spliced file that fails the store's hash
+    check drops the prefix and is asked for from byte 0 at once.
+  - `onReceived(...)` — save the blob, clear `fetching`, fire `onObtained`
+    (`InboundPipeline.onObtained`: screen the held bytes, and adopt the avatar or group photo they are; a
+    message names its blob by hash, so there is no path to fill in). Nothing is pushed to anyone: a blob walks hop-by-hop over direct-neighbor file transfers,
+    one hop per re-ask.
+  - `reask()` steps every round still missing and not arriving — on a new link (a neighbour that links in a
+    widened round is asked at once; catches late joiners) and on the 60 s re-offer tick, which opens the next
+    round with one ask again once 45 s have passed, re-armed from the database first
+    (`MeshManager.rewantMissingBlobs`, ADR 2026-09.ptv8). A neighbour asked before is not asked again while a
+    file from it is streaming in (ADR 2026-10.nxfb).
+  - **Storm/loop control:** the `fetching` dedup set, the non-relaying request frame (`relay = false`,
+    never flooded — each hop mints a fresh request id), and never bouncing a blob back to its giver.
+
+On startup, `MeshManager.resumePendingFetches()` re-requests any attachment referenced by a stored
+message whose bytes aren't present yet (`MessageDao.attachmentFetchRows()`) — and any
+attachment referenced by a **carried store-and-forward frame** whose bytes are missing
+(`ForwardStore.attachmentsNeedingFetch()`, gated by the carrier budget below), so a carrier keeps
+retrying the image it is custodying for a late joiner.
+
+**Over the Internet.** The same image crosses the spool plane as a second object class beside frames:
+sealed and chunked under the scope keys, stored against a per-scope byte quota, and fetched on demand
+from the cleartext hash the frame already carries (`docs/SPOOL_PROTOCOL.md` §4.5/§9.5,
+`mesh/spool/ScopeAttachments`). It reuses this section's whole local half — the bytes land in `blobs`
+and fire the same `onObtained` hook a radio pull does, so screening, the message row, and the UI are
+unchanged.
+
+**Blob custody.** Store-and-forward carries the *frame* but historically not the image bytes,
+so a custodied message re-served to a late joiner — after the sender and every recipient who pulled it
+have left — referenced an image no reachable node held (a permanent "Loading photo" spinner; for E2E
+DMs/groups the carrier couldn't even see the sealed hash). Now a node that *carries* a chat frame also
+eager-pulls its blob (`ForwardSync`'s `onCarried` hook → `MeshManager.onCarriedFrame` →
+`BlobExchange.want`) and holds it, pinned against GC by the `forward_store` reference
+(`BlobDao.orphanHashes` / `BlobRepository.deleteIfUnreferenced`) for the frame's carried lifetime — so
+the bytes gain the same delay-tolerance as the frame. For E2E frames the (ciphertext) hash now rides in
+cleartext (§14 / `docs/WIRE_COMPAT.md`) so a carrier blind to the sealed content can see it; the carrier
+holds ciphertext it can't decrypt or screen (the addressed recipient screens on decrypt). The extra
+"carrier-only" footprint — blobs referenced by a carried frame but no local `messages` row — is bounded
+by a pull-time byte budget (`MeshManager.CARRIER_BLOB_BUDGET_BYTES`, `BlobDao.carrierOnlyBlobBytes()`);
+because these blobs are deliberately **not** folded into the custody content digest (`StoreDigest`, §3.1),
+that budget is a purely local knob that can differ per node without breaking cue-plane convergence.
+
+## 8. Mentions (`mesh/protocol/Wire.kt`, `data/message/MentionStore`, `ui/chat/MentionText.kt`)
+
+- **Detection** — `List<Mention>.mention(nodeId)` matches on **node id**, never name; a mention of
+  *me* routes to the dedicated Mentions notification path (§11).
+- **Highlighting** — `MentionText.highlightMentions(body, mentions, spanStyle)` builds `@name`
+  tokens, sorts them **longest-first** (so `@Jay` can't grab a prefix of `@Jaylene`), and styles each
+  non-overlapping occurrence via a per-char mask. The same file provides compose-time typeahead
+  (`activeMentionQuery` / `filterCandidates`, which matches a candidate's name **or alias**); `ChatViewModel`
+  builds the candidate list from the thread's senders ∪ the group roster (so @-mentions work in a fresh
+  group before anyone has spoken).
+- **Same-named people** (ADR 058) — the token the picker inserts is the candidate's collision-aware label
+  (`PeerLabel.text`): `@Alice` normally, `@Alice (ReallyJoyfulFerret)` when the sender knows two Alices, and
+  `Mention.name` carries that exact text so the receiver (and every older build) still locates the span.
+  The picker row always shows the alias beside the name.
+- **Storage** — `object MentionStore` (in `MessageEntity.kt`, its own lenient `Json`) encodes
+  mentions to a JSON array string for the `messages.mentions` TEXT column (default `"[]"`); a
+  malformed/legacy value decodes to an empty list rather than crashing rendering.
+
+## 9. Data layer (`data/`)
+
+- **Room** (`KnitDatabase`, `knit.db`) — **encrypted at rest with SQLCipher**: the passphrase is a
+  random key wrapped under a hardware AndroidKeyStore key by `data/crypto/DatabaseKey`. **DB v1 is the
+  frozen launch baseline**, with **no** destructive fallback: from v1 forward every schema bump ships a
+  tested `Migration` in `KnitMigrations` (validated by `KnitDatabaseMigrationTest`) — a missing one makes
+  Room throw at open time (caught in CI) instead of silently wiping a user's messages/custody/pins.
+  The schema JSON is exported to `app/schemas/` and checked in per version. Seven tables:
+  - `messages`: `id` (PK, wire id), `senderId`, `recipientId?`, `conversationId` (default `NEARBY`,
+    indexed), `body` (the **decrypted plaintext**, held only inside the encrypted DB), `sentAt`,
+    `received`, `arrivedAt?` (**our** clock when an inbound row was first persisted — the local
+    complement of the author's `sentAt`, so the details screen can show the store-and-forward latency;
+    null on our own sends and on every row older than DB v7, never rewritten by a custody re-serve),
+    `mentions` (JSON, default `"[]"`), `attachmentHash?`, `attachmentMime?`,
+    `attachmentKey?` (base64 AES key for an E2E attachment; null for plaintext/broadcast attachments),
+    `attachmentName?` / `attachmentSize?` (an arbitrary **file**'s own name and declared byte count, both
+    off the seal — null on images and voice notes, which describe themselves; the name is what selects the
+    file bubble, and the size is a pre-arrival label the stored blob's length supersedes),
+    `moderation` (on-device content verdict), `pendingKey` (composed before the recipient's key was
+    known; not yet flooded — §14), `kind` (normal vs. a member-left system row). No DAO read returns a
+    whole table or a whole thread: the chat screen reads a newest-anchored window
+    (`observeNewestForConversation`, ADR 2026-09.hd5n) and the list screens read per-thread summaries
+    (`observeNewestPerConversation`, `observeDistinctConversations`, `observeGroupSenders`,
+    `countUnreadIn`), all served by the two `conversationId`-led indices; plus `markReceived`,
+    `deleteByConversation`, and `attachmentsNeedingFetch`.
+  - `peers`: `nodeId` (PK), `name`, `status`, `avatarHash?`, `pubKey?` (pinned E2E public-key bundle),
+    `verified` (out-of-band key confirmation, see §14), `deviceTag?` (key-independent block-list
+    continuity), `protoVersion?` / `capabilities?` (advertised, diagnostic), `updatedAt`, `openToChat` (their
+    declared availability, ADR 2026-09.74fq).
+  - `reactions`: composite PK `(messageId, reactorNodeId)`, `emoji?`, `updatedAt` (see §6).
+  - `blobs`: `hash` (PK, SHA-256), `mime`, `bytes` — content-addressed attachment bytes (avatars, images,
+    voice notes, arbitrary files); E2E-attachment bytes are stored as **ciphertext**, addressed by their
+    ciphertext hash.
+  - `blob_verdicts`: `hash` (PK), `flagged`, `score` — the on-device NSFW image verdict cached by content
+    hash, so identical bytes are scanned once across send/receive (`docs/CONTENT_MODERATION.md`).
+  - `groups`: `groupId` (PK), `name`, `members` (JSON roster), `createdBy`, `createdAt`, `nameUpdatedAt`,
+    `left` (leave tombstone), `departed` (JSON set of members who left), `photoHash?` / `photoUpdatedAt` (the
+    decided photo, advertised and last-writer-wins) and `photoShownHash?` (the photo that renders, once its
+    bytes are local and screened — ADR 2026-09.nxcq).
+  - `forward_store`: `id` (PK), `recipientId?`, `groupId?`, `senderId`, `type`, `origin`, `signed`, `sig`,
+    `sentAt`, `receivedAt`, `expiresAt`, `attachmentHash?` — the encrypted store-and-forward custody set
+    (immutable signed frames re-served to newcomers; the id set the cue-plane content digest folds over —
+    §3.2, `AGENTS.md`).
+- **Repositories** (`MessageRepository`, `PeerRepository`, `ReactionRepository`, `GroupRepository`,
+  `BlobRepository`, `ForwardRepository`) are the single source of truth; DAOs expose `Flow<List<…>>` for
+  the UI and suspend writes for the manager.
+- **`SettingsStore`** (Preferences DataStore, `knit_settings`): display name, status,
+  advertising/discovery toggles, `avatarUpdatedAt`, and a last-read watermark driving unread badges.
+  The node id is not stored here: `Identity.nodeId()` derives it from the identity key bundle
+  (`NodeId.fromPublicKeyBundle`; §10).
+- **`AttachmentStore`** (§7) — ingests images, voice notes and arbitrary files into the content-addressed,
+  encrypted `blobs` table (keyed by SHA-256). For E2E DM/group attachments the bytes are encrypted first and keyed by their
+  ciphertext hash (§14); broadcast-room attachments are stored plaintext-in-the-encrypted-DB.
+- **`AvatarStore`**: own avatar picked → center-cropped square → 256² JPEG q90, stored in the
+  encrypted `blobs` table (peer avatars likewise, pulled over the mesh). `ownAvatarHash()` is a
+  **SHA-256 of the avatar bytes** (stable across devices and unaffected by a no-op rewrite —
+  meaningful enough to gate re-pushes, unlike the old length+mtime fingerprint).
+
+## 10. Identity & profiles
+
+- **`Identity.nodeId()`** resolves (and caches) the stable **128-bit node id** — the *self-certifying*
+  hash of the device's E2E public-key bundle. `NodeId.derive(seed)` = the first **16 bytes** of
+  `SHA-256("knit-node-id-v2:" + seed)`, RFC4648-**base32**-encoded (lowercase, unpadded) to a 26-char
+  `[a-z2-7]` string, where `seed` is `Identity.publicKeyBundle()` (the base64 bundle) — **not** a
+  platform device id. Because the id is derived from the keypair, a peer can only claim an id it holds
+  the private key for (forging a colliding bundle is a 128-bit second-preimage), which is what makes the
+  TOFU key pin race-proof and the ~41-bit predecessor did not — this was widened as a coordinated wire
+  break during pre-1.0 alpha (folded into the v1 launch baseline). base32 keeps the id
+  filesystem/delimiter-safe so it stays disjoint from the `g-…` group-id namespace and rides avatar
+  filenames / the verify payload. The device's long-term **E2E keypair** lives in
+  `data/crypto/IdentityKeyStore` **outside** the DB (so the id is stable for the
+  life of that keypair; an app-data wipe that drops `identity.key` mints a new identity); its public
+  bundle is exposed via `Identity.publicKeyBundle()` and advertised in `ProfileContent.pubKey` (§14).
+- **`Alias`** (ADR 2026-09.wuqj) maps any node id to a deterministic PascalCase "AdverbAdjectiveNoun"
+  token (e.g. `ReallyJoyfulFerret`): `SHA-256("knit-alias-v2:" + nodeId)`, each byte a whole index into
+  one of three frozen 256-entry lists (`AliasWords.kt`, pinned by a fingerprint test), three bytes to a
+  token and ten tokens in the digest — every device derives the same friendly name for a peer with no
+  exchange. `displayNameFor(storedName, nodeId)` returns the non-blank profile name else the alias, so a
+  peer is never shown as a raw id.
+- **`PeerLabels`** (ADR 058, growth rule ADR 2026-09.wuqj) — names are not unique, so a list surface
+  resolves through `PeerLabelIndex.labelFor` instead: over the universe of every cached peer ∪ our own name,
+  grouped by `NameKey` (NFKC, format chars stripped, lower-cased, whitespace collapsed), a peer whose name
+  another identity shares is labelled `Name (Alias)`; a label that still reads like another's (a blank-named
+  peer whose alias someone chose as a name, a name chosen to look like a label, an alias ground to match)
+  grows by the next token of the phrase, round by round, so labels are distinct by construction.
+  `PeerRepository.observeDirectory()` emits the table with its index; `labelIndex()` is the suspend snapshot
+  (notifications, card preview). Collision-evident, not anti-impersonation — a 24-bit token is minutes of
+  grinding, but a match can only make both labels longer, never equal; `verified` and the safety number
+  remain the trust mechanism. A stranger not heard from for a week (`peers.lastSeenAt`, stamped from accepted signed frames on the
+  metrics tick) **gives way** (ADR 2026-10.k8ge): still labelled apart, but no longer adding a token to anyone
+  else, so a contact reads plain again; contacts, verified peers and self (`data/LabelAnchors`) never go stale.
+- **Profile broadcasting** (`MeshManager`):
+  - On a **new neighbor**, push the current profile frame and (only if needed — §8) the avatar file.
+  - On a **profile change** (name/status/avatar, observed via a combined settings flow, `.drop(1)` to
+    skip the initial value), bump `profileVersion` to the wall clock, re-broadcast the frame, and
+    send the avatar to neighbors **that don't already have this exact avatar**.
+  - The profile frame id is `profile-<nodeId>-<profileVersion>`, so an unchanged profile re-sent on
+    connect dedups everywhere except the new peer, while a changed profile re-floods.
+  - **Avatar re-push dedup:** a `sentAvatarHashes: ConcurrentHashMap<nodeId, hash>` records the last
+    avatar hash sent to each neighbor; `sendAvatarIfNeeded` skips the (large) JPEG when the hash is
+    unchanged, so editing just your status text no longer re-ships your avatar to everyone. A
+    departed peer's entry is cleared in `watchNeighbors`, so a genuine reconnect re-sends once.
+
+## 11. Notifications (`notifications/`)
+
+- **`Notifier`** interface — `createChannel`, `notify`, `notifyMention`, `setVisibleConversation`, `clearConversation`,
+  `onDismissed`. `NotificationChannels` registers the channels per context: `knit_msg_nearby`
+  (`IMPORTANCE_DEFAULT` — the busy broadcast room), plus `knit_msg_dms`, `knit_msg_groups_v2`, and a
+  dedicated `knit_msg_mentions` (all `IMPORTANCE_HIGH`); separate app channels are the foreground-service
+  `knit_mesh` (`IMPORTANCE_MIN`), `knit_alerts` (`IMPORTANCE_LOW`), and `knit_open_to_chat`
+  (`IMPORTANCE_DEFAULT`) for the presence cue below.
+- **The "open to chat" cue** (`presence/`): a profile flag (`ProfileContent.openToChat`, carried on both
+  profile paths, stored as `PeerEntity.openToChat`) plus one standalone notification — "Sam is nearby and open
+  to chat" / "3 people nearby are open to chat" — that opens the Nearby room. `OpenToChatWatch` (started by
+  `MeshManager.start`) joins the own flag, the short-range `neighbors` set, the peer rows carrying the flag,
+  the block list and the people already messaged; the pure `OpenToChatPolicy` batches newcomers for 20 s,
+  re-cues a person only per encounter (out of range ≥ 15 min, ≥ 2 h since their last cue, ≤ 2 cues a day),
+  and posts at most once an hour overall, holding later arrivals for the next post. Its per-person stamps and
+  the last post time persist in `SettingsStore` so a restart cannot re-buzz. The cue is an **introduction**,
+  so anyone already met drops out of it entirely (ADR 2026-09.3yje): `MessageDao.observeAcquaintedPeers`
+  reads the two-way exchanges out of `messages` — a DM thread with a message each way, or a group both have
+  posted in — and the Nearby room and status notices never count.
+- **Room/DM notifications** use `NotificationCompat.MessagingStyle` so multiple senders show in one
+  grouped notification; `NotificationHistory` keeps the last ~8 `NotifMessage`s for that context, and
+  each becomes a `Person`-attributed line with the sender's cached avatar.
+- **Mentions** branch to a separate, standalone `BigTextStyle` notification on the Mentions channel
+  (a message that `@`-mentions you takes `notifyMention`, everything else `notifyIncoming` — they're
+  mutually exclusive), so a direct ping isn't buried among other senders.
+- `setVisibleConversation`/`clearConversation` suppress and dismiss notifications while you're reading; a
+  `NotificationActionReceiver` wired as the `deleteIntent` calls `onDismissed` so a swipe-away clears
+  accumulated state without those messages reappearing.
+
+## 12. UI layer (`ui/`)
+
+- **Compose + Material 3, Navigation Compose.** `KnitApp` hosts a `NavHost` with routes
+  `onboarding`, `chatlist`, `contacts`, `settings`, `profile`, and `chat/{conversationId}` (the conversation id
+  is the Nearby room, a peer node id, or a `g-…` group id; it defaults to `Conversations.NEARBY`), plus
+  group details, diagnostics, blocked-users, donate, and an offline app-share flow. Start destination is
+  `chatlist` if the radio permissions are granted, else `onboarding`. `MeshService` is started by a
+  `LaunchedEffect` once the user is past onboarding.
+- **Screens:**
+  - `OnboardingScreen` — a three-page stepper (ADR 2026-09.nzpr): welcome (brand mark + how it works), an
+    optional display name (a live `Avatar` preview of the initial peers will see, keyed on the node id, over the
+    shared `DisplayNameField`; stored via `SettingsStore.setDisplayName` on leaving the page), and permissions as one row per concept with live state — the radio set gates
+    Start, while notifications (33+) and the battery exemption are optional rows that can also point at
+    app-info Settings once Android stops showing the dialog. `onboardingSeen` opens a returning phone (a
+    grant revoked later) on the permissions page directly.
+  - `ChatListScreen` — one row per conversation (always-present Nearby room + DM threads with
+    messages), each with a leading visual (room icon vs. peer `Avatar`), last-message preview,
+    relative time, and an unread `Badge`; a FAB opens Contacts, an overflow menu opens Settings.
+  - `ContactsScreen` — the new-DM picker; lists your contacts by the shared `contactIds` rule (accepted
+    DM peers, explicitly accepted peers, co-members of accepted groups, verified peers − self and blocked),
+    online-first; one pick opens `chat/{nodeId}`, several create a group. A contact is removed from their
+    `ProfileDetailsScreen` overflow (ADR 2026-09.adgd).
+  - `ChatScreen` — a `LazyColumn` of bubbles with reactions, image attachments (Coil + animated
+    decoder for GIF/WebP), `@`-mention highlighting and typeahead, auto-scroll, and an IME-padded
+    input.
+  - `SettingsScreen` — what the overflow menu opens: a profile header row into `ProfileScreen`, the
+    light/dark selector, the content-filtering / Material You / link-preview switches, the rows that hand
+    off to the Internet-relay and LoRa screens, and the battery-opt row.
+  - `ProfileScreen` — your own profile behind that header row: avatar via photo picker + Coil,
+    name/status fields, node id, alias, and the open-to-chat flag, with one Save for the two text
+    fields; key verification (safety number / QR) of a *peer* is `ProfileDetailsScreen`.
+  - **Also:** `GroupDetailsScreen` (roster / rename / photo / leave), `DiagnosticsScreen` (transport
+    health, per-radio Bluetooth/Wi-Fi-Aware status, mesh metrics + store-and-forward digest),
+    `BlockedUsersScreen`, `DonateScreen`, and a `ShareTargetScreen` / invite flow that shares the APK
+    (and shared content) to a nearby phone offline.
+- **ViewModels** (`ChatViewModel`, `ChatListViewModel`, `ContactsViewModel`, `ProfileViewModel`) are
+  Koin `koinViewModel()`s. `ChatViewModel` takes the `conversationId` as a runtime parameter and
+  `combine`s the conversation's messages (pre-merged with reactions), peers, neighbor count, node id,
+  and display name into UI rows (mentions, attachments, reaction summaries, sender name/avatar).
+- **Theme** (`ui/theme/`): real M3 light/dark schemes from the brand coral, with every role the
+  dynamic scheme fills set explicitly (`ColorSchemeTest` guards that). Material You is a Settings
+  switch, off by default so the brand shows; `KnitSemanticColors.positive` keeps "online / verified /
+  healthy" green in every scheme, since a wallpaper-derived `tertiary` could land on the error hue.
+  Light/dark is a Settings selector too, but it is applied as the platform's **per-app night mode**
+  (`NightMode`/`AndroidNightMode`, API 31+) rather than passed to `KnitTheme`, so the launch window,
+  `isSystemInDarkTheme()` and the system bars all follow one configuration; ADR 2026-09.v5ck.
+- **Editable fields use write-through local state**, not the DataStore flow directly (see §15).
+- **Coil 3** is configured app-wide in `KnitApplication` with the `AnimatedImageDecoder` so message
+  GIFs/WebP animate.
+
+## 13. Background survival (`mesh/MeshService.kt`)
+
+A typed foreground service hosts `MeshManager` so the mesh survives backgrounding — `connectedDevice`, plus
+`location` on API 29–32 where Wi-Fi Aware discovery is gated on the foreground-only location app-op
+(`meshForegroundServiceTypes`, tiered with `requiredRadioPermissions`; ADR 2026-09.535d):
+
+- **Foreground notification** (`knit_mesh` channel, `IMPORTANCE_MIN`) with Pause 15 min / Pause 1 hour / Stop
+  actions; while paused it reads "Knit mesh is paused — Until 3:15 PM" with Resume / Stop.
+- **Pause** (ADR 2026-09.wz99): the service stays foreground and takes `MeshManager` down until a wall-clock
+  deadline held in `SettingsStore.meshPausedUntil`, which the service, the chat list's banner and the debug
+  bridge all read through `MeshPause.activeDeadline`. `applyPause` converges idempotently on the key, so the
+  notification's buttons, the banner's Resume (a store write alone) and a service created mid-pause all end
+  where the store says. Two inexact resume alarms (`setAndAllowWhileIdle` + a 10-min `setWindow`, both
+  `ACTION_RESUME`) plus an expiry check on every start bring it back; no exact-alarm permission.
+- **Stop is sticky:** `SettingsStore.meshEnabled` is the user's switch, and every starter honours it —
+  `BootReceiver` after a reboot, and `KnitApp`'s route and resume effects through `shouldStartMeshFromUi`
+  (`ui/MeshStartPolicy.kt`, deciding on a fresh store read — a lifecycle-collected copy is stale on the
+  resume after a Stop). The chat list's "Mesh stopped — Start" banner writes the flag back and the route
+  effect does the start.
+- **Heartbeat:** inexact ~15-min `AlarmManager` alarm → `ACTION_HEAL` → `MeshManager.heal()`.
+- **Significant motion:** a `TriggerEventListener` (re-armed after each fire) → `heal()` (moving
+  likely means new peers in range).
+- **Radio availability** (Wi-Fi Aware turning on/off, or another Wi-Fi mode seizing it) is handled
+  inside `WifiAwareTransport` itself via `ACTION_WIFI_AWARE_STATE_CHANGED`, not here.
+- All cleaned up in `onDestroy` (including `MeshManager.stop()`, which cancels pending relays). The
+  message notification channels are registered up front in `KnitApplication` so they appear in system
+  settings before the first notification. Battery optimization is surfaced in onboarding and the
+  settings screen (`ui/BackgroundBattery.kt`).
+
+## 14. Encryption posture
+
+**Two layers.** (1) *In transit:* the Wi-Fi Aware NDP is encrypted with a fixed app-wide PSK. Every build
+ships the same one, so it is a public constant: it defeats casual capture, not an eavesdropper who has read
+the APK. The Bluetooth LE L2CAP CoC is **not** encrypted: `BluetoothMeshTransport` opens it insecure
+(`listenUsingInsecureL2capChannel` / `createInsecureL2capChannel`), with no pairing, so room posts and every
+frame's routing fields are readable over the air. On both planes a frame is authenticated by its Ed25519
+signature, with two unsigned exceptions: the v3 `relay = false` delivery tick, which only its addressee can
+authenticate, by opening it (ADR 059), and the blob request, which asks for a content hash.
+(2) *End-to-end:* DM and group messages are encrypted to their recipients so relays — which flood every
+message hop-by-hop — only ever carry ciphertext. *At rest:* the Room DB is encrypted with SQLCipher (§9). The
+public **broadcast room is plaintext by design** (no fixed recipient set), so a room message takes the
+unencrypted path (it is still signed, and store-and-forward-carried).
+
+**Library.** Google **Tink** (`tink-android`) — HPKE/X25519 hybrid encryption, Ed25519 signatures,
+and AES-GCM. Originally chosen because the then-`minSdk 29` predated the platform `XDH`/`Ed25519` JCA
+algorithms (API 33+); `minSdk` is 29 (the BLE co-plane lowered it back from the NAN-era 33), so Tink stays — it's a
+pure-runtime dep (no Gradle plugin) that can't perturb the bleeding-edge toolchain, and there's no
+reason to re-implement working, audited crypto against the platform APIs.
+
+**Identity keys** (`data/crypto/IdentityKeyStore`). Each device generates a Tink **hybrid** keypair
+(wraps content keys) and an **Ed25519** keypair (signs) on first run. The private keysets are
+serialized, AES-256-GCM-wrapped under a hardware AndroidKeyStore key (`KeystoreSecret`), and stored in
+`filesDir/identity.key` — deliberately **outside** the DB, so the identity survives anything that
+takes `knit.db` down (otherwise such an event would mint a new key and break pinning + stored
+ciphertext). The public bundle (`PublicKeyBundle`, base64) is advertised in `ProfileContent.pubKey`.
+The same file also holds the rotating **ratchet signed prekeys** (v2 DM bootstrap, below), so
+in-flight session initiations survive a DB loss too.
+
+**DMs — the epoch-rekey ratchet (crypto scheme v2, `EncEnvelope.v = 2`).** DMs between
+ratchet-capable builds are forward-secret: an X3DH-style bootstrap off the peer's published signed
+prekey establishes a per-pair session, and per-epoch X25519 rekeying + a forward-only message-key
+chain bound the exposure of any later key compromise to the epoch retention window. The full scheme —
+keys, derivations, epoch advance rules, races/replacement/reset, and the honest security claim — is
+specified in `docs/FORWARD_SECRECY_RATCHET.md`; the implementation is `mesh/crypto/ratchet/`
+(pure engine + session service) with state in the `ratchet_*` tables. Outbound v2 is gated on the
+peer's pinned profile advertising `CAP_RATCHET` plus a prekey; anything else falls back to v1.
+
+**Groups — the sender-key ratchet (crypto scheme v2, group form).** Groups whose every member is
+ratchet-capable are forward-secret too (the group form shares `EncEnvelope.v = 2` with the DM
+ratchet — both landed in one never-released bump; a group frame carries `g`, a DM `r`): each member mints a random per-group epoch
+seed driving a forward-only chain, distributes it pairwise inside v2 ctl DMs
+(`MessageContent.ctl = CTL_GROUP_KEY`), and seals group frames under a tiny `GroupRatchetHeader {se, n}`
+with no per-member wraps. Recovery (lost seeds, late members, wipes) is the seed outbox + proactive
+re-sends + a rate-limited key-request loop; a member's departure forces a rekey to the remaining
+members (eventual, bounded by the signed `groupleave`'s convergence). All-or-nothing per message: any
+non-capable member demotes that message to v1. Full scheme: `docs/GROUP_FORWARD_SECRECY.md` (ADR 017);
+implementation `GroupRatchetEngine`/`GroupRatchetSessions` with state in the `group_*` tables.
+
+**Receipts and reactions — sealed ctl frames (crypto scheme v2 addition).** Delivery receipts and
+reactions toward ratchet-capable targets ride as `MessageContent.ctl` control frames
+(`CTL_RECEIPT`/`CTL_REACTION`) inside ordinary v2 CHAT frames — wire-indistinguishable from
+conversation, never persisted/notified/acked as messages, falling back to the legacy cleartext
+frames for pre-ratchet targets (never to v1: an old build would strip the unknown ctl and persist an
+empty bubble) and staying cleartext in the broadcast room by design. Sealed receipts retire the
+carrier vaccine-purge — nobody can parse them, so delivered DMs age out of custody on the 24 h TTL
+uniformly (the recipient custodies its own inbound DMs, and a cleartext ack self-vaccinates; both
+keep ADR 006's digests convergent). Full scheme: `docs/ENCRYPTED_RECEIPTS_REACTIONS.md` (ADR 018).
+
+**Per-message scheme v1** (static keys — the fallback: pre-ratchet peers, mixed-capability groups), in `mesh/crypto`:
+
+1. Generate a random content key; AES-256-GCM-encrypt the `MessageContent` (body + mentions +
+   attachment refs) into `EncEnvelope.ct`.
+2. Wrap the content key (Tink hybrid) to **each recipient** — the DM's recipient, or a group's members
+   minus self (rosters are capped at 8) — producing one `WrappedKey` each.
+3. Put the `EncEnvelope` (nonce, ciphertext, wrapped keys) in `ChatContent.enc`. The envelope is **not**
+   signed here: the AEAD AAD binds the message header (`id|sender|sentAt|thread`), and the *single frame
+   signature* — `WireEnvelope.sig`, raw Ed25519 over the whole `RelayEnvelope` `signed` bytes (§4) —
+   covers the encrypted `ChatContent`, so a wrapped key or ciphertext can't be replayed into another
+   message.
+4. Originate a `chat` frame with `ChatContent.enc` set, `recipientId`/`group` in the clear (for routing),
+   and cleartext `body`/`mentions`/`attachment*` blank. The sender also stores its own **plaintext** copy
+   locally.
+
+On receive, `verifyInbound` (the gate at the top of `onDeliver`) has **already** checked
+`WireEnvelope.sig` byte-exact against the sender's **pinned** key — for a `profile` frame, against the
+`pubKey` in its own payload, since first contact precedes any pin — so after the for-me / group-membership
+gate the recipient only unwraps its `WrappedKey`, decrypts, and delivers the plaintext. `MessageCrypto.open`
+now just unwraps + AES-decrypts; there is no separate envelope signature. **Decryption/verification failures
+must never throw out of the inbound handler** — `onDeliver` runs *before* the router schedules the relay,
+so a throw would stop the device forwarding the frame; the crypto calls return null on any failure and the
+message is dropped while relaying continues (`MeshManager.decryptAndDeliver`).
+
+**Attachments.** Image bytes are encrypted to a per-attachment key and **content-addressed by their
+ciphertext hash**, so the content-addressed pull/dedup (`BlobExchange`/`BlobStore`, §7) is unchanged —
+relays serve opaque ciphertext. The key rides inside the encrypted `MessageContent` and is persisted
+in `MessageEntity.attachmentKey` so the UI's Coil `BlobFetcher` can decrypt on display. So does the
+**MIME type** since ADR 035 — the cleartext frame names the hash alone, and `MessageEntity.attachmentMime`
+is written from the decrypted content. The residual is the blob transfer itself: `FileHeaderWire` still
+names a mime to whichever neighbour pulls the bytes.
+
+**Trust & verification.** Peer keys are pinned **trust-on-first-use** into `PeerEntity.pubKey`; if a
+peer's advertised key later changes, it's adopted (so comms continue) but `PeerEntity.verified` is
+reset and the change is flagged. Users confirm a key out of band on the peer's profile screen — comparing the
+`SafetyNumber` (a Signal-style fingerprint derived symmetrically from both identities) or scanning the
+peer's identity **QR** (`VerifyPayload` + ZXing) — which sets `verified` and shows a badge.
+
+**Availability edge cases.** Sending requires the recipient's key: a DM composed before the recipient's
+key is known is saved `pendingKey` and re-sealed + flooded once the key arrives (`flushPendingFor`); for
+a v1-fallback group, members whose key is unknown are still skipped (the residual key-gap — §18); a ratcheted
+group heals through the seed outbox + key-request loop instead (`docs/GROUP_FORWARD_SECRECY.md` §7).
+An inbound frame from a not-yet-pinned sender is dropped locally but **parked** in `PendingInbound` and
+recovered by a signed, point-to-point `keyreq` to neighbors (`KeyExchange`), then replayed once the
+profile arrives (§3.5 / `AGENTS.md`). In practice profiles flood on connect, so keys are usually present
+before the first message.
+
+## 15. Build & tooling decisions
+
+The project runs on intentionally bleeding-edge tooling — a current AGP / Gradle / Kotlin / Compose line
+and an early `compileSdk`. The pins themselves live in `gradle/libs.versions.toml` and the reasoning behind
+each in `.agents/context/toolchain.md`; what follows is the *shape* of the constraints, which outlives any
+particular version. Consequences, all load-bearing:
+
+| Decision | Reason |
+|---|---|
+| **Koin, not Hilt** | Hilt's Gradle plugin is broken on AGP 9.x (dagger#5083/#5099). Koin has no Gradle plugin / no annotation processor → immune. |
+| **Built-in Kotlin overridden past AGP's bundled KGP** | AGP ships a KGP older than the Kotlin we compile with, and the older compiler can't read the newer one's class metadata. The root `build.gradle.kts` puts our KGP on the buildscript classpath (`classpath(libs.kotlin.gradle.plugin)`) so built-in Kotlin compiles with it. **Bumping AGP does not move Kotlin** — that classpath entry is the only lever; check Google's AGP/Kotlin matrix for the AGP floor the Kotlin line needs. It's also why **Coil tracks latest**: its old pin was a stale-metadata workaround that no longer applies. |
+| **No `disallowKotlinSourceSets` override** | The `=false` escape hatch was dropped 2026-09-08. KSP2 registers its generated sources through AGP's sources API, not `kotlin.sourceSets`, so the flag bought nothing — and AGP 10 enforces it regardless. |
+| **No `kotlin-android` plugin** | AGP's built-in Kotlin compiles Kotlin; only the compose / serialization / ksp plugins are applied. |
+| **KSP on its own version line** | KSP adopted independent (KSP2) versioning at 2.3.0 — decoupled from the compiler, Kotlin 2.2+ — so one KSP version spans Kotlin releases instead of the old `<kotlin>-<ksp>` lockstep scheme. |
+| **CBOR on the JSON BOM line** | `kotlinx-serialization-cbor` shares the version ref with the JSON artifact, so it's built with the same (toolchain-safe) Kotlin — no separate bump to vet. |
+| **LiteRT / SQLCipher / Tink** | The on-device ML runtime (`com.google.ai.edge.litert`), at-rest DB encryption, and E2E crypto are Java + native `.so` with **no Kotlin metadata and no Gradle plugin**, so they can't perturb the pinned Kotlin graph — per-dep rationale is in the version catalog. LiteRT's pin is *separately* load-bearing for F-Droid and for 16 KB page alignment: don't move it without reading `.agents/context/distribution.md`. |
+
+The wire codec uses **CBOR** (`kotlinx-serialization-cbor`) and the UI uses **Navigation Compose**. When
+adding dependencies, pin versions in `gradle/libs.versions.toml`; a dep built with a Kotlin at or below our
+overridden built-in Kotlin is readable, but still probe Maven before bumping anything that could pull in a
+newer Kotlin stdlib.
+
+## 16. Notable bugs fixed (lessons)
+
+- **Self-joining coroutine deadlock (Nearby era).** In the since-retired Nearby transport, `connectTo`
+  did `connectJob = scope.launch { connectJob?.join(); … }`; by the time the coroutine ran, `connectJob`
+  pointed at *itself*, so it awaited itself forever and the connect never executed — devices discovered
+  each other but never connected. The lesson still holds (don't await a job handle from inside that same
+  job; a serialized dispatcher + a `connecting` guard fixed it); the current radios have their own
+  lifecycle traps — the single-NDI wedges in `AGENTS.md` / `docs/DIGEST_PULL_REATTACH.md`.
+  <!-- doc-lint: allow connectTo — the retired Nearby transport's own function, named as history -->
+- **One-character text fields.** Binding a Compose `TextField`'s `value` directly to a
+  DataStore-backed `StateFlow` lags a keystroke behind (the write→emit round-trip is async), so
+  Compose resets the field and only one character registers. Fixed by holding editable text in a
+  local `MutableStateFlow` updated synchronously, persisting to DataStore in the background
+  (`ProfileViewModel`).
+- **Edge-to-edge keyboard overlap.** With `enableEdgeToEdge`, the chat input bar was covered by the
+  IME. Fixed with `Modifier.imePadding().navigationBarsPadding()` on the input surface.
+
+## 17. Testing strategy
+
+- **JVM unit tests** (`app/src/test/`, no hardware):
+  - Wire/protocol: `WireSerializationTest` (CBOR round-trips incl. the encrypted `chat` frame),
+    `FrameSignatureTest` (the single-frame signature), `ProtocolTest` (endpoint-info advert parse),
+    `SeenSetTest` (dedup/TTL/eviction), `MeshRouterTest` (dedup, relay-excludes-source + hop increment,
+    TTL drop, multi-hop delivery, and the **jittered overhear-suppression** cases — using a fixed
+    `jitter` + virtual time), `LinkFramingTest`/`FramedLinkTest` (the socket record codec), and
+    `BlobExchangeTest`/`BlobHashTest` (content-addressed pull).
+  - Transports & custody: `CompositeMeshTransportTest` (plane merge/preference), `ForwardSyncTest` +
+    `ForwardRepositoryTest` (store-and-forward custody + convergent quotas), `KeyExchangeTest` (`keyreq`
+    recovery), `PendingInboundTest` (park-until-key), `StoreDigestTest` + `DigestTrackerTest` (cue-plane
+    anti-entropy), and the pure BLE policies (`PromotionPolicyTest`, `ScanDemandPolicyTest`,
+    `ConnectBackoffPolicyTest`, `BleAdvertPayloadTest`, `BlePresenceTrackerTest`, `PowerPolicyTest`).
+  - Data/identity/UI logic: `ConversationsTest`, `ReactionRepositoryTest`, `MentionTest`,
+    `MentionTextTest`, `NodeIdTest` / `SelfCertifyingIdentityTest` / `DeviceTagTest`, `AliasTest`, `PeerLabelsTest` / `NameKeyTest` (the `Name (Alias)` collision labels, ADR 058),
+    `GroupNamingTest` / `GroupMembersStoreTest`, `NotificationTest`, `RelativeTimeTest`, `AvatarCropTest`.
+  - E2E crypto: `MessageCryptoTest` (DM + N-member group seal/open; tampered ciphertext, wrong sender
+    key, mismatched header, and non-recipient all rejected; bundle encode/decode) and `SafetyNumberTest`
+    (symmetry across endpoints, determinism, change-detection, `VerifyPayload` parsing). Tink runs
+    unchanged on the JVM, so these need no hardware.
+  - Moderation: `LexicalTextFilterTest` (normalization/evasions/Scunthorpe), `HybridTextModeratorTest`
+    (lexical short-circuit / ML fallthrough), `SentencePieceTokenizerTest` (HuggingFace-golden parity).
+  - Run with `./gradlew :app:testDebugUnitTest`. Use `UnconfinedTestDispatcher` for flow-propagation
+    tests and a fixed `jitter` lambda + virtual time for relay-timing tests.
+- **Emulator smoke test** validates launch, Koin init, screen rendering, and service start — but an
+  emulator has no Wi-Fi Aware or BLE peer radio, so it can't form a real mesh.
+- **Two-to-three physical phones** validate discovery → connect → message relay over both radios,
+  profile/avatar exchange, attachment pulls, store-and-forward backfill, and — with three nodes — that
+  overhear suppression fires (`framesSuppressed > 0` in the metrics log) and the single-NDI cue/digest
+  sync converges while messages still deliver.
+- **Seeded UI instrumentation suite** (`app/src/androidTest/java/app/getknit/knit/ui/`) hunts device- and
+  API-specific UI quirks on real hardware. The mesh radios can't run on a Firebase Test Lab (FTL) device,
+  so the suite runs the **demo-seeded, radio-less build** (`-PseedDemo=true`): `DemoTransport` replaces the
+  radios, `DemoSeeder` populates Room through the real repositories, and onboarding/`MeshService` are
+  skipped, so every screen renders populated and deterministic. Tests assert on the seeded ids + existing
+  `testTag`s and capture a screenshot each (via `UiAutomation` + test-services `TestStorage`, collected by
+  FTL). Run locally (emulator OK — no real mesh) with `./gradlew :app:connectedDebugAndroidTest
+  -PseedDemo=true` (every attached adb device) or `./gradlew :app:pixel7api33DebugAndroidTest -PseedDemo=true`
+  (a Gradle-managed emulator only — Pixel 7 @ API 33, ignores adb), or on FTL physical devices by submitting
+  the seeded debug + `androidTest` APKs via `gcloud firebase test android run` (Android Test Orchestrator +
+  `clearPackageData`, default matrix API 29/33/36). This is the UI-rendering complement to the radio-absent
+  **graceful-degradation** logic, which the JVM tests above already cover (`CompositeMeshTransportTest`,
+  `RadioWarningTest`, `OnboardingScreenContentTest`). See `AGENTS.md` for the full setup and gotchas.
+
+## 18. Known limitations & deferred work
+
+- DM/group messages are E2E-encrypted (§14), but they still **flood** the whole mesh (only the
+  addressed recipient(s) decrypt/ack) — so relays see *who is talking to whom and how much* (the
+  cleartext `recipientId`/`group` roster and sizes), just not the contents.
+- **Forward secrecy is epoch-granular, not per-message:** DMs between current builds ratchet
+  (`docs/FORWARD_SECRECY_RATCHET.md`) and fully-capable groups run the sender-key form
+  (`docs/GROUP_FORWARD_SECRECY.md`), so exposure is bounded by the epoch/seed retention windows
+  rather than zero; mixed-capability conversations fall back to the static v1 wrap until every
+  participant upgrades.
+- **The broadcast room is cleartext** by design (signed, not encrypted); receipts/reactions toward
+  pre-ratchet targets fall back to their cleartext frames (the shrinking v1 residual — sealed forms
+  are the default between current builds, ADR 018). *(The key-request/retransmit path for a frame
+  received before its sender's key is pinned is now implemented — `KeyExchange` + `PendingInbound`,
+  §3.5.)*
+- Receipts/relays add some flood overhead (reduced by overhear suppression); no per-recipient delivery
+  state beyond the single ✓, and DMs have **no routing table** (they flood; store-and-forward carries
+  undelivered ones).
+- Room migrations are **tested and non-destructive** from the v1 launch baseline on (there is no
+  destructive fallback). The identity key lives outside the DB, so it survives regardless. *(Pre-1.0 alpha
+  builds churned through destructive v2…v22 bumps that rode the wire/crypto breaks; that history is
+  collapsed — see `docs/WIRE_COMPAT.md`.)*
+- **Deferred by design:** true (targeted) DM routing, encrypting the broadcast room, the v1-fallback
+  residuals (cleartext receipts/reactions toward pre-ratchet peers; the group key-gap retransmit for
+  v1-pinned groups — ratcheted groups heal via the seed outbox + key-request loop), and a BLE
+  connect-time gate on A2DP audio contention (see `.agents/memory/roadmap.md`).

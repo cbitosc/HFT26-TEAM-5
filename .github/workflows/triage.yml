@@ -1,0 +1,131 @@
+name: Triage
+
+# Keyword auto-labeling for newly opened issues, so a report lands with an `area:` / `dist:` tag
+# instead of only `needs-triage`. Advisory only: this workflow never removes a label, never closes
+# anything, and never comments. Canned replies and closes live in .github/label-actions.yml and are
+# driven by labels a human applies.
+#
+# Runs on `opened` ONLY, deliberately not `edited`. An `edited` run would re-add labels the
+# maintainer had just removed by hand, and there is no way to distinguish "the regex was wrong" from
+# "the text changed". Hand-labeling wins after the first pass.
+#
+# Bugs: matching runs over the title plus a SCRUBBED body: issue-form headings (`### ...`) and
+# UNCHECKED checkbox lines are stripped first, because the forms in .github/ISSUE_TEMPLATE render their
+# own scaffolding into every issue. Checked boxes survive the scrub on purpose — those are a signal.
+#
+# Feature requests: the body is NOT keyword-matched, only the title plus the checked "Scope and mesh
+# impact" boxes, mapped structurally. A proposal names the subsystems it leaves alone — the form's
+# scope question asks for exactly that ("no CBOR change, no custody change, no crypto envelope
+# change", "alongside Bluetooth and Wi-Fi Aware", "rather than changing encryption or
+# store-and-forward") — so body keywords tagged nearly every request `area: mesh` + `area: crypto`
+# (#5, #6, #15). A regex can't read negation; the maintainer adds the real area by hand.
+#
+# Filed from the app: About's "Report a problem" opens the bug form with the build and device facts
+# filled in under "Logs / screenshots", behind `<!-- knit-app-report -->` (crash/CrashIssueUrl.kt's
+# `forProblem`). That block is the app's text, not the reporter's — an F-Droid install's
+# `installed from: fdroid` line would otherwise read as `dist: fdroid` — so it is cut from the keyword
+# match, and the issue is labeled `in-app` instead. The crash reporter's `<!-- knit-crash-report -->`
+# issues are crash-report.yml's to label.
+#
+# Third-party and first-party actions alike are pinned by commit SHA here because this job holds
+# `issues: write` and is triggered by anyone who can open an issue. (ci.yml / release.yml pin by
+# major tag; they run only on maintainer-controlled refs.)
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  label:
+    name: Auto-label
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const issue = context.payload.issue;
+            // GitHub delivers issue bodies with CRLF; normalize before any line-anchored matching.
+            const raw = (issue.body || '').replace(/\r\n?/g, '\n');
+
+            const APP_MARKER = '<!-- knit-app-report -->';
+            const APP_LABEL = 'in-app';
+            const fromApp = raw.includes(APP_MARKER);
+            // The marker, the app's one line under it and its fenced facts block, through the closing fence.
+            const body = fromApp ? raw.replace(/<!-- knit-app-report -->[\s\S]*?```text\n[\s\S]*?\n```/, '') : raw;
+
+            const isFeature =
+              (issue.labels || []).some((l) => l.name === 'enhancement') ||
+              /^\s*\[Feature\]/i.test(issue.title || '') ||
+              /^###\s*Proposed solution\s*$/m.test(body);
+
+            const checked = (re) => new RegExp(`^\\s*[-*]\\s*\\[[xX]\\]\\s.*${re.source}`, 'im').test(body);
+
+            const scrubbed = isFeature
+              ? issue.title || ''
+              : [
+                  issue.title || '',
+                  ...body
+                    .split('\n')
+                    .filter((l) => !/^\s{0,3}#{1,6}\s/.test(l))        // form headings
+                    .filter((l) => !/^\s*[-*]\s*\[\s*\]\s/.test(l)),   // UNCHECKED checkbox boilerplate
+                ].join('\n');
+
+            const RULES = [
+              ['area: wifi-aware', /wi-?fi[\s-]?aware|\bNAN\b|\bNDPs?\b|\bNDIs?\b|\bAware session\b/i],
+              ['area: ble',        /\bBLE\b|bluetooth|\bL2CAP\b|\bGATT\b|\bPSM\b|advertis(e|ing|er)/i],
+              ['area: mesh',       /store[- ]and[- ]forward|custody|convergence|\bCBOR\b|wire format|forward_store|\bhops?\b|reachab/i],
+              ['area: crypto',     /\bcrypto\b|encrypt|\bX25519\b|\bEd25519\b|key exchange|safety number/i],
+              ['area: ui',         /\bUI\b|\bcompose\b|composable|\bscreen\b|\btheme\b|\bcolou?rs?\b|material you|\bmonet\b|wallpaper|dark mode|splash|\bicons?\b|accessib|talkback/i],
+              ['area: build',      /\bgradle\b|\bAGP\b|lockfile|detekt|ktlint|\bJDK\b|compileSdk|\bproguard\b|\bR8\b/i],
+              ['dist: fdroid',     /f-?droid|reproducible build/i],
+              ['dist: play',       /play store|google play|play console|pre-?launch report/i],
+            ];
+
+            const labels = new Set(
+              RULES.filter(([, re]) => re.test(scrubbed)).map(([name]) => name),
+            );
+
+            // The feature form's scope boxes, when the reporter actually ticked one.
+            if (isFeature) {
+              if (checked(/CBOR wire format/) || checked(/custody \/ convergence/)) labels.add('area: mesh');
+              if (checked(/crypto envelope/)) labels.add('area: crypto');
+            }
+
+            // The bug form's "Radios involved" dropdown beats prose. "Both" means both planes.
+            const radios = /^###\s*Radios involved\s*$\n+^(.+)$/m.exec(body);
+            if (radios && radios[1].trim() === 'Both') {
+              labels.add('area: ble');
+              labels.add('area: wifi-aware');
+            }
+
+            if (fromApp) {
+              labels.add(APP_LABEL);
+              // Every other label here has a colour and a description, and `addLabels` on a missing name would
+              // invent one with neither, so make it on first use (crash-report.yml does the same for its own).
+              await github.rest.issues.getLabel({ ...context.repo, name: APP_LABEL }).catch(async (err) => {
+                if (err.status !== 404) throw err;
+                await github.rest.issues.createLabel({
+                  ...context.repo,
+                  name: APP_LABEL,
+                  color: 'bfdadc',
+                  description: 'Filed from the app’s Report a problem, with build and device details filled in',
+                });
+                core.info(`created the ${APP_LABEL} label`);
+              });
+            }
+
+            if (labels.size === 0) {
+              core.info(`no keyword match on #${issue.number}; leaving to manual triage`);
+              return;
+            }
+
+            await github.rest.issues.addLabels({
+              ...context.repo,
+              issue_number: issue.number,
+              labels: [...labels],
+            });
+            core.info(`labeled #${issue.number}: ${[...labels].join(', ')}`);

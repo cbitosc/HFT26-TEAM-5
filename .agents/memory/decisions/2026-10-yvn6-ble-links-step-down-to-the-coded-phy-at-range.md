@@ -1,0 +1,673 @@
+---
+id: "2026-10.yvn6"
+slug: ble-links-step-down-to-the-coded-phy-at-range
+title: "BLE links step down to the Coded PHY at range"
+date: 2026-10-01
+topics: [ble, mesh, power]
+---
+
+# ADR 2026-10.yvn6 — BLE links step down to the Coded PHY at range
+
+Status: Accepted (2026-10-01) as an experiment — built and JVM-tested on `feat/ble-coded-phy`, behind
+`BuildConfig.BLE_CODED_PHY`. A release feature since 2026-10-08 (always AUTO; the mode knob is debug-only), ahead of the walk-apart
+field trial that measures the range it buys and the battery night that measures what it costs. getknit/knit#29.
+
+**What was observed.** #29 asks for the LE Coded PHY (S=8, "long range") so the Bluetooth mesh reaches further
+without a LoRa board. Every Bluetooth path ran on 1M: a legacy presence advert, a legacy scan, links on whatever
+PHY the stack picked. A throwaway APK on the lab phones (2026-10-01, Pixel 7 + Pixel 8, Knit running on both)
+answered what the design hung on:
+
+- **Support is uneven.** The P7 and P8 report `isLeCodedPhySupported`; the Pixel 3 does not.
+- **A Coded advert is heard only by a Coded or all-PHY scan.** A 1M scan saw nothing of it.
+- **A plain `createInsecureL2capChannel(psm)` to a Coded-only sighting connects on Coded** (`readPhy` tx/rx
+  CODED, 0.9–3.2 s). No `connectGatt(PHY_LE_CODED_MASK)` detour is needed to open the link there.
+- **A link's PHY moves in place.** A GATT client attached to the live L2CAP ACL in 13–25 ms, and
+  `setPreferredPhy` switched CODED ↔ 1M ↔ 2M in 5–700 ms, status 0, with the channel streaming through it.
+- **S=8 is honoured, and slow.** On one link at HIGH priority: S=8 ≈ 22 kbps, S=2 ≈ 47, 1M ≈ 70–110, 2M ≈ 120.
+- **A controller without Coded answers nothing.** The Pixel 3 gave no `onPhyUpdate` at all to a Coded request.
+- **The two RSSIs differ.** At one spot the link read −70 while the adverts read in the −90s.
+- At −15 dBm advert power the Coded advert was still heard and the 1M extended one was not — a margin hint, not
+  a range number. Range needs phones that move.
+
+**What changed.** The experiment has one seam, the mode flow the DI hands `BluetoothMeshTransport`
+(`SettingsStore.debugBlePhyMode`, read OFF while the build keeps it dark): OFF (today's plane), AUTO, CODED
+(every capable link pinned to S=8, the walk test's ceiling) and ONE_M (Coded discovery, links pinned to 1M).
+Diagnostics and `…debug.PHY` set it, and the transport applies a change without a restart.
+
+- **Discovery.** A second presence set, `BleAdvertiser.codedParams()`: extended, connectable, Coded on both PHYs
+  (primary advertising on Coded is always S=8), the presence cadence, HIGH power. It carries the presence payload
+  bytes, pushed by the same `readvertise()`, so its PSM cannot lag. The presence scan becomes extended on
+  `PHY_LE_ALL_SUPPORTED` (`BleScanner.allPhys`); `setLegacy(false)` still delivers legacy adverts.
+- **Scoring.** `BlePresenceTracker` keeps one EWMA per PHY and reports the stronger on the 1M scale
+  (`CodedPhyPolicy.effectiveRssi`, Coded + 12 dB), counting a PHY only while it was heard in the peer's latest
+  burst. Every −90 floor (promotion, the scan's boost gate, the lonely dial, held-link eviction) is unchanged and
+  reads the number it always read when the experiment is off.
+- **Dialing.** The rules are untouched. `initiateTo` dials the peer's Coded address only when no 1M advert of it
+  was heard in the last 8 s (`CodedPhyPolicy.dialCoded`); the link then opens on Coded.
+- **Switching.** Each link to a peer heard on Coded gets a `BlePhyControl` (the `BleDoorbell` lifecycle: `isLive`
+  re-checked before `connectGatt`, 2 s attach, closed with the link). The larger node id drives; the other side
+  attaches only to read and report. It reads link RSSI every 5 s (2 s at −75 or weaker) into `PhyStepper`: down to
+  Coded after three smoothed reads at −82 or weaker, back to 1M after 30 s at −72 or stronger, no automatic switch
+  within 20 s of the last, and a request unanswered in 3 s, or answered with another PHY, gives up for that link.
+
+The alternative a reader reaches for first is an advert flag saying "I can do Coded". It isn't needed: hearing a
+peer's Coded advert proves it, which spends no flags-byte bit and needs nothing from the iOS port (CoreBluetooth
+has no Coded PHY, so an iPhone link never gets a PHY handle). Turning the presence advert itself into a Coded one
+is out: it must stay legacy for legacy-only scanners and the 31-byte budget.
+
+**What it costs**, and the traps.
+
+- **Scan time.** An all-PHY scan time-shares its window with Coded, the cost the side scan's 1M pin avoids. The
+  spike saw no measurable loss of 1M sightings, inside its noise. The field trial compares OFF and AUTO.
+- **Advertising sets.** Up to five (presence, two side slots, the watch, Coded). A refused Coded start leaves it
+  dark until the next bring-up (`bt coded advert dark <status>`, `bleCodedAdvertDark`); nothing else depends on it.
+- **Throughput.** A link held on S=8 moves about a fifth of 1M. Blobs still prefer Wi-Fi Aware past
+  `BULK_MIN_BYTES`. A file on a Coded link is fed at its own pace so chat is not queued behind it (the 2026-10-03
+  amendment, #114).
+- **The 12 dB credit and the step thresholds are guesses** sized from one spike. `…debug.PHY` overrides the
+  thresholds on a debug build; the credit is a constant.
+- **Reachable at Coded range.** A peer sighted on Coded counts as nearby (`reachable ⊇ neighbors` holds, since a
+  Coded sighting can dial). If links at that range turn out not to hold, the Coded sighting must stop feeding
+  `reachable` rather than the floor being loosened further.
+- **Never toggled behind the user's back.** A build without `BLE_CODED_PHY` reads OFF and a release build AUTO, whatever is stored; flipping it
+  in release is a product decision with a CHANGELOG line (flipped 2026-10-08, ahead of the trial).
+
+Tests: `CodedPhyPolicyTest` (scoring, dial choice, every step rule), `BlePresenceTrackerTest`,
+`PromotionPolicyTest`. `BlePhyControl` and the Coded set are device-verified only, like `BleDoorbell`.
+
+## Amendment 2026-10-01 — the first walk: a link held, a far peer never came back
+
+**What was observed.** P9 walked 215 m from P7 with both in AUTO. The link stepped to Coded and held, and room
+posts and DMs crossed it well. P9 was then switched to OFF and the link dropped. Back in AUTO it did not re-link
+until P9 was back at about the old 1M range. The 256 KiB log ring had rolled over before anyone read it. P7's
+counters survived: 114 Coded sightings and 4 Coded dials, and P7 is the smaller id, so those were lonely dials.
+Reading the code turned up four causes:
+
+- **The two ends waited on each other.** The responder refused a smaller-id dialer it had sighted at all
+  (`BleAdmissionPolicy`, ADR 2026-09.shzv), on the grounds that it would dial that peer itself. Its own dial,
+  though, needs 12 s of presence at −90 effective. A faint, occasional Coded hit is enough to refuse with and not
+  enough to dial with.
+- **Presence kept restarting.** Any 8 s silence reset the 12 s dwell. A far peer's Coded hits come seconds apart:
+  a 1 s advert, an all-PHY scan that splits its window, and 10% duty with the screen off.
+- **The scan rarely listened on Coded.**
+- **OFF asked the link back to 1M**, and at that range 1M could not hold it.
+
+**What changed.**
+
+- **Admission.** While the experiment runs, a dialer heard on Coded alone counts as unsighted
+  (`CodedPhyPolicy.sightedForAdmission`), so it is admitted whatever the id order, as an iPhone is. "Coded alone"
+  (`codedOnly`) means the peer's last 1M hit trails its last Coded hit by more than 8 s. It is measured as that
+  lag, not the 1M hit's age, because a close peer's two sightings go stale together between scan windows.
+  `dialCoded` now uses the same test. A peer heard on 1M is judged exactly as shzv says, so the Android mesh
+  does not move.
+- **Presence.** A Coded sighting that follows a Coded sighting is continuous across
+  `PresenceConfig.codedGapResetMs` (30 s). Any other pair keeps 8 s, and the 1M path is unchanged byte for byte.
+- **Scan.** `BleScanner.allPhys` became `phys` (`ScanPhys.ONE_M` / `ALL` / `CODED`). While a phone has no link,
+  or an unlinked peer is heard on Coded alone, `CodedPhyPolicy.scanPhys` gives every other window wholly to
+  Coded. It never schedules two in a row, so legacy-only peers are still heard every other window. A Coded-only
+  window does not count as quiet time against an iPhone's GATT payload.
+- **OFF lets the handles go and leaves each link on its PHY.** A link left on Coded stays there until it drops or
+  the mode returns. `codedCapable` survives OFF, so AUTO re-attaches at once.
+- **The record.**
+  - `bt coded heard <id> hits rssi=a..b 1m eff dwell promotable dials backoff` is logged once a minute for each
+    unlinked peer heard on Coded. It is not debug-gated.
+  - `bt scan coded windows on|off` is logged at each edge.
+  - `bt refused client … codedOnly=` is now logged at info level.
+  - `…debug.PHY` reports each PHY's own `rssi1m` / `rssiCoded`.
+  - The 12 dB credit is a tuning field (`PhyTuning.codedCreditDb`, `--ei credit`), read live by the presence
+    tracker.
+  - Raise the log ring (`adb logcat -G 16M`) before a walk.
+- **Diagnostics.** Each directly-connected row whose link has a PHY handle carries a chip for its PHY (`1M` /
+  `2M` / `Coded`, with Coded in the tertiary colour). The transport publishes the map on `CodedPhyDiag.linkPhys`
+  rather than through the `MeshTransport` / `MeshController` seam, which is not worth widening for something dark
+  in release. Plumb it properly if the experiment ships.
+
+**Not done, pending the next walk's numbers:** a faster Coded advert while a far peer is wanted, and any change to
+the 12 dB credit's default. Links reach further than adverts (Android caps advertising at +1 dBm, and a link's own
+transmit power can be higher), so rediscovery is expected to stop short of where a held link drops.
+
+Tests: `CodedPhyPolicyTest` (lag-measured `codedOnly`, admission, scan windows, the Coded gap, the tunable
+credit), `DiagnosticsScreenContentTest` (the chip).
+
+## Amendment 2026-10-01 (2) — the step-up lets the controller pick 2M
+
+A link opens on 1M, the PHY its advert was heard on. The stack then upgrades it to 2M by itself when both ends
+support it; the spike's Pixel 3 link was on 2M by its first read. AUTO's step-up from Coded asked
+`setPreferredPhy` for the 1M mask alone. That preference lasts the link's life, so a link that once visited Coded
+was pinned to 1M for good, even where it would otherwise have run on 2M.
+
+The step-up is now `PhyStepper.Action.REQUEST_FAST`. It passes the 1M and 2M masks together and leaves the pick to
+the controller, and either answer completes the request. Only the pinned `ONE_M` mode still asks for 1M alone,
+since it exists to compare against today's PHY, so a 2M answer to it gives the link up as before.
+
+AUTO never asks for 2M on its own account; a strong 1M link stays where the stack put it. A deliberate 2M step,
+which trades range for airtime, is a separate experiment, and it waits on evidence of a throughput or battery
+problem. Tests: `CodedPhyPolicyTest`'s step-up cases.
+
+## Amendment 2026-10-02 — a link that drops at range comes back faster
+
+**What was observed.** The second walk ran on 2026-10-01 from 23:31 to 00:01, with P9 walking and P7 in the lab.
+
+- The link stepped from 1M to Coded at −82 and held for about two minutes. It then dropped on a supervision timeout
+  (HCI 0x08) at both ends.
+- It took 4m44s to come back. For the first 2m40s P9 heard nothing of P7.
+  - Part of that was P9's scan slowing down 12 s after the drop. That was a clock bug, fixed separately in ADR
+    2026-09.w3xk's 2026-10-02 amendment.
+- After that, P9 heard P7 on Coded alone, at −91 to −95 raw.
+  - Three Coded dials ended at the 12 s watchdog. Each time it was our own create-connection cancel, with no error
+    from the controller.
+  - The fourth reached LE Connection Complete in 7.4 s and linked in 8.6 s.
+- The cause sits on both ends of the dial:
+  - While a direct connect is pending, Android's initiator listens on Coded for 15 ms in every 60 ms (AOSP `le_impl.h`,
+    `kScanWindowCodedFast`). Neither lab phone overrides that.
+  - P7's Coded set went out once a second.
+  - So each 12 s dial got only a few chances at the edge, and each chance needs four Coded packets to land at −91..−95.
+
+The amendment above expected re-acquiring a link to stop short of where a held one drops. This walk confirms it, and
+measures how far short.
+
+**What changed.**
+
+- **A Coded dial gets a 25 s watchdog** (`CodedPhyPolicy.connectTimeoutMs`); a 1M dial keeps 12 s.
+  - 25 s is under the stack's own 30 s direct-connect timeout (`connection_manager.cc`), so the watchdog still ends a
+    stalled dial.
+  - The scan's safety-net wait for a connect in flight grows with it, to 28 s. Each connect's end still wakes the scan.
+- **A drop at range makes the Coded advert fast.** The trigger is a link with a PHY handle that ends on its own (`eof`,
+  not evicted, stopped or lost to the adapter), on Coded or at or below the step-down threshold.
+  - Only the smaller id does it. That is the side the other dials back; the dialer's own advert would not help.
+  - For 3 minutes, or until that peer links again, the Coded set goes out every 250 ms instead of every 1 s
+    (`CodedAdvertPace`, `PhyTuning.fastAdvertMs` / `fastHoldMs`, settable with `--ei` on `…debug.PHY`).
+  - The interval moves in place (`BleAdvertiser.setInterval`): disable, `setAdvertisingParameters` (the stack will not
+    write it to an enabled set), enable. The set keeps its handle and its address, since AOSP's `set_parameters` reuses
+    the set's current one. A stop-and-restart would allocate a new set, and such a start failed with status 4 twice on
+    P7 that night.
+  - The change waits 2.5 s after the drop (ADR 2026-10.9utz's settle), so its disable and enable stay out of the
+    stack's own pause and resume around the disconnection.
+  - While the change runs, `reassert()` does nothing. If the stack has not answered a step 5 s after the change
+    began, the next re-assert turn gives the change up and enables the set, so a lost callback cannot keep it off.
+  - A refused parameter write or disable leaves the set on the air at its old interval, and nothing retries on its own.
+  - Two refused fast enables give the rest of the window up, because a slow advert on the air beats a fast one refused.
+    A 250 ms Coded set costs the controller about four times the 1 s one, and on the walk night P7's controller refused
+    19 enables beside its links.
+- **The Coded set gets retries of its own** (`codedKeeper`, a second `AdvertReassertPolicy.Keeper` with no net). It
+  still rides the presence set's re-assert turns as before.
+  - A refused enable is retried on the doubling wait and logged, where 9utz only logged it.
+  - A start the stack failed internally (status 4) is retried up to five times per bring-up with the current payload.
+    The retries are quiet in the log and the metric.
+  - TOO_MANY_ADVERTISERS and FEATURE_UNSUPPORTED still leave the set dark until the next bring-up.
+- **The record:**
+  - `bt phy <id> link dropped on <PHY> rssi=<link RSSI> (<reason>)` for every link with a handle. This fills the walk's
+    gap: it never logged a link RSSI at the drop.
+  - `bt coded advert fast (<peers>, every <ms>ms)` / `bt coded advert slow`.
+  - `bt coded advert refused <status>, retry in <ms>` / `enabled again (refused for <ms>ms)`.
+  - `bt coded advert interval <units> refused <status>` and `bt coded advert retry <n>/5`.
+  - The `advert` field gains `refused <status>` and `retrying`.
+
+**What it costs.**
+
+- A fast Coded event is about 6.7 ms on air at S=8. At 250 ms that is about 2.7 % transmit airtime, for at most
+  3 minutes per drop at range, on the dialed side only.
+- A Coded dial can now pause the scan for up to 25 s. That only happens for a peer heard on Coded alone, which is a far
+  peer.
+- All of it rides `BLE_CODED_PHY`, like the rest of the feature (on in release since 2026-10-08).
+
+Tests: `CodedAdvertPaceTest` (the window, a relink, two peers, giving up, a fresh try), `CodedPhyPolicyTest` (the drop
+rule, interval units, the watchdog), and `BleAdvertiserTest`. The last covers: the in-place change and its order;
+`reassert` held off during it; a refused parameter write or disable leaving the set on the air; an interval asked for
+mid-start, cold, or mid-change; and `withInterval`. The controller's own answers are device-only.
+
+**The next walk checks:**
+
+- On P7: `bt coded advert fast` about 2.5 s after `bt phy <P9> link dropped on CODED`, and no `fast refused`.
+- On P9: no `bt scan lonely: relaxed` within 3 minutes of the drop.
+- On P9: Coded dials that link in one attempt, or fail at `durMs=25…`.
+- Drop to relink, against 4m44s.
+
+## Amendment 2026-10-02 — both presence sets advertise at HIGH, so the credit means 12 dB
+
+ADR 2026-10.ryak raised the 1M presence advert from MEDIUM (−7 dBm) to HIGH (+1 dBm), the Coded set's power since
+this ADR. The 12 dB credit is a receiver's margin (Coded S=8 hears about 12 dB deeper than 1M), and it holds only
+while both adverts go out at one power. Until now they did not, so a peer heard on both PHYs scored its Coded
+reading + 12, which was its 1M reading + 20. The credit stays 12 dB and now means 12 dB. A Coded-only peer is
+promotable at the same physical range as before (its reading never moved); a 1M peer's reach grew by 8 dB, so the
+1M advert stays fresh further out and `CodedPhyPolicy.dialCoded` picks the 1M address over a slightly wider band,
+leaving the `PhyStepper` to step such a link down by its link RSSI, which no advert power touches. The next walk
+should note where the 1M advert is last heard, against the walks above.
+
+## Amendment 2026-10-02 (3) — Coded alone is measured on 1M listening time
+
+**What was observed.** On 2026-10-02 the P9 and P7 sat about 4 m apart in AUTO. Diagnostics showed their link moving
+between Coded and 2M. From the two logs:
+
+- The P9 made four dials `via=coded` that day, at an effective −57 to −77. Three of those links opened on Coded and
+  stepped up to 2M about 35 s later. One was the P7 link at 19:00:46: the transport had just come back up with no
+  link, so its scan ran Coded-only windows, and it dialed P7 at −59.
+- The `codedOnly` test of the first amendment compared the wall-clock times of the last 1M and Coded hits. A Coded-only
+  window is 12 s with the screen on and hears no 1M advert. Each close peer's Coded hits in it therefore trailed its
+  last 1M hit by more than 8 s before the window ended. The same test fed `dialCoded`, `sightedForAdmission` and the
+  scan's `far` set. It could admit a close smaller-id Android dialer as unsighted, against shzv.
+- A peer first heard in a Coded-only window had no 1M hit at all, and that also counted as Coded alone. A bring-up
+  with no link starts on such a window.
+- One step was the stepper's own. At 19:06:55 the P9 read the link at −82 smoothed and stepped down. Its read cadence
+  shows the link at −75 or weaker for most of 19:05:25 to 19:15:39, while its screen was on and the phone was in use. The P7's
+  end read −72 at the same time. The step-up came at −58 at 19:16:09. The thresholds did what they say. A phone held
+  in a hand reaches −82 across a room, so a step-down at that level does not mean a peer is far away.
+
+**What changed.**
+
+- `BlePresenceTracker` keeps a clock that runs only while a scan window listens on 1M. The scan loop starts it with
+  each window that is not Coded-only (`onOneMListening`) and stops it when the window ends, cancellation included.
+- `Snapshot.codedLagMs` is that clock's reading at the peer's latest Coded hit, minus its reading at the peer's last 1M
+  hit. A peer never heard on 1M is measured from its first Coded hit instead. `CodedPhyPolicy.codedOnly` is
+  `codedLagMs > ONE_M_FRESH_MS` (8 s). It is the old rule with wall time replaced by 1M listening time: Coded kept
+  hearing the peer for 8 s of 1M listening after its last 1M hit. `dialCoded`, `sightedForAdmission` and the `far` set
+  all read it.
+- The clock's reading at each peer's last 1M hit outlives its presence entry, up to 64 peers, least recently used out.
+  With the screen off the scan runs 8 s windows two minutes apart, so presence starts over every window. A peer that
+  walked off from 1M range is still judged by the 1M hit it had while close. `clear()` resets the clock and the marks.
+- A peer first heard on Coded is not Coded alone until an all-PHY window has missed its 1M advert for 8 s. A
+  never-met peer at range is judged later than before. That is the cost of not dialing the phone across the table on
+  Coded.
+- `…debug.PHY` reports `codedLagMs` for each peer.
+
+**Not changed:** the step thresholds. The bench says only that −82 is reachable indoors. Moving the thresholds needs
+the link RSSI along a walk, and the stepper does not log its reads yet.
+
+Tests: `CodedPhyPolicyTest`. It covers a Coded-only window after an all-PHY one, a first hit in a Coded-only window, a
+1M advert an all-PHY window misses, a far peer heard only in Coded-only windows, the mark outliving presence, a quiet
+peer keeping its verdict, and `clear()`.
+
+## Amendment 2026-10-02 (4) — a strong Coded link steps up after 10 s
+
+**What was observed (#113).** On the 2026-10-02 evening walk the P9 carried its link to the P8 out to Coded at 20:13:08
+and back. Wi-Fi Aware discovered the P8 again at 20:22:32. The P9's link-RSSI reads went from every 2 s back to every
+5 s at about 20:23:33, so the smoothed RSSI had climbed past −75. The step-up came at 20:24:13, `CODED→TWO_M rssi=-52`.
+About 60 s of the wait was a link that was still weak. The other 40 s was the 30 s hold and the climb through −75 to
+−72. The hold is the same whether a link reads −71 or −50, and a link on Coded moves about a fifth of what 1M moves.
+
+**What changed.**
+
+- `PhyStepper` steps a Coded link up after either of two holds. The fast hold is 10 s at −62 or stronger
+  (`PhyTuning.stepUpFastDbm` / `stepUpFastHoldMs`). The slow hold is unchanged: 30 s at −72 or stronger.
+- A read that falls under −62 but stays at or over −72 ends the fast hold. The slow hold keeps running from where it
+  started; it does not restart.
+- `minSwitchGapMs` (20 s) still bounds every automatic step, the fast one included.
+- The stepper decides once per read, every 5 s above −75, so the fast hold is met on the third strong read.
+- `…debug.PHY` sets the new fields with `--ei stepUpFast N` and `--ei stepUpFastHoldMs N`. The reply's `tuning` shows
+  them.
+- A Coded link logs `bt phy <id> step-up hold none|slow|fast (rssi=…)` when its smoothed RSSI moves between the bands.
+  This is the first record of link RSSI along a walk. The amendment before this one noted the stepper did not log its
+  reads.
+
+**Why the −72 to −62 band keeps 30 s.** The 30 s hold and the 10 dB of hysteresis over the −82 step-down are what keep
+a link hovering just over −72 from flapping. A link at −62 has 20 dB of margin over the step-down, so a short hold
+there costs nothing.
+
+**Not taken.** A shorter hold for every reading would remove the guard sized for the hovering band. Stepping up on a
+strong 1M advert would need its own threshold: advert RSSI reads about 20 dB apart from link RSSI, and an advert says
+nothing about the link's own margin.
+
+Tests: `CodedPhyPolicyTest`, which covers the fast hold, the slow band waiting 30 s, a dip under −62 falling back to
+the slow hold, the fast tier inside the minimum gap, and the band each read reports. A walk back into range is still
+owed. It should measure the time from `step-up hold fast` to `CODED→`, against the 40 s above.
+
+## Amendment 2026-10-03 — a file on a Coded link is fed at Coded's pace
+
+**What was observed (#114).** On the 2026-10-02 walk the P9 served a 203,807 B photo to the P8 over a link on Coded
+since 20:13:08, read at −75 or weaker. The P9 logged `file ATTACHMENT/3af731f5… 203807B in 7110ms`: the whole file
+reached the stack at `BLE_PACE_BYTES_PER_SEC`, 28 KiB/s. The P8's side scan saw the stream from 20:18:06 to 20:21:00,
+and it served the photo onward at 20:21:15. The link drained about 1.1 KB/s, so the photo took about 3 min to cross,
+and a message sent after it waited behind it in the stack's queue. The pace keeps that queue shallow only while it
+sits under what the air drains, and 28 KiB/s is sized for 1M and 2M.
+
+**What changed.**
+
+- `FramedLink` reads its pace (`PaceConfig`: a rate and a chunk size) before every chunk, from a supplier the
+  transport passes. Wi-Fi Aware passes none and stays unbounded.
+- `CodedPhyPolicy.pace` gives a link last read on Coded 1 KiB/s in 2 KiB chunks (`PhyTuning.codedPaceBytesPerSec` /
+  `codedChunkBytes`). Any other PHY, or a link not yet read, keeps 28 KiB/s in 16 KiB chunks. A frame queued
+  mid-file now waits about one 2 KiB chunk on the feed side.
+- A pace that changes mid-file restarts the pace's clock and byte count (`PaceWindow`). An average since the file
+  began would owe nothing for seconds after a step down, while the slower air backed up, and would hold the feed
+  after a step up to pay off the slow stretch.
+- The transport keeps the PHY each link was last read on past its handle (`linkPhy`). Mode OFF lets the handles go
+  and leaves a Coded link on Coded, so its files keep Coded's pace.
+- `…debug.PHY` sets the two fields with `--ei codedPace N` and `--ei codedChunk N`, and the `file … in …ms` line
+  carries the pace it ended on (`@1024`).
+
+Nothing changes on the wire: a receiver takes any record up to `MAX_PAYLOAD_BYTES`, and the chunk size was never
+part of the contract.
+
+**What it costs.** At the edge a photo takes about as long as before, since the air is the bottleneck. On a Coded
+link at closer range, where S=8 drains faster than 1 KiB/s, a photo is two to three times slower.
+
+**Not taken.**
+
+- Never starting a file on a Coded link, and letting the receiver ask again once the link steps up or Wi-Fi Aware
+  links (ADR 2026-09.4tx5's fresh ask). Chat would stay live, but a photo would never cross at Coded range.
+- Pacing by the link's smoothed RSSI. It would adapt to the edge, but no RSSI-to-throughput curve has been measured,
+  and the guesses would sit in a hot path.
+- Receiver flow control (windowed chunk acks in `LinkFraming`). It bounds the queue on every PHY, but it is a wire
+  change both platforms must speak.
+
+Tests: `TransferPacePolicyTest` (the Coded rate, and the window restarting on a change, both ways),
+`CodedPhyPolicyTest` (`pace` per PHY, tunable, chunk capped), and `FramedLinkTest` (a frame queued mid-file behind
+2 KiB chunks waits a chunk, not the file; a pace change takes the next chunk). A desk trial is owed: `mode coded`, a
+~200 KB image then a text, the text's arrival timed on the receiver against the same run in `auto`. A walk at the
+edge is owed after it.
+
+The 1M/2M side of this pace moved to ADR 2026-10.8jwn (#117): one 4 KiB/s budget split among the links on 1M or 2M
+feeding a file at once, in chunks of two seconds of the share. A link on Coded keeps the pace above, outside the
+split.
+
+## Amendment 2026-10-04 — the dialing side hunts a peer it lost at range, and harder while Knit is in use
+
+**What was observed.** On the 2026-10-04 walk the P9 and the iPhone 12 stayed together and the P8 was left on its own,
+about 100 m out. All three ran main @47485429 in AUTO. Logs: `~/knit-trials/2026-10-04-field-coded-lora/`.
+
+- The P9↔P8 link stepped 1M→Coded at −89 (16:15:27) and dropped on a supervision timeout at 16:17:23. The P8 dialed
+  back on Coded at 16:24:01, and that link dropped the same way at 16:30:20. BQR "Approaching LSTO" read −100/−103 dBm
+  and −106 dBm, with the P9 transmitting at +17 dBm. Both drops were the RF floor, not code.
+- Both relinks took about 6 minutes, and both were the P8's lonely dial (hj4a). The P9 is the larger id, the side
+  that dials back, and it never heard the P8 again: its `reach` lacked it for the whole of both gaps.
+- The P9 held a link to the iPhone the whole walk. With one link and no sighted candidate, its scan sat at the settled
+  floor, one window per 120 s. Coded-only windows run only when a phone is alone or already hears a peer on Coded
+  alone, so they never came on. Wi-Fi Aware discovered the P8 at range twice (chase boosts at 16:22:42 and 16:33:17),
+  but a boost is an all-PHY scan, and it ended at the floor again 80 s later.
+- The 2026-10-02 amendment made the dialed side (the P8) advertise fast after a drop, but nothing made the dialing side
+  listen for it.
+- Walking back toward the P8 at 16:35, the P9's side-channel scanner heard a P8 page at 16:35:33, so the P8 was within
+  1M range. The link still waited for the P8's dial at 16:36:08 and stepped to 2M at −60 a minute later.
+
+**What changed.**
+
+- **The dialing side hunts.** `CodedPhyPolicy.huntAfterDrop` is `fastAdvertAfterDrop`'s twin: the same drop at range
+  (`eof`, on Coded or at or under the step-down), on the side that `drives`. The transport holds the peer in `RangeHunt`
+  until it links again or its hold runs out.
+- **What a hunt is** (`CodedPhyPolicy.hunts`):
+  - the 12 s lonely gap (`PowerPolicy.HUNT_IDLE_MS`) on the elapsed clock (pj9w);
+  - every other window Coded-only (`scanPhys`' new `farWanted`);
+  - never the settled floor;
+  - a window that ends when a dial begins (`dialStarted`, sent from `beginConnect`). The hunted peer's dwell ripens
+    inside a hunting window, and a scan left running through a Coded dial takes the radio from the initiator's 15 ms
+    in 60. The cut window keeps its slot (`nextWindowAt`): the next one starts no sooner than the cut one would have
+    ended, so windows still start at least 8 s apart and the app stays under Android's five scan starts per 30 s
+    however fast dials begin and end. Every other window still runs its length, as pj9w describes;
+  - all of it whatever other links the phone holds;
+  - except under Bluetooth audio: A2DP keeps the scan at its floor, a hunt included, as it does everywhere else. The
+    lost peer stays held, so the hunt resumes when the audio stops, inside its hold.
+  The window length and scan mode still follow the screen.
+- **Knit in use hunts harder and longer.** "In use" is Knit's UI on screen (`AppVisibility`: any Knit activity started,
+  as `ProcessLifecycleOwner` counts them) with the screen lit. `MainActivity`'s own `onStart` and `onStop` set it at
+  first, and read false on a lit screen whenever a new instance replaced an old one, because the old one's stop lands
+  after the new one's start (#170).
+  - A phone in that state hunts with nobody lost.
+  - A lost peer stays hunted for up to `PhyTuning.huntInUseHoldMs` (30 min) from the drop, not `fastHoldMs` (3 min).
+  - `RangeHunt` keeps the drop time, not a deadline. Opening Knit two minutes after a drop picks the hunt up, and
+    closing it ten minutes in ends the hunt at the next window.
+  - A drop older than the longer hold is forgotten.
+  - `AppVisibility` is its own flow rather than a `PowerState` field, because the Wi-Fi Aware transport heals on every
+    `PowerState` change and opening the app is no reason to re-arm NAN.
+- **A NAN chase gets Coded-only windows too**, for a chased peer this phone has heard on Coded before (`codedCapable`):
+  one that 1M cannot hear may be one only Coded can (`ScanDemandPolicy.chasing`, split out of `decide`). Any other
+  chased peer gets none: a chase usually buys one woken window, and a Coded-only one is deaf to a Pixel 3, a release
+  build or a phone in mode OFF.
+- **The record.**
+  - `bt hunt <id>: lost at range, for <ms>ms or <ms>ms in use` at the drop.
+  - `bt scan → hunt (lost=[…] inUse=…)` each time the verdict or its reason changes, `bt scan hunt held (… a2dp)`
+    while audio holds it off, and `bt scan hunt over`.
+  - `bt scan coded windows on (hunt|chase=[…])`.
+  - `hunt=` on the `bt state` line.
+  - `…debug.PHY` reports `hunting` and `hunted` and sets `--ei huntInUseHoldMs`.
+
+**What it costs.** It all rides `BLE_CODED_PHY`, like the rest of the feature (on in release since 2026-10-08).
+
+- A pocket phone pays for at most 3 minutes per drop at range, at the same cadence a lonely phone runs in its first
+  three minutes.
+- A phone with Knit open on a lit screen scans 12 s on and 12 s off for as long as it stays open, about 12 % receiver
+  duty at BALANCED, half of it on Coded. That overrides w3xk's relaxed screen-on gap for a lonely phone, and the floor
+  and duty-cycle gaps for a linked one. The display costs more than that, and the person is looking at Knit.
+- Coded-only windows halve the 1M listening while a hunt runs. Legacy-only peers are still heard every other window.
+  A Coded-capable peer coming back close can still read Coded alone for a while: its 1M mark is the one from its last
+  visit, and the 1M clock ran on while it was away. Heard first in a Coded-only window, its dial can go out on Coded
+  and the link step up to 2M about 10 s later at −62 (the fast hold). That was already so for a phone alone; a hunt
+  makes it likelier. `dialTarget` also falls back to the peer's last 1M address when its Coded one is unknown, which
+  is not pruned. Both are left alone here.
+- The in-use hunt scans about half the time on a phone that may be feeding a file. The 4 KiB/s budget of ADR
+  2026-10.8jwn was measured at the old cadence, so whether a 1M link's drain holds under the hunt is unmeasured. The
+  bench below measures it; if it does not hold, the nobody-lost hunt yields while a file streams.
+
+**Not taken.**
+
+- Hunting on the dialed side as well. It does not dial a sighted larger id (shzv), and its fast advert is the half
+  that helps.
+- Feeding side-channel pages into presence. A page names its frame's author, not the phone that aired it.
+- An app-in-use hunt in release on 1M alone. It would change the shipped plane's battery, so it waits until the
+  experiment ships or is split out.
+
+Tests: `RangeHuntTest` (the pocket hold, the in-use bound, an open picking up an ended hunt, forgetting, a relink, a
+second drop, `clear`), `CodedPhyPolicyTest` (`huntAfterDrop`, `hunts`, `scanPhys` with `farWanted`),
+`ScanDemandPolicyTest` (`chasing`), and `PowerPolicyTest` (`HUNT_IDLE_MS`).
+
+**The next walk checks:**
+
+- With the iPhone linked: on the P9, `bt hunt <P8>` at `link dropped on CODED`, then `bt scan → hunt (lost=[<P8>] …)` by
+  the end of the window running at the drop (up to 12 s), and `bt scan coded windows on (hunt)` if they were off.
+- The P9's own dial `via=coded`, linked before the P8's lonely dial (against about 6 minutes), in a pocket and again
+  walking back with Knit open, where it should link before 1M range.
+- `bt coded heard` tallies during a screen-off hunt, to see whether its LOW_POWER Coded windows hear the 250 ms advert.
+- One leg with earbuds streaming: `bt scan hunt held (lost=[…] … a2dp)` by the window after the drop, and no audible dropouts. (The floor
+  line will not show: `floorScan` logs a change of tier, and the phone was already at the floor.)
+- Walking Knit open into three or more smaller-id peers at once: no `scan failed: 6` from `BleScanner`, and no
+  `via=coded` dial to a peer reading −70 or stronger.
+- A chase bench: a dialer in AUTO holding a link, a Pixel 3 or a phone in mode OFF returning. It must relink within a
+  window of the chase, as before this change.
+- An in-use bench: Knit open, a ~700 KB photo to a linked peer, texts at +5/+15/+30 s. The receiver's drain stays at or
+  over 4.8 KB/s and the texts arrive inside 8jwn's bound. Note `hunt=` in every `ble-link-trial` rep: a lab phone with
+  Knit in front and its screen lit now hunts the whole time.
+
+## Amendment 2026-10-08 — a Coded file to a peer that reports is clocked by its reports
+
+The walk trial this ADR's #114 amendment waited on has run, so a file on a Coded link to an Android peer carrying
+`CAP_BLOB_HAVE` is now fed by ADR 2026-10.5buf's window, as on 1M and 2M, in smaller chunks (1 KiB,
+`PhyTuning.codedWindowChunkBytes`); the measured drain sets its rate instead of the fixed 1 KiB/s, which stays the
+fallback for a silent receiver and the feed of an iPhone or an older build. A PHY step now forgets the window's drain
+as well as its round trip. The reasoning, the simulation and the owed desk and walk checks are 5buf's amendment of
+2026-10-08 (2).
+
+## Amendment 2026-10-10 — a fallback to the Coded address is a Coded dial (#148)
+
+`DialPlan.target` falls back to a peer's Coded address when its 1M one is unknown (a peer first heard in a Coded-only
+window, before its lag ripens), and a plain connect there opens on Coded. It returned the requested flag, so that dial
+got the 12 s 1M watchdog, went uncounted and logged `via=1m`. The flag now names the address returned: the fallback is
+a Coded dial, with `CodedPhyPolicy.CODED_CONNECT_TIMEOUT_MS`, `onBleCodedDial` and `via=coded`. The addresses chosen
+are unchanged. The 2026-10-04 amendment's note has the fallback the wrong way round: a dial that asks for Coded never
+falls back to the 1M address (`DialPlanTest`); a dial that asks for 1M falls back to the Coded one.
+
+What it costs: the 2026-10-02 cost line no longer holds as written. A 25 s scan pause now also covers a peer not
+yet heard on 1M, which may be close (a hunt's Coded-only windows make that likelier). The extra blind time is 13 s and
+only on a fallback dial that fails; a close peer's Coded connect lands fast and steps up through the fast hold. In the
+few seconds after the experiment is switched off, a running Coded window can still refill `codedDeviceFor`, so a
+fallback dial there counts in `onBleCodedDial` with no `via=`. It is left counted: that dial does go to a Coded address
+and opens on Coded. Test: `DialPlanTest`.
+
+## Amendment 2026-10-14 — a link that flaps backs off its step-up, never its step-down (#169)
+
+Status: draft, pending review and the device trial below.
+
+**What was observed (#169).** A field log from an external user's Xiaomi (MT6769, Android 15, 2.9.0-alpha.0) covers
+43 h of one side of a link; the peer drove its PHY. It holds 27 step-downs and 22 step-ups, in bursts: 14 steps in
+33 min, 6 in 15 min, 9 in 75 min. Two step-downs came 21–22 s after a step-up. That is `minSwitchGapMs` (20 s) plus
+one 2 s edge read: `weakReads` keeps counting during the gap, so the step-down fires as soon as the gap runs out.
+
+The two ends did not read the link 20 dB apart. This side's `bt_phy` RSSI lags (5 s reads above −75, an EWMA at
+α 0.5), and its own `bt_link` samples read −83 to −98 shortly after the driver's "strong" step-downs. One step-down
+at −67 read −93 nine seconds later, and the link was lost 18 s after the step. The driver's reads were early, not
+wrong: the link really dipped. Tripping three weak smoothed reads takes roughly 10 s at about −90, and dips of 6–8 s
+to −95 do not trip the rule.
+
+Some step-downs in those bursts were the start of a real walk-away that lost the link within minutes. At the edge a
+late step-down costs the link. A late step-up costs throughput and airtime, never the link: S=8 moves about a fifth of
+1M. So the fix backs off the step-up alone, and the step-down is never later than three weak reads and the 20 s gap.
+
+**What changed.**
+
+- A **reversal** is a step-down to Coded that lands less than `PhyTuning.flapWindowMs` (5 min) after the link's last
+  step-up. Both edges are taken from the controller's reports (`PhyStepper.onPhy`), not from the requests.
+- Each reversal doubles `PhyStepper.stepUpBackoffMs`, the least time the link must spend on Coded since that step-down
+  before AUTO may step up. It starts at the minimum gap (20 s), so a link that has not flapped steps exactly as
+  before. It then goes 40 s, 80 s, 160 s, and stops at `PhyTuning.stepUpBackoffMaxMs` (5 min).
+- A step-down a whole window after the last step-up (the link stayed fast a while) resets the backoff to 20 s.
+- The step-up holds are unchanged (30 s at −72, 10 s at −62) and may run during the backoff, so a link that is
+  plainly back in range steps up on the first read once the backoff has run.
+- Step-downs, the `coded` / `1m` modes, the request timeout and give-up, and the read cadence are untouched.
+- The backoff belongs to one link's stepper, so a relink starts at 20 s. A link that opened on Coded has no backoff.
+- `BlePhyControl` logs `bt phy <id> reversal <n>: step-up backoff <s>s (drives=…)` on each reversal, and
+  `bt phy <id> step-up backoff reset to 20s (drives=…)` when a fast stretch resets it, in whole seconds so a script
+  can parse them. The watching side logs the same lines with `drives=false`, from the PHY updates it is sent, so a
+  trial counts one side. No field event was added.
+- `…debug.PHY` sets the new fields with `--ei flapWindowMs N` and `--ei stepUpBackoffMaxMs N`, and the reply's `tuning`
+  shows them.
+
+The modelled series is a link at −58 that dips to −90 for 10 s every 2 min, with reads at the stepper's own cadence and
+one decision per read. Today's rule takes 16 steps in 30 min and 30 in an hour. With the backoff it takes 11 and 19.
+Every other dip trips the rule, and a link held on Coded for 5 min sits out the trip between. At the cap a cycle lasts
+at least 5 min on Coded plus 20 s on 1M/2M, so at most 2 steps per 5 min 20 s. The minimum gap alone allowed 2 steps
+per 40 s.
+
+**Not taken.**
+
+- *Doubling `minSwitchGapMs` both ways*, the issue's first option. It delays the step-down that begins a walk-away, and
+  at the edge that costs the link.
+- *Multiplying the step-up holds.* A 5 min hold has to be contiguous, and a link that dips every 2 min never meets
+  one, so it would stay on Coded for as long as it flaps. A minimum time on Coded bounds the cycle rate and still lets
+  the link back up.
+- *A faster or less smoothed `bt_phy` reading on the watching side.* The driver's reads were early, not wrong. A
+  steadier record would not have changed the steps.
+
+**What it costs.** A link that flapped and then settled in range waits up to 5 min on Coded before stepping up, at
+about a fifth of 1M's throughput. Each byte also holds the air about 8× as long as on 1M. That air is shared with
+the scanner, the phone's other LE links and Wi-Fi coexistence, so the wait costs radio-on time and contention too.
+That cost is unmeasured on these phones, and no link is lost by it. The flap window sets what counts as a flap. A link whose fast stretches last longer
+than 5 min resets each time, so it can still step twice per stretch. The field bursts had shorter stretches. A flap
+that runs through relinks also starts over each time.
+
+Tests: `PhyStepUpBackoffTest` covers the dip series, a single walk-away and return stepping as today, a second walk-away
+whose step-down is not delayed, the backoff doubling to its cap and resetting, a link that opened on Coded, and the
+pinned modes. **Device trial owed:** two Coded-capable lab phones in AUTO for at least 20 min: about 15 min of swinging,
+then the walk-away, since the 300s level first appears around minute 7. Hold the driver (the larger id) in a hand swung
+between body-blocked and clear, with its screen off for part of the run. Count on the driver's logcat only
+(`drives=true`): its `bt phy <id> …→…` lines and its `bt phy <id> reversal <n>: step-up backoff <s>s (drives=true)`
+lines. The trial passes if the reversals' backoffs climb 40s, 80s, 160s, 300s, each `CODED→` step-up after a reversal
+comes no sooner than its backoff after the step-down before it, and from the fourth reversal on the link steps at most
+twice in any 5 min 20 s. A walk-away at the end of the trial must still step down on today's rule: three weak reads,
+never inside 20 s of the last step.
+
+## Amendment 2026-10-20 — a weak 1M hit is no evidence against Coded alone, and a cold far sighting is hunted
+
+Status: draft, pending review and the walk trial below.
+
+**What was observed.** On Coded a link that opened close holds well past the distance at which a fresh one opens. Two
+of the causes are Knit's own rules:
+
+- **At the edge, the dial went out on 1M.** `codedOnly` needs 8 s of 1M listening with no 1M hit (the 2026-10-02 (3)
+  amendment). A peer whose faint 1M advert still got through now and then reset that clock on every hit and never
+  qualified, so `DialPlan.target` dialed its 1M address. The dial failed and the peer went into backoff, though Coded
+  heard it fine.
+- **A first meeting at range got no help.** The hunt and the fast Coded advert started only from a drop at range
+  (`notePhyDrop`), or while Knit was open on a lit screen. A far peer heard for the first time got the settled cadence
+  (on a screen-off phone, 8 s windows minutes apart) and a 1 s Coded advert.
+
+**What changed.**
+
+- **The weak-1M rule.** `BlePresenceTracker` moves a peer's 1M mark only on a 1M hit whose smoothed 1M reading, that
+  hit included, is at or above `PhyTuning.oneMWeakDbm`. The reading is raw, on the 1M scale, with no credit: the
+  presence advert at `TX_POWER_HIGH` (ryak). A weaker hit only seeds a missing mark, as a Coded first hit does. So a
+  peer heard on 1M only weakly ripens `codedLagMs` at the same rate as one never heard on 1M. The default is the
+  promotion floor (`PromotionConfig.DEFAULT_RSSI_FLOOR_DBM`, −90). That is a guess, not a measured 1M dial limit, and
+  the walk sizes it. A close peer's strong 1M hits reset the mark as before, so the 2026-10-02 bench case is unchanged
+  (`BlePresenceTrackerTest`). `ONE_M_FRESH_MS` stays 8 s.
+- **What moves with it.** Every reader of `codedOnly`:
+  - `dialCoded`: a weak-1M peer is dialed at its Coded address, `via=coded`. That is the fix.
+  - `sightedForAdmission`: a weak-1M dialer counts as unsighted while the experiment runs, so it is admitted whatever
+    the id order. That is the far-pair deadlock fix of the 2026-10-01 amendment, now reached sooner. No admission code
+    changed. A linked dialer that is weak on 1M now redials into the unsighted rows: its second link replaces the
+    held one once that is 30 s old (`REPLACE_MIN_HOLD_MS`), where before it was refused (`BleAdmissionPolicyTest`).
+  - `ScanPlan.far`: more Coded-only windows while a weak-1M peer is unlinked. It stays bounded, since `far` excludes
+    linked peers.
+  - `ScanPlan.near` moves at the boundary. A peer with a weak smoothed 1M reading but a fresh raw Coded reading at
+    −90 or better used to be near, and once it ripens Coded-only it is not. That is the conservative way for Wi-Fi
+    Aware's Tier-2 corroboration (ADR 2026-09.9dnk): one fewer peer vouches for the radio, never one more
+    (`ScanPlanTest`).
+- **A cold far sighting is treated as a drop at range, bounded.** After each presence window
+  (`BluetoothMeshTransport.noteColdSightings`), every unlinked peer in `ScanPlan.far` is judged by
+  `CodedPhyPolicy.coldHunt`, on the same two sides as a drop:
+  - **The side that dials** (`drives`, the larger id) gets `HUNT`. `RangeHunt.onCold` holds the peer for the hold
+    granted, never `huntInUseHoldMs`, since a lit, in-use Knit already hunts on its own. The hunt is the one the
+    2026-10-04 amendment built: the 12 s hunting gap on the elapsed clock, Coded windows, no settled floor, a dial ends
+    the window, and A2DP still floors it. The gap after the window that began the hunt is judged again, so a
+    screen-off phone does not sit out its settled gap before the hunt's first window.
+  - **The dialed side** (the smaller id) gets `FAST_ADVERT`. `CodedAdvertPace.onDrop` holds it fast for the grant,
+    2.5 s after the decision (`AdvertReassertPolicy.SETTLE_MS`), and never replaces a pace change already pending,
+    which reads the new hold when it runs. The refusal give-up applies as for a drop.
+- **The gates** (`coldHunt`, pure): the experiment runs; `PhyTuning.coldHunt` is set; the low-power posture is off
+  (ADR 2026-10.d44b, the seam `lowPower` reading `LowPowerSource.current`); the peer is not linked or dialed, not
+  already hunted or wanted back, not in connect backoff; and its smoothed RSSI on the 1M scale is at or above −90, the
+  floor below which neither the ordinary dial nor the lonely dial would dial it. A hunt also needs the promotion that
+  would dial the peer to have room for it (`DialPlan.promotes`): the connect loop's own `PromotionPolicy.decide` over
+  the links it scores, the debug cap included, with only the dwell taken as ripe — a free slot under `maxLinks`, or
+  the peer beats the weakest evictable link by `rssiHysteresisDb`. At the budget behind stronger links, a hunt's
+  windows would ripen a dwell into nothing.
+- **The bounds** (`ColdSightings`, pure; `tryStart` is the last gate, so nothing is spent on an action not taken):
+  - per peer, at most one cold hunt or fast window per `PhyTuning.coldHuntCooldownMs` (30 min), in a 64-entry LRU;
+  - at most one cold hunt and one cold fast window running at a time, phone-wide;
+  - a phone-wide budget per kind, each its own: `fastHoldMs` (3 min) of cold hunting and, separately, 3 min of cold
+    fast Coded advert per cooldown window. A phone with a larger far neighbour to dial and a smaller one that dials it
+    can spend both. A spell that ended early (the peer linked, backed off or left presence) spends only the time it
+    ran, and a grant is the budget of its kind left, never under `ColdSightings.MIN_GRANT_MS` (24 s, one hunting window
+    and its gap).
+  - A cold hunt ends at the next scan window once its peer has linked, entered connect backoff or left presence, or
+    the switch or low power turns it off (`ColdSightings.endReason`): `bt hunt <id>: cold hunt over
+    (linked|backoff|gone|off)`. The `linked` end, and a re-check of the links right after a cold hold is set, cover a
+    link-up on the link's own thread (an inbound accept) landing between the scan loop's read of the links and the
+    hold's start; such a hold is undone at once and its spell ended. A drop's hunt keeps its current behaviour.
+- **One-sided triggers.** Each phone acts on what it hears. A pair where only the larger id hears the other cold hunts
+  a slow advert; where only the smaller does, it advertises fast for a dialer that may not be listening on Coded yet.
+  Neither half waits on the other, and each helps alone. The trial has a one-way leg.
+- **The record.** `bt hunt <id>: cold sighting on Coded, for <ms>ms (rssi=…)` on the dialing side (the `bt hunt <id>:`
+  prefix kept), `bt coded advert fast (cold <id>, for <ms>ms rssi=…)` on the dialed side, then the existing
+  `bt scan → hunt (…)` and `bt coded advert fast (…)` edges. `…debug.PHY --ei oneMWeak N` (−200 restores the old rule)
+  and `--ez coldHunt false` set the two knobs for the A/B, and the reply's `tuning` echoes them.
+
+**What it costs.** It rides `BLE_CODED_PHY`, like the rest of the feature. A parked neighbour heard through a wall at
+or above the floor costs at most 3 min of hunting (or of a 250 ms Coded advert) per 30 min. Each kind has its own
+budget, so one phone may spend up to 3 min of cold hunting and 3 min of cold fast Coded advert per 30 min, for a larger
+and a smaller far neighbour, and a crowd of them no more than that. A Coded dial to a weak-1M peer gets the 25 s watchdog, where a failing 1M dial got 12 s; the
+scan pauses for it the longer time. A link that opens on Coded at moderate range steps up through `PhyStepper` as today
+(−72 held 30 s); the trial watches for flapping near −82 / −72.
+
+**Not taken.**
+
+- *A shorter `ONE_M_FRESH_MS`.* It would make a close peer Coded-only sooner too, the bench regression.
+- *Hunting cold sightings under the promotion floor.* Neither dial path dials there, so the windows would buy nothing.
+- *A per-peer hold without the phone-wide budget.* A pocket among several parked neighbours would hunt back to back.
+
+Tests: `BlePresenceTrackerTest` (weak hits ripen the lag, a strong one resets it, the knob restores the old rule, the
+alternating-window bench never goes Coded-only), `CodedPhyPolicyTest` (`coldHunt`: id order, floor, room, linked,
+held, backoff, the switch and low power), `ColdSightingsTest` (cooldown, one at a time, the budget and its sliding
+window, the least grant, the LRU, `clear`, `endReason`), `RangeHuntTest` (a cold hold ignores the in-use bound, a drop keeps it,
+`cancelCold`), `ScanPlanTest` (a weak-1M peer is far and not near), `DialPlanTest` (it is dialed `via=coded`;
+`promotes`), `BleAdmissionPolicyTest` (a weak-1M linked dialer replaces after 30 s).
+
+**The walk trial owed** (`scripts/ble-link-trial.py` plus a walk, two lab phones in AUTO):
+
+- Start the phones apart, at a distance where a carried link still holds but a cold one does not open today. A/B
+  `…debug.PHY --ez coldHunt false --ei oneMWeak -200` (today's behaviour) against the defaults. Measure the time to
+  `bt initiating to … via=coded` and to link-up, and count `via=1m` dials that fail at the edge.
+- A one-way leg: the larger id screen-off in a pocket, the smaller id moving in; then the roles swapped. Each side's
+  cold line (`bt hunt <id>: cold sighting…` or `bt coded advert fast (cold <id>…`) by the end of the window that heard
+  the other.
+- A bench check, the phones a metre apart: links still open on 1M (no `via=coded`), and no cold line.
+- The parked-peer cost: 30 min with a peer parked just under the floor (`bt coded heard … eff=` under −90): no cold
+  line at all. Then parked just over it, where its dials fail: at most one cold line per peer per 30 min, each hunt
+  ending at its first backoff (`cold hunt over (backoff)`), and no more than 3 min of cold `bt scan → hunt` in any 30.

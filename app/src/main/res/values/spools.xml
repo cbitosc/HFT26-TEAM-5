@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Default spools for the Internet-relay plane (docs/SPOOL_PROTOCOL.md).
+
+  Seeded into the user's spool list ONCE, on first run (SettingsStore.seedDefaultSpools), behind a
+  marker so that removing an entry sticks — a default the app keeps re-adding would not be a default,
+  it would be a policy. Editing this list only affects installs that have never seeded.
+
+  Seeding a URL is NOT the same as using it: the plane is off unless the user turns it on
+  (SettingsStore.spoolEnabled defaults false), so a fresh install still opens no socket.
+
+  Entries must be `wss://` — release builds refuse any other scheme at dial time, and a spool sees
+  subscriber IPs, so plaintext would leak the scope ids that identify a conversation's era on the wire.
+-->
+<resources>
+    <string-array name="default_spools" translatable="false">
+        <item>wss://public-1.spool.getknit.app/spool/v1</item>
+    </string-array>
+    <!--
+      Free issuers (docs/VOICE_CALLS.md C-7.6-33): `<relay host> <issuer origin>`, the one place a free account may be
+      made for that relay's uploads, after the person allows it (C-7.6-34). Only the seeded relay has one, under both
+      of its names while both answer (ADR 2026-10.qpja): a phone that has not yet moved its settings off `lax` still
+      looks the issuer up by it. Drop the `lax` line when `lax` is retired. A debug build sets its own for any host
+      through `…debug.SPOOL` (.agents/context/debug-bridge.md).
+    -->
+    <string-array name="free_issuers" translatable="false">
+        <item>public-1.spool.getknit.app https://anywhere.getknit.app</item>
+        <item>lax.spool.getknit.app https://anywhere.getknit.app</item>
+    </string-array>
+    <!--
+      The `am` a free ticket from each free issuer is expected to carry: `<issuer origin> <bytes>`. Only sizes the photo
+      a phone sends before it has ever held a ticket there (data/relay/FreeUploads); the ticket's own `am` wins after.
+      The issuer's operator can change the real value without a release, so this is a starting guess, never a limit.
+    -->
+    <string-array name="free_issuer_am" translatable="false">
+        <item>https://anywhere.getknit.app 262144</item>
+    </string-array>
+</resources>
