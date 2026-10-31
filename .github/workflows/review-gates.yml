@@ -1,0 +1,68 @@
+name: Review gates
+
+# The reviewer personas' checks for a contributor's pull request: the first half of the review gates a maintainer's
+# Claude Code session runs through its Stop hook (.claude/hooks/review-gate.sh). The second half, the reviewers
+# themselves, is review-gates-report.yml, which starts when this run completes.
+#
+# TRIGGER: a maintainer applies the `review-gates` label to a pull request, after reading the diff. Applying it
+# again re-runs both halves; the report removes the label when it is done. No other event runs this, so a stranger's
+# pull request never spends the Claude token on its own, the same cost ceiling claude.yml keeps.
+#
+# WHY TWO WORKFLOWS: this half builds and tests the pull request's code (scripts/review-checks.sh: the touched
+# classes' tests, the chaos sweep, the stress, the regression check against the merge base), so it runs as
+# `pull_request` with a read-only token and no secrets, as ci.yml does. The report runs as `workflow_run`, which holds
+# the Claude token, and never executes anything from the pull request. Its only input from here is the uploaded
+# `review-checks` artifact, which it treats as untrusted data.
+#
+# A fork's pull request from a first-time contributor still waits for "Approve and run" before this starts.
+
+on:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: review-gates-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Reviewers' checks
+    if: github.event.label.name == 'review-gates'
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      # The head, not the merge commit `pull_request` checks out by default: the reviewers read the head's code.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools # NOT the default `tools platform-tools` — see ci.yml's ACTION PINS
+      - uses: gradle/actions/setup-gradle@v5
+      - name: Run the owed reviewers' checks
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        # The gate's map and this script come from the target branch, so a pull request branched before them still
+        # gets its checks, and who is owed is the target's call, as it is in the report.
+        run: |
+          git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null || git fetch --no-tags origin "$BASE_SHA"
+          git checkout "$BASE_SHA" -- scripts/review-checks.sh .claude/hooks/review-gate.sh .claude/hooks/review-gate.conf
+          scripts/review-checks.sh --base "$(git merge-base "$BASE_SHA" HEAD)" --out review-checks
+          cat review-checks/checks.md >>"$GITHUB_STEP_SUMMARY"
+      - name: Upload the results for the report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: review-checks
+          path: review-checks/
+          retention-days: 7
+          if-no-files-found: ignore

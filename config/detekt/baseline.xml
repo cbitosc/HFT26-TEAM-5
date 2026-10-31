@@ -1,0 +1,14 @@
+<?xml version="1.0" ?>
+<SmellBaseline>
+  <ManuallySuppressedIssues/>
+  <CurrentIssues>
+    <ID>BarePeriodicLoop:DirectCallPath.kt:DirectCallPath$while (true) { delay(timings.pingMs) leg.frames.trySend(LaneFrame.Ping) }</ID>
+    <ID>BarePeriodicLoop:FieldLog.kt:FieldLog$while (true) { delay(tickMs) if (on == true) { if (clock() - countersAt &gt;= COUNTERS_EVERY_MS) sample() if (clock() - sampledAt &gt;= SAMPLE_EVERY_MS) sampleRadios() } flush() }</ID>
+    <ID>BarePeriodicLoop:ScopeSync.kt:ScopeSync$while (isActive) { reconcileLock.withLock { reconcile() } delay(RECONCILE_INTERVAL_MS) }</ID>
+    <ID>BarePeriodicLoop:ScopeSync.kt:ScopeSync.Worker$while (isActive) { delay(tickIntervalMs) tickDue.set(true) wake() }</ID>
+    <ID>BarePeriodicLoop:VoicePlayer.kt:VoicePlayer$while (true) { delay(TICK_MS) lock.withLock { val p = player ?: return@withLock val playing = runCatching { p.isPlaying }.getOrDefault(false) val position = runCatching { p.currentPosition }.getOrDefault(0) _nowPlaying.value = _nowPlaying.value?.copy(positionMs = position, playing = playing) } }</ID>
+    <ID>BarePeriodicLoop:WifiAwareTransport.kt:WifiAwareTransport$while (scope.isActive) { delay(CUE_HEARTBEAT_MS) onHandler { pruneAbsentPeers() cueAll() } }</ID>
+    <ID>BarePeriodicLoop:WifiAwareTransport.kt:WifiAwareTransport$while (scope.isActive) { delay(DIAG_INTERVAL_MS) logState() }</ID>
+    <ID>BarePeriodicLoop:WifiAwareTransport.kt:WifiAwareTransport$while (scope.isActive) { delay(WEDGE_CHECK_MS) checkWedge() checkMessagePlane() }</ID>
+  </CurrentIssues>
+</SmellBaseline>

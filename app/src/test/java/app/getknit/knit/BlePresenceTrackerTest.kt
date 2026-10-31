@@ -1,0 +1,194 @@
+package app.getknit.knit
+
+import app.getknit.knit.mesh.bluetooth.BlePresenceTracker
+import app.getknit.knit.mesh.bluetooth.CodedPhyPolicy
+import app.getknit.knit.mesh.bluetooth.PresenceConfig
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/** Unit tests for [BlePresenceTracker] — the pure per-peer RSSI/dwell/linger model, driven by a virtual clock. */
+class BlePresenceTrackerTest {
+    private fun sighting(
+        nodeId: String,
+        rssi: Int,
+        psm: Int = 100,
+        cue: Int = 0,
+        coded: Boolean = false,
+    ) = BlePresenceTracker.Sighting(nodeId, rssi, protoVersion = 1, capabilities = 0xFL, psm = psm, digestCue = cue, coded = coded)
+
+    @Test
+    fun firstSightingSeedsRssiAndZeroDwell() {
+        val t = BlePresenceTracker()
+        t.onSighting(sighting("p", -60), now = 1_000)
+        val snap = t.snapshots(1_000).single()
+        assertEquals(-60.0, snap.smoothedRssi, 0.0001)
+        assertEquals(0L, snap.dwellMs)
+        assertEquals(0L, snap.lastSeenAgoMs)
+    }
+
+    @Test
+    fun ewmaSmoothsRssiTowardNewSamples() {
+        val t = BlePresenceTracker(PresenceConfig(rssiEwmaAlpha = 0.5))
+        t.onSighting(sighting("p", -60), now = 0)
+        t.onSighting(sighting("p", -80), now = 1_000)
+        // 0.5*-80 + 0.5*-60 = -70
+        assertEquals(-70.0, t.snapshots(1_000).single().smoothedRssi, 0.0001)
+    }
+
+    @Test
+    fun dwellAccruesWhilePresenceIsContinuous() {
+        val t = BlePresenceTracker()
+        t.onSighting(sighting("p", -50), now = 0)
+        t.onSighting(sighting("p", -50), now = 3_000) // within the gap-reset window
+        assertEquals(5_000L, t.snapshots(5_000).single().dwellMs)
+    }
+
+    @Test
+    fun aGapLongerThanResetRestartsDwellAndReseedsRssi() {
+        val t = BlePresenceTracker(PresenceConfig(presenceGapResetMs = 8_000))
+        t.onSighting(sighting("p", -50), now = 0)
+        t.onSighting(sighting("p", -90), now = 9_000) // gap 9s > 8s → reset
+        val snap = t.snapshots(9_000).single()
+        assertEquals("dwell restarts", 0L, snap.dwellMs)
+        assertEquals("RSSI reseeds, not averaged across the gap", -90.0, snap.smoothedRssi, 0.0001)
+    }
+
+    @Test
+    fun aPeerIsPrunedAfterTheLingerWindow() {
+        val t = BlePresenceTracker(PresenceConfig(reachableLingerMs = 90_000))
+        t.onSighting(sighting("p", -50), now = 0)
+        assertTrue(t.snapshots(90_000).isNotEmpty()) // exactly at the window still present
+        assertTrue("pruned once past the linger", t.snapshots(90_001).isEmpty())
+        assertNull(t.psmFor("p"))
+    }
+
+    @Test
+    fun reachableExposesSeenPeersAndPsmIsLookedUp() {
+        val t = BlePresenceTracker()
+        t.onSighting(sighting("aaaa1111", -55, psm = 137), now = 0)
+        t.onSighting(sighting("bbbb2222", -70, psm = 141), now = 0)
+        assertEquals(setOf("aaaa1111", "bbbb2222"), t.reachable(0).map { it.nodeId }.toSet())
+        assertEquals(137, t.psmFor("aaaa1111"))
+    }
+
+    @Test
+    fun aPhyIsFreshOnlyWhileHeardInTheLatestBurstAndItsHeldReadingOutlivesIt() {
+        val t = BlePresenceTracker()
+        t.onOneMListening(true, now = 0)
+        t.onSighting(sighting("p", -80), now = 0)
+        t.onOneMListening(false, now = 1_000) // a Coded-only window: the 1M-listening clock stops
+        t.onSighting(sighting("p", -100, coded = true), now = 5_000)
+        val both = t.snapshots(5_000).single()
+        assertTrue("1M heard within its gap of the latest sighting", both.oneMFresh)
+        assertTrue(both.codedFresh)
+
+        t.onSighting(sighting("p", -100, coded = true), now = 12_000) // 12 s after the 1M hit: past its 8 s gap
+        val coded = t.snapshots(12_000).single()
+        assertFalse("1M not heard in the latest burst", coded.oneMFresh)
+        assertTrue(coded.codedFresh)
+        assertEquals("the stale 1M reading is still held", -80.0, coded.rssi1m!!, 0.0001)
+        assertTrue("not Coded-only: 1M listened for 1 s of the lag", (coded.codedLagMs ?: Long.MAX_VALUE) <= CodedPhyPolicy.ONE_M_FRESH_MS)
+        assertFalse(CodedPhyPolicy.codedOnly(coded.codedLagMs))
+        assertEquals(
+            "the smoothed reading counts the fresh PHY alone, by the same rule",
+            coded.rssiCoded!! + CodedPhyPolicy.CODED_RSSI_CREDIT_DB,
+            coded.smoothedRssi,
+            0.0001,
+        )
+    }
+
+    // --- the weak-1M rule (ADR 2026-10.yvn6, the 2026-10-20 amendment) ---
+
+    // An all-PHY window from 0 that keeps listening on 1M: weak 1M hits (−95, −96) between the peer's Coded ones.
+    private fun edgePeer(t: BlePresenceTracker) {
+        t.onOneMListening(true, now = 0)
+        t.onSighting(sighting("p", -95), now = 1_000)
+        t.onSighting(sighting("p", -100, coded = true), now = 1_500)
+        t.onSighting(sighting("p", -96), now = 4_000)
+        t.onSighting(sighting("p", -100, coded = true), now = 6_000)
+        t.onSighting(sighting("p", -95), now = 8_000)
+        t.onSighting(sighting("p", -100, coded = true), now = 10_000)
+    }
+
+    @Test
+    fun weakOneMHitsBetweenCodedOnesLeaveTheCodedOnlyClockRunning() {
+        val t = BlePresenceTracker()
+        edgePeer(t)
+        val snap = t.snapshots(10_000).single()
+        assertEquals("measured from the first hit, through the weak ones", 9_000L, snap.codedLagMs)
+        assertTrue(CodedPhyPolicy.codedOnly(snap.codedLagMs))
+        assertTrue("so its dial goes to the Coded address", CodedPhyPolicy.dialCoded(snap.codedLagMs))
+    }
+
+    @Test
+    fun oneStrongOneMHitResetsTheClock() {
+        val t = BlePresenceTracker()
+        edgePeer(t)
+        // 0.35 × −60 + 0.65 × ≈−95.3 ≈ −83: the smoothed 1M reading, this hit included, is back over the floor.
+        t.onSighting(sighting("p", -60), now = 11_000)
+        t.onSighting(sighting("p", -100, coded = true), now = 12_000)
+        val snap = t.snapshots(12_000).single()
+        assertTrue(snap.rssi1m!! >= -90.0)
+        assertEquals(1_000L, snap.codedLagMs)
+        assertFalse(CodedPhyPolicy.codedOnly(snap.codedLagMs))
+    }
+
+    @Test
+    fun theFloorReadsTheSmoothedReadingWithThisHitNotTheRawOne() {
+        // A raw −95 after 1M history at −70 smooths to 0.35 × −95 + 0.65 × −70 = −78.75: over the floor, so it moves the mark.
+        val t = BlePresenceTracker()
+        t.onOneMListening(true, now = 0)
+        t.onSighting(sighting("p", -70), now = 1_000)
+        t.onSighting(sighting("p", -100, coded = true), now = 3_000)
+        t.onSighting(sighting("p", -100, coded = true), now = 6_000)
+        t.onSighting(sighting("p", -95), now = 8_000) // 7 s after the last 1M hit: averaged, not reseeded
+        t.onSighting(sighting("p", -100, coded = true), now = 10_000)
+        val snap = t.snapshots(10_000).single()
+        assertEquals(-78.75, snap.rssi1m!!, 0.0001)
+        assertEquals("measured from the −95 hit, not the −70 one", 2_000L, snap.codedLagMs)
+        assertFalse(CodedPhyPolicy.codedOnly(snap.codedLagMs))
+    }
+
+    @Test
+    fun aHitExactlyAtTheFloorMovesTheMark() {
+        val t = BlePresenceTracker(oneMWeakDbm = { -95.0 })
+        t.onOneMListening(true, now = 0)
+        t.onSighting(sighting("p", -70), now = 1_000)
+        for (at in listOf(3_000L, 6_000L, 9_000L, 12_000L)) t.onSighting(sighting("p", -100, coded = true), now = at)
+        // 11.5 s after the last 1M hit, past its 8 s gap: the 1M reading reseeds at exactly −95, the floor.
+        t.onSighting(sighting("p", -95), now = 12_500)
+        t.onSighting(sighting("p", -100, coded = true), now = 14_000)
+        val snap = t.snapshots(14_000).single()
+        assertEquals(-95.0, snap.rssi1m!!, 0.0)
+        assertEquals("at the floor counts: the mark moved to 12.5 s", 1_500L, snap.codedLagMs)
+    }
+
+    @Test
+    fun theWeakFloorIsTunableAndLowEnoughRestoresTheOldRule() {
+        val t = BlePresenceTracker(oneMWeakDbm = { -200.0 })
+        edgePeer(t)
+        assertEquals("the last 1M hit, however weak, set the mark", 2_000L, t.snapshots(10_000).single().codedLagMs)
+    }
+
+    @Test
+    fun aClosePeerAcrossAlternatingCodedOnlyWindowsIsNeverCodedOnly() {
+        // The 2026-10-02 bench under the new rule: a phone alone, every other window Coded-only, the peer 4 m away.
+        val t = BlePresenceTracker()
+        var now = 0L
+        repeat(10) { window ->
+            val allPhy = window % 2 == 0
+            t.onOneMListening(allPhy, now)
+            for (hit in 0 until 12) {
+                val at = now + hit * 1_000L
+                if (allPhy) t.onSighting(sighting("p", -62), now = at)
+                t.onSighting(sighting("p", -64, coded = true), now = at + 500)
+                assertFalse("window $window hit $hit", CodedPhyPolicy.codedOnly(t.snapshots(at + 500).single().codedLagMs))
+            }
+            t.onOneMListening(false, now + 12_000)
+            now += 24_000
+        }
+    }
+}

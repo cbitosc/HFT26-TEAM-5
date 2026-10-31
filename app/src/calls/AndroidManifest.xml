@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- What a build with voice calls adds to the manifest (experimental, docs/VOICE_CALLS.md). Not a source set: the build
+     adds this file to a variant only where `BuildConfig.LIVE_CALLS` or `BuildConfig.MESH_CALLS` is on (`-PliveCalls=`,
+     `-PmeshCalls=`; on in debug, off in a shipped artifact), so a build without calls declares neither the components
+     nor the permissions below. RECORD_AUDIO is already main's, for voice notes. The microphone foreground service
+     keeps a call's audio while Knit is off screen; the full-screen intent rings it over the lock screen. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- Every call is a self-managed Telecom call (core-telecom, docs/VOICE_CALLS.md §3.13), which owns its audio route;
+         the service holding the microphone holds the phone-call type with it. -->
+    <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
+
+    <application>
+        <activity
+            android:name="app.getknit.knit.ui.call.CallActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:launchMode="singleInstance"
+            android:showWhenLocked="true"
+            android:taskAffinity=""
+            android:theme="@style/Theme.Knit"
+            android:turnScreenOn="true" />
+        <service
+            android:name="app.getknit.knit.ui.call.CallService"
+            android:exported="false"
+            android:foregroundServiceType="microphone|phoneCall" />
+        <receiver
+            android:name="app.getknit.knit.ui.call.CallActionReceiver"
+            android:exported="false" />
+    </application>
+
+</manifest>

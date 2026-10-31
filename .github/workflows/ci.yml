@@ -1,0 +1,400 @@
+name: CI
+
+# Public-mirror CI for github.com/getknit/knit. Mirrors the core jobs of the maintainer's internal
+# .gitlab-ci.yml (build -> test -> verify) so pull requests opened on the GitHub mirror get automated
+# checks. Builds here are UNSIGNED and never touch a signing key — cutting the signed release APK is
+# release.yml's job, triggered by a v* tag. detekt/ktlint are advisory
+# (continue-on-error), matching the GitLab pipeline's allow_failure posture; they are enforced locally
+# by the repo's Git hooks. The *.tflite moderation models are ordinary Git blobs (NOT LFS — see
+# .gitattributes and .agents/context/distribution.md), so a plain checkout is enough; the build's
+# checkModerationModels task hard-fails if one ever arrives as a pointer stub. The only LFS objects are the
+# Compose screenshot references, and only screenshot-tests fetches them.
+#
+# ACTION PINS: every JS action here is held at a major that runs on Node 24 — GitHub's runners force
+# Node 20 actions onto 24 and warn about it, and the Node 20 runtime is going away. JetBrains/qodana-action
+# is pinned to an exact patch rather than a major because the tag also selects the inspection ENGINE, and a
+# silent engine bump changes the finding set; keep it in step with qodana.yaml's `linter:`. gradle/actions is
+# deliberately kept at v5, the last MIT release: v6 moves caching into `gradle-actions-caching`, a
+# proprietary component governed by Gradle's Terms of Use rather than the MIT licence, and it loads
+# whenever caching is on (it is, by default). Don't "upgrade" that one.
+#
+# android-actions/setup-android is given an explicit `packages:` at every site, because its default
+# is `tools platform-tools` and Google stopped serving the obsolete `tools` package on 2026-09-15 —
+# sdkmanager then exits 1 and takes every job that uses the action with it
+# (android-actions/setup-android#537). Name what the job actually needs; the default is not a
+# fallback we can rely on again even if upstream fixes it.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: # manual trigger; the qodana job below runs only on this
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: Build & unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools # NOT the default `tools platform-tools` — see ACTION PINS above
+      - uses: gradle/actions/setup-gradle@v5
+      - name: Assemble debug APK
+        run: ./gradlew :app:assembleDebug --stacktrace --console=plain
+      - name: JVM unit tests
+        run: ./gradlew :app:testDebugUnitTest --stacktrace --console=plain
+      - name: Upload unit-test report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: unit-test-report
+          path: app/build/reports/tests/testDebugUnitTest/
+          if-no-files-found: ignore
+
+  mesh-lab:
+    name: Mesh-in-a-box scenarios (x3)
+    runs-on: ubuntu-latest
+    # The multi-node JVM scenarios (app/src/test/.../mesh/lab/, see .agents/context/testing.md) already
+    # ride build-test's testDebugUnitTest once. They get their own job because they are the one suite
+    # where real time and thread scheduling decide the outcome — N complete mesh stacks converging on
+    # Dispatchers.Default, polled — so a 1-in-N flake here is a bug, either in the lab or in the mesh
+    # (the router overhear-suppression bug and the lost-parked-seed gap both surfaced as flakes). Three
+    # consecutive green runs are the bar; `--rerun` forces the Test task past Gradle's up-to-date check.
+    # Enforced, not advisory: the suite is deterministic on a 4 vCPU runner (48/48 locally).
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools # NOT the default `tools platform-tools` — see ACTION PINS above
+      - uses: gradle/actions/setup-gradle@v5
+      - name: Run the mesh/lab scenarios three times
+        run: |
+          for run in 1 2 3; do
+            echo "::group::mesh/lab run $run"
+            ./gradlew :app:testDebugUnitTest --tests 'app.getknit.knit.mesh.lab.*' --rerun --stacktrace --console=plain
+            echo "::endgroup::"
+          done
+      - name: Upload mesh/lab report (last run)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mesh-lab-report
+          path: app/build/reports/tests/testDebugUnitTest/
+          if-no-files-found: ignore
+
+  mesh-lab-chaos:
+    name: Mesh-in-a-box under seeded chaos (advisory)
+    runs-on: ubuntu-latest
+    # The same scenarios once more under LabChaos (app/src/test/.../mesh/lab/LabChaos.kt): lagged dispatches,
+    # jittered pipes and the occasional 40-400 ms single-coroutine stall a one-vCPU runner produces now and
+    # then, produced on purpose. A failure is a schedule a slow runner can hit too, so it names a latent
+    # flake with its seed (the run id) — reproduce locally with `scripts/lab-chaos.sh --seed <run id>`.
+    # Advisory until the findings of the first local sweep (2026-09-24) are triaged; then enforce it.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools # NOT the default `tools platform-tools` — see ACTION PINS above
+      - uses: gradle/actions/setup-gradle@v5
+      - name: Run the mesh/lab scenarios under chaos
+        run: >-
+          ./gradlew :app:testDebugUnitTest --tests 'app.getknit.knit.mesh.lab.*' --rerun --stacktrace --console=plain
+          -Pknit.labChaos=${{ github.run_id }}
+      - name: Upload mesh/lab chaos report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mesh-lab-chaos-report
+          path: app/build/reports/tests/testDebugUnitTest/
+          if-no-files-found: ignore
+
+  screenshot-tests:
+    name: Compose preview screenshots (advisory)
+    runs-on: ubuntu-latest
+    # Every @Preview rendered through layoutlib and diffed against the committed references
+    # (app/src/screenshotTest/, ADR 2026-10.gtmm, .agents/context/testing.md). Advisory until it has rendered
+    # green here a few times: the references were rendered on a workstation without AVX-512, and Skia's CPU
+    # rasterizer can take another SIMD path on a runner that has it. On a failure the artifact holds the
+    # report (self-contained, every image inlined), the renders and the diffs — enough to tell a real
+    # regression from a runner rendering differently. Then make it enforced, like mesh-lab.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      # The references are the repo's only Git LFS objects (.gitattributes). Fetched through a cache keyed on
+      # their ids rather than with `lfs: true`, so a run spends the LFS bandwidth quota only when they change.
+      - name: List the LFS objects
+        run: git lfs ls-files --long | cut -d ' ' -f1 | sort > .lfs-ids
+      - uses: actions/cache@v6
+        with:
+          path: .git/lfs
+          key: lfs-${{ hashFiles('.lfs-ids') }}
+          restore-keys: lfs-
+      - name: Fetch the screenshot references
+        run: git lfs pull
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools # NOT the default `tools platform-tools` — see ACTION PINS above
+      - uses: gradle/actions/setup-gradle@v5
+      - name: Validate the previews against their references
+        run: ./gradlew :app:validateDebugScreenshotTest --stacktrace --console=plain
+      - name: Upload screenshot report, renders and diffs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: screenshot-test-report
+          path: |
+            app/build/reports/screenshotTest/preview/debug/
+            app/build/outputs/screenshotTest-results/preview/debug/
+          if-no-files-found: ignore
+
+  instrumented:
+    name: Instrumented tests on emulators (advisory)
+    runs-on: ubuntu-latest
+    # The androidTest suites (app/src/androidTest/, .agents/context/testing.md) on the two Gradle Managed Devices
+    # app/build.gradle.kts defines: headless aosp-atd emulators Gradle downloads, boots and tears down itself.
+    # The seeded suites (ui/, uiauto/, a11y/) need both APKs built with -PseedDemo=true — SEED_DEMO is inlined into
+    # the test DEX, and they fail loudly without it; everything else runs from an unseeded build (see the steps). The
+    # BLE pair suite needs a second phone and is left out. The accessibility checks are API 34+, so pixel8api34 runs
+    # that one package. The report XML lists an assumption skip as a <failure>; Gradle counts it as skipped. Advisory until it has been green here a few times: the hosted runner is slower than any
+    # device the suites were written against, and the shade-driving tests already skip on an emulator.
+    continue-on-error: true
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools # NOT the default `tools platform-tools` — see ACTION PINS above
+      - uses: gradle/actions/setup-gradle@v5
+      # The hosted runner has KVM, but /dev/kvm is not open to the runner user until a udev rule says so; without
+      # it the emulator falls back to software and the boot outlasts Gradle's setup timeout.
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      # Two builds, because the seed is not neutral: a seeded app mints its own identity and database key under the
+      # live Keystore aliases as it starts, in the very process the platform suites (data/, moderation/, …) run in,
+      # and BackupRoundTripTest's read-back lost that race every time (run 38830030015).
+      # One Gradle call per package: under the orchestrator the runner keeps only the first entry of a comma-separated
+      # package / notPackage list. The APKs are built once per pass; each call boots the emulator again.
+      - name: Seeded UI and UIAutomator suites (pixel7api33)
+        env:
+          PASS: seeded
+        run: |
+          rc=0
+          keep() { mkdir -p "instrumented/$1" && cp -r app/build/reports/androidTests/managedDevice app/build/outputs/androidTest-results/managedDevice "instrumented/$1/" 2>/dev/null; true; }
+          for pkg in ui uiauto; do
+            ./gradlew :app:pixel7api33DebugAndroidTest -PseedDemo=true \
+              -Pandroid.testInstrumentationRunnerArguments.package=app.getknit.knit.$pkg \
+              -Pandroid.testoptions.manageddevices.emulator.gpu=swiftshader_indirect \
+              --stacktrace --console=plain || rc=1
+            keep "$PASS-$pkg"
+          done
+          exit $rc
+      - name: Platform suites, unseeded (pixel7api33)
+        if: success() || failure()
+        env:
+          PASS: unseeded
+        run: |
+          rc=0
+          keep() { mkdir -p "instrumented/$1" && cp -r app/build/reports/androidTests/managedDevice app/build/outputs/androidTest-results/managedDevice "instrumented/$1/" 2>/dev/null; true; }
+          for pkg in data moderation notifications text; do
+            ./gradlew :app:pixel7api33DebugAndroidTest \
+              -Pandroid.testInstrumentationRunnerArguments.package=app.getknit.knit.$pkg \
+              -Pandroid.testoptions.manageddevices.emulator.gpu=swiftshader_indirect \
+              --stacktrace --console=plain || rc=1
+            keep "$PASS-$pkg"
+          done
+          exit $rc
+      - name: Accessibility suite (pixel8api34)
+        if: success() || failure()
+        run: >-
+          ./gradlew :app:pixel8api34DebugAndroidTest -PseedDemo=true
+          -Pandroid.testInstrumentationRunnerArguments.package=app.getknit.knit.a11y
+          -Pandroid.testoptions.manageddevices.emulator.gpu=swiftshader_indirect
+          --stacktrace --console=plain
+      - name: Upload instrumented-test reports and screenshots
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: instrumented-test-report
+          # One folder per Gradle call (each overwrites app/build's results), plus the last a11y run in app/build.
+          path: |
+            instrumented/
+            app/build/reports/androidTests/managedDevice/
+            app/build/outputs/androidTest-results/managedDevice/
+            app/build/outputs/managed_device_android_test_additional_output/
+          if-no-files-found: ignore
+
+  verify:
+    name: detekt & ktlint (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true # advisory, mirroring .gitlab-ci.yml allow_failure; enforced locally by Git hooks
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools # NOT the default `tools platform-tools` — see ACTION PINS above
+      - uses: gradle/actions/setup-gradle@v5
+      - name: detekt
+        run: ./gradlew :detekt-rules:test detekt --stacktrace --console=plain # with the tests of our own rules
+      - name: ktlint
+        run: ./gradlew ktlintCheck --stacktrace --console=plain
+
+  qodana:
+    name: Qodana inspections (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true # advisory, like detekt/ktlint above
+    # The IntelliJ inspection engine over the whole tree — the only thing here that finds a *global*
+    # problem ("this class has no callers", "this resource is referenced by nothing"). Android Lint,
+    # detekt and ktlint are different engines and do not overlap with it; scripts/ide-diagnostics.sh
+    # reaches the same engine but one focused file at a time, so it cannot see across the project.
+    # The linter pin, profile and exclude list live in qodana.yaml.
+    #
+    # This is the job that actually runs on every push: hosted runners are 4 vCPU / 16 GB, whereas
+    # the internal GitLab runner is 1 vCPU / 2 GB and would OOM, so verify:qodana there is manual.
+    permissions:
+      contents: read
+      pull-requests: write # post-pr-comment
+      checks: write # use-annotations
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # Qodana reads history to attribute findings to commits
+      - uses: JetBrains/qodana-action@v2026.2.1
+        with:
+          # pr-mode analyses ONLY the files a PR touched, which silently disables exactly the
+          # whole-project inspections this job exists for — an unused class stops looking unused once
+          # you stop looking at its callers. Full scan every time.
+          pr-mode: false
+          # The action caches its whole cache-dir, and restoring the IDE's project state from it
+          # silently drops the Android facets — the run exits 0 with every AndroidLint inspection
+          # reporting nothing (measured: 38 -> 0, no warning). Correct-but-slower beats
+          # quietly-wrong, so the cache is off; the bootstrap re-fetches the SDK and JDK each run.
+          use-caches: false
+          upload-result: true
+          # --baseline holds the committed qodana.sarif.json, so the run reports what is NEW rather
+          # than re-reporting the accepted backlog (which includes the @Preview blind spot the
+          # AGP forward-compat property leaves behind — see qodana.yaml's banner).
+          args: --save-report --baseline qodana.sarif.json
+        env:
+          # qodana.yaml's bootstrap installs compileSdk 37.1 + build-tools here — the linter image
+          # ships only android-33, and without the matching platform every Android API resolves to
+          # nothing, so the run reports garbage rather than reporting nothing.
+          ANDROID_SDK_ROOT: ${{ runner.temp }}/qodana/caches/android-sdk
+          ANDROID_HOME: ${{ runner.temp }}/qodana/caches/android-sdk
+          # Optional: unset is fine. The Community linter qodana.yaml pins needs no licence; a token
+          # only publishes the run to Qodana Cloud for trend history and baselines.
+          QODANA_TOKEN: ${{ secrets.QODANA_TOKEN }}
+
+  adr-index:
+    name: ADR router is in sync
+    runs-on: ubuntu-latest
+    # No JDK, no Android SDK, no Gradle: this only reads `.agents/memory/decisions/`.
+    # Enforced (not advisory) because a stale router silently hides a decision from
+    # every agent that reads it, and `merge=union` on the generated file means a bad
+    # merge lands quietly rather than as a conflict.
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check .agents/memory/decisions.md
+        run: python3 scripts/adr.py index --check
+
+  lab-lint:
+    name: Mesh-lab scenarios lint clean
+    runs-on: ubuntu-latest
+    # No JDK, no Android SDK, no Gradle: scripts/lab-lint.py reads the mesh/lab sources with the standard library
+    # and names the flake shapes the text shows (a delay as a sync point, a dropped tryAwait, a hold re-applied
+    # after a release, …). Enforced: each is a flake a slow runner finds later, and a deliberate one carries a
+    # `// lab-lint: allow <rule> — <why>` where it stands.
+    steps:
+      - uses: actions/checkout@v7
+      - name: Linter unit tests
+        run: python3 -m unittest scripts/test_lab_lint.py
+      - name: HCI bridge isolation unit tests
+        run: python3 -m unittest scripts/test_hci_bridge.py
+      - name: Lint app/src/test/.../mesh/lab/
+        run: python3 scripts/lab-lint.py
+
+  doc-lint:
+    name: Docs reference live code
+    runs-on: ubuntu-latest
+    # No JDK, no Gradle: scripts/doc-lint.py reads the docs and the tracked sources with the standard library and
+    # flags a name the code dropped, a member an app type lacks, a path or an ADR id that is gone. Full history,
+    # because a retired symbol is one some commit removed. A deliberate mention carries
+    # `<!-- doc-lint: allow <name> — <why> -->` in its paragraph.
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Checker unit tests
+        run: python3 -m unittest scripts/test_doc_lint.py
+      - name: Check the docs
+        run: python3 scripts/doc-lint.py
+
+  btsnoop-drain:
+    name: Snoop analyser tests
+    runs-on: ubuntu-latest
+    # scripts/btsnoop-drain.py reads a phone's HCI snoop for the Bluetooth drain trial (#120); stdlib only, so its
+    # tests need nothing but Python.
+    steps:
+      - uses: actions/checkout@v7
+      - name: Analyser unit tests
+        run: python3 -m unittest scripts/test_btsnoop_drain.py
+
+  fieldlog:
+    name: Field log reader tests
+    runs-on: ubuntu-latest
+    # scripts/fieldlog.py reads the logs testers share; `pair` lines two phones' logs up with no notes from anyone.
+    # Stdlib only, so its tests need nothing but Python.
+    steps:
+      - uses: actions/checkout@v7
+      - name: Reader unit tests
+        run: python3 -m unittest scripts/test_fieldlog.py
+
+  generated-assets:
+    name: Generated assets are in sync
+    runs-on: ubuntu-latest
+    # No JDK, no Android SDK, no Gradle: the emoji catalog is a committed file generated from a vendored
+    # Unicode source, so a hand edit or a re-vendor without a regenerate must fail here, not on a device.
+    steps:
+      - uses: actions/checkout@v7
+      - name: Generator unit tests
+        run: python3 -m unittest scripts/test_gen_emoji_catalog.py
+      - name: Check app/src/main/assets/emoji/emoji_en.tsv
+        run: python3 scripts/gen-emoji-catalog.py --check
+      # Every @Preview has its screenshot test: a preview added or renamed without a regenerate fails here.
+      - name: Check app/src/screenshotTest/ wrappers
+        run: python3 scripts/gen-screenshot-tests.py --check

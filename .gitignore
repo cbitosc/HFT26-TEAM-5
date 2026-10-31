@@ -1,0 +1,58 @@
+*.iml
+.gradle
+/local.properties
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+# Release signing & secrets — never commit signing keys, keystores, or credentials (see
+# keystore.properties.example). The blanket key/cert globs also stop a stray app-signing key or
+# certificate from ever landing in the tree again (e.g. under res/raw); force-add with `git add -f`
+# only if you ever have a genuinely public test fixture in one of these formats.
+keystore.properties
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.bks
+*.pk8
+*.der
+*.pem
+*.key
+google-services.json
+.env
+.env.*
+
+# Marketing captures kept out of the public repo — the generator scripts and finished masters live
+# under .private/ (.private/scripts/, .private/shots/, .private/trailer/, .private/docs/). Run from the
+# repo root those scripts still default their output here, so keep it ignored: screenshots -> /shots/,
+# promo trailer -> /trailer/ (large, regenerable raw captures + ffmpeg-stage intermediates), plus a
+# user-supplied trailer music bed under assets/trailer/ (never committed — check its license).
+/shots/
+/trailer/
+/assets/trailer/
+
+app/release/*
+
+# gradle build cache
+.kotlin
+
+# JetBrains IDE — local editor config, never shared in the public repo.
+.idea/
+
+# Personal per-machine Claude Code overrides — the shared .claude/settings.json stays tracked.
+.claude/settings.local.json
+
+# Private working area: marketing masters (see above) + personal files — kept out of the public repo.
+.private/
+
+# Bytecode cache from `scripts/*.py` — `scripts/adr.py` is importable (a one-shot script
+# or a test can `from adr import ...`), and importing it writes one of these.
+scripts/__pycache__/
+
+# Qodana scan output (report HTML + SARIF) and its multi-GB engine cache. The BASELINE,
+# qodana.sarif.json at the repo root, is deliberately NOT ignored — it is committed so a run reports
+# only what is new.
+.qodana/

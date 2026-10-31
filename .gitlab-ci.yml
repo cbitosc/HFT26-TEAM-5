@@ -1,0 +1,505 @@
+# Knit — GitLab CI. Stages: build -> test -> verify, but ordered by `needs:`: the test jobs wait for
+# build:debug alone (its build cache, see .android) and the verify jobs wait for nothing, so a slow
+# build:release holds up nothing but itself.
+# Bleeding-edge toolchain (AGP 9.4.1 / Kotlin 2.4.21 / JDK 21 / compileSdk 37.1).
+# Static analysis (detekt/ktlint) and coverage (Kover) run as Gradle plugins via `./gradlew` tasks.
+
+stages:
+  - build
+  - test
+  - verify
+
+variables:
+  # Keep Gradle's home in the project tree so the resolved-dependency jars are cached across jobs.
+  # (Trivy CVE scanning now reads the committed app/gradle.lockfile, not these jars — see verify:trivy.)
+  GRADLE_USER_HOME: "${CI_PROJECT_DIR}/.gradle"
+  # daemon=false keeps no daemon alive between jobs; it does NOT stop Gradle forking a
+  # single-use daemon for the build (it does, to honour org.gradle.jvmargs) — but that daemon
+  # EXITS when the invocation ends, which is what makes the split in .compile-unit-tests work.
+  # Its heap is capped in the CI gradle.properties written by before_script below, which overrides
+  # the project gradle.properties. Note a Test task forks a THIRD JVM on top of those two, and
+  # nothing here reaches it: its heap is app/build.gradle.kts's `test.maxHeapSize` (1g; Gradle's 512m
+  # default GC-thrashed pipeline 860 into the job timeout) with Metaspace uncapped, which is ~1.75 GB RSS
+  # once Robolectric and the Kover agent have loaded their classes.
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false"
+  ANDROID_HOME: "${CI_PROJECT_DIR}/.android-sdk"
+  ANDROID_SDK_ROOT: "${CI_PROJECT_DIR}/.android-sdk"
+  # Pinned tool versions — bump deliberately (see .gitlab-ci notes in the repo plan).
+  CMDLINE_TOOLS_VERSION: "11076708"   # commandlinetools-linux revision
+  # Keep in lockstep with app/build.gradle.kts `compileSdk` and `buildToolsVersion` — the minor matters,
+  # `android-37` is a different package from `android-37.1`, and build-tools is pinned there (above AGP
+  # 9.4.1's 36.0.0 default), so the two move independently of each other but never of the build file.
+  # Both must resolve in F-Droid's buildserver image first: .agents/context/distribution.md.
+  ANDROID_COMPILE_SDK: "37.1"
+  ANDROID_BUILD_TOOLS: "37.0.0"
+  # Check out Git LFS objects as pointers. The only ones are the Compose screenshot references, which only
+  # test:screenshots reads (it sets this back to 0); every other job — build:release above all — then sees
+  # the tree F-Droid's LFS-less clone sees, as GitHub's default checkout does. See .gitattributes.
+  GIT_LFS_SKIP_SMUDGE: "1"
+
+workflow:
+  rules:                              # avoid duplicate branch+MR pipelines
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS == null
+    - if: $CI_COMMIT_TAG
+
+# ---- shared setup for Gradle/Android jobs ----
+# Two caches, both pull-only unless a job says otherwise, because saving one costs ~2.5 min of zipping on
+# the small runner and same-stage jobs race for the last write. The cache is local to each runner (no
+# shared cache server), so a job only sees what a job on the SAME runner saved.
+#   * deps  — resolved jars, transforms, wrapper, SDK. Saved by both build jobs: build:release always runs
+#             on a bigmem runner and build:debug on either, so each runner's copy stays current after a
+#             version bump. Same key as before the split, so existing caches carry over.
+#   * build — Gradle's local build cache (the init script below puts it in .gradle/build-cache/), one per
+#             branch. Saved by build:debug only, which also compiles the unit-test sources, so test:unit,
+#             test:mesh-lab and test:coverage take the compile FROM-CACHE instead of each redoing it —
+#             when they land on build:debug's runner.
+.gradle-deps-cache: &gradle-deps-cache
+  key:
+    files:
+      - gradle/libs.versions.toml
+      - gradle/wrapper/gradle-wrapper.properties
+  paths:
+    - .gradle/caches/
+    - .gradle/wrapper/
+    - .android-sdk/
+  policy: pull
+
+.gradle-build-cache: &gradle-build-cache
+  key: gradle-build-$CI_COMMIT_REF_SLUG
+  paths:
+    - .gradle/build-cache/
+  policy: pull
+
+# Pinned to amd64 because the untagged pool includes an Apple Silicon runner (mac-mini-docker), which would
+# otherwise pull the arm64 image. Two native pieces of the build are Linux x86_64-only: AGP's AAPT2 (from
+# Maven) and Robolectric's native runtime (`nativeruntime-dist-compat` ships no linux/aarch64). In an arm64
+# container Rosetta finds no x86_64 loader, and AAPT2 dies at processDebugResources (job 6043). An amd64
+# container runs whole under Rosetta, which is slower than native and still correct; on the x86 runners this
+# does nothing. Needs runner 16.7+ for `docker: platform`.
+.android:
+  image:
+    name: eclipse-temurin:21-jdk
+    docker:
+      platform: linux/amd64
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq unzip wget > /dev/null
+    - export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
+    # CI memory profile for the 1 vCPU / 2 GB runner — relies on the host's 2 GB swap being
+    # active. Written to $GRADLE_USER_HOME so it overrides the project gradle.properties.
+    # NO metaspace cap: a 384m cap starved Metaspace and crashed the daemon (job 462). Heap is
+    # 1664m: a clean :app:compileDebugKotlin peaks at ~1.26 GB live (GC log, 2026-10-18), so the old
+    # 1280m OOMed both compiles in pipeline 1121 once the call code landed. Metaspace/native/launcher-JVM
+    # spikes spill to swap instead of tripping the OOM killer. SerialGC because there is only one core
+    # to GC on. Self-contained.
+    - |
+      mkdir -p "$GRADLE_USER_HOME"
+      cat > "$GRADLE_USER_HOME/gradle.properties" <<'EOF'
+      org.gradle.jvmargs=-Xmx1664m -XX:+UseSerialGC -Dfile.encoding=UTF-8
+      org.gradle.workers.max=1
+      kotlin.compiler.execution.strategy=in-process
+      org.gradle.daemon=false
+      org.gradle.caching=true
+      EOF
+    # Gradle's local build cache, moved out of .gradle/caches/ so it can be its own GitLab cache (below)
+    # with its own key and writer. Entries unused for a day are dropped: every reuse that pays is within
+    # one pipeline (build:debug's compile, pulled by the test jobs), so there's no point carrying more.
+    - |
+      mkdir -p "$GRADLE_USER_HOME/init.d"
+      cat > "$GRADLE_USER_HOME/init.d/ci-build-cache.gradle" <<'EOF'
+      beforeSettings { settings ->
+          settings.caches { buildCache.setRemoveUnusedEntriesAfterDays(1) }
+      }
+      settingsEvaluated { settings ->
+          settings.buildCache { local { directory = new File(settings.rootDir, '.gradle/build-cache') } }
+      }
+      EOF
+    - |
+      if [ ! -d "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" ]; then
+        wget -q "https://dl.google.com/android/repository/commandlinetools-linux-${CMDLINE_TOOLS_VERSION}_latest.zip" -O /tmp/clt.zip
+        mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
+        unzip -q /tmp/clt.zip -d "$ANDROID_SDK_ROOT/cmdline-tools"
+        mv "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools" "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+      fi
+    - yes | sdkmanager --licenses > /dev/null 2>&1 || true
+    - sdkmanager "platform-tools" "platforms;android-${ANDROID_COMPILE_SDK}" "build-tools;${ANDROID_BUILD_TOOLS}" > /dev/null
+    - chmod +x ./gradlew
+  cache:
+    - *gradle-deps-cache
+    - *gradle-build-cache
+
+# ----------------- build -----------------
+# Build the test classpath and RUN the tests in two separate `./gradlew` invocations. Doing both in one
+# invocation is what killed job 3500 on the 2 GB runner: in-process Kotlin grows the single-use daemon to
+# ~2 GB of anonymous pages compiling :app and the test sources, a JVM never returns that to the OS, and
+# when the Test task then forks its own JVM (~1.25 GB once Robolectric has loaded android-all + Compose +
+# Room) the two coexist. 2.0 + 1.25 + 0.1 launcher + 0.25 host services is 3.6 GB against 1.9 GB RAM +
+# 2 GB swap, so the kernel OOM-killed the daemon with 120 kB of swap left. Split, the compile daemon is
+# gone before the test JVM starts and the second daemon starts near -Xms — nothing is recompiled (33 of
+# 35 tasks come back up-to-date), so the split costs one extra configuration phase and nothing else.
+# The task list is just `testDebugUnitTest`'s graph minus the Test task itself; re-derive it with
+# `./gradlew :app:testDebugUnitTest --dry-run` if AGP renames or adds one. Shared as a plain YAML anchor
+# rather than GitLab's `!reference` tag so the repo's yamllint can still parse this file.
+.compile-unit-tests: &compile-unit-tests
+  ./gradlew :app:compileDebugUnitTestJavaWithJavac :app:packageDebugUnitTestForUnitTest :app:bundleDebugClassesToRuntimeJar :app:processDebugUnitTestJavaRes :app:processDebugJavaRes :app:generateDebugUnitTestConfig :app:koverFindJar --stacktrace --console=plain
+
+# Every job that compiles runs on skuld for now (`tags: [skuld]` here and on the three test jobs;
+# build:release is already on bigmem). On the 1 vCPU `service` runner a cold compile alone takes ~44 min —
+# after a dependency bump the deps cache there has no entry for the new key and its build cache is stale,
+# since only the build jobs save either and caches are per runner — so a test job landing there ran past the
+# 60 min timeout (test:mesh-lab 6263; test:unit 6252, 6055).
+#
+# Also compiles the unit-test sources (a second invocation, for the same memory reason as the split above)
+# so the one job that saves the build cache has the test jobs' compile in it.
+build:debug:
+  extends: .android
+  stage: build
+  tags: [skuld]
+  script:
+    - ./gradlew :app:assembleDebug --stacktrace --console=plain
+    - *compile-unit-tests
+  cache:
+    - <<: *gradle-deps-cache
+      policy: pull-push
+    - <<: *gradle-build-cache
+      policy: pull-push
+  artifacts:
+    name: "knit-debug-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - app/build/outputs/apk/debug/*.apk
+    expire_in: 1 week
+
+# R8 is exercised ONLY on the release variant (debug never shrinks), so this is the only CI guard against
+# keep-rule breakage — and because obfuscation (name mangling) is ON, mapping/release/mapping.txt is the
+# DEOBFUSCATION MAP (retain per shipped release to symbolicate crashes; see the artifacts note below).
+# `allow_failure` is now FALSE: since ADR 050 tightened the keep rules there is real optimization to lose,
+# and the two things most likely to take it away — a dependency shipping a broad consumer keep rule, or
+# someone re-broadening knit-r8.keep to silence a warning — are both silent until the next Play upload.
+# So the job runs four steps: build, measure, gate, gate.
+#   * assembleRelease           — proves the keep rules still produce a working shrink.
+#   * analyzeReleaseR8Config    — R8's own keep-radius report (AGP 9.3+). Archived as HTML; this is where
+#                                 you look when the gate below trips, since it names the offending rule.
+#   * scripts/r8-dex-gate.sh    — fails the pipeline on a step change in how much of the dex R8 was not
+#                                 allowed to rename. See that script's header for what it measures and why.
+#   * scripts/dex-bitmap-gate.sh — fails on an unbounded BitmapFactory.decode* anywhere in the dex, ours or
+#                                 a library's (ADR 051). Same reason it lives here and not in detekt: the
+#                                 risk arrives through a dependency, and only the dex shows that.
+# Builds UNSIGNED (no KNIT_UPLOAD_* creds in CI) — signing isn't needed to run R8. Archives mapping/ so
+# mapping.txt (deobfuscation), usage.txt (removed code) and configuration.txt (merged rules) are
+# auditable/retained per pipeline.
+# Pinned to a `bigmem` runner: on the 1 vCPU / 2 GB runner R8 alone takes ~27 min and lint-vital ~7, and
+# by 2026-09-24 the whole job ran past the 60 min timeout (jobs 5276, 5300; ~5-8 min on skuld). If it
+# must come back to the small runner, first run analyzeReleaseR8Config only when the dex gate fails and
+# move lintVitalRelease into a job of its own.
+build:release:
+  extends: .android
+  stage: build
+  tags: [bigmem]
+  cache:
+    - <<: *gradle-deps-cache
+      policy: pull-push
+  script:
+    - ./gradlew :app:assembleRelease --stacktrace --console=plain
+    - ./gradlew :app:analyzeReleaseR8Config --stacktrace --console=plain
+    - scripts/r8-dex-gate.sh app/build/outputs/apk/release/app-release-unsigned.apk
+    - scripts/dex-bitmap-gate.sh app/build/outputs/apk/release/app-release-unsigned.apk
+  artifacts:
+    name: "knit-release-r8-$CI_COMMIT_SHORT_SHA"
+    when: always
+    paths:
+      - app/build/outputs/apk/release/*.apk
+      - app/build/outputs/mapping/release/
+      # R8's keep-radius report: which rule is blocking what, ranked. The first thing to open when the
+      # dex gate trips or Play Console reports a drop in the optimization/obfuscation/shrinking rates.
+      - app/build/reports/r8/
+    # mapping.txt is the deobfuscation map now that obfuscation is ON — keep it long enough to symbolicate a
+    # shipped build's crashes (for a tagged release, also upload mapping.txt to Play Console / a durable store).
+    expire_in: 1 year
+
+# ----------------- test ------------------
+test:unit:
+  extends: .android
+  stage: test
+  tags: [skuld]
+  needs: [{job: "build:debug", artifacts: false}]
+  script:
+    - *compile-unit-tests
+    # The mesh/lab scenarios run in test:mesh-lab (three times), not here: they shared this job's one test
+    # JVM, and that heap is what GC-thrashed pipeline 860 into the job timeout.
+    - ./gradlew :app:testDebugUnitTest -Pknit.skipMeshLab=true --stacktrace --console=plain
+  artifacts:
+    when: always
+    reports:
+      junit: app/build/test-results/testDebugUnitTest/**/TEST-*.xml
+    paths:
+      - app/build/reports/tests/testDebugUnitTest/
+    expire_in: 1 week
+
+# The multi-node JVM scenarios (app/src/test/.../mesh/lab/, see .agents/context/testing.md) run only here;
+# test:unit skips them (-Pknit.skipMeshLab). They get their own job because they are the one suite where
+# real time and thread scheduling decide the outcome — N complete mesh stacks converging on
+# Dispatchers.Default, polled — so a 1-in-N flake here is a bug, either in the lab or in the mesh (the
+# router overhear-suppression bug and the lost-parked-seed gap both surfaced as flakes). Three consecutive
+# green runs are the bar; `--rerun` forces the Test task past Gradle's up-to-date check. Same compile/run
+# split as test:unit, and each run forks its own test JVM in turn, so the memory profile is test:unit's,
+# three times over. Enforced, not advisory. The awaits (MeshLab.AWAIT_MS, 30 s per convergence) are
+# headroom for a single shared vCPU, not a budget: a scenario converges in seconds even on one core, so a
+# flake here is a fixture racing the mesh, not a slow runner — reproduce it with the throttled loop in
+# .agents/context/testing.md before touching a timeout.
+# On skuld for now (see build:debug), so CI no longer runs the lab on one slow core; `scripts/lab-chaos.sh
+# --quota` is the slow-runner stand-in until it does again.
+test:mesh-lab:
+  extends: .android
+  stage: test
+  tags: [skuld]
+  needs: [{job: "build:debug", artifacts: false}]
+  script:
+    - *compile-unit-tests
+    - |
+      for run in 1 2 3; do
+        echo "--- mesh/lab run $run ---"
+        ./gradlew :app:testDebugUnitTest --tests 'app.getknit.knit.mesh.lab.*' --rerun --stacktrace --console=plain
+      done
+  artifacts:
+    when: always
+    reports:
+      junit: app/build/test-results/testDebugUnitTest/**/TEST-*.xml
+    paths:
+      - app/build/reports/tests/testDebugUnitTest/
+    expire_in: 1 week
+
+# Test coverage (advisory) — Kover instruments the *debug* unit tests and reports line coverage over the
+# hand-written code (generated Room _Impl / Compose / BuildConfig are excluded in app/build.gradle.kts).
+# koverXmlReportDebug depends on testDebugUnitTest, so the report tasks run the tests themselves. Kept a
+# separate job (not folded into test:unit) to mirror the detekt/trivy advisory-verify pattern and keep the
+# pass/fail test signal clean; the tradeoff is it re-runs the Robolectric suite. allow_failure so coverage
+# never blocks. The mesh/lab scenarios are left out (-Pknit.skipMeshLab): they wait on wall-clock
+# convergence, instrumentation slows the suite ~3x, and a lab timeout here fails testDebugUnitTest before
+# the report tasks run — job 4347 shipped no artifacts at all for that reason. test:mesh-lab already runs
+# them three times uninstrumented, so the coverage % simply does not count their lines. The `coverage:` regex scrapes the % that koverLogDebug prints so GitLab shows it on the MR
+# and as the pipeline badge. HTML (browsable) + XML (JaCoCo format) are archived.
+test:coverage:
+  extends: .android
+  stage: test
+  tags: [skuld]
+  needs: [{job: "build:debug", artifacts: false}]
+  allow_failure: true
+  script:
+    # Same compile/run split as test:unit — the Kover report tasks run the suite themselves, so this job
+    # has exactly the same daemon-plus-forked-test-JVM overlap that OOM-killed job 3500.
+    - *compile-unit-tests
+    - ./gradlew :app:koverXmlReportDebug :app:koverHtmlReportDebug :app:koverLogDebug -Pknit.skipMeshLab=true --stacktrace --console=plain
+  coverage: '/application line coverage: \d+\.\d+%/'
+  artifacts:
+    when: always
+    paths:
+      - app/build/reports/kover/htmlDebug/
+      - app/build/reports/kover/reportDebug.xml
+    expire_in: 1 week
+
+# Compose preview screenshot tests (ADR 2026-10.gtmm, .agents/context/testing.md): every @Preview rendered
+# through layoutlib and diffed against the committed references. The one job that fetches the LFS objects
+# (GIT_LFS_SKIP_SMUDGE back to 0 — the runner then runs `git lfs pull` after its checkout). Advisory until it
+# has rendered green on this runner a few times: the references were rendered on a workstation, and Skia's CPU
+# rasterizer can take another SIMD path on another CPU. Then drop allow_failure, like test:mesh-lab.
+# Same compile/run split as test:unit, for the same reason: the forked rendering JVM must not start while the
+# compile daemon is still resident. The first list is validateDebugScreenshotTest's graph minus the task
+# itself (`./gradlew :app:validateDebugScreenshotTest --dry-run` re-derives it); build:debug's build cache
+# answers the main-source compile. Artifacts on failure only — the report inlines every image, ~40 MB.
+test:screenshots:
+  extends: .android
+  stage: test
+  tags: [skuld]
+  needs: [{job: "build:debug", artifacts: false}]
+  allow_failure: true
+  variables:
+    GIT_LFS_SKIP_SMUDGE: "0"
+  script:
+    - ./gradlew :app:compileDebugScreenshotTestJavaWithJavac :app:packageDebugScreenshotTestForScreenshotTest :app:bundleDebugClassesToRuntimeJar :app:mergeDebugAssets :app:processDebugResources --stacktrace --console=plain
+    - ./gradlew :app:validateDebugScreenshotTest --stacktrace --console=plain
+  artifacts:
+    when: on_failure
+    reports:
+      junit: app/build/test-results/validateDebugScreenshotTest/**/TEST-*.xml
+    paths:
+      - app/build/reports/screenshotTest/preview/debug/
+      - app/build/outputs/screenshotTest-results/preview/debug/
+    expire_in: 1 week
+
+# --------------- verify (enforced) -------
+# The ADR router, `.agents/memory/decisions.md`, is generated from `.agents/memory/decisions/` and is
+# checked in. Enforced (not advisory, unlike the jobs below) because a stale router silently hides a
+# decision from every agent that reads it, and `.gitattributes` gives the file `merge=union` — the right
+# strategy for a file whose only real churn is appended table rows, but it means a bad merge lands as
+# duplicated lines rather than as a conflict, so nothing else in the repo would ever say so.
+#
+# No .android: this only reads the decisions directory with the standard library, so it wants neither a
+# JDK nor the Android SDK. It mirrors GitHub's `adr-index` job — a GitHub-only check is one the internal
+# pipeline cannot enforce, which is how the duplicate count lines reached main green on 2026-09-15.
+verify:adr-index:
+  image: python:3.13-alpine
+  stage: verify
+  needs: []
+  script:
+    - python3 scripts/adr.py index --check
+
+# Every @Preview has its screenshot test (scripts/gen-screenshot-tests.py): a preview added or renamed without
+# a regenerate fails here rather than going untested. Enforced, unlike test:screenshots — this is a text
+# comparison with no renderer in it. Mirrors the step in GitHub's `generated-assets` job.
+verify:screenshot-wrappers:
+  image: python:3.13-alpine
+  stage: verify
+  needs: []
+  script:
+    - python3 scripts/gen-screenshot-tests.py --check
+
+# The mesh-lab scenarios lint clean (scripts/lab-lint.py): the flake shapes the source text shows — a delay as a
+# sync point, a dropped tryAwait, a hold re-applied after a release, a filtered release with no re-link before the
+# oracle — fail here in seconds instead of on a slow runner one run in thirty. Enforced; a deliberate one carries a
+# `// lab-lint: allow <rule> — <why>`. Mirrors GitHub's `lab-lint` job.
+verify:lab-lint:
+  image: python:3.13-alpine
+  stage: verify
+  needs: []
+  script:
+    - python3 -m unittest scripts/test_lab_lint.py
+    - python3 -m unittest scripts/test_hci_bridge.py
+    - python3 scripts/lab-lint.py
+
+# The docs reference live code (scripts/doc-lint.py): a name the code dropped, a member an app type lacks, a path or
+# an ADR id that is gone fails here. Full history, because a retired symbol is one some commit removed; alpine needs
+# git for it. A deliberate mention carries `<!-- doc-lint: allow <name> — <why> -->`. Mirrors GitHub's `doc-lint` job.
+verify:doc-lint:
+  image: python:3.13-alpine
+  stage: verify
+  needs: []
+  variables:
+    GIT_DEPTH: 0
+  script:
+    - apk add --no-cache git
+    - git config --global --add safe.directory "$CI_PROJECT_DIR"
+    - python3 -m unittest scripts/test_doc_lint.py
+    - python3 scripts/doc-lint.py
+
+# The Bluetooth drain trial's snoop analyser (scripts/btsnoop-drain.py, #120) reads HCI snoops with the standard library;
+# its tests need nothing but Python. Mirrors GitHub's `btsnoop-drain` job.
+verify:btsnoop-drain:
+  image: python:3.13-alpine
+  stage: verify
+  needs: []
+  script:
+    - python3 -m unittest scripts/test_btsnoop_drain.py
+
+# The field log's reader (scripts/fieldlog.py): `pair` lines two testers' logs up from what both phones logged, with no
+# notes from anyone; stdlib only. Mirrors GitHub's `fieldlog` job.
+verify:fieldlog:
+  image: python:3.13-alpine
+  stage: verify
+  needs: []
+  script:
+    - python3 -m unittest scripts/test_fieldlog.py
+
+# --------------- verify (advisory) -------
+# detekt/ktlint run as Gradle plugins now (was: a downloaded detekt-cli jar). Both are advisory
+# (allow_failure) to mirror the prior detekt job and keep the pass/fail test signal clean; locally they
+# are enforced by the Stop hooks. Reports land under build/reports/{detekt,ktlint}/. The detekt job also runs the
+# tests of Knit's own rules (:detekt-rules, the `knit` ruleset), which nothing else runs.
+verify:detekt:
+  extends: .android
+  stage: verify
+  needs: []
+  allow_failure: true
+  script:
+    - ./gradlew :detekt-rules:test detekt --stacktrace --console=plain
+  artifacts:
+    when: always
+    paths:
+      - app/build/reports/detekt/
+    expire_in: 1 week
+
+verify:ktlint:
+  extends: .android
+  stage: verify
+  needs: []
+  allow_failure: true
+  script:
+    - ./gradlew ktlintCheck --stacktrace --console=plain
+  artifacts:
+    when: always
+    paths:
+      - app/build/reports/ktlint/
+      - build/reports/ktlint/
+    expire_in: 1 week
+
+verify:trivy:
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]
+  stage: verify
+  needs: []
+  allow_failure: true
+  # `needs: []` — Trivy scans the committed app/gradle.lockfile, so it's independent of the build job.
+  variables:
+    TRIVY_NO_PROGRESS: "true"
+    TRIVY_CACHE_DIR: ".trivycache/"
+  cache:
+    - key: trivy-db
+      paths: [.trivycache/]
+  script:
+    - trivy --version
+    - trivy fs --scanners vuln,secret,misconfig,license --exit-code 0 --format table .
+    - trivy fs --scanners vuln,secret,misconfig,license --format json --output trivy-report.json .
+  artifacts:
+    when: always
+    paths: [trivy-report.json]
+    expire_in: 1 week
+
+# Qodana — the IntelliJ inspection engine over the whole tree. Config (linter pin, profile, the
+# exclude list and why each entry is there) lives in qodana.yaml.
+#
+# MANUAL ON PURPOSE, and not because it is unimportant. The shared runner behind this pipeline is
+# 1 vCPU / 2 GB — the profile every other job here is tuned around (see the heap notes on .android).
+# Qodana is an IDE plus a full Gradle sync in one container and wants ~8 GB; it will be OOM-killed on
+# that runner, so wiring it into every merge request would only buy a red X on every pipeline. Start
+# it by hand when a bigger runner is available, or let the GitHub mirror's `qodana` job carry it —
+# that one runs on a 4 vCPU / 16 GB hosted runner and is the one that actually executes on each push.
+#
+# `needs: []` and no .android: the linter image brings its own JDK and Android SDK, and Qodana drives
+# its own Gradle sync inside the container. It only wants the sources.
+verify:qodana:
+  stage: verify
+  needs: []
+  image:
+    name: jetbrains/qodana-jvm-android:2026.2   # keep in lockstep with qodana.yaml `image:`
+    entrypoint: [""]
+  when: manual
+  allow_failure: true
+  # The Community linter needs no licence, so this job runs with no secrets. QODANA_TOKEN is optional
+  # and only publishes the run to Qodana Cloud — set it as a masked CI/CD variable if you want the
+  # cloud report and hosted baselines. If the engine ever needs more heap than it sizes for itself,
+  # the supported knob is `--property` on the command below, not an env var.
+  variables:
+    # qodana.yaml's bootstrap installs compileSdk 37.1 + build-tools here (the image ships only
+    # android-33). Inside .qodana/cache so the `cache:` below carries it between runs instead of
+    # re-downloading ~160 MB every time.
+    ANDROID_SDK_ROOT: "${CI_PROJECT_DIR}/.qodana/cache/android-sdk"
+    ANDROID_HOME: "${CI_PROJECT_DIR}/.qodana/cache/android-sdk"
+  script:
+    # --baseline: report what is NEW against the committed qodana.sarif.json.
+    - qodana --save-report --baseline qodana.sarif.json --results-dir "$CI_PROJECT_DIR/.qodana/results" --cache-dir "$CI_PROJECT_DIR/.qodana/cache"
+  cache:
+    # ONLY the downloads. Never .qodana/cache/{idea,android,262} — that is the IDE's cached project
+    # state, and restoring it silently drops the Android facets: the run still exits 0 but every
+    # AndroidLint inspection finds nothing (measured: 38 findings -> 0, no warning). Caching the
+    # whole dir would make this job quietly analyse less than it reports.
+    - key: qodana-$CI_COMMIT_REF_SLUG
+      paths:
+        - .qodana/cache/android-sdk/
+        - .qodana/cache/jdk21/
+        - .qodana/cache/gradle/
+  artifacts:
+    when: always
+    paths:
+      - .qodana/results/report/
+      - .qodana/results/qodana.sarif.json
+    expire_in: 1 week

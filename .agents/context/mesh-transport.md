@@ -1,0 +1,706 @@
+# Mesh transport (radios, NAN concurrency, BLE scan) — gotchas that have already bitten us
+
+Deep behaviour of the two-radio transport. The **import-boundary rule** (keep `android.net.wifi.aware.*`
+in `mesh/wifiaware/`, `android.bluetooth.*` in `mesh/bluetooth/`) lives in `rules/mesh.md`. This file
+is the hard-won operational detail behind that seam.
+
+## Per-peer responders DON'T compose — use one persistent accept-any responder
+
+The intuitive design (each incoming peer gets its own
+`WifiAwareNetworkSpecifier.Builder(session, peerHandle).setPort(...)` responder + `ServerSocket`) works
+for *two* devices but silently fails for a third: a device already acting as responder for one peer
+cannot stand up a second per-peer responder, so a phone joining an existing pair is stranded (its client
+`requestNetwork` just times out; verified — 7 couldn't join an 8+9 pair). The fix in
+`WifiAwareTransport`: each node runs **one** responder built from its *publish* session with **no peer
+handle** (`WifiAwareNetworkSpecifier.Builder(publishSession).setPort(port)`), which accepts a data path
+from **any** initiator over a single `ServerSocket`; all clients share it. Because an accept-any
+responder doesn't know who connected, the **initiator sends its advert as the first
+`LinkFraming.Type.HELLO` record** over the socket (`mesh/link/LinkHandshake`, shared with BLE), and the
+responder reads it to identify the peer. Tie-break gives one link per pair (larger nodeId =
+client/initiator, smaller = server). The responder is anchored to the publish session, so **only
+*subscribe* is ever re-armed** (publish/responder stay up), respecting the "one data interface" rule
+below.
+
+## One NAN data interface (`maxNdiInterfaces == 1`) → one aware *network* at a time → cue-driven ephemeral sync
+
+The single hardest constraint, confirmed on Pixel 7/8/9 (`dumpsys wifiaware` → `maxNdiInterfaces=1`) —
+but the limit is **per-role**, not "one NDP, period" (re-audited on-device 2026-07-04; evidence +
+corrected model in `docs/NAN_CONCURRENCY_REAUDIT.md`): every **initiator** `requestNetwork` is its own
+aware Network and needs its own NDI, so a second concurrent *initiate* is refused with
+`WifiAwareDataPathStMgr: ... NdpInfos[] - no interfaces available!` (verified: Pixel 7, largest, couldn't
+reach Pixel 9 while linked to Pixel 8) — while the **accept-any responder is ONE network that officially
+multiplexes many concurrent inbound NDPs** on the same NDI (E1: 30+ consecutive serves on one request
+with zero re-attaches; E2: two *simultaneous* inbound NDPs; firmware budget `maxNdpSessions=8`; the
+`dumpsys` `mMaxNdpInApp=1` once read as a per-app cap is a metrics high-water mark, not a limit). Each
+node's *outbound* is still single, so "everyone links to everyone they're larger than" still can't work,
+and the shipped design runs **two planes** (a concurrent-serve redesign is proposed in
+`docs/NAN_CONCURRENCY_REAUDIT.md` §5):
+
+- **Coordination plane** — Wi-Fi Aware *messages* (`DiscoverySession.sendMessage` / `onMessageReceived`,
+  ~255 B, best-effort, `maxQueuedTransmitMessages=8`) ride discovery follow-up frames and need **no data
+  path**, so they reach every neighbor at once *and* keep working while the one NDP is busy. Each node
+  cues `nodeId|version` — a `StoreDigest` **content digest** (XOR over its **live** custody frame-id set, so
+  it is O(1)-incremental and **restart-stable**: same store ⇒ same version, unlike the old monotone
+  `SyncEpoch` counter it replaced; expired-but-unswept rows are excluded, folded out **lazily** by
+  `StoreDigest.current()` at every read/cue — expiry is frame-global `sentAt + TTL`, so all nodes flip
+  together modulo clock skew instead of diverging for up to a sweep period, work item #8) — and
+  `DigestTracker` (pure, JVM-tested) flags a peer *sync-wanted* when either side's digest changed since
+  the last sync (an identical-digest pair skips the NDP entirely). Small floodable frames (broadcast
+  chat, reactions, receipts, group-meta, profiles) *also* ride this plane as a best-effort **fast
+  fan-out** (`fastFanout`/`fastSend`), deduped by the receiver's `SeenSet`, so they propagate with zero
+  NDP. The framing is chosen **per peer** (`mesh/link/FastFramePick`, from the SSI-advert capability copy):
+  toward a `CAP_FRAME_TRANSCODE` peer the frame rides the transcoded `0x05` tag (`mesh/link/FrameTranscoder`,
+  ADR 060 — `signed` re-encoded with integer labels and raw ids, rebuilt byte-exact at the receiver before
+  the signature is verified; the signed v3 ✓✓ tick is one 221-B message this way) or `0x03` when that is
+  smaller; toward a `CAP_FAST_COMPACT` peer the compact `0x03` tag (`mesh/link/FastFrameCodec` — outer
+  envelope stripped to 3 B + preset-dict deflate over `signed`, sig/signed byte-exact); either splits into
+  ≤3 `0x04` fragments when one ~255 B message won't hold it (this is what lets AckSync's sealed ticks,
+  sealed reactions, and full profiles ride at all — they measure 374-554 B legacy, see
+  `CoordinationPlaneSizeBudgetTest`); toward legacy/cue-only peers the old `0x01` tagged-CBOR framing is
+  kept, so no wire break. Counters: `fastCompactSent`/`fastTranscodedSent`/`fastLegacySent`/`fastFragSent`/
+  `fastReassembled`/`fastTooBig`/`transcodeFallbacks`/`fastDropsByReason` on `…debug.STATE`; grep
+  `fast-fanout`/`fast-send`/`fast-frame` logcat lines for per-frame routing. A cue also bootstraps
+  the reverse handle, so a node whose own *subscribe* is broken (e.g. Pixel 9 post-kill) still cues
+  larger peers to pull from it. A fast frame is a **sighting of the hop that delivered it, never of its
+  author** — `NanHopTable` maps the (session, `PeerHandle`) a message arrived on to the node the last
+  cue/advert named there, and that hop is what `noteReachable` and `InboundFrame.fromNodeId` get. The
+  envelope's `senderId` is the originator (relays keep the signed bytes verbatim), and every node re-fans each
+  first-seen custody frame, so crediting it put a peer miles away — and a BLE-only phone with no Aware
+  radio — in the "directly connected" list for the 150 s linger (ADR 061). An unnamed handle is no
+  sighting at all.
+- **Data plane** — one ephemeral NDP, brought up **only** when a peer is sync-wanted (the larger id
+  initiates, via the unchanged `initiateTo` + accept-any responder). On link-up each side advertises the
+  custody ids it holds (a `LinkFraming.Type.DIGEST` record) and pushes back only the frames the peer lacks
+  (`ForwardSync.onDigest`, replacing the old push-all backfill), then the NDP is torn down on
+  **quiescence** (no data for `QUIESCENCE_MS`, never mid-file) — freeing the NDI for the next pair. The
+  initiator drives teardown and records the sync in `DigestTracker` (it alone consults it); the responder
+  just sees the socket close, with a longer `RESPONDER_MAX_HOLD_MS` safety cap for a dead initiator.
+  <!-- doc-lint: allow SyncEpoch — the counter the digest replaced, named as history -->
+
+Net: an **idle mesh does zero data-path work** (just beacons + occasional cues); a new message triggers a
+targeted sync with only the peers that need it; and everything stays delay-tolerant (store-and-forward
+custody carries what one flood doesn't reach — a rotating series of pairwise syncs propagates
+epidemically). Single-slot admission (`beginConnect`/`beginAccept`: at most one link/handshake/accept,
+plus a `SETTLE_MS` gap after a link ends so the NDI is released before the next `requestNetwork`) keeps
+the radio off the "no interfaces available" wedge. `discoveryLoop`/`rearmSubscribe()` re-fire one-shot
+discovery **only while the slot is free** (never with a live NDP, whose client side rides the subscribe
+session and would be dropped by a re-arm).
+
+## A lonely node relaxes its discovery cadence (ADR 2026-09.kb68)
+
+With no cue targets `NanSyncPolicy.needsRediscovery` is true on every tick (an empty snapshot is "blind"), so
+the loop re-armed subscribe every `REARM_COOLDOWN_MS` for as long as the phone was alone, and every re-arm
+relights Instant Communication Mode for the framework's 30 s — a phone in a drawer kept ICM lit around the
+clock. `mesh/wifiaware/NanLonelyPolicy` gives the loop its cadence while lonely: the old 8 s / 15 s for the
+first three minutes and whenever the screen is on or the charger is in, then — the shared
+`PowerPolicy.lonelyRelaxed` rule, "alone ≥ 3 min on battery", which the BLE scan also reads — the duty
+cycle's base interval as the tick (120 s / 300 s) with the cooldown 15 s under it (ICM 25 % / 10 %). The
+screen-on exception is NAN's own since ADR 2026-09.w3xk (the shared rule stopped carrying it when the BLE scan
+learned to relax a screen-on node): a 30 s tick would leave ICM at ~100 %, so a relaxed interactive cadence
+here needs its own tick and a trial — deferred, and `NanLonelyPolicyTest` pins the clause. `lonelySince` is observed by the loop, never maintained at
+the cue-target removal sites; it resets on `onAttached` and on a BLE sighting of a peer we hold no cue target
+for (`onForeignReachable` rising edge, which also pokes the loop). `heal()` buys exactly one re-arm at the
+aggressive cooldown (`healRearmOwed`), so walking re-arms once per motion trigger. Nothing else in the loop
+changes: branch order, the watchdog's clocks, the sync and ICM-relight paths all read as before, and every
+wedge the file guards against needs an owed peer to be observed, which a lonely node has none of. Oracles:
+`re-arm subscribe (lonely=…ms cooldown=…ms heal=…)` and `lonely: relaxed …` / `lonely: aggressive again` on
+the transport tag, `lonely=` on the state line. The device trial is listed in the ADR and still owed.
+
+## `requestNetwork` with no timeout leaks the one interface forever — always time-box it
+
+The 3-arg `requestNetwork(request, cb, handler)` has no timeout, so a request that can't be fulfilled
+stays pending forever — its `NetworkCallback` never unregisters and its NDI reservation never frees, so
+the node exhausts its single interface and can never connect again (observed: a Pixel 7 stuck in a
+`terminate: already terminated` loop). Always use the **timeout** overload
+`requestNetwork(req, cb, handler, HANDSHAKE_TIMEOUT_MS)`, clean up in `onUnavailable`, and back a failed
+peer off (`CONNECT_BACKOFF_MS`) so a different sync-wanted peer gets the slot next. Note `neighbors` is the
+≤1 live link (send routing + the `onNeighborAdded` sync hooks); the **UI reads the smoothed `reachable`
+set** (coordination-plane sightings, lingered `REACHABLE_LINGER_MS`) so it doesn't blink as ephemeral
+syncs come and go.
+
+The accept-any **responder** request is the one request that is *not* time-boxed — it stands for the life
+of the publish session — and its `onUnavailable` is the framework declaring it unfulfillable and dropping
+it from its cache. `refileResponder` re-files it on `NanResponderPolicy`'s terms (ADR 2026-09.bgk3): a
+verdict while a link, handshake or accept of ours is live (or inside `SETTLE_MS`) is the documented knock
+refusal — the interface really was busy — and is re-filed after a 500 ms floor without being counted; a
+verdict with the interface free is about the request, backs off along 0.5 → … → 60 s, and at five in a
+row gives the request up for `sessionCycleWithSettle()`, three cycles per episode, refunded only by the
+responder's `onAvailable`. Before this the re-file was immediate and the Pixel 3 filed 174 in 130 ms
+(work item #77). Never count the contended case: a hub serving a long sync collects knocks for the life
+of the link.
+
+## An initiate that knocks the phone off its Wi-Fi is given up on (ADR 2026-09.m8kc)
+
+On the Pixel 3 (blueline, API 31) every NDP we initiate ends in a firmware REJECT that also tears the phone's
+own STA down (`DEAUTH_LEAVING`, eight drops in two hours, band-independent), and each drop silently kills the
+Aware client; the request never reaches the peer (a byte-swapped publish id inside `system_server`). The
+largest node id initiates to everyone and `NanConnectPolicy` never gives up, so that was a Wi-Fi drop a minute.
+`mesh/wifiaware/NanInitiatorPolicy` (pure, JVM-tested) is the failsafe: the transport keeps a **passive**
+`registerNetworkCallback` on `TRANSPORT_WIFI`, a loss followed by an available within 15 s is a **blip**, and a
+blip whose loss fell within 120 s *after* an initiate of ours with no link since is a **strike** — never a
+`NanConnectPolicy` streak (the P7/P8/P9 fleet runs long streaks against a wedged responder with no STA harm).
+Three strikes **hold the initiator role**: `driveSync` stops initiating, and the responder, discovery, cues and
+the fast plane keep running, so nearby phones still connect to this one and Bluetooth carries custody. The hold
+acts through **one choke point** — `digestSyncWanted` / `bulkSyncWanted`, where the BLE `suppressed` set already
+lives — so every admission *and* recovery site (the wedge watchdog's owed clock included; Tier-2 is a process
+kill, and the hold is journaled) stops seeing a sync it would have to initiate; `PeerFacts.initiator` stays the
+tie-break so `needsIcmRelight` is unaffected; `expectBulkTransfer` refuses a held peer so a photo goes to BLE
+without the composite's 10 s grace. Refunded by **exactly one** field event — an initiator link forming —
+plus the user's "Try again" (Diagnostics, `MeshTransport.releaseInitiatorHold()` through the controller and
+composite) and the build+ROM stamp (`data/settings/NanInitiatorJournal`, the ADR 055 shape). Never by the Aware
+edge, `heal()`, `stop()` or a fresh session; `pause()` and a genuine Aware-off void the initiate in flight as
+not evidence, but our own session cycle's NAN-down does not (on the Pixel 3 that cycle is bgk3's recovery from
+the very drop being judged). A held role takes **one probe initiate a day** (wall clock, journaled) through
+`driveSync` alone — `syncWantedForProbe`; the recovery sites keep the held view. Surface:
+`MeshTransport.initiatorHeld` → `TransportStatus.initiatorHeld` → an "on hold" tag and a section under
+Transports; `TransportHealth` unchanged, the plane is healthy. Oracles on the transport tag: `Wi-Fi dropped and
+came back … — strike n/3`, `holding the initiator role`, `daily initiator probe`, `initiator link formed under
+the hold — releasing it`; `init=` on the state line; `…debug.NANINIT` (`context/debug-bridge.md`).
+
+Device-verified 2026-09-19 on the P3 (the ADR has the log): one natural strike through the real `NetworkCallback`
+(the drop is rarer than the issue's night — 1 in 26 initiates), two injected, the hold, a force-stop restore, the
+forced probe and its `AlreadyHeld` verdict, the Diagnostics tag + section, and "Try again now". Two traps for the
+next run: the P3 in deep Doze without the battery exemption has Aware **disabled by the framework**
+(`dumpsys wifiaware` → `mUsageEnabled: false`, Knit reads `Unavailable`) — lift Doze first; and a real STA drop
+takes network adb with it, so a `logcat` pipe dies at exactly the moment you want it — loop the reconnect. Still
+owed: the initiator-link refund on hardware (needs a phone that can actually link), and the P9-side injected leg.
+
+## The coordination plane can die while discovery lives, and only a NAN restart brings it back (ADR 2026-09.jjhg)
+
+Work item #81, from `soak-20260921-bursts`. After a chat burst a phone's Wi-Fi Aware follow-up plane — the cue
+heartbeat and the fast path, `DiscoverySession.sendMessage` — stops being acked: `nanMsgsAcked` flat,
+`nanMsgSendsFailed` climbing by the whole send rate, for hours, while `onServiceDiscovered` keeps re-firing,
+`disc`/`reach` stay full, `live=[]`, health `Healthy`. The frozen phone receives no follow-ups either. Chat is
+unaffected (Bluetooth and the side channel carry it) so nothing alarms. Two mechanisms, both in the forensics:
+
+- **The framework's send queue deadlocks.** `WifiAwareStateManager` blocks on a firmware `FOLLOWUP_TX_QUEUE_FULL`
+  but arms its 10 s timeout only off messages it still tracks; with none tracked nothing unblocks. The next 50
+  sends from our uid get **no callback at all**, every send after that fails instantly. `dumpsys wifiaware`:
+  `mSendQueueBlocked: true`, `mFwQueuedSendMessages: [{}]`, 50 host-queued.
+- **The firmware stops delivering unicast.** Queue idle; every follow-up queued successfully and failed ~4 s
+  later, including to a peer matched seconds earlier under its current address. Not a stale `PeerHandle`.
+
+Both clear on a **NAN restart** and on nothing else the app can do. Knit is the only Aware client on the lab
+Pixels, so `session.close()` is the framework's last-client detach (`onAwareDownCleanupSendQueueState()` + a
+firmware disable/enable with a fresh address); every recovery in the run followed one (a Doze NAN-down, a
+`reattach()`, a session cycle), and the phone that never restarted stayed frozen five hours. Addresses do not
+rotate on the 30-minute `mac_random_interval_sec`; they change only on a restart — which also means a peer's
+restart leaves our publish-side handle to it pointing at a dead address until it messages us again.
+
+`checkMessagePlane` (every `WEDGE_CHECK_MS`, beside `checkWedge`) reads the ack bookkeeping `sendCoord` keeps —
+every send by `messageId` until the framework answers, the last ack, failures since it, the last sighting — and
+`NanMessagePlanePolicy` gives one of two verdicts: **swallowed** (oldest unanswered send ≥ 30 s old, no ack since)
+or **starved** (≥ 4 failures since the last ack, no ack for 60 s, a peer sighted within 90 s — the sighting is
+what separates a dead plane from a peer that walked away, which is pruned at 150 s). The cure is Tier 1's
+`sessionCycleWithSettle()` on the shared `lastReattachAt` cooldown, 3 per episode, never with a live link, and
+the episode ends only on an ack that lands after it began — not on the cycle, not on the beat its NAN-down
+leaves the node unhealthy and alone (ADR 2026-09.9dnk's livelock). A spent episode earns a fresh set after 15
+minutes. Read it on a device from `…debug.STATE`'s `nanMsgPlaneStalledPeakMs` / `nanMsgPlaneCycles`, the state
+line's `msg=<unanswered>/<failsSinceAck>/<sinceAck>`, and `…debug.NANMSG`; `dumpsys wifiaware`'s
+`mSendQueueBlocked` tells the two mechanisms apart. Trap: a send on a discovery session we have closed is a
+silent no-op in the framework (no callback ever) — `sendCoord` refuses it and `rearmSubscribe` forgets what the
+closed subscribe strands; record one as in flight and it reads as swallowed forever.
+
+## Three sets, and only one of them means *nearby*
+
+`MeshTransport.neighbors` is live links; `MeshTransport.reachable` is sightings. Above the composite the
+split is different and easy to get backwards (ADR 2026-09.2ajk):
+
+- **`MeshController.neighbors` = `CompositeMeshTransport.shortRangeReachable`** — the merged `reachable`
+  set restricted to children whose `MeshTransport.shortRange` is true. This is what every *nearby* /
+  *online* / *connected* surface reads: the foreground notification count, the chat-list status row, the
+  Contacts online dot, Profile Details, the group member picker, and Diagnostics' *Directly connected*.
+  Only a short-range plane sights the peer's **own** radio.
+- **`MeshController.reachable`** — the full union, long-range planes included. A superset, read only by
+  Diagnostics' *Reachable long-range*. A LoRa entry names the plane a frame arrived over, not proximity
+  and not the peer's hardware: LoRa keys presence on the frame *author*, and a gateway carries other
+  people's frames, so a phone with no board at all appears here (`context/lora-bridge.md`).
+- **`MeshController.shortRangeKinds`** — which `TransportKind`s count as short-range, read off
+  `MeshTransport.shortRange` rather than restated, so a UI telling a proximity tag from a relay one
+  cannot drift from what the transports declare.
+
+Adding a plane is where this bites: give it `shortRange = false` unless a sighting really does mean the
+peer is in radio range, or every *nearby* surface in the app inherits the claim.
+
+## Wi-Fi Aware availability flaps, and may be absent entirely
+
+`WifiAwareManager.isAvailable()` goes false when Wi-Fi is off or **another app's** Wi-Fi Direct / SoftAP /
+hotspot seizes the radio; the transport watches `ACTION_WIFI_AWARE_STATE_CHANGED`, flips `health` to
+`Degraded`, tears links down, and re-attaches on recovery. **It does not go false for our own P2P.** Since
+Android 12 `HalDeviceManager` gives same-app interface requests equal priority, so they never evict each
+other: Knit's own `createGroup` returns `BUSY` while our Aware session is attached, and `isAvailable()`
+stays true throughout. There is no edge to react to, which is why the direct-transfer path pauses this
+transport by hand (`MeshTransport.pause`/`resume`, `context/direct-transfer.md`, ADR 2026-09.wtmz). `PackageManager.FEATURE_WIFI_AWARE` can be missing outright
+(some budget/older + certain Samsung models) — but the **Bluetooth LE plane still meshes** on those
+devices, since `CompositeMeshTransport` merges whichever radios are present, so the UI shows the
+"unsupported" state only when *neither* Wi-Fi Aware nor BLE hardware exists
+(`RadioSupport.probe(context).any`, in onboarding). The same verdict (`mesh/RadioSupport.kt`: `PlaneSupport`
+Supported / NoHardware / NeedsAndroid12, the two transports' `isSupported` gates are expressed on it) fills in
+the Diagnostics Transports row for a plane the composite never built — "Not supported by this phone" or "Needs
+Android 12 or newer" — since an omitted row had looked identical to a radio switched off (work item 18). Never
+as a synthetic `TransportStatus`: the chat list's `radioWarningFor` reads every entry there as present hardware.
+
+## On API 29–32 publish/subscribe are location-gated, and the service's type is what lifts it (ADR 2026-09.535d)
+
+`WifiAwareServiceImpl` enforces the **location app-op** on `publish` and `subscribe` only — `attach`,
+`updatePublish`, `sendMessage` and `requestNetwork` are not gated — and a "While using the app" grant is a
+foreground-only app-op, so a backgrounded uid is refused with `SecurityException: UID … does not have
+Coarse/Fine Location permission`. What lifts it is the `location` **runtime** foreground-service type
+(`meshForegroundServiceTypes`, tiered with `requiredRadioPermissions`; the manifest attribute alone grants
+nothing), and on 30–32 also the while-in-use flag the system grants only to a start from a visible activity —
+which `KnitApp`'s resume observer makes on every open. Until then a boot- or sticky-started service still
+discovers only on screen. The transport tells that refusal from a dead client (`NanSessionFault.classify`,
+tier-gated), **holds** it as `TransportHealth.ForegroundOnly` with nothing torn down (the publish, the
+responder and every NDP keep serving) and retries once per `heal()`; routing it through `onSessionDead`
+instead is the 45-attaches-in-four-minutes churn of work item #62, against `NanAttachPolicy`'s leak budget.
+From 33 discovery rides `NEARBY_WIFI_DEVICES` and none of this applies.
+
+## One file streams at a time per socket
+
+`mesh/link/LinkFraming` (transport-neutral — the same codec runs over the Wi-Fi Aware NDP socket and the
+BLE L2CAP socket) multiplexes frames + files over one connected byte stream; the writer serializes file
+transfers and interleaves live frames *between* chunks (so an 8 MiB blob never stalls traffic), which is
+why a `FILE_HEADER`→`FILE_CHUNK`s→`FILE_END` run needs no file id. Don't push two files down one socket
+expecting them to interleave.
+
+A link holds **at most one custody digest waiting to be written** (ADR 2026-09.tjfb). `FramedLink.sendDigest`
+swaps the ids into one slot and queues a `DigestDue` marker only when the slot was empty; the writer empties
+the slot when it reaches the marker. A digest is a snapshot of `liveIds`, so the newer set replaces the older
+one where it stands, and a back-fill on a slow link no longer collects one stale 20 KB digest per re-offer
+tick in `FramedLink`'s queue. An idle link's cadence and bytes are unchanged, and a digest still rides between
+file chunks. Counter: `digestsReplaced`. Sender-local: the wire and the receiver are untouched. **It reaches
+only `FramedLink`'s own queue:** the Bluetooth stack's socket buffer (≥ 120 KB on the Pixel 3) holds whatever
+the writer has already handed it, and on the knit-ios `hci1` rig a post still waited 133 s behind six digests
+queued there (393 s behind ten before). Shrinking that wait means keeping the socket shallow or the digest
+smaller, not a second slot.
+
+## Steady-state digest parity + BLE suppression means NAN has no NDP exactly when an image needs it
+
+Large attachments go through the bulk-want escape hatch, and it must never feed the recovery machinery.
+With both radios up, BLE holds the link, the composite suppresses NAN's sync to that peer
+(`suppressDataPath`), and converged custody digests make `reconcileWanted` false — so
+`childHoldingLinkTo` only ever finds BLE and a naive "prefer NAN in `sendFile`" silently falls back
+~always, leaving images to crawl over untuned L2CAP. The fix: `CompositeMeshTransport.sendFile`
+(ATTACHMENT only; any size rides an already-live NAN link, and one ≥ `BULK_MIN_BYTES` = 128 KiB also
+arms a bring-up — the gate compares the **transcoded wire blob**, not the user's source file: a 1-5 MB
+GIF lands at ~150-250 KB as a 480px q70 animated WebP, which is how the original 256 KiB gate quietly
+routed "large GIFs" over BLE) and `MeshManager.deliverChat` (at `blobExchange.want`) call
+`MeshTransport.expectBulkTransfer` on **both** sides of the pair — the requester marks the author, the
+serving side marks the requester; only the larger nodeId can initiate, so whichever side that is has a
+mark — which arms a TTL'd `BulkWantTracker` that `WifiAwareTransport.syncWanted` ORs in ahead of the
+suppression + digest gates. The split is load-bearing: the bulk term reaches ONLY the admission sites
+(`driveSync`/`initiateOwed`/`initiateOwedToReachable`), while `anyReachableSyncOwed` (the wedge watchdog's
+owed clock — Tier-2 is a process kill), `needsRediscovery` (subscribe re-arm churn is its own wedge
+trigger), `needsIcmRelight`, and `rediscoverDelayMs` read the digest-pure gate — a pending
+image always has the BLE fallback carrying it, so it is never an outage to "heal". This whole predicate
+family is now a **pure `NanSyncPolicy`** (per-candidate `PeerFacts` snapshots carry `digestWanted` and
+`bulkWanted` as sibling flags so the split is structural and JVM-tested); the transport keeps thin wrappers
+that build the snapshot and call the policy. The two-tier watchdog clock is `NanWatchdogPolicy` and the
+cue/SSI codec is `NanCueCodec` — both pure and tested alongside `NanConnectPolicy`/`NanServePolicy`. Marks are gated on a
+fresh sighting (`BULK_FRESH_MS` 45 s, not the 150 s linger), fail-cooled 120 s on a failed initiate, and
+never bypass connect backoff / single-slot admission / SETTLE. The composite grace-waits ≤ 10 s for the
+NDP **off the inbound dispatch coroutine** (`onRequest`→`sendFile` runs inline in the router's single
+inbound collector — a suspension there stalls both radios) then falls back to the link holder;
+`sendFile` now returns enqueue-acceptance so a link that died in the check→enqueue window falls back
+instead of silently dropping the file, and `BlobExchange` keeps a per-(hash, peer) 45 s serve memo so
+the re-ask storm around a slow transfer (60 s re-offer, post-link-up `onNeighborAdded`) can't ship a
+second full copy (field-verified: the late-NDP re-ask after a BLE fallback is real, and the memo ate it).
+Since ADR 2026-09.4tx5 (#79) the link itself answers the two questions the memo could not: a receiver
+reads `MeshTransport.arrivingFiles()` (off `FramedLink.rxFile`) and does not ask for a blob whose header is
+already in, and a holder reads `fileInFlightTo(peer, key)` (the link's pending-file count, from the enqueue
+to the end of the stream) and refuses a re-ask for a copy still queued or streaming to that peer. The stack's
+buffer sits between those two reads, and an overfed link holds a whole photo in it (ADR 2026-10.nxfb, #121): the
+tick asks nothing of a peer whose file is streaming in (`MeshTransport.fileArrivingFrom`, off
+`FramedLink.rxInProgress`), and `hasPendingFile` keeps a file the link fed in full while it goes on feeding that
+peer, so a re-ask crossing a copy still in the stack ships nothing. Since ADR 2026-10.y9qh (#115) that read is a map of each arriving key to the bytes in and the `size` the sender's
+`FILE_HEADER` declared, and the chat samples it (`MeshController.arrivals`, every 500 ms while anything
+streams in, 2 s otherwise, only while an attachment it shows is awaited) to draw a progress ring; the size is
+a label, never a bound. The receiver logs `rx <KIND>/<hash> <size|?>B ← <peer>` at the header and
+`rx … <N>B in <ms>ms ← <peer>` at the end — the end line times the bytes on air, where the sender's `file …`
+line times only its feed (a different verb, so a `file ATTACHMENT/<hash>` grep still counts serves).
+Since ADR 2026-10.wtyc (#116) a link closed mid-stream does not throw an attachment's bytes away: its
+`FileIntake` (the receive side, pulled out of `FramedLink` and driven under the link's lock) hands the prefix to
+the shared, session-scoped `PartialBlobs`, the next `blobreq` names its length, and the holder streams the rest
+with the `offset` in its header — `size` is the tail's, and the ring resumes at the offset. The holder's `file …`
+line and the receiver's `rx …` lines end ` from <offset>` on a resume, and the bulk gate below reads the bytes
+still to send. Tails served and taken and splices refused ride `…debug.STATE` (`filesResumedOut`,
+`filesResumedIn`, `splicesRefused`).
+Frames, digests, avatars, and (when no NAN link is already up) sub-128 KiB blobs keep the BLE-first
+route byte-for-byte. Every routing decision logs `file route: <kind>/<key> <N>B → <peer> <choice+why>`
+(tag `CompositeMeshTransport`) and every arm accept/reject logs `bulk arm <peer> …` (tag
+`WifiAwareTransport`), so "why did this ride BLE" is one grep away; the `FramedLink`
+`file ATTACHMENT/<hash> <N>B in <ms>ms` line gives the per-plane timing, and `filesNan`/`filesBt`/
+`bulkTimeouts` ride `…debug.STATE`. `bulkTimeouts` climbing much faster than `filesNan` means ghosts are
+being armed.
+
+## The BLE scan is demand-gated, and a *settled* clique used to scan continuously
+
+`BluetoothMeshTransport.scanLoop` duty-cycles the scan, but `onScanResult` pokes the loop's wake channel
+on **every** sighting — *including already-linked peers* — and the loop consumes a buffered wake
+immediately, so whenever any peer is in range the idle gap collapsed to ~0 and the node scanned
+back-to-back **forever** (the `PowerPolicy` idle intervals only ever bit when *nothing* was nearby). The
+adaptive throttle (`ScanDemandPolicy`) fixes this by driving Boost/Floor from an explicit **demand**
+check and splitting a dedicated `scanWake` channel (only `scanLoop` drains it; `connectLoop` keeps
+`healSignal`) that `onScanResult` pokes **only for a genuine boost trigger** (a peer we'd initiate to,
+above the RSSI floor, unlinked, off backoff). Floor (`settledIdleAfterScan`, ~2 min) engages only with
+≥1 link and no candidate/chase — or while A2DP audio contends the radio. An isolated node never floors; it
+hunts at `PowerPolicy.idleAfterScan`'s 12 s gap for three minutes from its last link's end (`noLinkSince`), then — on battery — relaxes: screen on
+to a 60 s gap between its 12 s BALANCED windows (ADR 2026-09.w3xk, ≈ 4 % receiver duty from 12.5 %), screen
+off to the duty cycle (120 s / 300 s); charging never. Every wake below (heal, a power edge, the adapter
+coming on, a NAN sighting) ends the gap early with an immediate scan. Oracle: `bt scan lonely: relaxed
+idle=…ms (alone …ms)` / `aggressive again`, and `alone=` on the 60 s `bt state` line. NAN acts as an **early-warning**: `CompositeMeshTransport.onForeignReachable` (the reverse of
+`suppressDataPath`) tells BLE which peers another plane can see, and BLE boosts to chase them onto a link,
+bounded by `PROMOTE_CHASE_MS` so a NAN-only / out-of-range peer can't pin Boost. Advertising is untouched
+(always-on) so BLE-only devices still discover us — and *re-asserted*: the stack's own re-enable of the presence
+set around a connection can be refused by the controller (0x0d beside a 15 ms link), silently when the connection
+was ours, so `advertLoop` enables the live set again 2.5 s after every ACL edge, on a doubling wait after a reported
+refusal, and on a 10 s (no link) / 60 s net (`AdvertReassertPolicy`, ADR 2026-10.9utz). Oracle: `bt advert refused
+<status>, retry in <ms>` / `bt advert enabled again (refused for <ms>ms)`, `advert=` on the `bt state` line. **Load-bearing invariant: `reachable ⊇ neighbors`.**
+BLE `reachable` is fed only from scan presence (90 s linger), so once the floor stops re-sighting a
+linked peer it would vanish from the "nearby" UI while still linked — `publishReachable` unions live
+links back in (`_reachable` only, never `_neighbors`, which routes sends). The same call publishes `near`, the
+stricter subset (links, or heard fresh at raw ≥ −90 and not Coded-only) that the composite pushes to Wi-Fi Aware
+through `onForeignNear` to corroborate its Tier-2 self-kill (ADR 2026-09.9dnk). Verify on-device via the
+`bt scan → floor/boost` logcat lines and that a linked peer stays in `…debug.STATE` reachable while the
+scan is floored. The side channel below runs a **second** scan with its own policy (`SideScanPolicy`):
+continuous at LOW_POWER/BALANCED while a flagged peer is around, Off during a connect, and rationed to
+one start per 30 s because Android's five-starts-per-30 s budget is per app and this scan shares it.
+
+## The BLE responder admits a dialer it never sighted (ADR 2026-09.shzv)
+
+The larger node id dials, and the responder used to close every dialer that sorted below it. An iPhone
+advertises no service data, so before A3 this side never sighted it and never dialed it; refusing its dial from
+below left the pair unlinked for good. A3 (below) sights a foreground iPhone through its GATT payload, which puts
+it under the old rule; A1 stays whole for the rest — a backgrounded iPhone, a dark reader, an iPhone build that
+ignores the flag (the shzv amendment). A sighted iPhone's redial over a held link is refused like an Android
+peer's, until the held link fails. `BleAdmissionPolicy.decide` keeps the old rule, unchanged, for a dialer presence
+holds (below us: refused, our own dial wins; already linked: refused, which is also what stops a claimed id
+cutting a sighted peer's link). It admits an unsighted dialer in either order, and its second link replaces the
+first once the held one is 30 s old (`REPLACE_MIN_HOLD_MS`). Each link has its own `LinkEvents`, and
+`teardownLink(…, only = link)` releases the slot only while that link holds it — the link's own end and an
+eviction both pass the link they mean; the replaced link's `onLinkDown` used to remove its replacement. A link
+the scan has not once sighted (`neverSighted`) scores the promotion floor (−90 dBm); a sighted peer that left
+presence still scores −127, unless its HELLO carried `CAP_DOORBELL`.
+
+A backgrounded iPhone (AND-3, the shzv amendment of 2026-10-10): its UUID moves to Apple's overflow area, so this
+phone stops hearing it and it leaves presence 90 s later. A link whose HELLO carried `CAP_DOORBELL`
+(`FramedLink.peer.capabilities`; Android never sets it) scores −90 out of presence, never −127, so it is not the
+first shed at the budget, though a candidate 8 dB stronger still replaces it. A doorbell dialer counts as sighted
+for admission (`BleAdmissionPolicy.doorbellTrusted`: the HELLO's bit counts only if any held link's HELLO
+carried it too and a peer in presence was last sighted through its GATT payload, `gattSighted`) only if presence heard it within `DOORBELL_HEARD_MS` (12 s, `Snapshot.lastSeenAgoMs`), else it takes
+the unsighted rows. That is wall-clock age, and the scan is duty-cycled, so a foreground iPhone's dial from below is
+often admitted too; the error only leans toward linking. Oracle: `bt accepted client <id> (<verdict>,
+sighted=<b> codedOnly=<b>[ doorbell=true heardAgoMs=<ms|null> inPresence=<b>[ doorbellTrusted=false]])` and `bt refused client <id>
+(sighted=<b> codedOnly=<b> heldAgeMs=<ms|null> atCap=<b>[ …same suffix])` at info; an eviction logs `bt evicting
+<id> (score=<dBm> doorbell=<b>)`, and a debug `bt state` ends `linkScores=<id>:<dBm>,…`. Tests:
+`BleAdmissionPolicyTest`, `PromotionPolicyTest`; the lab has no radio layer.
+
+## A lonely node dials a larger peer it sights (ADR 2026-09.hj4a)
+
+The tie-break left a smaller-id newcomer waiting on a settled, screen-off clique's floored scan — `120 s × (1 +
+links)`, 360–600 s — and the clique's one post-link-down scan lands inside the newcomer's fresh backoff (#103). So a
+node that has held **zero** links for `LONELY_AGGRESSIVE_WINDOW_MS` (180 s) may dial a sighted peer whose id sorts
+**above** its own: `LonelyDialPolicy.pick`, PromotionPolicy's own gates (−90 dBm, 12 s dwell, off backoff) plus device
+and PSM known, strongest first, one open at a time (an in-flight dial to a larger id can only be the lonely one). Its
+clock is `noLinkSince` — transport start, restarted when the last link goes (`teardownLink`) — which the scan's
+relaxed cadence reads too (w3xk's 2026-10-02 amendment; it used to run from the last link's start). The responder is unchanged: a
+peer that has not sighted the newcomer admits it (shzv's unsighted admit), and one that has refuses it and dials it
+by the tie-break; the refusal is an ordinary `HANDSHAKE` failure with the ordinary backoff, and a failure for a peer
+whose own dial already linked bumps no streak. `LonelyDialPolicy.msUntilDue` wakes the connect loop when the window
+closes or a candidate's dwell ripens, because on a screen-off phone every 8 s scan window restarts the dwell
+(`presenceGapResetMs`), so the next sighting never ripens it. Scan untouched: zero links is always Boost. Oracle:
+`bt lonely dial <id> (alone=<ms>ms rssi=<dBm> dwell=<ms>ms)` straight before that dial's `bt initiating to <id>` —
+the iOS interop harness keys off the pair — and `alone=` on the `bt state` line. Tests: `LonelyDialPolicyTest`.
+
+## Discovery keeps wall time, and its advert runs at full power (ADR 2026-10.pj9w, 2026-10.ryak)
+
+The first Android-to-Android trial (2026-10-02) took 58–92 s to relink two Pixels four metres apart after a
+Bluetooth toggle, and once not at all. Three causes, three rules:
+
+- **A dial wakes when its dwell ripens.** A screen-off scan's gap is longer than `presenceGapResetMs` (8 s), so the
+  next sighting restarts a candidate's 12 s dwell instead of ripening it. `PromotionPolicy.msUntilDue` (ordinary
+  dial) and `LonelyDialPolicy.msUntilDue` (lonely dial) feed `nextConnectWaitMs`, so the connect loop runs between
+  windows, when the dwell comes due. A new rule that gates a dial on the clock needs the same wake.
+- **The waits a relink waits on run on `elapsedRealtime`** (`mesh/power/ElapsedWait`). A coroutine `delay` stops
+  while the CPU is suspended: the Pixel 3's 60 s `bt state` line ran at a median 110 s, its 12 s dial watchdog at up
+  to 26 s. The connect loop, the dial and HELLO watchdogs, the scan's pause behind a dial, the GATT payload read's
+  12 s give-up (`ElapsedWait.runWithin`: the read holds the arbiter, so the scan and every dial wait on it, #127), the
+  scan window and the **hunting** gap (`PowerPolicy.hunting`: no link, not yet relaxed) go through `elapsedWait`,
+  which looks at the clock every 2 s of awake time; they never wake a sleeping phone, they stop losing the time it
+  slept. The settled, linked
+  and relaxed gaps keep stretching on purpose: they are power budgets measured on phones that stretched them. A new
+  wait a relink waits on that uses `delay` or `withTimeoutOrNull` brings the stretch back, and only a suspending phone
+  shows it. The `bt state` line itself keeps `delay` on purpose: its spacing is how far a phone sleeps.
+- **The presence advert is `TX_POWER_HIGH`** (+1 dBm, the API's most). Every −90 floor reads it, while the link runs
+  at the controller's power; at MEDIUM the pair four metres apart read −79..−90. The side pages and the Coded set go
+  out at the same power (`BleAdvertiserTest.everyDiscoverySetAdvertisesAtFullPower`): a page must reach as far as
+  the sighting that gated it, and the Coded credit's 12 dB holds only at equal power. A threshold on an advert
+  reading is sized against HIGH.
+
+Measure with `scripts/ble-link-trial.py` (`run` toggles one phone and times `bt link up` from both phones' logs on
+the host clock; `summary` tabulates). Tests: `ElapsedWaitTest`, `PromotionPolicyTest`, `BleAdvertiserTest`.
+
+## The BLE plane rings a peer's GATT doorbell when its HELLO asks (ADR 2026-09.dqvb)
+
+iOS does not resume a suspended app for data on an open L2CAP channel, and does for a write to its own GATT
+server, so an iPhone serves a **doorbell**, characteristic `f34c056b-5830-4243-a888-01f92f49e446` in a primary
+`0xFE30` service (`DoorbellPolicy.SERVICE_UUID` / `DOORBELL_UUID`, pinned). It sets `Protocol.CAP_DOORBELL`
+(`0x1000`) in its HELLO. Android never sets it, so no Android↔Android link touches GATT.
+
+`registerLink` gives a link whose HELLO carries the bit a `BleDoorbell`, one coroutine per link that owns a
+GATT client and a `DoorbellPolicy.Schedule`. `writeOnce` pokes it after enqueuing a frame (past the
+`LinkCrossings` check). `typing`, `blobreq` and `keyreq` don't ring; digests, files and the HELLO never pass
+through it.
+
+- **The schedule is the port's own.** A ring at most every 5 s, plus one more after a burst.
+- **The lookup runs at link-up, before any ring** (#102). `connectGatt(TRANSPORT_LE)` attaches to the link's own
+  ACL; if it has not attached within 2 s the ACL is gone, and the timeout's close cancels the dial it turned into.
+  Then `discoverServices`, then the characteristic, which must take a write without response.
+- **Every lookup that finds the doorbell asks for `CONNECTION_PRIORITY_BALANCED`** (#102). An iPhone that dialed
+  us is the central and runs the link at a 720 ms supervision timeout; the stack's discovery-time update lifts it
+  to 5 s and then asks for 720 ms back. BALANCED carries AOSP's fixed 5 s timeout (30–50 ms, no latency), and iOS
+  grants it. Asked after each lookup, so a re-lookup's discovery is followed by the request again.
+- **The ask is repeated when the put-back wins** (`DoorbellPolicy.Balanced`). The stack re-sends the central's first
+  values (720 ms from an iPhone, 420 ms from BlueZ) as discovery ends, and over the L2CAP-signalling path nothing
+  orders that put-back against our ask. A timeout under 5 s reported by `onConnectionUpdated` after the ask asks
+  again at once, and 2 s after the ask a settle check asks again unless a report since showed 5 s — the net for a
+  framework that stops calling the hidden callback. At most two repeats per lookup, all for the same values; a
+  report with a non-success status (`0x2A`, a re-ask colliding with the ask in flight) spends none. Device-verified:
+  40 of 40 links ended at 5 s, with the iPhone and BlueZ as central (the last ten on this rule).
+- **A ring is a 1-byte write without response.** Never with a response: a suspended app would have to answer it.
+- **The client lives and dies with the link** (`teardownLink`, and `registerLink`'s replace branch): an open client
+  holds the ACL.
+- **The poke goes at the enqueue, not after the socket write.** A suspended iPhone's credits run out and the
+  writer blocks until the ring wakes it.
+- **A dialed link rings too** (A3). The dialer registers the link with the HELLO reply's full-width caps, not the
+  advert's low byte, so a dialed iPhone's `CAP_DOORBELL` shows; a dialed Android↔Android link's `Peer.capabilities`
+  is full width now, as the accepted side's was.
+
+Oracle: `bt doorbell found|absent|lookup failed|wedged <id>`, `bt doorbell priority <id> requested=<bool>`,
+`bt doorbell priority <id> again (put-back <ms>ms|settle) requested=<bool>` and
+`bt conn params <id> interval=… latency=… timeout=…` (the hidden `onConnectionUpdated`) at info, `bt ring <id>` at
+debug, and
+`doorbells=`/`rings=` on the `bt state` line. Tests: `DoorbellPolicyTest`, `ProtocolTest`; `BleDoorbell` is
+device-verified only.
+
+## An Android phone finds an iPhone through its GATT payload (A3, ADR 2026-09.kwq2)
+
+A foreground iPhone advertises only the `0xFE30` UUID and serves its 24-byte advert payload (cue zeroed) from
+characteristic `848eedcd-a2e3-4fb2-86f9-e2c80821a497` (`DoorbellPolicy.PAYLOAD_UUID`) in the doorbell's service
+(knit-ios ADR 2026-09.xzpt). While `BuildConfig.BLE_GATT_PEERS` is on (debug and release since 2026-10-08; the trial still owed):
+
+- **The presence scan matches the UUID too** (`BleScanner(matchesServiceUuid)`, a second OR'd filter).
+- **`onScanResult` splits.** Service data → `sight`, as always. A UUID-only advert → the cached payload for its
+  address, sighted at this advert's RSSI; else a read launched on the transport's scope, with no scan wake.
+- **`GattPayloads` paces the reads**, line for line with iOS: one at a time, 12 s each, 30 s after a failure, 10
+  min after a stranger (no service, no characteristic, a value under 23 B); `cancel()` on radio stop. Two Android
+  additions: at most 64 addresses, LRU (an iPhone's address rotates); and a budget across addresses (kwq2's
+  2026-10-11 amendment, #154). At most 12 charged reads run in any 10 min of the elapsed clock. Every read that ends
+  is charged, a payload read included: the payload is unauthenticated, and a forger naming a large id is never
+  dialed. A link's HELLO at the address naming the payload's node refunds that read once (`GattPayloads.confirmed`,
+  from `registerLink`); an unrefunded charge ages out, which is the cost to an iPhone read but never linked (link
+  budget full, sorting above us, a quiet forget) or one at the edge of range. A cancel is free and no forget is charged. While the
+  connect loop has a dial it can make (`GattPayloads.yieldTo`, `DialPlan.dialWaiting`), no new read starts, so a
+  dial waits for at most the one read in flight.
+- **A payload lives until one of three rules forgets its address** (the contract's payload lifetime): a dial to it
+  fails before its channel opens (never on HANDSHAKE); a HELLO on a link to it, accepted or the reply to ours, names
+  another node; or it goes 60 s of scanning unheard with no link up (`GattPayloads.scanned`, fed each scan window).
+- **`BleGattPayloadReader` is a dial**: `connectGatt(TRANSPORT_LE)` → discover → read → parse, 12 s in all on the
+  elapsed clock (pj9w, #127), under `BleConnectArbiter("gatt-read")`, client always closed, no `requestMtu` (the
+  Read Blob fetches 24 B at MTU 23).
+  Never an address a link holds, never while an L2CAP dial is in flight or the arbiter is held; a promotion waits
+  while a read runs.
+- **The dial rule is unchanged.** A read iPhone is sighted, so the larger id dials and a sighted lower dialer is
+  refused. The dialed link takes the reply HELLO's caps, so the doorbell rings it.
+- **`FLAG_DIALS_GATT_PEERS` (0x02)** in the advert's flags byte tells an iPhone whose id sorts lower to wait to be
+  dialed. Set only while the reader runs (`readvertise`, the same gate); it went on after the device gate passed.
+
+Limits: in the iPhone-below order the first link waits on this phone's (possibly floored) scan cadence; a read
+during iOS's PSM-change service swap is a 10-minute stranger, kept line for line with iOS; a backgrounded iPhone
+cannot be sighted, and one below a flagged phone waits for a dial that can't come (free until iOS gains background
+discovery) — once linked, though, it keeps its link and its re-dial gets in (AND-3, above); an identity change at an address that never goes quiet, new node below a flagged phone and old above,
+keeps the old sighting until the address rotates or goes quiet. Oracle: `bt gatt read <addr> → <id>` /
+`failed (<phase>)` / `stranger (<phase>)` and `bt gatt forget <addr> (dial|hello <id>|quiet)` at info, `bt gatt reading <addr>` at debug, `gattPayloads=`/`gattReads=`/`gattBudget=` on `bt state`, `bt gatt budget spent (…)` / `bt gatt budget free` per
+edge, `bt gatt confirmed <addr> → <id>` at debug. Tests:
+`GattPayloadsTest`, `BleAdvertPayloadTest`, `DoorbellPolicyTest`; the reader is device-verified only.
+
+A debug build can cap the link budget below `PromotionConfig.DEFAULT_MAX_LINKS` (6) from Diagnostics or
+`…debug.BLECAP` (`SettingsStore.debugBleLinkCap`, read as null in release). Only while a cap is set does the
+transport count in-flight dials against it and pass `atCap` to `BleAdmissionPolicy.decide`, which turns an
+Admit (never a Replace) into a Refuse — release keeps the shipped table and the accept-then-shed overflow path.
+
+## A frame crosses a BLE link once, and the loops sleep until something can change
+
+Two paths used to hand the Bluetooth plane the same frame for the same L2CAP stream — the router's flood copy
+(`MeshRouter` → `CompositeMeshTransport.send`, `wire.relayed()`) and the fast path's link copy
+(`fastFanout`, the immediate one, unrelayed) — and a relayed frame's fast copy went straight back over the link
+it arrived on, because `fastFanout` has no hop id. Different bytes (`hops`), same `sig`, and the far end's
+`SeenSet` dropped the second every time: room chat, reactions, receipts and profiles each crossed every link
+twice. `mesh/link/LinkCrossings` is the per-link memo that stops it, keyed on `mesh/link/FrameKey` (the
+sig-prefix key the side channel already used), marked on the way **in** as well as out, with the router
+`SeenSet`'s ten-minute window and forgotten with the link — so what it skips is exactly what the receiver
+would have dropped, and a peer that restarted with an empty `SeenSet` gets a clean stream. `BleFastRoutePolicy`
+additionally never routes a frame to its own author (a page-first hearing re-fans with the author as hop,
+which the router's split horizon can't exclude). Counter: `bleLinkDupSkipped`, about one per room frame per
+link. The lab's `LabTransport` keeps the same memo (`dupSkipped`), so the box stays the plane as shipped
+(`SideChannelLabTest.aFrameCrossesEachPipeOnce`). ADR 2026-09.6nmy.
+
+The loops around the radio no longer poll on a fixed short tick: `scanLoop`'s paused branch waits 60 s while
+the adapter is off (the `STATE_ON` receiver wakes it) and the longest connect watchdog + 3 s while a connect is in
+flight (its end wakes it), `connectLoop` sleeps until the earliest connect backoff expires or the lonely dial
+comes due (hj4a), clamped to 1–60 s (`ConnectBackoffPolicy.nextDueWaitMs`), instead of every 5 s, `advertLoop`
+sleeps until the presence set's next re-assert (9utz) — 60 s while the adapter is off, and both
+transports' diagnostic state line runs every 60 s and builds its string only in debug builds. Every wait is still a timeout, so a lost wake costs latency,
+never liveness.
+
+## The BLE side channel is a page carousel, not a message queue (ADR 2026-09.sjaa)
+
+`mesh/bluetooth/BleSideChannel` is the BLE analogue of the NAN coordination plane's fast fan-out
+(knit/knit-next#13): the `shouldFastFanout` frames — room chat, reactions, receipts, group meta, profiles,
+plus the room typing cue — ride **non-connectable extended-advertising pages** under
+`BleConstants.SIDE_SERVICE_UUID` (`0xFE38`), connectionless and scheduled by the controller apart from the
+ACL, so they bypass a blob head-of-line-blocking the L2CAP stream and reach a sighted-but-unlinked peer.
+It lives *inside* `BluetoothMeshTransport` (which now declares `hasFastPlane`; `fastFanout` keeps the link
+copy the composite used to send and adds the page, `fastSend` is the link only — nothing DM-form rides a
+broadcast carrier), gated by `BuildConfig.BLE_SIDE_PLANE` (debug and release on since 2026-10-08) through one seam: the
+`BleSideChannel?` DI hands the transport. A page is **one** `FastFrameCodec` unit (`0x03`/`0x05`, or one
+`0x04` fragment) ≤ `PAGE_BYTES` = 236 B — one AUX PDU, because an AD structure caps at 252 B, an in-place
+update on a live set must be one HCI operation, and a chained page is lost whole. `SideCarousel` (pure)
+rotates the queue through `SLOTS` = 2 sets: a 12 s dwell from first air (one screen-off scan interval),
+a 30 s linger when nothing waits, fewer-part frames first, a started frame finishes first, typing
+coalesced per sender, 30 s freshness, capacity 32. The gate is a BLE-local **flags byte** the presence
+advert grew (`BleAdvertPayload` 23 → 24 B, the last byte of the 31-byte budget; `FLAG_SIDE_CHANNEL` set
+only while the controller passed its extended-advertising probe), tracked by `SideCapableTracker` with a
+10-min linger *or* a live link (restamped at the link's end), since presence prunes at 90 s. The receive
+scan is the channel's battery cost, so `SideScanPolicy` runs it only while a page could say something the
+links will not — a flagged peer is sighted but **unlinked**, or a file is streaming on one of our links — and
+is Off for an all-linked clique with nothing streaming (ADR 2026-09.u8qj; `SideCapableTracker.audience`
+tells the two apart, and the sender's page offer still keys on `anyCapable`). A page carries no hop id and is never
+presence (each set has its own RPA; `fromNodeId` is the author, ADR 038's rule); fragments reassemble by
+fragment id, seeded at random per process. Grep `ble-side` (bring-up probe, `offer`, `heard`, `rx →`);
+counters `bleSide*` on `…debug.STATE`. In the JVM, `mesh/lab/LabPages` is the pages' air and
+`SideChannelLabTest` runs the author-as-hop, linkless-listener and never-DM shapes through the real
+`BleFastRoutePolicy` and codec against the full oracle (`context/testing.md`). Device trial owed before the
+release flag flips — the ADR lists it.
+
+## Links step down to the Coded PHY at range (ADR 2026-10.yvn6)
+
+Behind `BuildConfig.BLE_CODED_PHY`, on in release since 2026-10-08 (release always AUTO); on a debug build the mode (`SettingsStore.debugBlePhyMode`: off, auto,
+coded, 1m) is set from Diagnostics or `…debug.PHY` and applied without a restart. With it on, and on a controller
+that reports `isLeCodedPhySupported`:
+
+- **A second presence set on Coded** (`BleAdvertiser.codedParams()`, extended + connectable, HIGH power) carries
+  the same payload bytes as the legacy advert. The presence scan goes extended on every PHY (`BleScanner.phys`
+  = `ScanPhys.ALL`). While the phone has no link, or an unlinked peer is heard on Coded alone, every other
+  window is Coded-only (`CodedPhyPolicy.scanPhys`, never two in a row). The legacy advert stays: legacy-only
+  scanners and the 31-byte budget need it.
+- **One RSSI per PHY.** `BlePresenceTracker` reports the stronger on the 1M scale (Coded + 12 dB,
+  `CodedPhyPolicy.effectiveRssi`; the credit is `PhyTuning.codedCreditDb`), so every −90 floor reads what it always
+  did with the experiment off. A Coded hit after a Coded hit is continuous presence across 30 s
+  (`codedGapResetMs`), not the 1M path's 8 s.
+- **The dial picks the PHY.** A peer heard on Coded alone (`codedOnly`: Coded kept hearing it for more than 8 s of
+  *1M listening* after its last 1M hit, `Snapshot.codedLagMs`) is dialed at its Coded address. The clock runs only
+  while a window listens on 1M (`BlePresenceTracker.onOneMListening`), because a Coded-only window cannot hear a 1M
+  advert; on the wall clock it made every close peer Coded-only (the ADR's 2026-10-02 (3) amendment). Only a 1M hit
+  whose smoothed 1M reading is at or above `PhyTuning.oneMWeakDbm` (−90, raw, the presence advert at HIGH) moves the
+  mark: a peer whose faint 1M advert still got through reset the clock on every hit, was dialed on 1M at the edge and
+  backed off (the 2026-10-20 amendment). So a weak-1M peer is dialed on Coded, admitted as unsighted, counts as far,
+  and leaves `near`. The peer's mark
+  outlives its presence entry (64, least recently used out). A peer with no 1M address yet (first heard in a Coded-only
+  window) is dialed at its Coded address too, as a Coded dial (`DialPlan.target`, #148). A plain L2CAP connect to that
+  address lands on Coded (spike-verified). That dial's watchdog is 25 s, not 12 (`CodedPhyPolicy.connectTimeoutMs`): Android's initiator
+  listens on Coded 15 ms in every 60 while it connects, and the stack's own direct-connect timeout is 30 s. The
+  tie-break and every dial rule are untouched.
+- **A drop at range makes the dialed side's Coded advert fast.** When a link with a PHY handle ends on its own
+  (`eof`) on Coded or at the step-down edge, the smaller id — the side the other dials back — advertises Coded every
+  250 ms for 3 min (`CodedAdvertPace`, `PhyTuning.fastAdvertMs` / `fastHoldMs`), until that peer links again. The
+  interval moves in place (`BleAdvertiser.setInterval`: disable, `setAdvertisingParameters`, enable; same set, same
+  address), 2.5 s after the drop so it stays out of the stack's pause and resume around the disconnection (9utz). Two
+  refused fast enables give the window up. The Coded set rides the presence set's re-assert turns (9utz) and has
+  retries of its own (`codedKeeper`): a refused enable, and up to five restarts of a start the stack failed
+  internally (status 4); TOO_MANY_ADVERTISERS and FEATURE_UNSUPPORTED stay dark until the next bring-up.
+- **…and the dialing side hunts it.** For the same drop, the larger id holds the peer in `RangeHunt` and its scan
+  hunts (`CodedPhyPolicy.hunts`): the 12 s lonely gap (`PowerPolicy.HUNT_IDLE_MS`, on the elapsed clock), every
+  other window Coded-only, never the settled floor, whatever other links it holds, and a window that a dial ends;
+  A2DP still floors it. That lasts 3 min (`fastHoldMs`),
+  or up to 30 min from the drop while Knit is in use (`huntInUseHoldMs`), until the peer links again. "In use" is
+  `AppVisibility` (`MainActivity` started, kept off `PowerState` so NAN does not heal on it) with the screen lit,
+  and it hunts on its own too, with nobody lost. A NAN chase of a peer heard on Coded before also gets Coded-only
+  windows. **A cold far sighting is hunted too** (the 2026-10-20 amendment): an unlinked peer in `ScanPlan.far`, at or
+  above −90 on the 1M scale and not in backoff, gets the same two halves after the window that heard it
+  (`noteColdSightings`, `CodedPhyPolicy.coldHunt`) — a `RangeHunt.onCold` hold on the side that dials, only while the
+  promotion has room for it (`DialPlan.promotes`), and a fast Coded advert on the dialed side, 2.5 s later and never
+  replacing a pending pace change. `ColdSightings` bounds it: one action per peer per 30 min
+  (`coldHuntCooldownMs`), one cold hunt and one cold fast window at a time, and 3 min of each kind per 30 min phone-wide, each kind its own budget.
+  A cold hunt never takes the in-use bound and ends at the next window once its peer links, backs off or leaves presence; none starts under
+  low power (ADR 2026-10.d44b). Log: `bt hunt <id>: cold sighting on Coded…`, `bt hunt <id>: cold hunt over (linked|backoff|gone|off)`,
+  `bt coded advert fast (cold <id>…)`; `…debug.PHY --ez coldHunt false --ei oneMWeak -200` is today's rule for the A/B.
+  Before this a dialer
+  holding any other link (an iPhone in the same pocket) floored its scan and never heard its lost peer again (the
+  2026-10-04 walk). Log: `bt hunt <id>: lost at range…`, `bt scan → hunt (lost=[…] inUse=…)` / `bt scan hunt over`.
+- **Admission.** While the experiment runs, a dialer heard on Coded alone counts as unsighted
+  (`CodedPhyPolicy.sightedForAdmission`) and is admitted whatever the id order. Otherwise a far pair waits on
+  each other: the responder refuses, and its own dial never clears the dwell (the first walk, the ADR's
+  amendment). A dialer heard on 1M keeps shzv's tie-break.
+- **`BlePhyControl` per capable link** — a GATT client on the link's ACL, the `BleDoorbell` pattern — reads link
+  RSSI and asks `PhyStepper` (pure, JVM-tested) to step down to Coded S=8 and back up to 1M or 2M — the step-up
+  passes both masks and the controller picks, so a link that visited Coded is never pinned to 1M; only the `1m`
+  mode asks for 1M alone. A link that flaps backs off its step-up, never its step-down: a step-down within 5 min of
+  the last step-up doubles the time AUTO holds the link on Coded before it may step up (20 s to a 5 min cap,
+  `PhyStepper.stepUpBackoffMs`; #169, the ADR's 2026-10-14 amendment). The larger id drives. A request unanswered in
+  3 s, or answered with another PHY, gives up for the link (a controller without Coded answers nothing at all).
+  Mode OFF lets the handles go and leaves each link on its PHY: asking a far Coded link back to 1M drops it.
+- **A file is paced by the link's PHY** (#114) **and by how many links share the radio** (#117, ADR 2026-10.8jwn).
+  `FramedLink` reads its `PaceConfig` before every chunk: `CodedPhyPolicy.pace` gives a link last read on Coded 1 KiB/s
+  in 2 KiB chunks (`PhyTuning.codedPaceBytesPerSec` / `codedChunkBytes`; a windowed feed's fallback there, below), and every other link its share of one
+  4 KiB/s budget (`PhyTuning.filePaceBytesPerSec`), split evenly among the 1M/2M links feeding a file right now
+  (`BluetoothMeshTransport.paceFor` counts `txInProgress`), in chunks of two seconds of the share (2–16 KiB). A change
+  restarts the pace's clock (`PaceWindow`). The PHY a link was last read on outlives its handle (`linkPhy`), since OFF
+  leaves the link where it is. The stack's queue holds hundreds of KB before a write blocks, so only the receiver's
+  `rx … in <ms>ms` line shows the drain: on 2026-10-03 three 1M Pixel pairs drained 4.8–10 KB/s, and at the old
+  28 KiB/s a text sent mid-photo waited one to four minutes. No wire change.
+- **A link that feeds a file asks for a short interval** (#120, ADR 2026-10.2da4; `BuildConfig.BLE_LINK_BOOST`, debug
+  and release on since 2026-10-08). The drain is the host's share of the controller's LE buffers (the Pixel 9: 3 of 13, split over its
+  4 LE links, idle ones included) times about 2 packets per connection event, so it follows the interval: ~9 KB/s at
+  45 ms, 22.5–29 at 15 ms. `FramedLink` pokes `onBusy` on its (feeding, receiving) edges; the transport makes a
+  `BleLinkBoost` at a link's first file either way, which runs `LinkBoostPolicy`. While a file moves either way, a side
+  whose screen is on asks for `CONNECTION_PRIORITY_HIGH` (and the ATT MTU once: Android 12 sends 27-byte PDUs until
+  one) through the link's one `BleLinkTuner` (a GATT client on the ACL, no discovery, held for the link's life; boost
+  asks never wait for their reports). It asks for BALANCED 15 s after neither direction streamed, or at once when the
+  screen goes off, A2DP starts or the link reads Coded; nothing earns while A2DP streams. A dark side only listens, so a sender in a pocket earns a watching
+  receiver's ask. A link earns the boosted budget only by *reporting* ≤ 15 ms through `onConnectionUpdated`, whoever
+  asked, and loses it with the client that heard it. While every feeding 1M/2M link has, the budget is 18 KiB/s
+  (`PhyTuning.boostPaceBytesPerSec`), or 12 KiB/s (`crowdedBoostPaceBytesPerSec`) past four LE connections (the host's
+  buffer split; `leLinkCount`), split as above; otherwise 4 KiB/s. An iPhone link is never boosted (dqvb).
+- **A file to a reporting Android peer is clocked by its reports** (ADR 2026-10.5buf, nsr7's phase 2;
+  `BuildConfig.BLE_FEED_WINDOW`, debug and release on since 2026-10-08, `…debug.LINKTUNE --es feed window|pace`). On a link to a
+  peer carrying `CAP_BLOB_HAVE` and no doorbell, on any PHY (Coded too since 5buf's amendment of 2026-10-08 (2)),
+  `paceFor` returns its pace with `windowed = true`, and `FramedLink.feedChunks` writes only while `FeedWindow` lets it.
+  - **The window:** bytes written and not yet reported held, kept under the drain over the round trip plus
+    `QUEUE_MS` (250 ms), from two of the link's smallest chunks (`PaceConfig.windowChunkBytes`: 2 KiB on 1M/2M, 1 KiB
+    on Coded, never under 1 KiB) to 64 KiB: BBR's estimates, the drain the largest recent sample and the round trip the
+    smallest in 10 s (kept across the link's files), probed at one chunk's room for a round when none smaller came. With the switch on
+    a receiver reports on every chunk of 2 KiB or more, every 500 ms, and once more 500 ms after chunks no later one
+    reported (`RxReports`); off, every 2 s of chunks.
+  - **The drain:** the largest of the last twelve Δheld ÷ Δms samples, up to 64 KiB/s.
+  - **A report or a queued frame wakes the writer.** The split and the earned budgets do not apply (nor is a windowed
+    feed counted in a paced one's split), but the boost's interval ask still raises the drain the window follows.
+  - **Pacing comes back** while the receiver has been silent for 3 s (or three smallest chunks' time at the measured
+    drain, if longer: Coded's far edge). It is also what an iPhone or an older build always gets. A PHY step forgets
+    the window's round trip; a step to or from Coded its drain too, and the window probes (`FeedWindow.forgetLink`).
+  - **Oracle:** `bt file window rate=… target=… queued=… rtt=… → <node>` when its rate moves a quarter, and ` window` at the
+    end of the `file …` line, whose `@` then names the window's rate.
+- **Diagnostics** draws a PHY chip on each directly-connected row with a handle (`CodedPhyDiag.linkPhys`, testTag
+  `ble_phy_chip_<nodeId>`).
+
+Oracles: `bt phy mode=…`, `bt coded advert live|dark <status>`, `via=coded|1m` on `bt initiating to`,
+`bt phy <id> link dropped on <PHY> rssi=… (<reason>)`, `bt coded advert fast (…)` / `slow`, `bt coded advert
+refused <status>, retry in …` / `enabled again`, `bt coded advert retry n/5`,
+`bt phy <id> ONE_M→CODED rssi=… (auto)`, `bt phy <id> gave up …`, `file …/… <N>B in <ms>ms @<pace>` (the hand-off) and
+`rx …/… <N>B in <ms>ms` (the drain), `bt file pace budget=… feeding=… share=… chunk=… earned=… le=… → <node>` (per link since ADR 2026-10.g24x), `bt boost <id>
+high[ mtu=517]|release|earned interval=…us|unearned interval=…us`, `bt scan coded windows on|off`,
+`bt refused client … codedOnly=`, and once a minute `bt coded heard <id> hits=… rssi=a..b 1m=… eff=… dwell=…
+promotable=… dials=…` per unlinked peer heard on Coded (raise the log ring with `adb logcat -G 16M` before a walk);
+counters `bleCoded*` / `blePhy*`; the `…debug.PHY` reply lists each link's PHY and link RSSI and each peer's
+per-PHY ages and RSSIs. Link RSSI reads ~20 dB
+stronger than the adverts at the same spot, so step thresholds and advert floors are on different scales.
