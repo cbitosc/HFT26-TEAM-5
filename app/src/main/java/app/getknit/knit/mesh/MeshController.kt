@@ -182,6 +182,7 @@ interface MeshController {
         recipientId: String? = null,
         group: GroupInfo? = null,
         replyTo: ReplyRef? = null,
+        messageId: String? = null,
     ): Boolean
 
     /**

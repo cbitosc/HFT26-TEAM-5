@@ -47,7 +47,7 @@ class KnitDatabaseMigrationTest {
         )
 
     @Test
-    fun `the current schema (v22) creates and opens from the exported JSON`() =
+    fun `the current schema (v23) creates and opens from the exported JSON`() =
         runTest {
             helper.createDatabase(CURRENT_VERSION).close()
         }
@@ -906,12 +906,35 @@ class KnitDatabaseMigrationTest {
             }
         }
 
+    @Test
+    fun `migrate 22 to 23 preserves messages and adds an empty emergency projection`() =
+        runTest {
+            helper.createDatabase(22).use { c ->
+                c.execSQL(
+                    "INSERT INTO messages (id, senderId, conversationId, body, sentAt, received, receivedVia, " +
+                        "mentions, replyToHasAttachment, moderation, pendingKey, kind, originViaMqtt, originSigned, " +
+                        "attachmentAnimated, replyCheck, replyToFlagged, attachmentFetchApproved, videoPosterFlagged) " +
+                        "VALUES ('m23','alice','nearby','ordinary message',1,1,0,'[]',0,0,0,0,0,0,0,0,0,0,0)",
+                )
+            }
+            helper.runMigrationsAndValidate(23, listOf(KnitMigrations.MIGRATION_22_23)).use { c ->
+                c.prepare("SELECT body FROM messages WHERE id = 'm23'").use { s ->
+                    assertTrue(s.step())
+                    assertEquals("ordinary message", s.getText(0))
+                }
+                c.prepare("SELECT COUNT(*) FROM emergencies").use { s ->
+                    assertTrue(s.step())
+                    assertEquals(0L, s.getLong(0))
+                }
+            }
+        }
+
     private companion object {
         /**
          * KnitDatabase `@Database(version = …)` — bump alongside the DB (its retention is CLASS, so the version
          * can't be read reflectively). A missing schemas/<db>/<version>.json fails the smoke test.
          */
-        const val CURRENT_VERSION = 22
+        const val CURRENT_VERSION = 23
 
         /** The v16 column list with an attachment — MIGRATION_16_17's test seeds rows through it. */
         const val INSERT_V16 =

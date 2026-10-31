@@ -45,7 +45,7 @@ object CrashIssueUrl {
     /** Exactly one of the template dropdown's option strings; the reporter narrows it if they know. */
     private const val RADIOS_UNKNOWN = "Not sure"
 
-    private const val SUMMARY = "Knit closed unexpectedly. Crash details were captured on-device and are below."
+    private const val SUMMARY = "TARNISHED closed unexpectedly. Crash details were captured on-device and are below."
     private const val ACTUAL = "The app crashed. The stack trace is under \"Logs / screenshots\"."
 
     /**
@@ -108,7 +108,7 @@ object CrashIssueUrl {
     private fun logs(excerpt: String): String =
         buildString {
             appendLine(MARKER)
-            appendLine("Captured by Knit on-device and redacted before leaving the phone.")
+            appendLine("Captured by TARNISHED on-device and redacted before leaving the phone.")
             appendLine("The full trace is on your clipboard - paste it below to replace this excerpt.")
             appendLine()
             appendLine("```text")
@@ -120,7 +120,7 @@ object CrashIssueUrl {
     private fun problemLogs(facts: String): String =
         buildString {
             appendLine(PROBLEM_MARKER)
-            appendLine("Build and device details, filled in by Knit. Add logs or screenshots below.")
+            appendLine("Build and device details, filled in by TARNISHED. Add logs or screenshots below.")
             appendLine()
             appendLine("```text")
             appendLine(facts.trimEnd())

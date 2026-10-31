@@ -64,7 +64,7 @@ class RadioWarningBannerTest {
     @Test
     fun allRadiosOffHasNoCloseButton() {
         render(RadioWarning.AllRadiosOff, dismissible = false)
-        compose.onNodeWithTag("chatlist_radio_banner").assertTextContains("Knit can't connect", substring = true)
+        compose.onNodeWithTag("chatlist_radio_banner").assertTextContains("TARNISHED can't connect", substring = true)
         compose.onNodeWithTag("chatlist_radio_banner_dismiss").assertDoesNotExist()
         compose.onNodeWithTag("chatlist_radio_banner").performClick()
         assertEquals(1, opened)

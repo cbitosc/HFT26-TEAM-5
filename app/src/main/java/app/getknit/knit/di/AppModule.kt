@@ -42,6 +42,7 @@ import app.getknit.knit.data.crypto.IdentityKeyStore
 import app.getknit.knit.data.crypto.KeystoreCipher
 import app.getknit.knit.data.crypto.KeystoreSecret
 import app.getknit.knit.data.draft.DraftRepository
+import app.getknit.knit.data.emergency.EmergencyRepository
 import app.getknit.knit.data.emoji.AndroidGlyphCheck
 import app.getknit.knit.data.emoji.EmojiCatalogLoader
 import app.getknit.knit.data.forward.ForwardRepository
@@ -286,7 +287,9 @@ val appModule =
         single { get<KnitDatabase>().metPeerDao() }
         single { get<KnitDatabase>().savedFileDao() }
         single { get<KnitDatabase>().attachmentHolderDao() }
+        single { get<KnitDatabase>().emergencyDao() }
         single { MessageRepository(get()) }
+        single { EmergencyRepository(get()) }
         // Judges an inbound reply's quote against the original it names (ADR 2026-10.gpa3), labelling a rebuilt
         // quote in the reader's own strings; one backlog batch is one write transaction.
         single {

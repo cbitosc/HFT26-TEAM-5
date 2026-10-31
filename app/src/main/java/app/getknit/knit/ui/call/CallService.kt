@@ -183,7 +183,7 @@ class CallService :
             CallPhase.Connecting -> "Connecting…"
             CallPhase.Connected -> connectedText(state)
             CallPhase.Reconnecting -> "Reconnecting…"
-            else -> "Knit call"
+            else -> "TARNISHED call"
         }
 
     /** An outgoing call with no RINGING back: whether anything reaches the peer (C-3.3-5), and whether it answered (C-3.3-6). */
@@ -203,7 +203,7 @@ class CallService :
 
     companion object {
         private const val TAG = "KnitCall"
-        private const val UNNAMED = "Knit call"
+        private const val UNNAMED = "TARNISHED call"
 
         /**
          * Starts the service for a call the system answered — a headset's button, a watch, a car — where the call screen

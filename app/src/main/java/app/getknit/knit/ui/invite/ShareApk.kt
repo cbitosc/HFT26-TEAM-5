@@ -63,7 +63,7 @@ private fun copyBaseApk(
     source: File,
 ): File {
     val dir = File(context.cacheDir, "apk").apply { mkdirs() }
-    val dest = File(dir, "Knit-${BuildConfig.VERSION_NAME}.apk")
+    val dest = File(dir, "TARNISHED-${BuildConfig.VERSION_NAME}.apk")
     // Refresh when missing or stale (an app update changes the base APK's length).
     if (!dest.exists() || dest.length() != source.length()) {
         source.copyTo(dest, overwrite = true)

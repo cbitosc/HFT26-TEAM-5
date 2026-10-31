@@ -151,6 +151,45 @@ class ChatListScreenContentTest {
     }
 
     @Test
+    fun overflowOmitsKnitSupportAndKeepsItsOtherDestinations() {
+        compose.setContent {
+            KnitTheme {
+                ChatListScreenContent(
+                    state = ChatListUiState(neighborCount = 1, transportHealth = TransportHealth.Healthy),
+                    now = now,
+                    onOpenConversation = {},
+                    onSearch = {},
+                    onNewMessage = {},
+                    onOpenSettings = {},
+                    onOpenYourMesh = {},
+                    onOpenEmergency = {},
+                    onOpenDiagnostics = {},
+                    onOpenMessageRequests = {},
+                    onOpenDonate = {},
+                    onOpenAddContact = {},
+                    onShareApp = {},
+                    onOpenRadioSettings = {},
+                    onDismissRadioWarning = {},
+                    onSignOut = {},
+                    onDismissClone = {},
+                    onResumeMesh = {},
+                    onStartMesh = {},
+                    onDeleteConversation = {},
+                )
+            }
+        }
+
+        compose.onNodeWithContentDescription("More options").performClick()
+        compose.onNodeWithText("Settings").assertIsDisplayed()
+        compose.onNodeWithText("Add contact").assertIsDisplayed()
+        compose.onNodeWithText("Your mesh").assertIsDisplayed()
+        compose.onNodeWithText("Emergency").assertIsDisplayed()
+        compose.onNodeWithText("Diagnostics").assertIsDisplayed()
+        compose.onNodeWithText("Install offline").assertIsDisplayed()
+        compose.onNodeWithText("Support the original Knit project").assertDoesNotExist()
+    }
+
+    @Test
     fun aRowWithADraftReadsAsDraftInsteadOfItsLastMessage() {
         compose.setContent {
             KnitTheme {

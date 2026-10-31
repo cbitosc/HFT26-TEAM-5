@@ -63,6 +63,7 @@ import app.getknit.knit.ui.diagnostics.CrashLogScreen
 import app.getknit.knit.ui.diagnostics.DiagnosticsScreen
 import app.getknit.knit.ui.diagnostics.FieldLogScreen
 import app.getknit.knit.ui.donate.DonateScreen
+import app.getknit.knit.ui.emergency.EmergencyScreen
 import app.getknit.knit.ui.group.GroupDetailsScreen
 import app.getknit.knit.ui.lora.LoraRadioScreen
 import app.getknit.knit.ui.onboarding.OnboardingScreen
@@ -101,6 +102,7 @@ private object Routes {
     const val PROFILE = "profile"
     const val DIAGNOSTICS = "diagnostics"
     const val YOUR_MESH = "yourMesh"
+    const val EMERGENCY = "emergency"
     const val CRASH_LOG = "crash"
     const val FIELD_LOG = "fieldlog"
     const val BLOCKED_USERS = "blocked"
@@ -413,6 +415,7 @@ fun KnitApp(startRoute: String? = null) {
                     onNewMessage = { navController.navigate(Routes.CONTACTS) },
                     onOpenSettings = { navController.navigate(Routes.SETTINGS) },
                     onOpenYourMesh = { navController.navigate(Routes.YOUR_MESH) },
+                    onOpenEmergency = { navController.navigate(Routes.EMERGENCY) },
                     onOpenDiagnostics = { navController.navigate(Routes.DIAGNOSTICS) },
                     onOpenMessageRequests = { navController.navigate(Routes.MESSAGE_REQUESTS) },
                     onOpenDonate = { navController.navigate(Routes.DONATE) },
@@ -657,6 +660,9 @@ fun KnitApp(startRoute: String? = null) {
                     onBack = { navController.popBackStack() },
                     onOpenDiagnostics = { navController.navigate(Routes.DIAGNOSTICS) },
                 )
+            }
+            composable(Routes.EMERGENCY) {
+                EmergencyScreen(onBack = { navController.popBackStack() })
             }
             composable(Routes.BLOCKED_USERS) {
                 BlockedUsersScreen(onBack = { navController.popBackStack() })

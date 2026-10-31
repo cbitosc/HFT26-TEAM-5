@@ -94,7 +94,13 @@ class OnboardingScreenContentTest {
     @Test
     fun welcomeGetStartedAdvances() {
         val calls = render(OnboardingStep.WELCOME)
+        assertEquals("Welcome to TARNISHED", context.getString(R.string.onboarding_title))
+        assertEquals(
+            "Emergency-ready messaging when networks fail — no account or internet needed.",
+            context.getString(R.string.onboarding_tagline),
+        )
         compose.onNodeWithText(context.getString(R.string.onboarding_title)).assertIsDisplayed()
+        compose.onNodeWithText(context.getString(R.string.onboarding_tagline)).assertIsDisplayed()
         compose.onNodeWithTag("onboarding_next").performClick()
         assertEquals(1, calls.next)
     }

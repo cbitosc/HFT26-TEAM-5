@@ -19,6 +19,8 @@ import app.getknit.knit.data.commons.CommonsOutboxEntity
 import app.getknit.knit.data.crypto.SqlCipherKey
 import app.getknit.knit.data.draft.DraftDao
 import app.getknit.knit.data.draft.DraftEntity
+import app.getknit.knit.data.emergency.EmergencyDao
+import app.getknit.knit.data.emergency.EmergencyEntity
 import app.getknit.knit.data.forward.ForwardDao
 import app.getknit.knit.data.forward.ForwardEntity
 import app.getknit.knit.data.group.GroupDao
@@ -56,7 +58,7 @@ import net.zetetic.database.sqlcipher.driver.SQLCipherDriver
  * The `@Database` version, as a top-level constant so the annotation and [KnitDatabase.SCHEMA_VERSION] read
  * one number (an annotation argument cannot name the class's own companion).
  */
-internal const val KNIT_DB_SCHEMA_VERSION = 22
+internal const val KNIT_DB_SCHEMA_VERSION = 23
 
 @Database(
     entities = [
@@ -70,7 +72,7 @@ internal const val KNIT_DB_SCHEMA_VERSION = 22
         MessageFtsEntity::class, CommonsEntity::class, CommonsOutboxEntity::class,
         CommonsMemberEntity::class, MetPeerEntity::class, SavedFileEntity::class,
         PeerProfileEntity::class, GroupMemberClockEntity::class, PeerBadgeEntity::class,
-        AttachmentHolderEntity::class,
+        AttachmentHolderEntity::class, EmergencyEntity::class,
     ],
     // v1: frozen launch baseline. The pre-1.0 alpha schema churn (the old destructive v2…v22 bumps that
     //     rode the wire/crypto breaks) is collapsed; docs/WIRE_COMPAT.md keeps the historical break record.
@@ -263,6 +265,8 @@ abstract class KnitDatabase : RoomDatabase() {
     abstract fun savedFileDao(): SavedFileDao
 
     abstract fun attachmentHolderDao(): AttachmentHolderDao
+
+    abstract fun emergencyDao(): EmergencyDao
 
     companion object {
         /** The schema version the annotation above declares, for code that must compare against it. */

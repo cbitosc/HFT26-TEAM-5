@@ -18,6 +18,7 @@ import app.getknit.knit.data.PeerRepository
 import app.getknit.knit.data.QuoteVerifier
 import app.getknit.knit.data.ReactionRepository
 import app.getknit.knit.data.VoiceAudio
+import app.getknit.knit.data.emergency.EmergencyRepository
 import app.getknit.knit.data.forward.ForwardRepository
 import app.getknit.knit.data.group.GroupEntity
 import app.getknit.knit.data.group.GroupMembersStore
@@ -133,6 +134,7 @@ import java.util.concurrent.ConcurrentHashMap
 class InboundPipeline(
     private val transport: MeshTransport,
     private val messages: MessageRepository,
+    private val emergencyRepository: EmergencyRepository? = null,
     private val receipts: MessageReceiptRepository,
     private val groups: GroupRepository,
     private val reactions: ReactionRepository,
@@ -3050,6 +3052,7 @@ class InboundPipeline(
                 originSigned = origin?.signed ?: MessageEntity.ORIGIN_UNSIGNED,
             ).withReply(admitReply(content.replyTo))
         val stored = persistQuoted(built.withVideo(video), isNew, me, conversationId, persist)
+        if (isNew) indexEmergency(stored, env.senderId)
         screenPoster(stored, fresh = isNew, own = env.senderId == me)
         val hidden = stored.hiddenByFilter(settings.contentFilteringEnabled.first())
         // Start pulling the referenced blob unless we already hold it (the UI observes the blobs table
@@ -3094,6 +3097,23 @@ class InboundPipeline(
         // Ack unconditionally (even on a re-delivery): the receipt floods back to the sender and, for a
         // DM, doubles as the vaccine that purges this message from any carrier that missed the first ack.
         if (ack) acknowledge(env, me, plane)
+    }
+
+    /**
+     * Builds the trusted emergency projection only after normal signed/decrypted message persistence.
+     * Invalid or ordinary bodies remain ordinary messages, and projection failure cannot alter delivery.
+     */
+    private suspend fun indexEmergency(
+        row: MessageEntity,
+        authenticatedSenderId: String,
+    ) {
+        emergencyRepository?.let { repository ->
+            runCatching {
+                repository.indexAuthenticatedMessage(row.id, authenticatedSenderId, System.currentTimeMillis())
+            }.onFailure {
+                Log.w(TAG, "emergency index failed for ${row.id}: ${it.javaClass.simpleName}")
+            }
+        }
     }
 
     /**

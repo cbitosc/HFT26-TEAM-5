@@ -169,13 +169,13 @@ class CrashStore(
         buildString {
             appendLine("FATAL EXCEPTION: $threadName")
             when (kind) {
-                Kind.CRASH -> appendLine("Knit crash report - redacted on device. Nothing was uploaded.")
-                else -> appendLine("Knit ANR report (the app stopped responding) - redacted on device. Nothing was uploaded.")
+                Kind.CRASH -> appendLine("TARNISHED crash report - redacted on device. Nothing was uploaded.")
+                else -> appendLine("TARNISHED ANR report (the app stopped responding) - redacted on device. Nothing was uploaded.")
             }
             // An ANR from before the running build was installed: naming this build here would point a reader,
             // and crash-report.yml, at the wrong release's mapping. The value is deliberately not `x (n) type`.
             if (kind == Kind.EARLIER_ANR) {
-                appendLine("app: unknown - recorded before Knit was updated to ${environment.appLine()}")
+                appendLine("app: unknown - recorded before TARNISHED was updated to ${environment.appLine()}")
             } else {
                 appendLine("app: ${environment.appLine()}")
             }

@@ -35,7 +35,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Message
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DownloadForOffline
-import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.MarkChatUnread
 import androidx.compose.material.icons.filled.MoreVert
@@ -129,6 +128,7 @@ fun ChatListScreen(
     onNewMessage: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenYourMesh: () -> Unit,
+    onOpenEmergency: () -> Unit = {},
     onOpenDiagnostics: () -> Unit,
     onOpenMessageRequests: () -> Unit,
     onOpenDonate: () -> Unit,
@@ -158,6 +158,7 @@ fun ChatListScreen(
         onNewMessage = onNewMessage,
         onOpenSettings = onOpenSettings,
         onOpenYourMesh = onOpenYourMesh,
+        onOpenEmergency = onOpenEmergency,
         onOpenDiagnostics = onOpenDiagnostics,
         onOpenMessageRequests = onOpenMessageRequests,
         onOpenDonate = onOpenDonate,
@@ -242,6 +243,7 @@ internal fun ChatListScreenContent(
     onNewMessage: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenYourMesh: () -> Unit,
+    onOpenEmergency: () -> Unit = {},
     onOpenDiagnostics: () -> Unit,
     onOpenMessageRequests: () -> Unit,
     onOpenDonate: () -> Unit,
@@ -358,19 +360,18 @@ internal fun ChatListScreenContent(
                                 },
                             )
                             DropdownMenuItem(
+                                text = { Text("Emergency") },
+                                onClick = {
+                                    menuOpen = false
+                                    onOpenEmergency()
+                                },
+                            )
+                            DropdownMenuItem(
                                 text = { Text(stringResource(R.string.diagnostics_title)) },
                                 leadingIcon = { Icon(Icons.Filled.NetworkCheck, contentDescription = null) },
                                 onClick = {
                                     menuOpen = false
                                     onOpenDiagnostics()
-                                },
-                            )
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.donate_title)) },
-                                leadingIcon = { Icon(Icons.Filled.Favorite, contentDescription = null) },
-                                onClick = {
-                                    menuOpen = false
-                                    onOpenDonate()
                                 },
                             )
                             DropdownMenuItem(

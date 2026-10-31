@@ -28,6 +28,7 @@ import app.getknit.knit.data.VoiceAudio
 import app.getknit.knit.data.commons.CommonsEntity
 import app.getknit.knit.data.commons.CommonsRepository
 import app.getknit.knit.data.draft.DraftRepository
+import app.getknit.knit.data.emergency.EmergencyRepository
 import app.getknit.knit.data.emoji.RecentReactions
 import app.getknit.knit.data.group.GroupEntity
 import app.getknit.knit.data.group.GroupMembersStore
@@ -62,6 +63,9 @@ import app.getknit.knit.data.relay.photoFitBytes
 import app.getknit.knit.data.relay.planeFor
 import app.getknit.knit.data.relay.reachFor
 import app.getknit.knit.data.settings.SettingsStore
+import app.getknit.knit.emergency.EmergencyCodec
+import app.getknit.knit.emergency.EmergencyDecodeResult
+import app.getknit.knit.emergency.EmergencyPayload
 import app.getknit.knit.identity.Alias
 import app.getknit.knit.identity.Identity
 import app.getknit.knit.identity.PeerLabel
@@ -304,7 +308,18 @@ data class ChatRow(
     // A call's record ([MessageEntity.KIND_CALL], §3.12), decoded. Null on every other row; a row carrying one is a
     // call line, never a bubble.
     val call: CallRecord? = null,
+    // Non-null only when the emergency projection proves this stored row was accepted by the
+    // authenticated inbound path (or authored and indexed locally). A prefix alone is never trusted.
+    val emergency: EmergencyPayload? = null,
 )
+
+internal fun authenticatedEmergency(
+    body: String,
+    indexedAt: Long?,
+): EmergencyPayload? {
+    if (indexedAt == null) return null
+    return (EmergencyCodec.decode(body, indexedAt) as? EmergencyDecodeResult.Success)?.payload
+}
 
 /**
  * Who said a post on the radio channel, and how it reached this board — the render-time shape of
@@ -581,6 +596,8 @@ class ChatViewModel(
     // The Calls screen's "Prefer mesh calls" (C-3.11-3): on, [meshCallFirst] holds whatever the route says and a DM
     // offers only the calls its peer takes. A plain parameter, read by the initializers alone.
     preferMeshCalls: Flow<Boolean> = flowOf(false),
+    // Optional for existing test rigs; production supplies the post-authentication projection.
+    private val emergencyRepository: EmergencyRepository? = null,
 ) : ViewModel() {
     /** This thread is the broadcast room (vs a 1:1 DM keyed by the peer's node id). */
     private val isRoom = conversationId == Conversations.NEARBY
@@ -948,6 +965,12 @@ class ChatViewModel(
             )
         }
 
+    private val messagesWithEmergencyIndex =
+        combine(
+            messagesWithReactions,
+            emergencyRepository?.observeAuthenticatedMessages() ?: flowOf(emptyMap()),
+        ) { bundle, emergencyIndex -> bundle to emergencyIndex }
+
     // The LoRa plane's facts + whoever this thread's notice is about, folded first so the LoRa notice costs
     // the mesh-status combine one arm, not two.
     private data class LoraThread(
@@ -1059,12 +1082,12 @@ class ChatViewModel(
 
     val state: StateFlow<ChatUiState> =
         combine(
-            messagesWithReactions,
+            messagesWithEmergencyIndex,
             peers.observeDirectory(),
             meshStatus,
             myNodeId,
             publicIdentity,
-        ) { bundle, directory, mesh, me, publicId ->
+        ) { (bundle, emergencyIndex), directory, mesh, me, publicId ->
             val myName = publicId.myName
             val publicConsented = publicId.publicConsented
             val count = mesh.neighborCount
@@ -1160,6 +1183,7 @@ class ChatViewModel(
                             },
                         sentAt = m.sentAt,
                         received = m.received,
+                        emergency = authenticatedEmergency(m.body, emergencyIndex[m.id]),
                         deliveredVia = m.receivedPlane,
                         // Only our own group sends have a "who has it" answer; the roster excludes us,
                         // since we never ack ourselves (the details screen's rule, kept identical here).

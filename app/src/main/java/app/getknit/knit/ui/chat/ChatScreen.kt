@@ -2538,6 +2538,11 @@ private fun MessageBubble(
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
+                            } else if (row.emergency != null) {
+                                EmergencyMessageCard(
+                                    payload = row.emergency,
+                                    senderName = row.senderName,
+                                )
                             } else {
                                 val mentionStyle =
                                     SpanStyle(

@@ -172,7 +172,7 @@ internal fun openAppSettings(context: Context) {
 fun CameraDeniedPreview() =
     KnitPreview {
         CameraMessage(
-            message = "Knit needs camera access to take a photo.",
+            message = "TARNISHED needs camera access to take a photo.",
             onCancel = {},
             onOpenSettings = {},
         )
@@ -183,7 +183,7 @@ fun CameraDeniedPreview() =
 fun CameraDeniedFamilyLinkPreview() =
     KnitPreview {
         CameraMessage(
-            message = "Knit needs camera access to take a photo.",
+            message = "TARNISHED needs camera access to take a photo.",
             onCancel = {},
             onOpenSettings = {},
             hint = permissionDeniedHint(DeviceSupervision.FamilyLink),

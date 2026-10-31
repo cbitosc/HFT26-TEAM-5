@@ -187,7 +187,7 @@ class CallActivity :
             if (granted && id != null) {
                 answer(id)
             } else if (!granted) {
-                Toast.makeText(this, "Knit needs the microphone to answer", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, "TARNISHED needs the microphone to answer", Toast.LENGTH_LONG).show()
             }
         }
 
@@ -1222,7 +1222,7 @@ internal fun captureText(
     name: String,
 ): String? =
     when (capture?.health) {
-        CaptureWatch.Health.DEAD -> "$name can't hear you: this phone's microphone isn't giving Knit any sound"
+        CaptureWatch.Health.DEAD -> "$name can't hear you: this phone's microphone isn't giving TARNISHED any sound"
         CaptureWatch.Health.SILENCED -> "$name can't hear you: Android silenced the microphone"
         else -> null
     }

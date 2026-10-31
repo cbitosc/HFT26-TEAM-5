@@ -23,6 +23,7 @@ import app.getknit.knit.data.MessageRepository
 import app.getknit.knit.data.PeerRepository
 import app.getknit.knit.data.QuoteVerifier
 import app.getknit.knit.data.ReactionRepository
+import app.getknit.knit.data.emergency.EmergencyRepository
 import app.getknit.knit.data.forward.ForwardRepository
 import app.getknit.knit.data.group.GroupEntity
 import app.getknit.knit.data.group.GroupMembersStore
@@ -210,6 +211,7 @@ class MeshManager(
     // The commons (docs/SPOOL_PROTOCOL.md §7.4): the joined rooms, their outbox and their members. Null —
     // every test, and a build with no Internet plane — derives no commons scope and refuses a commons send.
     private val commons: CommonsStore? = null,
+    private val emergencyRepository: EmergencyRepository? = null,
     // Injectable wall clock so the send path's timestamps (a frame and its stored local copy share one
     // sentAt) are deterministic under test. Defaults to the real clock, so production wiring (the Koin
     // module) is unchanged; mirrors the house convention — ForwardSync(clock = …), AckSync, KeyExchange.
@@ -578,6 +580,7 @@ class MeshManager(
         InboundPipeline(
             transport = transport,
             messages = messages,
+            emergencyRepository = emergencyRepository,
             receipts = receipts,
             groups = groups,
             reactions = reactions,
@@ -1308,11 +1311,11 @@ class MeshManager(
      * A DM or a group message is never classified on the way out: its receivers screen it and hide it behind
      * their own Content filtering toggle (ADR 2026-10.9rh6). A room [attachment] was screened at ingest.
      *
-     * `@Suppress("LongMethod")`: ktlint's one-arg-per-line wrapping of the room's and the sealed branch's
+     * The suppressions cover ktlint's one-arg-per-line wrapping and the two straight-line room/sealed branches;
      * MessageEntity builds inflates the raw line count past detekt's LongMethod=60; the logic is two
      * straight-line branches, not complex. The sealed content is read off the row (`sealedContent`, #131).
      */
-    @Suppress("LongMethod")
+    @Suppress("LongMethod", "CyclomaticComplexMethod")
     override suspend fun sendChat(
         text: String,
         attachment: AttachmentStore.Ingested?,
@@ -1320,11 +1323,12 @@ class MeshManager(
         recipientId: String?,
         group: GroupInfo?,
         replyTo: ReplyRef?,
+        messageId: String?,
     ): Boolean {
         val isRoom = recipientId == null && group == null
         if (isRoom && isTextFlagged(text, "outgoing", isRoom = true)) return false
         val me = identity.nodeId()
-        val id = FrameId.new()
+        val id = messageId ?: FrameId.new()
         val sentAt = clock()
         val conversationId = Conversations.idFor(me, recipientId, me, group?.id)
 

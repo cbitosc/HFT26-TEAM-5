@@ -25,7 +25,7 @@ class AboutInstrumentedTest : SeededUiTest() {
 
         awaitTag("settings_profile_row")
         compose.onNodeWithContentDescription("More options").performClick()
-        compose.onNodeWithText("About Knit").performClick()
+        compose.onNodeWithText("About TARNISHED").performClick()
         awaitTag("about_build_device")
 
         compose.onNodeWithTag("about_license").performScrollTo().performClick()

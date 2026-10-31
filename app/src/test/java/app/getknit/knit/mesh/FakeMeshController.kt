@@ -122,6 +122,7 @@ class FakeMeshController : MeshController {
         recipientId: String?,
         group: GroupInfo?,
         replyTo: ReplyRef?,
+        messageId: String?,
     ): Boolean {
         sentChats += SentChat(text, attachment, mentions, recipientId, group, replyTo)
         return sendChatResult

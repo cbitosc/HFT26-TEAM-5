@@ -54,7 +54,7 @@ internal fun collectSplitPaths(
 internal fun mergedApkFileName(
     versionName: String,
     versionCode: Long,
-): String = "Knit-$versionName-$versionCode-merged-r$MERGE_FORMAT_REV.apk"
+): String = "TARNISHED-$versionName-$versionCode-merged-r$MERGE_FORMAT_REV.apk"
 
 /**
  * Merges the [splitPaths] of a Play App Bundle install into one standalone-installable, re-signed APK and
@@ -78,7 +78,7 @@ fun buildSharableSplitApk(
 
     // Bound cache growth: an app update changes the file name, so drop any older shareable APK.
     dir
-        .listFiles { f -> f.isFile && f.name.startsWith("Knit-") && f.name != dest.name }
+        .listFiles { f -> f.isFile && (f.name.startsWith("Knit-") || f.name.startsWith("TARNISHED-")) && f.name != dest.name }
         ?.forEach { it.delete() }
 
     val inputBytes = splitPaths.sumOf { it.length() }

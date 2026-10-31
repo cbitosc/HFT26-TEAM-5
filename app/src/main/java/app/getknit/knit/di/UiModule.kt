@@ -11,6 +11,7 @@ import app.getknit.knit.data.LinkCardStore
 import app.getknit.knit.data.ReactionRepository
 import app.getknit.knit.data.commons.CommonsRepository
 import app.getknit.knit.data.crypto.IdentityKeyStore
+import app.getknit.knit.data.emergency.EmergencyRepository
 import app.getknit.knit.data.forward.ForwardRepository
 import app.getknit.knit.data.relay.FreeUploads
 import app.getknit.knit.data.relay.RelayStatusRepository
@@ -20,6 +21,7 @@ import app.getknit.knit.data.settings.IncomingCallStore
 import app.getknit.knit.data.settings.OwnIceStore
 import app.getknit.knit.data.settings.SettingsStore
 import app.getknit.knit.data.settings.TicketKeyStore
+import app.getknit.knit.identity.Identity
 import app.getknit.knit.linkpreview.LinkPreviewService
 import app.getknit.knit.location.LocationSource
 import app.getknit.knit.mesh.MeshController
@@ -38,6 +40,7 @@ import app.getknit.knit.ui.contacts.ContactsViewModel
 import app.getknit.knit.ui.diagnostics.CrashLogViewModel
 import app.getknit.knit.ui.diagnostics.DiagnosticsViewModel
 import app.getknit.knit.ui.diagnostics.FieldLogViewModel
+import app.getknit.knit.ui.emergency.EmergencyViewModel
 import app.getknit.knit.ui.group.GroupDetailsViewModel
 import app.getknit.knit.ui.lora.LoraRadioViewModel
 import app.getknit.knit.ui.onboarding.OnboardingViewModel
@@ -88,6 +91,7 @@ val uiModule =
                 if (CALLS_WIRED) get<CallManager>() else null,
                 freeUploads = if (ANYWHERE_WIRED) get<FreeUploads>() else null,
                 preferMeshCalls = if (LIVE_CALLS_WIRED && WALKIE_WIRED) get<CallPreferenceStore>().preferMesh else flowOf(false),
+                emergencyRepository = get<EmergencyRepository>(),
             )
         }
         viewModel {
@@ -216,6 +220,17 @@ val uiModule =
             )
         }
         viewModel { LoraRadioViewModel(get(), get(), get(), get()) }
+        viewModel {
+            EmergencyViewModel(
+                get(),
+                get(),
+                get<MeshController>(),
+                get<EmergencyRepository>(),
+                get<Identity>(),
+                get<LocationSource>(),
+                get(),
+            )
+        }
         // What MainActivity opens on a worker before KnitApp composes — exactly what KnitApp's first composition
         // reads (ReviewPrompter → the database, MeshController → the identity keys), so those become cache hits —
         // and the Try again screen when the Keystore refuses (ADR 2026-10.47rw). SEED_DEMO builds skip the

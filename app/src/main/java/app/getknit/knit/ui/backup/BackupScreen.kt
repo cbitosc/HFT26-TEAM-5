@@ -424,7 +424,7 @@ private fun formatDate(at: Long): String {
 }
 
 private fun suggestedName(): String =
-    "knit-backup-${SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())}.${BackupFormat.FILE_EXTENSION}"
+    "tarnished-backup-${SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())}.${BackupFormat.FILE_EXTENSION}"
 
-private const val CLIP_LABEL = "Knit recovery key"
+private const val CLIP_LABEL = "TARNISHED recovery key"
 private const val ANY_MIME = "*/*"

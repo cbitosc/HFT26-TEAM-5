@@ -15,6 +15,7 @@ import app.getknit.knit.crash.ProcessExitReasons
 import app.getknit.knit.data.KnitDatabase
 import app.getknit.knit.data.MeshBlobStore
 import app.getknit.knit.data.crypto.IdentityKeyStore
+import app.getknit.knit.data.emergency.EmergencyRepository
 import app.getknit.knit.data.forward.ForwardRepository
 import app.getknit.knit.data.relay.FreeUploads
 import app.getknit.knit.data.relay.RelayStatusRepository
@@ -421,6 +422,7 @@ val meshModule =
                 // feature (`BuildConfig.COMMONS`), so no room is derived into the scope table, subscribed,
                 // posted to, or swept for members — the plane behaves exactly as it did before §7.4.
                 commons = if (BuildConfig.COMMONS) get() else null,
+                emergencyRepository = get<EmergencyRepository>(),
                 // The platform's validated-default-network stream (net/AndroidInternetGate): a new route
                 // re-dials a relay the plane is backing off from at once (work item 50).
                 routeChanges = get<InternetGate>().routeChanges,

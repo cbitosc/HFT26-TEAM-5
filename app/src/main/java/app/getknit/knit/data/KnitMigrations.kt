@@ -597,6 +597,29 @@ object KnitMigrations {
             }
         }
 
+    /** v23: a local, rebuildable projection of authenticated emergency chat messages. */
+    val MIGRATION_22_23 =
+        object : Migration(22, 23) {
+            override suspend fun migrate(connection: SQLiteConnection) {
+                connection.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `emergencies` (`emergencyId` TEXT NOT NULL, `messageId` TEXT NOT NULL, " +
+                        "`senderId` TEXT NOT NULL, `kind` INTEGER NOT NULL, `targetEmergencyId` TEXT, `severity` INTEGER, " +
+                        "`createdAt` INTEGER NOT NULL, `expiresAt` INTEGER NOT NULL, `latitude` REAL, `longitude` REAL, " +
+                        "`accuracyMeters` REAL, `locationCapturedAt` INTEGER, `indexedAt` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`emergencyId`))",
+                )
+                connection.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_emergencies_messageId` ON `emergencies` (`messageId`)")
+                connection.execSQL("CREATE INDEX IF NOT EXISTS `index_emergencies_kind_expiresAt` ON `emergencies` (`kind`, `expiresAt`)")
+                connection.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_emergencies_targetEmergencyId` ON `emergencies` (`targetEmergencyId`)",
+                )
+                connection.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS `index_emergencies_targetEmergencyId_senderId` " +
+                        "ON `emergencies` (`targetEmergencyId`, `senderId`)",
+                )
+            }
+        }
+
     /**
      * Lab only, and temporary: walks a development database stamped v27 back down to v22. Before the fold above, the
      * post-2.9.0 schema was numbered v22…v27 and the lab phones installed it at v27; Room throws at every open on a
@@ -633,6 +656,7 @@ object KnitMigrations {
             MIGRATION_19_20,
             MIGRATION_20_21,
             MIGRATION_21_22,
+            MIGRATION_22_23,
         )
 
     /** What [KnitDatabase.build] registers: the upgrade chain plus the temporary lab downgrade. */

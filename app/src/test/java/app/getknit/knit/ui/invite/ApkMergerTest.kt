@@ -52,7 +52,7 @@ class ApkMergerTest {
     @Test
     fun `mergedApkFileName encodes version name and code`() {
         val name = mergedApkFileName("1.2", 34)
-        assertTrue(name, name.startsWith("Knit-1.2-34-merged-"))
+        assertTrue(name, name.startsWith("TARNISHED-1.2-34-merged-"))
         assertTrue(name, name.endsWith(".apk"))
     }
 

@@ -187,7 +187,7 @@ internal class TelecomCalls(
 
     private companion object {
         const val SCHEME = "knit"
-        const val UNNAMED = "Knit call"
+        const val UNNAMED = "TARNISHED call"
 
         // Telecom adds a call in well under a second; 1.1.0-beta01 bounded its own wait on Bluetooth at 2 s.
         const val ADD_TIMEOUT_MS = 5_000L
